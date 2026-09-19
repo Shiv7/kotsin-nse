@@ -1,0 +1,108 @@
+[project]
+name = "kotsin-nse"
+version = "0.1.0"
+description = "Personal NSE/MCX trading engine on 5paisa — one asyncio process, one port, one SQLite file."
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "websockets>=13",
+    "httpx>=0.27",
+    "pydantic>=2.8",
+    "pydantic-settings>=2.4",
+    "sqlalchemy[asyncio]>=2.0",
+    "aiosqlite>=0.20",
+    "pyarrow>=17",
+    "pandas>=2.2",
+    "numpy>=2.0",
+    "structlog>=24",
+    "pyotp>=2.9",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+    "import-linter>=2",
+    "httpx>=0.28.1",
+]
+
+[project.scripts]
+kotsin-nse = "kotsin_nse.main:cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["kotsin_nse"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = [
+    "live: hits the 5paisa API over the network (needs credentials; select with -m live)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# BLE is on deliberately: every blind `except Exception` must carry a `# noqa: BLE001`
+# with a reason. A trading loop legitimately swallows exceptions — it must say why each time.
+select = ["E", "F", "I", "B", "UP", "ASYNC", "RUF", "BLE"]
+ignore = ["E501", "RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test doubles implement protocols verbatim, so unused arguments are the point; and reaching into
+# a private field is how you pin behaviour that has no public accessor.
+"tests/*" = ["ARG002", "RUF015", "SLF001", "B017"]
+
+[tool.importlinter]
+root_package = "kotsin_nse"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "strategy is pure: no venue / exec / ledger / api / ops / feed imports"
+type = "forbidden"
+source_modules = ["kotsin_nse.strategy"]
+forbidden_modules = [
+    "kotsin_nse.venue",
+    "kotsin_nse.exec",
+    "kotsin_nse.ledger",
+    "kotsin_nse.api",
+    "kotsin_nse.ops",
+    "kotsin_nse.feed",
+    "kotsin_nse.instrument",
+]
+
+[[tool.importlinter.contracts]]
+name = "exec does not import strategy"
+type = "forbidden"
+source_modules = ["kotsin_nse.exec"]
+forbidden_modules = ["kotsin_nse.strategy"]
+
+[[tool.importlinter.contracts]]
+name = "venue is a leaf"
+type = "forbidden"
+source_modules = ["kotsin_nse.venue"]
+forbidden_modules = [
+    "kotsin_nse.strategy",
+    "kotsin_nse.risk",
+    "kotsin_nse.exec",
+    "kotsin_nse.ledger",
+    "kotsin_nse.api",
+    "kotsin_nse.bars",
+    "kotsin_nse.feed",
+    "kotsin_nse.instrument",
+]
+
+[[tool.importlinter.contracts]]
+name = "only market.session knows about IST"
+type = "forbidden"
+source_modules = ["kotsin_nse.strategy", "kotsin_nse.risk", "kotsin_nse.bars", "kotsin_nse.exec"]
+forbidden_modules = ["zoneinfo"]
+# Direct imports only: these layers may go through market.session (that is the point), they just
+# may not reach for a timezone themselves.
+allow_indirect_imports = true

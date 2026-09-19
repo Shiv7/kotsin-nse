@@ -1,0 +1,7 @@
+# NSE/MCX trading holidays, one YYYY-MM-DD per line. Blank lines and # comments are ignored.
+#
+# This file is DATA, not code, and it is deliberately empty: never guess a holiday. A wrong entry
+# skips a real trading day; a missing one produces a session of empty bars that looks like a feed
+# outage. Fill it from the exchange circular.
+#
+# The engine warns at boot while this is empty — every weekday then counts as a trading day.

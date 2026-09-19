@@ -1,0 +1,298 @@
+"""Costs, sizing, wallets, exits, exposure.
+
+The cost tests reproduce the measured NSE cash economics: at ₹33,000 a position the round trip was
+~0.30% and flat brokerage was ~81% of it. If those numbers stop holding, either the model or the
+finding is wrong, and we want to know which.
+"""
+
+from __future__ import annotations
+
+import math
+import time
+from itertools import pairwise
+
+from kotsin_nse.config import Segment, Settings
+from kotsin_nse.domain import (
+    Direction,
+    ExitReason,
+    Instrument,
+    InstrumentKind,
+    OrderSide,
+    Position,
+    PosSide,
+)
+from kotsin_nse.risk.costs import CostModel
+from kotsin_nse.risk.exits import ExitEngine, MarketView, apply_exit
+from kotsin_nse.risk.exposure import ExposureBook
+from kotsin_nse.risk.limits import RiskLimits
+from kotsin_nse.risk.sizing import size_position
+from kotsin_nse.risk.wallet import Wallet
+
+from .conftest import ist_ts
+
+
+def _settings() -> Settings:
+    return Settings(_env_file=None)
+
+
+# -- costs ------------------------------------------------------------------------------------------
+
+
+def test_round_trip_on_nse_cash_at_33k_matches_the_measured_030_percent(equity):
+    """The number that decided this book's fate. 0.299% measured; the model must land on it."""
+    costs = CostModel(_settings())
+    price, qty = 330.0, 100  # ₹33,000
+    pct = costs.round_trip_pct(equity, price, qty)
+    assert 0.28 <= pct <= 0.35, pct
+
+
+def test_a_percentage_slab_does_not_silently_replace_the_flat_charge(equity):
+    """With the slab off (the default) the flat ₹40 is what is charged. Turning it on must only
+    ever reduce the charge, never be the reason a small position looks cheap."""
+    flat = CostModel(Settings(_env_file=None))
+    slab = CostModel(Settings(_env_file=None, cost_brokerage_pct=0.03))
+    assert flat.leg(equity, OrderSide.BUY, 330.0, 100).brokerage == 40.0
+    assert slab.leg(equity, OrderSide.BUY, 330.0, 100).brokerage < 40.0
+
+
+def test_flat_brokerage_dominates_the_round_trip_at_small_size(equity):
+    """81% of the round trip was ₹40/order × 2. That is why entries, not exits, were the binding
+    problem: a fixed cost does not scale down."""
+    costs = CostModel(_settings())
+    ch = costs.round_trip(equity, 330.0, 330.0, 100)
+    assert ch.brokerage == 80.0  # ₹40 × 2 legs
+    assert ch.brokerage / ch.total > 0.70
+
+
+def test_cost_share_collapses_at_larger_size(equity):
+    """Break-even needed ~₹1.3 lakh per position. The model must show that."""
+    costs = CostModel(_settings())
+    small = costs.round_trip_pct(equity, 330.0, 100)  # ₹33k
+    large = costs.round_trip_pct(equity, 330.0, 400)  # ₹132k
+    assert large < small / 2
+
+
+def test_option_charges_are_levied_on_premium_turnover_not_notional(option):
+    costs = CostModel(_settings())
+    assert costs.turnover(option, 50.0, 250) == 50.0 * 250
+    ch = costs.leg(option, OrderSide.SELL, 50.0, 250)
+    assert ch.stt > 0  # STT on the sell leg only
+    assert costs.leg(option, OrderSide.BUY, 50.0, 250).stt == 0
+
+
+def test_mcx_multiplier_is_applied_to_turnover(mcx_future):
+    """ALUMINI is quoted per kg on a 1,000 kg contract. A 286-qty entry logged ₹99,943 when the
+    real notional was ₹99.9 million."""
+    costs = CostModel(_settings())
+    assert costs.turnover(mcx_future, 349.45, 286) == 349.45 * 286 * 1000
+
+
+# -- sizing ------------------------------------------------------------------------------------------
+
+
+def test_sizing_is_driven_by_the_stop(option):
+    costs = CostModel(_settings())
+    tight = size_position(
+        instrument=option, premium=50.0, option_stop=45.0, option_target1=80.0,
+        balance=1_000_000, available=1_000_000, limits=RiskLimits(), costs=costs,
+    )
+    wide = size_position(
+        instrument=option, premium=50.0, option_stop=25.0, option_target1=120.0,
+        balance=1_000_000, available=1_000_000, limits=RiskLimits(), costs=costs,
+    )
+    assert tight.ok and wide.ok
+    assert tight.qty > wide.qty, "a wider stop must buy fewer lots"
+
+
+def test_sizing_respects_lot_granularity(option):
+    res = size_position(
+        instrument=option, premium=50.0, option_stop=45.0, option_target1=80.0,
+        balance=1_000_000, available=1_000_000, limits=RiskLimits(), costs=CostModel(_settings()),
+    )
+    assert res.qty % option.lot_size == 0
+    assert res.lots == res.qty // option.lot_size
+
+
+def test_sizing_declines_an_unknown_contract_size_rather_than_guessing():
+    broken = Instrument(
+        scrip_code="1", symbol="X", segment=Segment.MCX_FO, kind=InstrumentKind.FUTURE, multiplier=0
+    )
+    res = size_position(
+        instrument=broken, premium=100.0, option_stop=90.0, option_target1=130.0,
+        balance=1_000_000, available=1_000_000, limits=RiskLimits(), costs=CostModel(_settings()),
+    )
+    assert not res.ok
+    assert "declined" in res.reason or "unknown" in res.reason
+
+
+def test_sizing_declines_when_costs_eat_the_move_to_t1(option):
+    """The guard the old book did not have and its own economics asked for."""
+    res = size_position(
+        instrument=option, premium=50.0, option_stop=49.0, option_target1=50.2,
+        balance=1_000_000, available=1_000_000, limits=RiskLimits(), costs=CostModel(_settings()),
+    )
+    assert not res.ok
+    assert "costs are" in res.reason
+
+
+def test_sizing_is_capped_by_the_position_budget(option):
+    lim = RiskLimits(max_position_inr=20_000, risk_per_trade_pct=100.0)
+    res = size_position(
+        instrument=option, premium=50.0, option_stop=45.0, option_target1=90.0,
+        balance=1_000_000, available=1_000_000, limits=lim, costs=CostModel(_settings()),
+    )
+    assert res.outlay <= 20_000
+
+
+def test_sizing_shrinks_with_the_wallet(option):
+    """CAN2 sized at a flat ₹33,000 and never read its wallet, so a position did not shrink in a
+    drawdown."""
+    costs, lim = CostModel(_settings()), RiskLimits()
+    rich = size_position(instrument=option, premium=50.0, option_stop=45.0, option_target1=90.0,
+                         balance=1_000_000, available=1_000_000, limits=lim, costs=costs)
+    poor = size_position(instrument=option, premium=50.0, option_stop=45.0, option_target1=90.0,
+                         balance=200_000, available=200_000, limits=lim, costs=costs)
+    assert poor.qty < rich.qty
+
+
+# -- wallet -------------------------------------------------------------------------------------------
+
+
+def test_wallet_day_rolls_on_the_ist_calendar_not_utc():
+    w = Wallet.new("FUDKII", 1_000_000, now=ist_ts("2026-09-18", "10:00"))
+    assert w.rollover(ist_ts("2026-09-18", "23:00")) is False  # same IST day
+    assert w.rollover(ist_ts("2026-09-19", "09:30")) is True
+
+
+def test_daily_loss_breaker_trips_once_and_lifts_on_rollover():
+    lim = RiskLimits(daily_loss_limit_pct=3.0)
+    w = Wallet.new("FUDKII", 100_000, now=ist_ts("2026-09-18", "10:00"))
+    w.apply_close(-4_000, ist_ts("2026-09-18", "11:00"))
+    assert w.check_breakers(lim, ist_ts("2026-09-18", "11:00")) is not None
+    assert w.halted
+    assert w.check_breakers(lim, ist_ts("2026-09-18", "11:01")) is None  # only once
+    w.rollover(ist_ts("2026-09-19", "09:30"))
+    assert not w.halted
+
+
+def test_reserve_and_release_track_deployed_capital():
+    w = Wallet.new("FUDKII", 100_000)
+    assert w.reserve(40_000, time.time()) is True
+    assert w.available == 60_000
+    assert w.reserve(70_000, time.time()) is False
+    w.release(40_000, time.time())
+    assert w.available == 100_000
+
+
+# -- exits ---------------------------------------------------------------------------------------------
+
+
+def _position(option, *, entry=50.0, stop=40.0, targets=(70.0, 90.0, 110.0, 130.0)) -> Position:
+    return Position(
+        id="p1", strategy="FUDKII", instrument=option, underlying=option, side=PosSide.LONG,
+        qty=1000, entry=entry, opened_ts=time.time(), signal_id="s1", direction=Direction.BULLISH,
+        equity_entry=1500.0, equity_sl=1460.0, equity_targets=(1550.0,),
+        option_sl=stop, option_targets=targets,
+    )
+
+
+def test_stop_beats_force_flat_on_the_same_bar(option):
+    e = ExitEngine(RiskLimits())
+    pos = _position(option)
+    d = e.evaluate(pos, MarketView(option_ltp=39.0, underlying_ltp=1500.0, now=time.time(),
+                                   bars_held=1, past_force_flat=True))
+    assert d is not None and d.reason is ExitReason.SL_OP
+
+
+def test_underlying_stop_is_distinct_from_the_option_stop(option):
+    e = ExitEngine(RiskLimits())
+    pos = _position(option)
+    d = e.evaluate(pos, MarketView(option_ltp=55.0, underlying_ltp=1450.0, now=time.time(),
+                                   bars_held=1, past_force_flat=False))
+    assert d is not None and d.reason is ExitReason.SL_EQ
+
+
+def test_target_ladder_takes_partials_in_order(option):
+    e = ExitEngine(RiskLimits())
+    pos = _position(option)
+    d = e.evaluate(pos, MarketView(option_ltp=71.0, underlying_ltp=1600.0, now=time.time(),
+                                   bars_held=1, past_force_flat=False))
+    assert d is not None and d.reason is ExitReason.TARGET
+    # 40% of 4 lots is 1.6 lots; an option can only be sold in whole lots, so it floors to 1.
+    assert d.qty == 250
+    assert d.qty % option.lot_size == 0
+    apply_exit(pos, d, fill_price=71.0, charges=10.0, now=time.time())
+    assert pos.targets_hit == 1 and pos.qty_remaining == 750
+
+
+def test_stop_moves_to_breakeven_after_t1(option):
+    e = ExitEngine(RiskLimits())
+    pos = _position(option)
+    d = e.evaluate(pos, MarketView(option_ltp=71.0, underlying_ltp=1600.0, now=time.time(),
+                                   bars_held=1, past_force_flat=False))
+    apply_exit(pos, d, fill_price=71.0, charges=0.0, now=time.time())
+    e.evaluate(pos, MarketView(option_ltp=72.0, underlying_ltp=1600.0, now=time.time(),
+                               bars_held=2, past_force_flat=False))
+    assert pos.option_sl >= pos.entry
+
+
+def test_the_stop_only_ever_tightens(option):
+    """Four places could move a HotStocks stop and one of them set it above the live price,
+    stopping the position out instantly. One owner, and it only ratchets."""
+    e = ExitEngine(RiskLimits())
+    pos = _position(option)
+    seen = [pos.option_sl]
+    for ltp in (55.0, 65.0, 60.0, 58.0, 75.0, 52.0):
+        e.evaluate(pos, MarketView(option_ltp=ltp, underlying_ltp=1600.0, now=time.time(),
+                                   bars_held=1, past_force_flat=False))
+        seen.append(pos.option_sl)
+    assert all(b >= a for a, b in pairwise(seen))
+
+
+def test_time_stop_and_eod_are_backstops(option):
+    e = ExitEngine(RiskLimits(time_stop_bars=3))
+    pos = _position(option)
+    d = e.evaluate(pos, MarketView(option_ltp=52.0, underlying_ltp=1510.0, now=time.time(),
+                                   bars_held=5, past_force_flat=False))
+    assert d is not None and d.reason is ExitReason.TIME_STOP
+    d = e.evaluate(_position(option), MarketView(option_ltp=52.0, underlying_ltp=1510.0,
+                                                 now=time.time(), bars_held=1, past_force_flat=True))
+    assert d is not None and d.reason is ExitReason.EOD
+
+
+def test_apply_exit_reports_gross_and_accumulates_charges(option):
+    e = ExitEngine(RiskLimits())
+    pos = _position(option)
+    d = e.evaluate(pos, MarketView(option_ltp=39.0, underlying_ltp=1500.0, now=time.time(),
+                                   bars_held=1, past_force_flat=False))
+    gross = apply_exit(pos, d, fill_price=39.0, charges=120.0, now=1000.0)
+    assert math.isclose(gross, (39.0 - 50.0) * 1000)
+    assert pos.charges == 120.0
+    assert pos.status == "CLOSED" and pos.closed_ts == 1000.0
+
+
+# -- exposure ---------------------------------------------------------------------------------------------
+
+
+def test_exposure_is_aggregated_by_underlying_across_strategies(option):
+    """One SuperTrend flip can open a FUDKII position and a FUKAA position in the same option and
+    neither book's own sizing can see the other."""
+    book = ExposureBook(RiskLimits(max_positions_per_underlying=1))
+    p = _position(option)
+    p.strategy = "FUDKII"
+    v = book.check(underlying="RELIANCE", outlay=10_000, positions=[p], total_capital=1_000_000)
+    assert not v.allowed and "already open" in v.reason
+
+
+def test_exposure_percentage_cap_binds(option):
+    book = ExposureBook(RiskLimits(max_positions_per_underlying=5, max_underlying_exposure_pct=5.0))
+    p = _position(option)
+    v = book.check(underlying="RELIANCE", outlay=40_000, positions=[p], total_capital=1_000_000)
+    assert not v.allowed and "exposure" in v.reason
+
+
+def test_exposure_snapshot_buckets_by_symbol(option):
+    book = ExposureBook(RiskLimits())
+    snap = book.snapshot([_position(option)], 1_000_000)
+    assert "RELIANCE" in snap["by_underlying"]
+    assert snap["gross"] > 0

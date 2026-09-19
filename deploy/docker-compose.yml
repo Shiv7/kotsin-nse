@@ -1,0 +1,27 @@
+# One service. If this file ever grows a second, re-read docs/adr/0001-single-process.md first.
+services:
+  kotsin-nse:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: kotsin-nse:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8500:8500"
+    env_file:
+      - ../backend/.env
+    volumes:
+      - kotsin-nse-data:/data
+    # A memory limit in the unit file, not a heap flag sized for a machine that may no longer
+    # exist. The old stack relaunched 19 GB of JVM ceilings onto a 2 GB box.
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8500/api/health')"]
+      interval: 60s
+      timeout: 10s
+      # Three failures, not one: a slow process is not a dead one.
+      retries: 3
+      start_period: 90s
+
+volumes:
+  kotsin-nse-data:

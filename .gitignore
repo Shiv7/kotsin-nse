@@ -1,0 +1,37 @@
+# secrets — never commit a credential again
+.env
+backend/.env
+backend/.env.*
+!backend/.env.example
+*.pem
+*.key
+
+# data
+backend/data*/
+# ...except the holiday list, which is checked-in data the engine needs
+!backend/data/
+backend/data/*
+!backend/data/holidays.txt
+backend/**/*.db
+backend/**/*.db-wal
+backend/**/*.db-shm
+*.jsonl
+*.parquet
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.import_linter_cache/
+
+# node
+node_modules/
+frontend/dist/
+*.tsbuildinfo
+
+# os / editor
+.DS_Store
+.idea/
+.vscode/
