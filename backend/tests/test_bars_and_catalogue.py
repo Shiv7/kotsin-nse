@@ -238,3 +238,34 @@ def test_ist_day_is_used_for_grouping():
     late = ist_ts("2026-09-18", "05:00")  # 23:30 UTC on the 17th
     assert ist_day(late).isoformat() == "2026-09-18"
     assert time.time() > 0
+
+
+def test_tracking_a_future_alongside_its_cash_symbol_is_refused(equity):
+    """Regression, found 2026-09-21. A future's `symbol` is its root — identical to the cash
+    symbol — and BarStore is keyed by (symbol, tf). Tracking both wrote futures ticks into the
+    equity's bars, so every SuperTrend and Bollinger value was computed on a mix of two
+    instruments separated by the basis. Silent, and it corrupted the decision frame."""
+    import pytest
+
+    from kotsin_nse.domain import Instrument, OptionType
+
+    fut = Instrument(
+        scrip_code="54321",
+        symbol="RELIANCE",
+        segment=Segment.NSE_FO,
+        kind=InstrumentKind.FUTURE,
+        expiry="2026-09-25",
+        option_type=OptionType.FUT,
+        underlying="RELIANCE",
+    )
+    agg = Aggregator(BarStore(), timeframes=("1m",))
+    agg.track(equity)
+    with pytest.raises(ValueError, match="bar-series collision"):
+        agg.track(fut)
+
+
+def test_tracking_the_same_instrument_twice_is_a_no_op(equity):
+    agg = Aggregator(BarStore(), timeframes=("1m",))
+    agg.track(equity)
+    agg.track(equity)
+    assert len(agg.state) == 1

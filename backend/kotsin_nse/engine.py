@@ -47,7 +47,7 @@ from .domain import (
     Trade,
     new_id,
 )
-from .exec.gateway import Gateway, LiveCaps, LiveContext, Mode
+from .exec.gateway import Decision, Gateway, LiveCaps, LiveContext, Mode
 from .exec.live import LiveExecutor
 from .exec.paper import BookSnapshot, PaperMatcher
 from .exec.reconcile import Reconciler
@@ -179,6 +179,8 @@ class Engine:
         self.ltps: dict[str, float] = {}
         self._zone_cache: dict[str, tuple[str, list[Zone]]] = {}
         self._future_to_underlying: dict[str, str] = {}
+        self._stale_positions: set[str] = set()
+        self._shadow_exits: set[str] = set()
         self._mode = Mode.SHADOW
         self._armed_until: float | None = None
         self._halted = False
@@ -272,17 +274,19 @@ class Engine:
         await self._backfill(universe)
 
         await self.feed.subscribe("mf", universe)
-        futures = [
-            f
-            for f in (cat.front_future(i.symbol) for i in universe)
-            if f is not None
-        ]
+
+        # Futures are an OI source, not a bar source. On NSE the front future's `symbol` is the
+        # cash symbol, so tracking it would write futures ticks into the equity's bar series — the
+        # two are separated by the basis and the mixture is silent. Only subscribe `oi`.
+        # On MCX the front future IS the instrument the strategy decides on, so it is already in
+        # `universe` and already tracked; `tracked_codes` keeps it from being double-counted.
+        tracked_codes = {i.scrip_code for i in universe}
+        futures = [f for f in (cat.front_future(i.symbol) for i in universe) if f is not None]
         self._future_to_underlying = {f.scrip_code: f.underlying for f in futures}
         if futures:
-            for f in futures:
-                self.aggregator.track(f)
-            await self.feed.subscribe("mf", futures)
             await self.feed.subscribe("oi", futures)
+            oi_only = [f for f in futures if f.scrip_code not in tracked_codes]
+            log.info("engine.oi_sources", futures=len(futures), bar_sources=len(futures) - len(oi_only))
         await self.feed.subscribe("md", universe)
         if self.reconciler is not None:
             await self.reconciler.run(list(self.positions.values()))
@@ -559,6 +563,12 @@ class Engine:
             return
 
         inst = selection.instrument
+        # Subscribe the contract we are about to hold on BOTH channels. `mf` gives the LTP the exit
+        # engine prices against; `md` gives the ladder the paper matcher walks. Without `md` every
+        # paper fill silently took the degraded LTP+slippage path, which is the thing PaperMatcher
+        # exists to avoid.
+        await self.feed.subscribe("mf", [inst])
+        await self.feed.subscribe("md", [inst])
         delta = (
             estimate_delta(spot=sig.entry, strike=inst.strike, option_type=inst.option_type)
             if inst.is_option
@@ -733,9 +743,34 @@ class Engine:
                 continue
             ltp = self.ltps.get(pos.instrument.scrip_code)
             if ltp is None or ltp <= 0:
+                self._stale_positions.add(pos.id)
                 continue
             wallet = self.wallets[pos.strategy]
             halted, _ = self.halted()
+            forced = past_force_flat(pos.underlying.segment, now) or halted
+
+            # An illiquid strike can stop ticking for minutes. Evaluating a stop against a price
+            # that old is worse than not evaluating it — but staleness must never trap a position
+            # past the force-flat, so a forced exit proceeds on the last known price and says so.
+            q = self.quotes.get(pos.instrument.scrip_code)
+            age = (now - q.ts) if q else None
+            if age is not None and age > self.s.position_quote_max_age_s and not forced:
+                if pos.id not in self._stale_positions:
+                    self._stale_positions.add(pos.id)
+                    log.warning(
+                        "position.quote_stale",
+                        position=pos.id,
+                        symbol=pos.underlying.symbol,
+                        instrument=pos.instrument.name or pos.instrument.scrip_code,
+                        age_s=round(age, 1),
+                    )
+                    self.telegram.fire_and_forget(
+                        f"⚠️ {pos.strategy} {pos.underlying.symbol}: no quote for "
+                        f"{age:.0f}s — the stop is not being evaluated",
+                        key=f"stale:{pos.id}",
+                    )
+                continue
+            self._stale_positions.discard(pos.id)
             view = MarketView(
                 option_ltp=ltp,
                 underlying_ltp=self.ltps.get(pos.underlying.scrip_code),
@@ -765,6 +800,20 @@ class Engine:
         )
         result = await self._submit(intent, verdict_ok=True, verdict_reason="")
         await self.ledger.insert_order(_order_json(result.order), result.decision.value)
+        if result.decision is Decision.SHADOW_OK:
+            # SHADOW places nothing, so a position carried in from a PAPER run can never close.
+            # That is the mode working as intended — say so once, not once a second, and never as
+            # an error: an alerting path that cries wolf is how the real alert gets ignored.
+            if pos.id not in self._shadow_exits:
+                self._shadow_exits.add(pos.id)
+                log.info(
+                    "exit.shadow_only",
+                    position=pos.id,
+                    symbol=pos.underlying.symbol,
+                    reason=decision.reason.value,
+                    note="SHADOW mode places nothing; switch to PAPER or LIVE to close it",
+                )
+            return
         if result.fill is None:
             log.error(
                 "exit.failed",
@@ -932,6 +981,7 @@ class Engine:
             "catalogue": self.catalogue_loader.catalogue.stats(),
             "telegram": self.telegram.stats(),
             "positions_open": len([p for p in self.positions.values() if p.status == "OPEN"]),
+            "positions_stale_quote": len(self._stale_positions),
             "boot_notes": self.boot_notes,
         }
 

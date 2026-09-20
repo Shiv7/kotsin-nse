@@ -300,3 +300,124 @@ def test_strategy_key_is_the_only_registry():
         strategy=StrategyKey.FUDKII, symbol="RELIANCE", direction=Direction.BULLISH,
         ts=int(ist_ts("2026-09-18", "11:00")), entry=100.0, stop=98.0,
     ).signal_id.startswith("FUDKII-RELIANCE-")
+
+
+async def test_a_stale_option_quote_suspends_exit_evaluation(settings, monkeypatch):
+    """An illiquid strike can stop ticking. Evaluating a stop against a price from minutes ago is
+    worse than not evaluating it — but staleness must never trap a position past the force-flat."""
+    from kotsin_nse.domain import (
+        Direction,
+        Instrument,
+        InstrumentKind,
+        OptionType,
+        Position,
+        PosSide,
+    )
+    from kotsin_nse.instrument.select import Quote
+
+    e = Engine(settings)
+    await e.start()
+    try:
+        opt = Instrument(
+            "45678", "RELIANCE", Segment.NSE_FO, InstrumentKind.OPTION,
+            lot_size=250, strike=1500.0, option_type=OptionType.CE, underlying="RELIANCE",
+        )
+        und = Instrument("2885", "RELIANCE", Segment.NSE_EQ, InstrumentKind.EQUITY, underlying="RELIANCE")
+        pos = Position(
+            id="p1", strategy="FUDKII", instrument=opt, underlying=und, side=PosSide.LONG,
+            qty=250, entry=50.0, opened_ts=time.time(), signal_id="s1", direction=Direction.BULLISH,
+            equity_entry=1500.0, equity_sl=1450.0, option_sl=40.0, option_targets=(70.0,),
+        )
+        await e.set_mode(Mode.PAPER)  # SHADOW places nothing, so nothing could close
+        e.positions[pos.id] = pos
+        e.ltps[opt.scrip_code] = 35.0  # below the stop: a live quote would exit immediately
+
+        stale_ts = time.time() - settings.position_quote_max_age_s - 10
+        e.quotes[opt.scrip_code] = Quote(ltp=35.0, bid=34.5, ask=35.5, ts=stale_ts)
+        monkeypatch.setattr("kotsin_nse.engine.past_force_flat", lambda *_a: False)
+        await e._manage_positions()
+        assert pos.status == "OPEN", "a stale quote must not trigger an exit"
+        assert pos.id in e._stale_positions
+        assert e.health_snapshot()["positions_stale_quote"] == 1
+
+        # The force-flat overrides staleness: never trap a position at the end of the session.
+        monkeypatch.setattr("kotsin_nse.engine.past_force_flat", lambda *_a: True)
+        await e._manage_positions()
+        assert pos.status != "OPEN" or pos.id not in e.positions
+    finally:
+        await e.stop()
+
+
+async def test_a_fresh_quote_is_evaluated_normally(settings, monkeypatch):
+    from kotsin_nse.domain import (
+        Direction,
+        Instrument,
+        InstrumentKind,
+        OptionType,
+        Position,
+        PosSide,
+    )
+    from kotsin_nse.instrument.select import Quote
+
+    e = Engine(settings)
+    await e.start()
+    try:
+        opt = Instrument(
+            "45678", "RELIANCE", Segment.NSE_FO, InstrumentKind.OPTION,
+            lot_size=250, strike=1500.0, option_type=OptionType.CE, underlying="RELIANCE",
+        )
+        und = Instrument("2885", "RELIANCE", Segment.NSE_EQ, InstrumentKind.EQUITY, underlying="RELIANCE")
+        pos = Position(
+            id="p2", strategy="FUDKII", instrument=opt, underlying=und, side=PosSide.LONG,
+            qty=250, entry=50.0, opened_ts=time.time(), signal_id="s2", direction=Direction.BULLISH,
+            equity_entry=1500.0, equity_sl=1450.0, option_sl=40.0, option_targets=(70.0,),
+        )
+        await e.set_mode(Mode.PAPER)
+        e.positions[pos.id] = pos
+        e.ltps[opt.scrip_code] = 35.0
+        e.quotes[opt.scrip_code] = Quote(ltp=35.0, bid=34.5, ask=35.5, ts=time.time())
+        monkeypatch.setattr("kotsin_nse.engine.past_force_flat", lambda *_a: False)
+        await e._manage_positions()
+        assert pos.id not in e._stale_positions
+        assert pos.status != "OPEN" or pos.id not in e.positions, "the stop should have fired"
+    finally:
+        await e.stop()
+
+
+async def test_shadow_mode_reports_an_exit_once_instead_of_failing_every_second(settings, monkeypatch, caplog):
+    """A position carried into SHADOW can never close, because SHADOW places nothing. That is the
+    mode working — it must be said once at info, not logged as an error on every 1 s tick."""
+    from kotsin_nse.domain import (
+        Direction,
+        Instrument,
+        InstrumentKind,
+        OptionType,
+        Position,
+        PosSide,
+    )
+    from kotsin_nse.instrument.select import Quote
+
+    e = Engine(settings)
+    await e.start()
+    try:
+        opt = Instrument(
+            "45678", "RELIANCE", Segment.NSE_FO, InstrumentKind.OPTION,
+            lot_size=250, strike=1500.0, option_type=OptionType.CE, underlying="RELIANCE",
+        )
+        und = Instrument("2885", "RELIANCE", Segment.NSE_EQ, InstrumentKind.EQUITY, underlying="RELIANCE")
+        pos = Position(
+            id="p3", strategy="FUDKII", instrument=opt, underlying=und, side=PosSide.LONG,
+            qty=250, entry=50.0, opened_ts=time.time(), signal_id="s3", direction=Direction.BULLISH,
+            equity_entry=1500.0, equity_sl=1450.0, option_sl=40.0, option_targets=(70.0,),
+        )
+        e.positions[pos.id] = pos
+        e.ltps[opt.scrip_code] = 35.0
+        e.quotes[opt.scrip_code] = Quote(ltp=35.0, bid=34.5, ask=35.5, ts=time.time())
+        monkeypatch.setattr("kotsin_nse.engine.past_force_flat", lambda *_a: False)
+
+        for _ in range(5):
+            await e._manage_positions()
+        assert pos.status == "OPEN"
+        assert e._shadow_exits == {pos.id}, "reported once, not once per tick"
+    finally:
+        await e.stop()

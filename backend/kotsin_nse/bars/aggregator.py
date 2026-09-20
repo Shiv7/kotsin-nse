@@ -75,7 +75,30 @@ class Aggregator:
     # -- registration ------------------------------------------------------------------------------
 
     def track(self, instrument: Instrument) -> None:
-        self.state.setdefault(instrument.scrip_code, SymbolState(instrument=instrument))
+        """Register an instrument whose ticks become bars.
+
+        Refuses a second instrument that would share a bar series with a different scrip code.
+        ``BarStore`` is keyed by ``(symbol, tf)`` and a future's ``symbol`` is its root — identical
+        to the cash symbol — so tracking RELIANCE cash and RELIANCE FUT together silently wrote
+        futures prices into the equity's bars, and every SuperTrend and Bollinger value downstream
+        was computed on a mix of two instruments separated by the basis.
+
+        This raises rather than warning: it is a wiring mistake, and booting on corrupted bars is
+        strictly worse than not booting.
+        """
+        existing = self.state.get(instrument.scrip_code)
+        if existing is not None:
+            return
+        for other in self.state.values():
+            if other.instrument.symbol == instrument.symbol:
+                raise ValueError(
+                    f"bar-series collision: {instrument.scrip_code} "
+                    f"({instrument.kind.value}) and {other.instrument.scrip_code} "
+                    f"({other.instrument.kind.value}) both claim the series "
+                    f"'{instrument.symbol}'. Track only the instrument the strategy decides on; "
+                    f"subscribe the other for OI alone."
+                )
+        self.state[instrument.scrip_code] = SymbolState(instrument=instrument)
 
     def set_oi(self, scrip_code: str, *, oi: int, change_pct: float, fut_code: str) -> None:
         """Stamp the underlying's OI from its front-month future.

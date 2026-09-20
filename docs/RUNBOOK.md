@@ -75,6 +75,22 @@ kill $(cat backend/data/engine.pid)     # by PID. `pkill -f kotsin-nse` kills th
 Wait for `shutdown.done` in the log, then start again. Open positions are re-hydrated from the
 ledger and reconciled against the broker before entries resume.
 
+## Known live-path gap: there is no resting stop at the broker
+
+Stops are managed **in this process**. When one is hit the engine sends a market exit. Nothing
+rests at 5paisa, so if the process dies while a position is open, that position is unprotected
+until the engine comes back and reconciles.
+
+`venue/fivepaisa/rest.py::place_order` accepts a `stop_trigger` and sets `StopLossPrice` /
+`IsStopLossOrder`, but **those field names are inferred, not verified against the live API**, and
+`LiveExecutor` deliberately never passes them. Shipping an unverified order shape is precisely how
+a control frame ends up silently ignored — the broker does not reject a malformed request, it just
+does nothing useful with it.
+
+To close the gap: place one stop order by hand against the live API, confirm the accepted field
+names and the response shape, then wire it into `LiveExecutor.place` behind a test. Until then,
+treat `LIVE_CAPPED` as "supervised trading only" — do not leave it armed and walk away.
+
 ## Before the first real order
 
 1. Rotate the 5paisa credentials. The previous stack committed all six plus the TOTP seed to git.

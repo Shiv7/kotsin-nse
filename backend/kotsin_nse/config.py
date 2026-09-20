@@ -125,6 +125,10 @@ class Settings(BaseSettings):
     # ---- paper accounting ---------------------------------------------------------------------
     paper_initial_inr: float = 1_000_000.0  # per-strategy wallet, matching the old 10-lakh default
     backfill_days: int = 30  # daily/intraday history seeded from REST at boot
+    #: An open position whose contract has not quoted for this long is NOT evaluated for exits —
+    #: a stop checked against a price from minutes ago is worse than one not checked at all. A
+    #: forced exit (force-flat or halt) overrides this and proceeds on the last known price.
+    position_quote_max_age_s: float = 60.0
 
     # ---- LIVE_CAPPED caps ----------------------------------------------------------------------
     # Mode is state (R9); these only bound what an *armed* engine may do.

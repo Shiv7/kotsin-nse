@@ -73,7 +73,7 @@ than pretending to have a feed.
 | 4 | FUDKII + FUKAA, pure, gate-counted | a signal reproduces end to end from a fixed bar series | ✅ (tested) |
 | 5 | Risk: wallets, sizing from the stop, exits, exposure, cost model | a null strategy costs exactly −charges | ✅ (tested) |
 | 6 | Gateway SHADOW/PAPER + ledger + API + UI | every page reads off a live paper run | 🟡 built, needs a session |
-| 7 | Live: real orders, reconciliation, kill | 5 restarts with an open position → zero unreconciled | ⬜ built, **never run against the broker** |
+| 7 | Live: real orders, reconciliation, kill | 5 restarts with an open position → zero unreconciled | ⬜ built, **never run against the broker**; no resting stop at the venue ([runbook](docs/RUNBOOK.md)) |
 | 8 | Backtester replaying the same strategy/risk code | a null strategy backtests to exactly −charges | ✅ (tested; the option leg is modelled, not measured) |
 
 **Nothing here has traded.** No parameter in this repo carries a backtest artefact yet; the ones
