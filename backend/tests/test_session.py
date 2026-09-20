@@ -11,6 +11,7 @@ from kotsin_nse.market.session import (
     bucket_start,
     in_entry_window,
     is_open,
+    ist_day,
     ist_hm,
     ist_naive_to_ts,
     past_force_flat,
@@ -91,3 +92,16 @@ def test_broker_timestamps_are_naive_ist():
 def test_session_open_matches_spec():
     assert ist_hm(session_open_ts(Segment.NSE_EQ, date(2026, 9, 18))) == "09:15"
     assert ist_hm(session_open_ts(Segment.MCX_FO, date(2026, 9, 18))) == "09:00"
+
+
+def test_synthetic_series_are_deterministic_not_wall_clock_anchored():
+    """Regression: the fixtures used to anchor on ``time.time()``, so the suite passed in the
+    morning and failed at night — ``session_phase`` correctly returned EOD after 14:45 IST and the
+    last bar's wall-clock time leaked into assertions that had nothing to do with the session."""
+    from .conftest import ANCHOR_DAY, ANCHOR_HM, series
+
+    a = series([100.0, 101.0, 102.0])
+    b = series([100.0, 101.0, 102.0])
+    assert [x.ts for x in a] == [x.ts for x in b]
+    assert ist_hm(a[-1].ts) == ANCHOR_HM
+    assert ist_day(a[-1].ts).isoformat() == ANCHOR_DAY

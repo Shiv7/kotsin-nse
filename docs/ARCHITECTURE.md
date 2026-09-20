@@ -73,6 +73,9 @@ All of it is **one asyncio process**, connected by bounded in-process queues (`b
 | `exec/gateway.py` · `paper.py` · `live.py` · `reconcile.py` | modes, book-walking fills, real orders, truth |
 | `ledger/db.py` | SQLite schema and reads, including the binding-gate histogram |
 | `api/routes.py` | REST; computes nothing, reads engine state and ledger rows |
+| `research/history.py` | Parquet cache of broker history, merged on overlap |
+| `research/backtest.py` | replays the cache through the **live** strategy/exit/cost code |
+| `research/stats.py` | day-clustered means and the within-day permutation test |
 
 Boundaries are enforced by `import-linter` (`backend/pyproject.toml`), not by convention:
 

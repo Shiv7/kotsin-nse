@@ -1,6 +1,7 @@
 import { BrowserRouter, NavLink, Route, Routes } from 'react-router-dom'
 import { ModeBanner } from './components/ModeBanner'
 import { usePoll } from './lib/usePoll'
+import { Backtest } from './pages/Backtest'
 import { Chart } from './pages/Chart'
 import { Overview } from './pages/Overview'
 import { Risk } from './pages/Risk'
@@ -17,6 +18,7 @@ const PAGES = [
   ['/trades', 'Trades'],
   ['/strategies', 'Strategies'],
   ['/chart', 'Chart'],
+  ['/backtest', 'Backtest'],
   ['/universe', 'Universe'],
   ['/risk', 'Risk'],
   ['/system', 'System'],
@@ -55,6 +57,7 @@ export default function App() {
             <Route path="/trades" element={<Trades />} />
             <Route path="/strategies" element={<Strategies />} />
             <Route path="/chart" element={<Chart />} />
+            <Route path="/backtest" element={<Backtest />} />
             <Route path="/universe" element={<Universe />} />
             <Route path="/risk" element={<Risk />} />
             <Route path="/system" element={<System />} />

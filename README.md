@@ -74,8 +74,28 @@ than pretending to have a feed.
 | 5 | Risk: wallets, sizing from the stop, exits, exposure, cost model | a null strategy costs exactly −charges | ✅ (tested) |
 | 6 | Gateway SHADOW/PAPER + ledger + API + UI | every page reads off a live paper run | 🟡 built, needs a session |
 | 7 | Live: real orders, reconciliation, kill | 5 restarts with an open position → zero unreconciled | ⬜ built, **never run against the broker** |
-| 8 | Backtester replaying the same strategy/risk code | a null strategy backtests to exactly −charges | ⬜ not built |
+| 8 | Backtester replaying the same strategy/risk code | a null strategy backtests to exactly −charges | ✅ (tested; the option leg is modelled, not measured) |
 
 **Nothing here has traded.** No parameter in this repo carries a backtest artefact yet; the ones
 inherited from the old stack carry its evidence and its caveats, both recorded in
 [`docs/strategies/`](docs/strategies/).
+
+## Research
+
+```bash
+cd backend
+uv run kotsin-nse fetch-history --symbols RELIANCE,TCS,INFY --start 2025-09-01
+uv run kotsin-nse backtest --symbols RELIANCE,TCS,INFY
+```
+
+The backtester imports the **live** `Fudkii`, `Fukaa`, `ExitEngine`, `CostModel` and sizing — it
+does not reimplement them, because hand-rolled replays in the old stack erred between −80% and
++185% against production. It is deliberately pessimistic: entry on the next bar's open, the stop
+assumed first when a bar covers both stop and target, and a stop fill worse than the stop price.
+
+It measures the **underlying**. There is no option-chain history from this broker — expired
+contracts leave the scrip master — so the option leg is a *model*, reported separately and
+labelled. Results land in `data/backtests/` and on the Backtest page.
+
+Statistics are day-clustered, and `research/stats.py` carries the within-day permutation test that
+twice overturned a "significant" split in the old stack.

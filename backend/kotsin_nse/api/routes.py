@@ -12,6 +12,7 @@ works even when everything else is frozen.
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from typing import Any
@@ -245,6 +246,46 @@ def build_app(engine: Engine) -> FastAPI:
                     }
                 )
         return {"symbol": sym, "expiry": expiry, "expiries": exps, "rows": rows}
+
+    # -- research -----------------------------------------------------------------------------------
+
+    @api.get("/backtests")
+    async def backtests(limit: int = Query(25, le=100)) -> list[dict[str, Any]]:
+        """Saved backtest summaries, newest first.
+
+        Read-only: a backtest is run from the CLI (`kotsin-nse backtest`), not from the UI. A long
+        sweep should not be able to compete with the trading loop for the same event loop.
+        """
+        from ..research.backtest import load_summaries
+
+        return load_summaries(engine.s.data_dir / "backtests", limit)
+
+    @api.get("/backtests/{run_id}")
+    async def backtest_detail(run_id: str) -> dict[str, Any]:
+        path = engine.s.data_dir / "backtests" / f"{run_id}.json"
+        if not path.exists() or ".." in run_id or "/" in run_id:
+            raise HTTPException(404, f"no backtest {run_id}")
+        return json.loads(path.read_text())
+
+    @api.get("/history")
+    async def history_coverage() -> list[dict[str, Any]]:
+        from ..research.history import HistoryStore
+
+        store = HistoryStore(engine.s.data_dir / "history")
+        out: list[dict[str, Any]] = []
+        for tf in ("30m", "1d"):
+            for sym in store.symbols(tf):
+                cov = store.coverage(sym, tf)
+                out.append(
+                    {
+                        "symbol": sym,
+                        "tf": tf,
+                        "from": cov[0] if cov else None,
+                        "to": cov[1] if cov else None,
+                        "bars": len(store.load(sym, tf)),
+                    }
+                )
+        return out
 
     # -- control -----------------------------------------------------------------------------------
 

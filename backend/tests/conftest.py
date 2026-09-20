@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 from datetime import datetime
 
 import pytest
@@ -106,11 +105,22 @@ def bar(
     )
 
 
+#: Every synthetic series ends here unless told otherwise: 11:00 IST on Monday 2026-01-05, i.e.
+#: mid-session on a weekday. Anchoring on ``time.time()`` made the suite pass in the morning and
+#: fail at night, because ``session_phase`` correctly returned EOD after 14:45 IST and the last
+#: bar's wall-clock time leaked into the assertion.
+ANCHOR_DAY = "2026-01-05"
+ANCHOR_HM = "11:00"
+
+
 def series(
     closes: list[float], *, start: float | None = None, step: int = 1800, vol: float = 1000.0
 ) -> list[UnifiedBar]:
-    """A bar series from closes, with a small symmetric range around each close."""
-    t0 = start if start is not None else time.time() - len(closes) * step
+    """A bar series from closes, with a small symmetric range around each close.
+
+    Deterministic by construction — see :data:`ANCHOR_DAY`.
+    """
+    t0 = start if start is not None else ist_ts(ANCHOR_DAY, ANCHOR_HM) - (len(closes) - 1) * step
     out = []
     prev = closes[0]
     for i, c in enumerate(closes):
