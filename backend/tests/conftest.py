@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime
 
 import pytest
@@ -8,6 +9,28 @@ from kotsin_nse.bars.unified import BarSource, UnifiedBar
 from kotsin_nse.config import Segment, Settings
 from kotsin_nse.domain import Instrument, InstrumentKind, OptionType
 from kotsin_nse.market.session import IST, from_ist
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_config_from_the_box() -> object:
+    """No test may read the operator's real ``backend/.env`` or stray ``KN_*`` variables.
+
+    ``Settings`` defaults to ``env_file=".env"`` relative to the working directory, so on a machine
+    with credentials a bare ``Settings()`` silently picks up the live broker's keys — and the suite
+    then behaves differently depending on whose box it runs on. That is how
+    ``test_a_flat_book_is_an_empty_reconcile_not_a_failed_one`` passed on the machine that wrote it
+    and failed here: it built a ``Settings()`` expecting an app key to be there.
+
+    Tests that want credentials must pass them explicitly, as fakes.
+    """
+    original = Settings.model_config.get("env_file")
+    Settings.model_config["env_file"] = None
+    saved = {k: v for k, v in os.environ.items() if k.startswith("KN_")}
+    for k in saved:
+        del os.environ[k]
+    yield None
+    Settings.model_config["env_file"] = original
+    os.environ.update(saved)
 
 
 @pytest.fixture

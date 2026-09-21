@@ -247,6 +247,20 @@ class _FakeResponse:
         return self._payload
 
 
+def _fake_credentials() -> Settings:
+    """Credentials that are obviously not real, supplied explicitly. A bare ``Settings()`` here
+    would read the operator's own ``backend/.env`` on a machine that has one."""
+    return Settings(
+        _env_file=None,
+        fp_client_code="00000000",
+        fp_app_key="test-key",
+        fp_encrypt_key="test-encrypt",
+        fp_user_id="test-user",
+        fp_pin="0000",
+        fp_totp_secret="AAAAAAAAAAAAAAAA",
+    )
+
+
 class _FakeHttp:
     def __init__(self, payload: dict) -> None:
         self.payload = payload
@@ -269,7 +283,7 @@ async def test_a_flat_book_is_an_empty_reconcile_not_a_failed_one():
         {"head": {"status": "1", "statusDescription": "No record found."}, "body": {}}
     )
     auth = _FakeAuth()
-    rest = FivePaisaREST(Settings(), http, auth)
+    rest = FivePaisaREST(_fake_credentials(), http, auth)
 
     assert await rest.net_positions() == []
     assert auth.invalidations == 0, "a flat book must not force a re-login"
