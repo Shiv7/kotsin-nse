@@ -20,9 +20,10 @@ import structlog
 from ..config import Segment, Settings
 from ..ledger.db import trades
 from ..market.session import session_phase
+from ..research.backtest import BacktestParams
 from ..research.history import HistoryStore
 from .evidence import BarRow, Case, case_pack, render_case
-from .experiments import run_experiment
+from .experiments import apply_changes, run_experiment
 from .forensics import TradeRec, forensics, from_backtest, from_ledger, render
 from .llm import LLM, AnthropicLLM
 from .memory import ReviewLog
@@ -362,6 +363,43 @@ class CommitteeService:
                 if len(after) < n_after:
                     after = [b for b in hist if b.ts > ts][:n_after]
         return before, after
+
+    # -- manual proposals --------------------------------------------------------------------------
+
+    def propose(
+        self,
+        *,
+        title: str,
+        changes: list[ParamChange],
+        expected: str = "",
+        rationale: str = "",
+        segment: str = "NSE_EQ",
+    ) -> dict[str, Any]:
+        """A hypothesis from a person, graded exactly like the committee's. The loop must not need
+        a key: the forensic tables already say enough to propose from, and the backtester — not
+        the model — is what confirms or refutes."""
+        if not changes:
+            raise ValueError("a hypothesis needs at least one parameter change")
+        apply_changes(BacktestParams(), changes)  # an unknown path fails here, not in the worker
+        entry = self.log.append(
+            {
+                "kind": "manual",
+                "subject": {"source": "manual", "segment": segment},
+                "strategy": None,
+                "symbol": None,
+                "lesson": None,
+                "hypotheses": [
+                    {
+                        "title": title,
+                        "rationale": rationale,
+                        "changes": [c.model_dump() for c in changes],
+                        "expected": expected,
+                    }
+                ],
+            }
+        )
+        log.info("committee.proposed", hypothesis=entry["hypotheses"][0]["id"], title=title)
+        return entry["hypotheses"][0]
 
     # -- experiments -------------------------------------------------------------------------------
 

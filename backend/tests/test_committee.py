@@ -454,3 +454,21 @@ async def test_service_without_a_key_is_unavailable_and_says_so(settings):
         await svc.review_signal("x")
     svc.on_trade_closed({"signal_id": "x"})  # auto-review off: a no-op, never an error
     await engine.ledger.close()
+
+
+async def test_a_person_can_propose_a_hypothesis_without_a_key(settings):
+    engine = Engine(settings)
+    svc = engine.committee
+    assert not svc.available
+    h = svc.propose(
+        title="stop at least 1 ATR away",
+        changes=[ParamChange(path="fudkii.grade_policy.min_stop_atr", value=1.0)],
+        expected="first-bar stops fall, avg R rises",
+    )
+    assert h["status"] == "pending" and h["id"].startswith("hyp")
+    assert svc.log.hypotheses()[0]["review_kind"] == "manual"
+    with pytest.raises(ValueError):  # an unknown path fails at proposal time, not in the worker
+        svc.propose(title="x", changes=[ParamChange(path="fudkii.nope", value=1)])
+    with pytest.raises(ValueError):
+        svc.propose(title="x", changes=[])
+    await engine.ledger.close()

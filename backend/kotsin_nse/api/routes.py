@@ -65,6 +65,14 @@ class ExperimentRequest(BaseModel):
     hypothesis_id: str
 
 
+class ProposeRequest(BaseModel):
+    title: str
+    changes: list[dict[str, float | str]] = Field(description="[{path, value}] on BacktestParams")
+    expected: str = ""
+    rationale: str = ""
+    segment: str = "NSE_EQ"
+
+
 def build_app(engine: Engine) -> FastAPI:
     app = FastAPI(title="kotsin-nse", version="0.1.0", docs_url="/api/docs", openapi_url="/api/openapi.json")
     api = APIRouter(prefix="/api")
@@ -291,6 +299,23 @@ def build_app(engine: Engine) -> FastAPI:
             raise HTTPException(404, str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(409, str(exc)) from exc
+
+    @api.post("/committee/hypotheses")
+    async def committee_propose(req: ProposeRequest) -> dict[str, Any]:
+        """A person's hypothesis, graded exactly like the committee's — the loop needs no key."""
+        from ..committee.schemas import ParamChange
+
+        try:
+            changes = [ParamChange(path=str(c["path"]), value=float(c["value"])) for c in req.changes]
+            return engine.committee.propose(
+                title=req.title,
+                changes=changes,
+                expected=req.expected,
+                rationale=req.rationale,
+                segment=req.segment,
+            )
+        except (KeyError, ValueError, TypeError) as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     @api.post("/committee/experiments/run")
     async def committee_run_experiment(req: ExperimentRequest) -> dict[str, Any]:

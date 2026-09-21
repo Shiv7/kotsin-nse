@@ -91,9 +91,52 @@ function Changes({ changes }: { changes: { path: string; value: number }[] }) {
   )
 }
 
-function Hypotheses({ rows, onRun, busy }: { rows: HypothesisRow[]; onRun: (id: string) => void; busy: boolean }) {
+function Propose({ onDone }: { onDone: () => void }) {
+  const [title, setTitle] = useState('')
+  const [changes, setChanges] = useState('fudkii.grade_policy.min_stop_atr=1.0')
+  const [expected, setExpected] = useState('')
+  const [msg, setMsg] = useState('')
+  const submit = async () => {
+    const parsed = changes
+      .split(/[,\s]+/)
+      .filter(Boolean)
+      .map((kv) => {
+        const [path, value] = kv.split('=')
+        return { path, value: Number(value) }
+      })
+    if (!title || parsed.some((c) => !c.path || Number.isNaN(c.value))) {
+      setMsg('need a title and changes as path=value')
+      return
+    }
+    try {
+      await postJson('/api/committee/hypotheses', { title, changes: parsed, expected })
+      setMsg('proposed — run the experiment below')
+      setTitle('')
+      onDone()
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e))
+    }
+  }
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-[11px]">
+      <span className="text-slate-500">propose your own (no key needed):</span>
+      <input className="w-56 rounded bg-slate-900 px-2 py-1 text-slate-200" placeholder="title" value={title} onChange={(e) => setTitle(e.target.value)} />
+      <input className="w-80 rounded bg-slate-900 px-2 py-1 font-mono text-slate-200" placeholder="fudkii.grade_policy.min_stop_atr=1.0 limits.risk_per_trade_pct=0.5" value={changes} onChange={(e) => setChanges(e.target.value)} />
+      <input className="w-64 rounded bg-slate-900 px-2 py-1 text-slate-200" placeholder="expected (a number to beat)" value={expected} onChange={(e) => setExpected(e.target.value)} />
+      <button className="rounded bg-sky-900/60 px-2 py-1 text-sky-200 hover:bg-sky-800" onClick={() => void submit()}>
+        propose
+      </button>
+      <span className="text-slate-400">{msg}</span>
+    </div>
+  )
+}
+
+function Hypotheses({ rows, onRun, busy, onProposed }: { rows: HypothesisRow[]; onRun: (id: string) => void; busy: boolean; onProposed: () => void }) {
   return (
     <Card title="Hypotheses" right="propose → backtest → grade → remember. A hypothesis is confirmed by the backtester, never by prose.">
+      <div className="mb-2">
+        <Propose onDone={onProposed} />
+      </div>
       <Table head={['proposed', 'from', 'hypothesis', 'changes', 'status', 'baseline → patched', 'Δ avg R · p', 'lesson', '']} empty="no hypotheses yet — run a review">
         {rows.map((h) => {
           const r = h.result
@@ -302,7 +345,7 @@ export function Committee() {
         )}
       </Card>
 
-      <Hypotheses rows={hyps.data ?? []} onRun={runExperiment} busy={busy} />
+      <Hypotheses rows={hyps.data ?? []} onRun={runExperiment} busy={busy} onProposed={() => void hyps.refresh()} />
 
       {open && <ReviewDetail r={open} onClose={() => setOpen(null)} />}
 
