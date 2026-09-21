@@ -35,6 +35,13 @@ from ..base import VenueError
 log = structlog.get_logger(__name__)
 
 TOTP_WINDOW_S = 30
+#: Never send a code in the first seconds of its window, and never so late that the request
+#: crosses into the next one. Observed 2026-09-22 00:01:00.2 IST: the post-midnight re-login fired
+#: 0.2 s into a fresh window and TOTPLogin answered Status 0 with no RequestToken; the retry two
+#: seconds later, same window, succeeded. A validator whose clock trails ours by a fraction of a
+#: second is still on the previous code at that instant.
+WINDOW_EDGE_HEAD_S = 3.0
+WINDOW_EDGE_TAIL_S = 2.0
 #: A session younger than this is not the reason a call failed, so an error path may not drop
 #: it. Longer than the 30s OTP window, so a genuine re-auth still gets a fresh code.
 MIN_SESSION_AGE_S = 90.0
@@ -145,13 +152,21 @@ class Authenticator:
     # -- internals ------------------------------------------------------------------------------
 
     async def _wait_for_fresh_window(self) -> int:
-        window = int(time.time()) // TOTP_WINDOW_S
-        if self._window_used == window:
-            sleep_s = TOTP_WINDOW_S - (int(time.time()) % TOTP_WINDOW_S) + 1
-            log.info("fivepaisa.totp_window_wait", seconds=sleep_s)
+        """The window to log in with: not one already used, and not at either edge of one."""
+        while True:
+            now = time.time()
+            window = int(now) // TOTP_WINDOW_S
+            into = now - window * TOTP_WINDOW_S
+            if self._window_used == window:
+                sleep_s, why = TOTP_WINDOW_S - into + WINDOW_EDGE_HEAD_S, "window used"
+            elif into < WINDOW_EDGE_HEAD_S:
+                sleep_s, why = WINDOW_EDGE_HEAD_S - into, "window edge"
+            elif into > TOTP_WINDOW_S - WINDOW_EDGE_TAIL_S:
+                sleep_s, why = TOTP_WINDOW_S - into + WINDOW_EDGE_HEAD_S, "window edge"
+            else:
+                return window
+            log.info("fivepaisa.totp_window_wait", seconds=round(sleep_s, 1), reason=why)
             await asyncio.sleep(sleep_s)
-            window = int(time.time()) // TOTP_WINDOW_S
-        return window
 
     async def _login(self) -> Session:
         s = self.s
@@ -173,7 +188,9 @@ class Authenticator:
             client_code=s.fp_client_code,
             expires_in_h=round((expires_at - time.time()) / 3600, 2),
         )
-        return Session(access_token=access, client_code=str(s.fp_client_code), expires_at=expires_at)
+        return Session(
+            access_token=access, client_code=str(s.fp_client_code), expires_at=expires_at
+        )
 
     def _head(self) -> dict[str, Any]:
         return {"Key": self.s.fp_app_key.get_secret_value()}  # type: ignore[union-attr]
@@ -200,7 +217,11 @@ class Authenticator:
             raise VenueError(f"TOTPLogin rejected: {body.get('Message', head)}", raw=head)
         token = body.get("RequestToken")
         if not token:
-            raise VenueError("TOTPLogin returned no RequestToken", raw=body)
+            raise VenueError(
+                "TOTPLogin returned no RequestToken "
+                f"(Status={body.get('Status')!r}, Message={body.get('Message')!r})",
+                raw=body,
+            )
         return str(token)
 
     async def _access_token(self, request_token: str, ip: str) -> str:

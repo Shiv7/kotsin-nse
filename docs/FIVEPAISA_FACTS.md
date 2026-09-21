@@ -27,6 +27,14 @@ POST GetAccessToken {head:{Key}, body:{RequestToken, EncryKey, UserId, PublicIP,
   delivers nothing at the open (`Engine._housekeeping` does both).
 * The TOTP code is **single-use within its 30-second window**. A second login inside the same
   window is rejected. One process needs no distributed lock — it needs to remember the window.
+* **Do not send a code in the first seconds of its window.** Measured 2026-09-22: the post-midnight
+  re-login fired at 00:01:00.2 IST, 0.2 s into a fresh window, and `TOTPLogin` answered Status 0
+  with **no `RequestToken`**; the retry at 00:01:02, same window, succeeded. `Authenticator` now
+  waits 3 s past a window edge and never sends in a window's last 2 s.
+* **Midnight rollover, measured 2026-09-22.** `exp` passed at 23:59:59; the engine asked for a
+  reconnect at 00:00:59, re-logged at 00:01:02 with a token good until 23:59:59 the next day
+  (`expires_in_h=23.98`), and the socket came back with every subscription re-sent
+  (`mf` 2,962 / `md` 2,502 / `oi` 2,748). Health stayed `ok`; `reconnects=1`.
 * `PublicIP` must be the box's real outbound address or the broker's RMS rejects orders. Auto-detect
   it once and log it; never fall back to `127.0.0.1`.
 * Two response envelopes must **both** be checked: `head.status` (transport) and `body.Status`
@@ -127,6 +135,11 @@ ISIN, Series`.
   `price × qty` is not the notional: a 286-quantity entry logged ₹99,943 against a real ₹99.9
   million. Sizing that ignores it is wrong by exactly that factor.
 * `LotSize` is 1 for cash and the contract lot for everything else.
+* **Unavailable overnight.** `ScripMaster/segment/{seg}` answers **404** with the body
+  `Cache not available for segment 'nse_eq'. Retry after some time.` — measured 2026-09-22 from
+  00:00 to at least 00:03 IST for all three segments, on the same URL that served them at 23:50.
+  The loader falls back to the newest cached day (`catalogue.using_stale_cache`) and the 09:20
+  rebuild fetches again with `force=True`.
 * Refresh daily: new weekly expiries appear and expired contracts disappear overnight. A stored
   future scrip code goes stale every month — resolve the front month from today's master, never
   from a value saved at calibration time.
