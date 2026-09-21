@@ -28,10 +28,12 @@ import httpx
 import structlog
 
 from .bars.aggregator import Aggregator
+from .bars.micro import MicroAggregator
 from .bars.periods import monthly, previous_complete, weekly
 from .bars.pivots import Zone, classic_pivots, cluster_zones, pivot_points
 from .bars.store import BarStore
 from .bars.unified import UnifiedBar
+from .bars.verify import BarReconciler
 from .bus import Bus, Topic
 from .config import Segment, Settings
 from .domain import (
@@ -61,9 +63,13 @@ from .instrument.select import (
     select_future,
     select_option,
 )
+from .instrument.universe import ScripGroup, UniverseBuilder, UniversePolicy
 from .ledger.db import Ledger
 from .market.session import (
+    TF_SECONDS,
     TradingCalendar,
+    bucket_start,
+    is_open,
     ist_day,
     ist_hm,
     ist_naive_to_ts,
@@ -146,9 +152,24 @@ class Engine:
             on_oi=self._on_oi,
         )
         self.aggregator = Aggregator(self.store, on_bar_close=self._on_bar_close)
+        self._segment_by_code: dict[str, Segment] = {}
+        self.micro = MicroAggregator(
+            tf_seconds=TF_SECONDS[DECISION_TF],
+            bucket_of=lambda code, ts: bucket_start(
+                self._segment_by_code.get(code, Segment.NSE_EQ), ts, DECISION_TF
+            ),
+        )
+        self.reconciler = BarReconciler(self.rest, self.store, lambda sym: self.underlyings.get(sym))
+        self.groups: dict[str, ScripGroup] = {}
+        self.universe_builder: UniverseBuilder | None = None
+        self.option_oi: dict[str, dict[str, float]] = {}
+        self._decision_tasks: set[asyncio.Task[Any]] = set()
+        self._sweep_task: asyncio.Task[Any] | None = None
+        self._intraday_rebuild_day: str = ""
         self.matcher = PaperMatcher(self.costs)
         self.live_exec: LiveExecutor | None = None
-        self.reconciler: Reconciler | None = None
+        self.reconciler_positions: Reconciler | None = None
+        self.reconciler_ready = False
         self.gateway = Gateway(
             matcher=self.matcher,
             mode=self.mode,
@@ -263,61 +284,81 @@ class Engine:
         cat = await self.catalogue_loader.ensure()
         self.live_exec = LiveExecutor(self.rest, self.costs)
         self.gateway.live = self.live_exec
-        self.reconciler = Reconciler(self.rest)
+        self.reconciler_ready = True
+        self.reconciler_positions = Reconciler(self.rest)
 
-        universe = self._pick_universe()
-        self.underlyings = {i.symbol: i for i in universe}
-        log.info("engine.universe", n=len(universe), sample=[i.symbol for i in universe[:8]])
-
+        # Pass 1 — who is in the universe. scripFinder's rule: every root with a derivative.
+        self.universe_builder = UniverseBuilder(
+            cat,
+            UniversePolicy(
+                band_pct=self.s.universe_band_pct,
+                strikes_per_side=self.s.universe_strikes_per_side,
+                include_indices=self.s.universe_include_indices,
+            ),
+        )
+        groups = self._apply_universe_filters(
+            self.universe_builder.build_underlyings(self.s.segment_list, date.today())
+        )
+        self.groups = groups
+        self.underlyings = {g.root: g.underlying for g in groups.values()}
+        for g in groups.values():
+            for inst in (g.underlying, *g.futures):
+                self._segment_by_code[inst.scrip_code] = inst.segment
+        universe = [g.underlying for g in groups.values()]
+        log.info(
+            "engine.universe",
+            **self.universe_builder.summary(groups),
+            sample=[g.root for g in list(groups.values())[:8]],
+        )
         for inst in universe:
             self.aggregator.track(inst)
         await self._backfill(universe)
 
-        await self.feed.subscribe("mf", universe)
+        # Pass 2 — which strikes, now that the previous close is known from the daily backfill.
+        n_opts = self.universe_builder.select_all(groups, self._prev_close, date.today())
+        for g in groups.values():
+            for o in g.options:
+                self._segment_by_code[o.scrip_code] = o.segment
+        self._future_to_underlying = {f.scrip_code: g.root for g in groups.values() for f in g.futures}
 
-        # Futures are an OI source, not a bar source. On NSE the front future's `symbol` is the
-        # cash symbol, so tracking it would write futures ticks into the equity's bar series — the
-        # two are separated by the basis and the mixture is silent. Only subscribe `oi`.
-        # On MCX the front future IS the instrument the strategy decides on, so it is already in
-        # `universe` and already tracked; `tracked_codes` keeps it from being double-counted.
-        tracked_codes = {i.scrip_code for i in universe}
-        futures = [f for f in (cat.front_future(i.symbol) for i in universe) if f is not None]
-        self._future_to_underlying = {f.scrip_code: f.underlying for f in futures}
-        if futures:
-            await self.feed.subscribe("oi", futures)
-            oi_only = [f for f in futures if f.scrip_code not in tracked_codes]
-            log.info("engine.oi_sources", futures=len(futures), bar_sources=len(futures) - len(oi_only))
-        await self.feed.subscribe("md", universe)
-        if self.reconciler is not None:
-            await self.reconciler.run(list(self.positions.values()))
+        # Futures are OI sources, not bar sources: on NSE the front future's `symbol` is the cash
+        # symbol, and tracking it wrote futures ticks into the equity's bars (found 2026-09-21).
+        # `subscriptions()` puts them on mf+oi only; the aggregator ignores untracked codes.
+        subs = UniverseBuilder.subscriptions(groups.values())
+        await self.feed.subscribe("mf", subs["mf"])
+        await self.feed.subscribe("md", subs["md"])
+        await self.feed.subscribe("oi", subs["oi"])
+        log.info(
+            "engine.subscribed",
+            mf=len(subs["mf"]), md=len(subs["md"]), oi=len(subs["oi"]),
+            options=n_opts, underlyings=len(universe),
+        )
+        if self.reconciler_positions is not None:
+            await self.reconciler_positions.run(list(self.positions.values()))
 
-    def _pick_universe(self) -> list[Instrument]:
-        """Optionable underlyings, because both books express themselves as options.
+    def _prev_close(self, symbol: str) -> float | None:
+        bars = self.store.bars(symbol, "1d")
+        prior = [b for b in bars if ist_day(b.ts) < date.today()]
+        return prior[-1].close if prior else (bars[-1].close if bars else None)
 
-        An explicit ``universe_file`` wins. Otherwise: every symbol that has a live option chain,
-        capped by ``max_universe`` (``None`` = uncapped, and the banner says so).
-        """
-        cat = self.catalogue_loader.catalogue
-        wanted: list[str]
+    def _apply_universe_filters(self, groups: dict[str, ScripGroup]) -> dict[str, ScripGroup]:
+        """An explicit ``universe_file`` wins; otherwise the whole derivatives universe, capped by
+        ``max_universe`` (None = uncapped, and the banner says so)."""
         if self.s.universe_file and self.s.universe_file.exists():
-            wanted = [
+            wanted = {
                 ln.split("#", 1)[0].strip().upper()
                 for ln in self.s.universe_file.read_text().splitlines()
                 if ln.split("#", 1)[0].strip()
-            ]
-        else:
-            wanted = cat.optionable_symbols()
-        out: list[Instrument] = []
-        for sym in wanted:
-            inst = cat.equity(sym)
-            if inst is None:
-                fut = cat.front_future(sym)
-                inst = fut  # MCX has no cash leg; the future is the signal instrument
-            if inst is not None:
-                out.append(inst)
-        if self.s.max_universe is not None:
-            out = out[: self.s.max_universe]
-        return out
+            }
+            groups = {r: g for r, g in groups.items() if r in wanted}
+            missing = sorted(wanted - set(groups))
+            if missing:
+                log.warning("universe.file_symbols_missing", symbols=missing[:20], n=len(missing))
+        if self.s.max_universe is not None and len(groups) > self.s.max_universe:
+            # Stocks before indices, then alphabetical: a cap should trim the tail, not the core.
+            ordered = sorted(groups.values(), key=lambda g: (g.note.startswith("index"), g.root))
+            groups = {g.root: g for g in ordered[: self.s.max_universe]}
+        return groups
 
     async def _backfill(self, universe: list[Instrument]) -> None:
         """Warm the 30m series and the daily series (for pivots) from REST.
@@ -394,8 +435,8 @@ class Engine:
     def halted(self) -> tuple[bool, str]:
         if self._halted:
             return True, self._halt_reason
-        if self.reconciler is not None and self.reconciler.frozen:
-            return True, f"reconcile: {self.reconciler.freeze_reason}"
+        if self.reconciler_positions is not None and self.reconciler_positions.frozen:
+            return True, f"reconcile: {self.reconciler_positions.freeze_reason}"
         if self.gateway.breaker_tripped:
             return True, "order gateway circuit breaker"
         return False, ""
@@ -441,17 +482,22 @@ class Engine:
         await self.bus.publish(Topic.TICK, tick)
 
     async def _on_depth(self, depth: dict[str, Any]) -> None:
-        self.books[str(depth["scrip_code"])] = BookSnapshot(
-            scrip_code=str(depth["scrip_code"]),
-            bids=depth["bids"],
-            asks=depth["asks"],
-            ts=float(depth.get("recv_ts") or time.time()),
-        )
+        code = str(depth["scrip_code"])
+        ts = float(depth.get("recv_ts") or time.time())
+        self.books[code] = BookSnapshot(scrip_code=code, bids=depth["bids"], asks=depth["asks"], ts=ts)
+        self.micro.on_depth(code, depth["bids"], depth["asks"], ts)
 
     async def _on_oi(self, oi: dict[str, Any]) -> None:
         fut_code = str(oi["scrip_code"])
         symbol = self._future_to_underlying.get(fut_code)
         if symbol is None:
+            # Not a future we map to an underlying → an option strike. Keep its OI; the Options
+            # page and any OI-aware selection read it from here.
+            self.option_oi[fut_code] = {
+                "oi": float(oi["open_interest"]),
+                "change_pct": float(oi["oi_change_pct"]),
+                "ts": float(oi.get("recv_ts") or time.time()),
+            }
             return
         inst = self.underlyings.get(symbol)
         if inst is None:
@@ -524,10 +570,58 @@ class Engine:
         for pos in self.positions.values():
             if pos.status == "OPEN" and pos.underlying.symbol == bar.symbol:
                 pos.bars_held += 1
+        micro = self.micro.for_bar(bar.scrip_code, bar.ts)
+        if micro:
+            bar.extra["micro"] = micro
+        # Off the tick path: at 15:15 IST two hundred 30m bars close in the same second and each
+        # waits on a REST round trip. Awaiting that inside the feed handler would stall every
+        # symbol's ticks. Concurrency is bounded by the reconciler's semaphore.
+        task = asyncio.create_task(self._reconcile_then_decide(bar))
+        self._decision_tasks.add(task)
+        task.add_done_callback(self._decision_tasks.discard)
+
+    async def _reconcile_then_decide(self, bar: UnifiedBar) -> None:
+        """Hold the decision until the exchange's own candle is installed — or the timeout.
+
+        The live build is right most of the time (87.8% exact on 1m, measured; better on 30m). A
+        strategy reads the bar forever, so "most of the time" is the wrong standard for the one
+        bar it decides on. REST serves a bucket within seconds of its close.
+        """
+        current = bar
+        if self.reconciler_ready and self.s.has_credentials:
+            check = await self.reconciler.reconcile_bar(
+                bar, timeout_s=self.s.decision_reconcile_timeout_s
+            )
+            if not check.found or check.error:
+                self.reconciler.decisions_on_live_bar += 1
+            latest = self.store.last(bar.symbol, DECISION_TF)
+            if latest is not None and latest.ts == bar.ts:
+                current = latest
+                if "micro" in bar.extra and "micro" not in current.extra:
+                    current.extra["micro"] = bar.extra["micro"]
         try:
-            await self._decide(bar)
+            await self._decide(current)
         except Exception as exc:
             log.exception("decide.failed", symbol=bar.symbol, error=str(exc))
+
+    async def _intraday_universe_rebuild(self) -> None:
+        if self.universe_builder is None:
+            return
+        try:
+            cat = await self.catalogue_loader.ensure(force=True)
+            self.universe_builder.cat = cat
+            before = {o.scrip_code for g in self.groups.values() for o in g.options}
+            self.universe_builder.select_all(self.groups, self._prev_close, date.today())
+            fresh = [o for g in self.groups.values() for o in g.options if o.scrip_code not in before]
+            for o in fresh:
+                self._segment_by_code[o.scrip_code] = o.segment
+            if fresh:
+                await self.feed.subscribe("mf", fresh)
+                await self.feed.subscribe("md", fresh)
+                await self.feed.subscribe("oi", fresh)
+            log.info("universe.intraday_rebuild", new_strikes=len(fresh))
+        except Exception as exc:  # noqa: BLE001 - a failed rebuild keeps the overnight universe
+            log.warning("universe.intraday_rebuild_failed", error=str(exc))
 
     async def _decide(self, bar: UnifiedBar) -> None:
         base_out = self.fudkii.on_bar(self.contexts[StrategyKey.FUDKII], bar)
@@ -888,10 +982,42 @@ class Engine:
                     if self.s.has_credentials and self.s.engine_enabled:
                         await self.catalogue_loader.ensure()
 
-                if self.reconciler is not None and now - last_reconcile > 60:
+                if self.reconciler_positions is not None and now - last_reconcile > 60:
                     last_reconcile = now
                     if self.mode() in (Mode.LIVE, Mode.LIVE_CAPPED):
-                        await self.reconciler.run(list(self.positions.values()))
+                        await self.reconciler_positions.run(list(self.positions.values()))
+
+                # The socket was opened with a token that dies at 23:59:59 IST. Once it has, drop
+                # the socket so the run loop reconnects with a fresh login — otherwise it can sit
+                # "connected" on a dead token and deliver nothing at the open. A minute of grace
+                # keeps this from racing the expiry itself.
+                if (
+                    self.feed.health.connected
+                    and self.feed.token_expires_at is not None
+                    and now > self.feed.token_expires_at + 60
+                ):
+                    await self.feed.reconnect(reason="token expired")
+
+                # Periodic REST sweep of the finer frames: the fidelity metric, and exact chart bars.
+                if (
+                    self.reconciler_ready
+                    and self.underlyings
+                    and (self._sweep_task is None or self._sweep_task.done())
+                    and (
+                        self.reconciler.last_sweep_ts is None
+                        or now - self.reconciler.last_sweep_ts > self.s.bar_sweep_interval_s
+                    )
+                    and any(is_open(g.segment, now, self.calendar) for g in self.groups.values())
+                ):
+                    self._sweep_task = asyncio.create_task(
+                        self.reconciler.sweep(list(self.underlyings))
+                    )
+
+                # scripFinder's 09:20 IST intraday rebuild: refetch the master, re-pick strikes,
+                # subscribe anything new. Strikes listed 09:00–09:15 are not in an overnight master.
+                if self.reconciler_ready and ist_hm(now) >= "09:20" and self._intraday_rebuild_day != day:
+                    self._intraday_rebuild_day = day
+                    self._decision_tasks.add(asyncio.create_task(self._intraday_universe_rebuild()))
 
                 if now - last_snapshot > 300:
                     last_snapshot = now
@@ -935,21 +1061,43 @@ class Engine:
 
     # -- introspection -------------------------------------------------------------------------------
 
+    def market_open_now(self) -> bool:
+        now = time.time()
+        segments = {g.segment for g in self.groups.values()} or set(self.s.segment_list)
+        return any(is_open(seg, now, self.calendar) for seg in segments)
+
     def health_snapshot(self) -> dict[str, Any]:
         fh = self.feed.health
+        open_now = self.market_open_now()
+        # Outside the session a silent socket and a dead token are the normal state of affairs,
+        # not faults. A health signal that is red every evening is one nobody reads (R17), so the
+        # feed and session checks are informational until a segment is open. The broker's token
+        # dies at 23:59:59 IST every day; `usable` is what a call actually needs.
+        sess = self.auth.session
         checks = [
-            Check("feed_connected", fh.connected or not self.s.feed_enabled, detail=fh.last_error),
+            Check(
+                "feed_connected",
+                (fh.connected or not self.s.feed_enabled) if open_now else True,
+                detail=fh.last_error if open_now else "market closed",
+            ),
             Check(
                 "feed_fresh",
-                fh.silence_s is None or fh.silence_s < 120,
+                (fh.silence_s is None or fh.silence_s < 120) if open_now else True,
                 value=fh.silence_s,
-                detail="no message for over 2 minutes",
+                detail="no message for over 2 minutes" if open_now else "market closed",
             ),
-            Check("broker_session", bool(self.auth.session and self.auth.session.valid)),
+            Check(
+                "broker_session",
+                bool(sess and sess.usable) if open_now else True,
+                value=round(sess.seconds_left / 60, 1) if sess else None,
+                detail=("token expired — the next call re-logs in" if sess and not sess.usable else "")
+                if open_now
+                else "market closed",
+            ),
             Check(
                 "reconciled",
-                self.reconciler is None or not self.reconciler.frozen,
-                detail=self.reconciler.freeze_reason if self.reconciler else "",
+                self.reconciler_positions is None or not self.reconciler_positions.frozen,
+                detail=self.reconciler_positions.freeze_reason if self.reconciler_positions else "",
             ),
             Check("breaker", not self.gateway.breaker_tripped),
             Check(
@@ -980,6 +1128,10 @@ class Engine:
             "gateway": self.gateway.stats(),
             "rest": self.rest.stats(),
             "catalogue": self.catalogue_loader.catalogue.stats(),
+            "universe": self.universe_builder.summary(self.groups) if self.universe_builder else {},
+            "fidelity": self.reconciler.snapshot() if self.reconciler_ready else {},
+            "micro": self.micro.stats(),
+            "option_oi_tracked": len(self.option_oi),
             "telegram": self.telegram.stats(),
             "positions_open": len([p for p in self.positions.values() if p.status == "OPEN"]),
             "positions_stale_quote": len(self._stale_positions),

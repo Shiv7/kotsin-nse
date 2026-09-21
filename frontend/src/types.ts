@@ -244,10 +244,16 @@ export interface UniverseRow {
   symbol: string
   scrip_code: string
   segment: string
+  kind: string
   ltp: number | null
   bars_30m: number
   bars_1d: number
   zones: number
+  futures: string[]
+  options: number
+  option_expiry: string | null
+  prev_close: number | null
+  note: string
 }
 
 export interface IndicatorRow {

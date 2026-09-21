@@ -51,8 +51,24 @@ class Session:
     minted_at: float = field(default_factory=time.time)
 
     @property
+    def usable(self) -> bool:
+        """The token will be accepted right now. This is the only question a call may ask.
+
+        Measured 2026-09-21 by decoding the JWT: ``exp`` is **23:59:59 IST, fixed**, whatever time
+        the token was minted (a 23:40 login lived 19 minutes). So there is no such thing as
+        "refresh early" — a login at 23:45 returns a token with the same expiry — and the 30-minute
+        margin this used to apply turned the last half hour of every day into false alarms and, in
+        the wrong loop, a login per call.
+        """
+        return bool(self.access_token) and time.time() < self.expires_at
+
+    @property
     def valid(self) -> bool:
-        return bool(self.access_token) and time.time() < self.expires_at - 1800  # refresh 30m early
+        return self.usable
+
+    @property
+    def seconds_left(self) -> float:
+        return max(0.0, self.expires_at - time.time())
 
 
 def _decode_jwt_exp(jwt: str) -> float:
@@ -78,8 +94,12 @@ class Authenticator:
     # -- public ---------------------------------------------------------------------------------
 
     async def token(self) -> Session:
+        """A usable session — the current one, or a fresh login once it has actually expired.
+
+        After midnight IST every token is dead; the first caller re-logs (one TOTP, one window)
+        and everyone else waits on the lock for that same session. Nothing here logs in early."""
         async with self._lock:
-            if self.session and self.session.valid:
+            if self.session and self.session.usable:
                 return self.session
             self.session = await self._login()
             return self.session

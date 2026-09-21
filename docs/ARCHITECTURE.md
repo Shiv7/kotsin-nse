@@ -65,7 +65,10 @@ All of it is **one asyncio process**, connected by bounded in-process queues (`b
 | `instrument/select.py` | OTM strike anchored on T1, liquidity checks, level → premium projection |
 | `bars/indicators.py` | Wilder ATR, population-σ Bollinger, SuperTrend with band lock, the two surge forms |
 | `bars/pivots.py` | classic pivots (Kite R3 convention), zone clustering, the confluence ladder and grade |
-| `bars/aggregator.py` | ticks → bars on the session grid; volume from the cumulative delta; partial tagging |
+| `bars/aggregator.py` | ticks → bars on the session grid, **inside the session only**; volume from the cumulative delta; day-extreme recovery; partial tagging; a live 1d bar so pivots roll overnight |
+| `bars/verify.py` | REST reconciliation: the exchange's candle installed over the live build; the 30m decision waits for it; running fidelity metric |
+| `bars/micro.py` | book-derived microstructure (L1 OFI, depth imbalance, microprice, spread) — and an honest list of what a snapshot feed cannot give |
+| `instrument/universe.py` | the scripFinder universe model: roots with derivatives → equity join → front/next future → ±12% strike shortlist, rebuilt at 09:20 IST |
 | `strategy/fudkii.py` · `fukaa.py` | the two books |
 | `strategy/conviction.py` | the S1–S6 matrix with its per-exchange thresholds |
 | `risk/costs.py` | the measured NSE/MCX charge model — used by paper, live and research alike |
@@ -87,20 +90,25 @@ Boundaries are enforced by `import-linter` (`backend/pyproject.toml`), not by co
 ## The decision path, in order
 
 1. A tick arrives; the aggregator buckets it by **trade time** into the 30m bucket anchored on the
-   session open, and closes the previous bucket if this tick starts a new one.
-2. On a closed 30m bar, `Fudkii.on_bar` computes BB(20, 2) and SuperTrend(7, 3) over the trailing
+   session open (ticks outside the session are counted and dropped), and closes the previous
+   bucket if this tick starts a new one.
+2. The closed 30m bar is handed to the reconciler **off the tick path**: it fetches the exchange's
+   own candle for that bucket (bounded wait, default 12 s) and installs it over the live build.
+   The strategy then decides on exchange truth; if REST is late the decision proceeds on the live
+   bar and is counted.
+3. On that bar, `Fudkii.on_bar` computes BB(20, 2) and SuperTrend(7, 3) over the trailing
    window, scores the flip and the band break, and — if both fire — asks the confluence engine for
    a stop, targets and a grade. Grade `F` is a recorded rejection, not a silent drop.
-3. `Fukaa.on_signal` takes that signal and applies the volume bar, the conviction matrix, the RR
+4. `Fukaa.on_signal` takes that signal and applies the volume bar, the conviction matrix, the RR
    floor and the OI floor. A signal that fails only on volume is **parked** for 35 minutes and
    promoted if the next bar delivers.
-4. `instrument.select` picks the OTM strike nearest the T1 anchor that is actually quotable, and
+5. `instrument.select` picks the OTM strike nearest the T1 anchor that is actually quotable, and
    projects the underlying's stop and targets onto the premium via an estimated delta.
-5. `risk.sizing` sizes from the option stop, clamps to the position budget and lot granularity, and
+6. `risk.sizing` sizes from the option stop, clamps to the position budget and lot granularity, and
    **declines** if the round-trip charge would eat more than 35% of the move to T1.
-6. `risk.exposure` checks the aggregate across both books, bucketed by underlying.
-7. `exec.gateway` runs halt → idempotency → caps → place, and writes an order row whatever happens.
-8. Every 1 s, `risk.exits` evaluates each open position: option stop, underlying stop, hard floor,
+7. `risk.exposure` checks the aggregate across both books, bucketed by underlying.
+8. `exec.gateway` runs halt → idempotency → caps → place, and writes an order row whatever happens.
+9. Every 1 s, `risk.exits` evaluates each open position: option stop, underlying stop, hard floor,
    target ladder, trail, then the time stop and force-flat as backstops.
 
 ## What is deliberately absent

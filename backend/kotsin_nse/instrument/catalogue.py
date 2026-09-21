@@ -179,11 +179,17 @@ class CatalogueLoader:
     def _cache_path(self, segment: Segment, day: date) -> Path:
         return self._cache_dir / f"{segment.scripmaster_key}-{day.isoformat()}.csv"
 
-    async def ensure(self, day: date | None = None) -> Catalogue:
+    async def ensure(self, day: date | None = None, *, force: bool = False) -> Catalogue:
+        """``force`` refetches today's master even if cached — scripFinder's 09:20 IST rebuild,
+        which exists because strikes listed between 09:00 and 09:15 are missing from a master
+        pulled overnight."""
         day = day or date.today()
         async with self._lock:
-            if self.catalogue.loaded_day == day:
+            if self.catalogue.loaded_day == day and not force:
                 return self.catalogue
+            if force:
+                for seg in self.s.segment_list:
+                    self._cache_path(seg, day).unlink(missing_ok=True)
             await self._load(day)
             return self.catalogue
 

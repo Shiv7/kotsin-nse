@@ -43,6 +43,27 @@ class BarStore:
         self._forming.pop(key, None)
         return bar
 
+    def replace_closed(self, bar: UnifiedBar) -> bool:
+        """Install ``bar`` over the closed bar with the same bucket, or insert it in order.
+
+        Distinct from :meth:`close`, which also drops the *forming* bar for that series — correct
+        when a bucket has just ended, catastrophic when the reconciler installs the exchange's copy
+        of an *older* bucket while a newer one is still forming. Returns whether a bar was replaced
+        (as opposed to inserted).
+        """
+        bar.complete = True
+        key = (bar.symbol, bar.tf)
+        series = self._closed[key]
+        for i in range(len(series) - 1, -1, -1):
+            if series[i].ts == bar.ts:
+                series[i] = bar
+                return True
+            if series[i].ts < bar.ts:
+                series.insert(i + 1, bar)
+                return False
+        series.insert(0, bar)
+        return False
+
     def seed(self, symbol: str, tf: str, bars: list[UnifiedBar]) -> int:
         """Replace a series wholesale from a backfill. Returns how many bars are held after."""
         key = (symbol, tf)

@@ -213,18 +213,62 @@ def build_app(engine: Engine) -> FastAPI:
     async def universe() -> list[dict[str, Any]]:
         out = []
         for sym, inst in sorted(engine.underlyings.items()):
+            g = engine.groups.get(sym)
             out.append(
                 {
                     "symbol": sym,
                     "scrip_code": inst.scrip_code,
                     "segment": inst.segment.value,
+                    "kind": inst.kind.value,
                     "ltp": engine.ltps.get(inst.scrip_code),
                     "bars_30m": engine.store.count(sym, "30m"),
                     "bars_1d": engine.store.count(sym, "1d"),
                     "zones": len(engine.zones_for(sym)),
+                    "futures": [f.scrip_code for f in g.futures] if g else [],
+                    "options": len(g.options) if g else 0,
+                    "option_expiry": g.option_expiry if g else None,
+                    "prev_close": g.close if g else None,
+                    "note": g.note if g else "",
                 }
             )
         return out
+
+    @api.get("/groups/{symbol}")
+    async def group(symbol: str) -> dict[str, Any]:
+        g = engine.groups.get(symbol.upper())
+        if g is None:
+            raise HTTPException(404, f"{symbol} is not in the universe")
+        return {
+            **g.to_json(),
+            "futures_detail": [
+                {"scrip_code": f.scrip_code, "expiry": f.expiry, "ltp": engine.ltps.get(f.scrip_code)}
+                for f in g.futures
+            ],
+            "options_detail": [
+                {
+                    "scrip_code": o.scrip_code,
+                    "strike": o.strike,
+                    "type": o.option_type.value,
+                    "ltp": engine.ltps.get(o.scrip_code),
+                    "oi": engine.option_oi.get(o.scrip_code),
+                }
+                for o in g.options
+            ],
+        }
+
+    @api.get("/micro/{symbol}")
+    async def micro(symbol: str) -> dict[str, Any]:
+        """Book-derived microstructure for the underlying, live. No tape on this venue, so no
+        Kyle λ and no VPIN — the response says so rather than inventing them."""
+        inst = engine.underlyings.get(symbol.upper())
+        if inst is None:
+            raise HTTPException(404, f"{symbol} is not in the universe")
+        return {"symbol": symbol.upper(), "live": engine.micro.live(inst.scrip_code), **engine.micro.stats()}
+
+    @api.get("/fidelity")
+    async def fidelity() -> dict[str, Any]:
+        """How often the live bar build disagrees with the exchange's own candle, by timeframe."""
+        return engine.reconciler.snapshot()
 
     @api.get("/bars/{symbol}")
     async def bars(symbol: str, tf: str = "30m", n: int = Query(200, le=1000)) -> dict[str, Any]:

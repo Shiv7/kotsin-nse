@@ -19,7 +19,12 @@ POST TOTPLogin      {head:{Key}, body:{Email_ID, TOTP, PIN, PublicIP, LocalIP}} 
 POST GetAccessToken {head:{Key}, body:{RequestToken, EncryKey, UserId, PublicIP, LocalIP}} → body.AccessToken
 ```
 
-* The access token is a **JWT**; its `exp` claim is the real expiry. Refresh 30 minutes early.
+* The access token is a **JWT** and its `exp` is **23:59:59 IST, fixed, whatever time it was
+  minted** — decoded live 2026-09-21: a 23:40:40 login had `exp` 23:59:59 (19 minutes). So there is
+  no "refresh early": a login at 23:45 returns a token with the same expiry. Use a token until it
+  actually expires; re-login after midnight; and **reconnect the WebSocket** after midnight, because
+  the socket URL carries the JWT and a socket left open on a dead token looks connected and
+  delivers nothing at the open (`Engine._housekeeping` does both).
 * The TOTP code is **single-use within its 30-second window**. A second login inside the same
   window is rejected. One process needs no distributed lock — it needs to remember the window.
 * `PublicIP` must be the box's real outbound address or the broker's RMS rejects orders. Auto-detect
@@ -40,6 +45,28 @@ ships inside `py5paisa`; it identifies the API product, not the user, and the ho
 request without it.
 
 ## Market-data WebSocket
+
+**It is a snapshot feed, not a tape.** Measured on the first live MCX session (2026-09-21): ~6.5
+`MarketFeedV3` frames per minute per symbol, each a snapshot of `LastRate` and the cumulative
+`TotalQty` at send time. Trades between two frames are invisible. Consequences, measured:
+
+| | |
+|---|---|
+| 1m bars built live vs the exchange's own candle | **122 / 139 exact (87.8%)** across 11 symbols |
+| every miss | a boundary attribution — a print between frames near a minute edge lands in the adjacent bucket (COPPER 23:14 close 1412.75 vs 1412.45, the difference reappearing in 23:15's open) |
+| volume | never lost (`TotalQty` is cumulative), only shifted a bucket |
+| depth (`MarketDepthService`) | 20 levels, ~2–5 Hz on active names; ~4,900 frames in 9 min for 11 symbols |
+| after the close | frames keep arriving (12 phantom forming bars observed 150 s after MCX 23:30) — the bar builder must ignore ticks outside the session, and the same guard keeps NSE's 09:00–09:15 pre-open prints out of the 09:15 bar |
+
+**So a forming candle cannot be made tick-perfect from this feed**, and the closed bars are made
+exact a different way: the historical endpoint returns the exchange's own OHLCV per bucket **and
+serves a bucket while it is still forming**, so a just-closed bucket is final within seconds.
+`bars/verify.py` fetches it and installs it over the live build — the 30m decision waits for it
+(bounded) — and reports the running fidelity on the System page.
+
+There is **no trade tape and no aggressor side**, so Kyle's λ and VPIN are not computable on this
+venue. `bars/micro.py` computes what the book does support (L1 OFI, depth imbalance, microprice,
+spread) and says so.
 
 The control frame is byte-pedantic. A malformed frame is **not** rejected — the broker simply never
 sends data for that scrip, which presents downstream as "an instrument that never ticks" and is
@@ -79,6 +106,15 @@ ScripCode`. That ordering is what the old `json-simple` implementation happened 
 | `SquareOffAll` | bulk flatten — the kill switch's last resort |
 
 A 200 from `PlaceOrderRequest` means *accepted*, not *filled*. Poll `OrderStatus` until terminal.
+
+## The F&O universe (from the master, the way scripFinder did it)
+
+Measured 2026-09-21: `nse_fo` carries **80,883** instruments — 647 futures and 80,236 options —
+over **216 roots**; **214** join to a cash equity by `SymbolRoot`, the other two (`NIFTYFPI`,
+`NIFTYNXT50`) are indices with no cash leg. Stock options are monthly (RELIANCE: 536 strikes over
+3 expiries); index options are weekly. `instrument/universe.py` derives the universe from the
+roots, joins the equity, keeps front + next future, and shortlists strikes within ±12% of the
+previous close, 5 per side, nearest tradeable expiry — the shortlist the socket subscribes to.
 
 ## Scrip master
 

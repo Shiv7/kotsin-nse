@@ -125,6 +125,17 @@ class Settings(BaseSettings):
     # ---- paper accounting ---------------------------------------------------------------------
     paper_initial_inr: float = 1_000_000.0  # per-strategy wallet, matching the old 10-lakh default
     backfill_days: int = 30  # daily/intraday history seeded from REST at boot
+    #: The 30m decision waits this long for the exchange's own candle before deciding on the live
+    #: build. Measured: REST serves a bucket while it is still forming, so this is a ceiling, not a
+    #: typical wait. Past it the decision proceeds on the live bar and is counted.
+    decision_reconcile_timeout_s: float = 12.0
+    #: Periodic REST sweep of the finer frames (fidelity metric + chart accuracy). One call per
+    #: symbol per swept timeframe per interval.
+    bar_sweep_interval_s: float = 300.0
+    #: scripFinder's strike shortlist: ±band around the previous close, N per side, nearest expiry
+    universe_band_pct: float = 12.0
+    universe_strikes_per_side: int = 5
+    universe_include_indices: bool = True
     #: An open position whose contract has not quoted for this long is NOT evaluated for exits —
     #: a stop checked against a price from minutes ago is worse than one not checked at all. A
     #: forced exit (force-flat or halt) overrides this and proceeds on the last known price.

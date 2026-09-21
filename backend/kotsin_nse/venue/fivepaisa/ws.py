@@ -126,6 +126,8 @@ class FivePaisaFeed:
         self._ws: Any = None
         self._stop = asyncio.Event()
         self._lock = asyncio.Lock()
+        #: expiry of the token this socket was opened with; None until connected
+        self.token_expires_at: float | None = None
 
     # -- subscription state ----------------------------------------------------------------------
 
@@ -179,8 +181,19 @@ class FivePaisaFeed:
         if self._ws is not None:
             await self._ws.close()
 
+    async def reconnect(self, reason: str = "") -> None:
+        """Drop the socket; the run loop reconnects with ``auth.token()`` — a fresh login if the
+        old one expired. Needed nightly: the socket was opened with a JWT that dies at 23:59:59 IST,
+        and a socket that stays "connected" on a dead token is the worst kind of feed — it looks
+        alive and delivers nothing at the open."""
+        log.info("feed.reconnect_requested", reason=reason)
+        self.token_expires_at = None
+        if self._ws is not None:
+            await self._ws.close()
+
     async def _connect_and_read(self) -> None:
         session = await self.auth.token()
+        self.token_expires_at = session.expires_at
         url = f"{self.s.endpoints.ws}{session.access_token}|{session.client_code}"
         async with websockets.connect(url, ping_interval=25, ping_timeout=45, max_size=8 << 20) as ws:
             async with self._lock:

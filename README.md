@@ -68,7 +68,7 @@ than pretending to have a feed.
 | Step | What | Done when | State |
 |---|---|---|---|
 | 1 | Skeleton, closed config, bus, session calendar, 5paisa REST/WS/scrip master, CI | boot fails on a misspelled key; CI green | ✅ |
-| 2 | Bars: ticks → 1m → 30m on the session grid, REST backfill, partial-bar tagging | live 30m bars match the broker's own candles over a full session | 🟡 built, unverified against a live session |
+| 2 | Bars: ticks → 1m → 30m on the session grid, REST backfill, partial-bar tagging, **REST reconciliation** | live bars match the broker's own candles | ✅ measured 2026-09-21: 1m 87.8% exact from the snapshot feed; closed bars are then made exact by `bars/verify.py`, and the 30m decision waits for the exchange's candle |
 | 3 | Pivots + confluence: MTF zones, stop, T1–T4, grade | levels match a hand-computed bhavcopy case | ✅ (DABUR golden case in tests) |
 | 4 | FUDKII + FUKAA, pure, gate-counted | a signal reproduces end to end from a fixed bar series | ✅ (tested) |
 | 5 | Risk: wallets, sizing from the stop, exits, exposure, cost model | a null strategy costs exactly −charges | ✅ (tested) |

@@ -29,7 +29,7 @@ import structlog
 
 from ..config import Segment
 from ..domain import Instrument
-from ..market.session import TF_SECONDS, bucket_start, ist_day, session_open_ts
+from ..market.session import TF_SECONDS, bucket_start, ist_day, session_close_ts, session_open_ts
 from .store import BarStore
 from .unified import BarSource, UnifiedBar
 
@@ -37,8 +37,11 @@ log = structlog.get_logger(__name__)
 
 #: Timeframes the engine maintains. 30m is FUDKII's and FUKAA's decision frame; the rest are for
 #: the chart, the ATR used by risk, and future strategies.
-#: 1m/2m/3m are for the chart and for anyone watching the tape; the decision frame is 30m.
-TIMEFRAMES: tuple[str, ...] = ("1m", "2m", "3m", "5m", "15m", "30m")
+#: 1m/2m/3m are for the chart and for anyone watching the tape; the decision frame is 30m. "1d"
+#: is built live too, because pivots are derived from the previous session's daily bar: an engine
+#: left running overnight would otherwise compute Tuesday's levels from Friday's session, the
+#: last one the boot-time backfill saw.
+TIMEFRAMES: tuple[str, ...] = ("1m", "2m", "3m", "5m", "15m", "30m", "1d")
 
 
 @dataclass(slots=True)
@@ -58,6 +61,12 @@ class SymbolState:
     fut_scrip_code: str | None = None
     connected_since: float = field(default_factory=time.time)
     ticks: int = 0
+    #: the exchange-computed day High/Low carried on every frame. A change between two frames
+    #: proves a print happened in the gap that no LastRate sample saw; the bucket open at that
+    #: moment gets it. This recovers the extremes a snapshot feed would otherwise miss, but only
+    #: those that were also day extremes — the REST reconciler covers the rest.
+    day_high: float = 0.0
+    day_low: float = 0.0
 
 
 class Aggregator:
@@ -77,6 +86,7 @@ class Aggregator:
         self.bars_closed = 0
         self.partial_bars = 0
         self.late_ticks = 0
+        self.out_of_session_ticks = 0
 
     # -- registration ------------------------------------------------------------------------------
 
@@ -132,17 +142,28 @@ class Aggregator:
         st.ticks += 1
 
         segment = st.instrument.segment
-        day = ist_day(ts).isoformat()
+        day_d = ist_day(ts)
+        day = day_d.isoformat()
+        # Bars exist only inside the session. The broker keeps sending snapshot frames after the
+        # close (MCX 23:30 → 12 phantom forming bars observed 150 s later) and before the open
+        # (NSE's 09:00–09:15 pre-open prints); `bucket_start` would clamp the latter INTO the 09:15
+        # bar and open new buckets for the former. Both corrupt the series. Ticks outside the
+        # session still update the LTP upstream; they just never become a bar.
+        if ts < session_open_ts(segment, day_d) or ts >= session_close_ts(segment, day_d):
+            self.out_of_session_ticks += 1
+            return
         if day != st.day:
             self._roll_day(st, day, tick)
 
         qty = self._volume_delta(st, tick)
-        await self._apply(st, segment, ts, price, qty)
+        new_high, new_low = self._day_extreme_moves(st, tick)
+        await self._apply(st, segment, ts, price, qty, new_high, new_low)
 
     def _roll_day(self, st: SymbolState, day: str, tick: dict[str, Any]) -> None:
         prev = float(tick.get("prev_close") or 0)
         st.day = day
         st.session_pv = st.session_v = 0.0
+        st.day_high = st.day_low = 0.0
         # A zero baseline claims we watched this session from its first trade. That is true only if
         # we were connected by the open — then TotalQty counts up from zero with us and nothing is
         # lost. Connect at 14:10 and it is false: the first tick carries the whole day so far, and
@@ -150,6 +171,22 @@ class Aggregator:
         opened = session_open_ts(st.instrument.segment, date.fromisoformat(day))
         st.last_total_qty = 0 if st.connected_since <= opened else None
         st.prev_close = prev if prev > 0 else st.prev_close
+
+    @staticmethod
+    def _day_extreme_moves(st: SymbolState, tick: dict[str, Any]) -> tuple[float | None, float | None]:
+        """Return (new_high, new_low) when the frame's day High/Low moved past the last seen."""
+        dh = float(tick.get("high") or 0)
+        dl = float(tick.get("low") or 0)
+        new_high = new_low = None
+        if dh > 0:
+            if st.day_high > 0 and dh > st.day_high:
+                new_high = dh
+            st.day_high = max(st.day_high, dh)
+        if dl > 0:
+            if st.day_low > 0 and dl < st.day_low:
+                new_low = dl
+            st.day_low = dl if st.day_low <= 0 else min(st.day_low, dl)
+        return new_high, new_low
 
     @staticmethod
     def _volume_delta(st: SymbolState, tick: dict[str, Any]) -> float:
@@ -167,7 +204,14 @@ class Aggregator:
         return float(delta)
 
     async def _apply(
-        self, st: SymbolState, segment: Segment, ts: float, price: float, qty: float
+        self,
+        st: SymbolState,
+        segment: Segment,
+        ts: float,
+        price: float,
+        qty: float,
+        new_high: float | None = None,
+        new_low: float | None = None,
     ) -> None:
         typical_v = price * qty
         st.session_pv += typical_v
@@ -187,6 +231,10 @@ class Aggregator:
                 cur = self._open_bar(st, tf, bucket, price, segment)
                 self.store.set_forming(cur)
             cur.merge_tick(price, qty)
+            if new_high is not None and new_high > cur.high:
+                cur.high = new_high
+            if new_low is not None and new_low < cur.low:
+                cur.low = new_low
             cur.vwap = sess_vwap
             cur.prev_close = st.prev_close
             cur.oi, cur.oi_change_pct = st.oi, st.oi_change_pct
@@ -236,7 +284,9 @@ class Aggregator:
                 cur = self.store.forming(st.instrument.symbol, tf)
                 if cur is None:
                     continue
-                if now >= cur.ts + TF_SECONDS[tf]:
+                close_ts = session_close_ts(st.instrument.segment, ist_day(cur.ts))
+                end = close_ts if tf == "1d" else min(cur.ts + TF_SECONDS[tf], close_ts)
+                if now >= end:
                     await self._close(cur)
                     closed += 1
         return closed
@@ -284,6 +334,7 @@ class Aggregator:
             "bars_closed": self.bars_closed,
             "partial_bars": self.partial_bars,
             "late_ticks": self.late_ticks,
+            "out_of_session_ticks": self.out_of_session_ticks,
             "ticks": sum(s.ticks for s in self.state.values()),
             "with_oi": sum(1 for s in self.state.values() if s.oi is not None),
         }
