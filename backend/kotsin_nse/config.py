@@ -111,7 +111,12 @@ class Settings(BaseSettings):
     # ---- storage ------------------------------------------------------------------------------
     data_dir: Path = Path("./data")
     db_url: str = "sqlite+aiosqlite:///./data/kotsin_nse.db"
+    #: keep the live session: per-IST-day Parquet of 1m bars, OI for every subscribed code and
+    #: the 30m microstructure metrics (``ops/archive.py``). This key was declared and read by
+    #: nothing until 2026-09-22 — a whole live session of option OI, the one input FUKAA cannot
+    #: be tested without, went unrecorded.
     archive_enabled: bool = True
+    archive_flush_s: float = 300.0
 
     # ---- service ------------------------------------------------------------------------------
     api_host: str = "127.0.0.1"
@@ -155,6 +160,18 @@ class Settings(BaseSettings):
     committee_path_bars: int = 16
     #: cap the symbols an experiment backtests (None = every symbol in the history cache)
     committee_experiment_symbols: int | None = None
+    #: replace symbol names and dates with tokens in what the model reads. Look-Ahead-Bench
+    #: (2026): standard LLMs carry future knowledge of named tickers on dated history. The log
+    #: and the UI keep the real names; only the prompt is blind.
+    committee_blind: bool = True
+    #: share of the cached history, by time, that hypotheses are graded on and the committee
+    #: never sees. The verdict is read there and nowhere else.
+    committee_holdout_frac: float = 0.3
+    #: the nightly loop: cohort review → veto known results → experiments → memory. Needs a key;
+    #: runs once a day after this IST time, only with every segment closed.
+    committee_autopilot: bool = False
+    committee_autopilot_ist: str = "02:00"
+    committee_autopilot_experiments: int = 2
 
     # ---- LIVE_CAPPED caps ----------------------------------------------------------------------
     # Mode is state (R9); these only bound what an *armed* engine may do.
@@ -178,6 +195,9 @@ class Settings(BaseSettings):
     #: ₹9.90 at ₹33,000 and make every small position look three times cheaper than it is.
     cost_brokerage_pct: float = 0.0
     cost_stt_pct_sell_equity: float = 0.025
+    #: overnight (delivery) cash equity pays STT on BOTH legs at this rate; the intraday rate
+    #: above applies to the sell leg only. The daily-bar backtest is the reader.
+    cost_stt_pct_delivery_equity: float = 0.1
     cost_stt_pct_sell_option_premium: float = 0.0625
     cost_stt_pct_sell_future: float = 0.02
     cost_exchange_txn_pct_equity: float = 0.00297
@@ -210,7 +230,7 @@ class Settings(BaseSettings):
                 raise ValueError(f"unknown segment {n!r} — known: {', '.join(Segment.__members__)}")
         return ",".join(names)
 
-    @field_validator("live_entry_cutoff_ist")
+    @field_validator("live_entry_cutoff_ist", "committee_autopilot_ist")
     @classmethod
     def _hhmm(cls, v: str) -> str:
         hh, _, mm = v.partition(":")

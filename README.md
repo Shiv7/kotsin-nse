@@ -75,7 +75,7 @@ than pretending to have a feed.
 | 6 | Gateway SHADOW/PAPER + ledger + API + UI | every page reads off a live paper run | 🟡 built, needs a session |
 | 7 | Live: real orders, reconciliation, kill | 5 restarts with an open position → zero unreconciled | ⬜ built, **never run against the broker**; no resting stop at the venue ([runbook](docs/RUNBOOK.md)) |
 | 8 | Backtester replaying the same strategy/risk code | a null strategy backtests to exactly −charges | ✅ (tested; the option leg is modelled, not measured) |
-| 9 | Review committee: forensic tables, Claude post-mortems, hypothesis → backtest → grade loop ([docs](docs/COMMITTEE.md)) | a hypothesis is confirmed or refuted by the backtester, never by prose | 🟡 built; forensics live, reviews off until `KN_ANTHROPIC_API_KEY` |
+| 9 | Review committee: forensic tables, blind Claude post-mortems, hypothesis → **out-of-sample** backtest (holdout, cost stress, Bonferroni) → grade loop, autopilot, ShinkaEvolve harness, live archive ([docs](docs/COMMITTEE.md)) | a hypothesis is confirmed on data the committee never saw; the archive makes FUKAA testable | 🟡 built; forensics/experiments/archive live, reviews off until `KN_ANTHROPIC_API_KEY` |
 
 **Nothing here has traded, and the first real backtest says it should not** — FUDKII with the inherited parameters averages −1.40R (t = −8) over 481 trades on a year of real data; see `docs/strategies/FUDKII.md` §8. No parameter in this repo carries a *validated* artefact; the ones
 inherited from the old stack carry its evidence and its caveats, both recorded in

@@ -65,6 +65,10 @@ class ExperimentRequest(BaseModel):
     hypothesis_id: str
 
 
+class AutopilotRequest(BaseModel):
+    source: str | None = Field(default=None, description="'ledger', 'backtest:<id>' or null = auto")
+
+
 class ProposeRequest(BaseModel):
     title: str
     changes: list[dict[str, float | str]] = Field(description="[{path, value}] on BacktestParams")
@@ -316,6 +320,16 @@ def build_app(engine: Engine) -> FastAPI:
             )
         except (KeyError, ValueError, TypeError) as exc:
             raise HTTPException(400, str(exc)) from exc
+
+    @api.post("/committee/autopilot/run")
+    async def committee_autopilot(req: AutopilotRequest) -> dict[str, Any]:
+        """One night's loop now: cohort review → veto → experiments → memory. Blocks until done."""
+        try:
+            return await engine.committee.autopilot_once(req.source)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @api.post("/committee/experiments/run")
     async def committee_run_experiment(req: ExperimentRequest) -> dict[str, Any]:

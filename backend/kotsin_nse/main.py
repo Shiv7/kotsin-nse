@@ -135,7 +135,7 @@ def run_backtest(settings: Settings, args: argparse.Namespace) -> None:
     symbols = (
         [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
         if args.symbols
-        else store.symbols("30m")
+        else store.symbols(args.decision_tf)
     )
     if not symbols:
         print(
@@ -148,6 +148,8 @@ def run_backtest(settings: Settings, args: argparse.Namespace) -> None:
         segment=Segment[args.segment],
         position_budget_inr=args.budget,
         slippage_bps=args.slippage_bps,
+        decision_tf=args.decision_tf,
+        holding=args.holding,
     )
     bt = Backtester(settings, params)
     result = bt.run(
@@ -169,6 +171,64 @@ def run_backtest(settings: Settings, args: argparse.Namespace) -> None:
             "conclude anything. The bar is ≥300 out-of-sample trades and a within-day "
             "permutation test — see docs/LEARNINGS.md R13."
         )
+
+
+def run_committee_cli(settings: Settings, args: argparse.Namespace) -> None:
+    """Forensics and experiments without the engine. Neither writes the review log — that is the
+    engine's, and two writers of one JSON file would lose each other's updates."""
+    from .committee.experiments import run_experiment
+    from .committee.forensics import forensics, from_backtest, from_ledger, render
+    from .committee.schemas import ParamChange
+
+    if args.action == "forensics":
+        strategy = args.strategy.upper() or None
+        if args.source == "ledger":
+            from .ledger.db import Ledger, trades
+
+            async def _rows() -> list[dict]:
+                ledger = Ledger(settings.db_url)
+                try:
+                    return await ledger.recent(trades, 5000)
+                finally:
+                    await ledger.close()
+
+            recs = [from_ledger(r) for r in asyncio.run(_rows())]
+        elif args.source.startswith("backtest:"):
+            path = settings.data_dir / "backtests" / f"{args.source.split(':', 1)[1]}.json"
+            if not path.exists():
+                print(f"no such run: {path}", file=sys.stderr)
+                raise SystemExit(1)
+            recs = [from_backtest(t) for t in json.loads(path.read_text()).get("trades") or []]
+        else:
+            print("--source must be 'ledger' or 'backtest:<run id>'", file=sys.stderr)
+            raise SystemExit(2)
+        if strategy:
+            recs = [r for r in recs if r.strategy == strategy]
+        f = forensics(recs)
+        print(json.dumps(f, indent=1, default=str) if args.json else render(f, title=f"{args.source} {strategy or 'ALL'}"))
+    elif args.action == "experiment":
+        changes = []
+        for kv in args.changes.split(","):
+            path, _, value = kv.strip().partition("=")
+            if not path or not value:
+                print(f"bad change {kv!r}; expected path=value", file=sys.stderr)
+                raise SystemExit(2)
+            changes.append(ParamChange(path=path, value=float(value)))
+        result = run_experiment(
+            settings,
+            changes=changes,
+            segment=Segment[args.segment],
+            holdout_frac=args.holdout if args.holdout is not None else settings.committee_holdout_frac,
+            cost_stress=not args.no_stress,
+        )
+        keep = (
+            "verdict", "note", "split", "in_sample", "out_of_sample", "cost_stress",
+            "survives_cost_stress", "monthly", "symbols", "seconds",
+        )
+        print(json.dumps({k: result.get(k) for k in keep}, indent=1, default=str))
+    else:
+        print("usage: kotsin-nse committee {forensics,experiment} …", file=sys.stderr)
+        raise SystemExit(2)
 
 
 # -- cli ------------------------------------------------------------------------------------------
@@ -193,6 +253,31 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--segment", default="NSE_EQ", choices=[s.name for s in Segment])
     b.add_argument("--budget", type=float, default=100_000.0, help="rupees per position")
     b.add_argument("--slippage-bps", dest="slippage_bps", type=float, default=5.0)
+    b.add_argument(
+        "--decision-tf",
+        dest="decision_tf",
+        default="30m",
+        choices=["30m", "1d"],
+        help="the bar the strategy decides on; 1d = held overnight, no force-flat",
+    )
+    b.add_argument(
+        "--holding",
+        default="intraday",
+        choices=["intraday", "delivery"],
+        help="delivery = STT on both legs and no shorts (retail cash equity cannot carry a short)",
+    )
+
+    c = sub.add_parser("committee", help="the review committee's offline tools (no engine needed)")
+    cs = c.add_subparsers(dest="action")
+    cf = cs.add_parser("forensics", help="the deterministic tables over a cohort of trades")
+    cf.add_argument("--source", default="ledger", help="'ledger' or 'backtest:<run id>'")
+    cf.add_argument("--strategy", default="", help="FUDKII | FUKAA | blank for both")
+    cf.add_argument("--json", action="store_true", help="print the JSON instead of the tables")
+    ce = cs.add_parser("experiment", help="grade a parameter change out of sample (six backtests)")
+    ce.add_argument("--changes", required=True, help="comma-separated path=value, e.g. fudkii.grade_policy.min_stop_atr=1.0")
+    ce.add_argument("--segment", default="NSE_EQ", choices=[s.name for s in Segment])
+    ce.add_argument("--holdout", type=float, default=None, help="holdout fraction (default: KN_COMMITTEE_HOLDOUT_FRAC)")
+    ce.add_argument("--no-stress", dest="no_stress", action="store_true", help="skip the cost-stress runs")
     return p
 
 
@@ -213,6 +298,8 @@ def cli() -> None:
         asyncio.run(fetch_history(settings, args))
     elif command == "backtest":
         run_backtest(settings, args)
+    elif command == "committee":
+        run_committee_cli(settings, args)
     else:  # pragma: no cover - argparse rejects anything else
         raise SystemExit(f"unknown command {command}")
 

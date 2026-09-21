@@ -35,3 +35,6 @@ frontend/dist/
 .DS_Store
 .idea/
 .vscode/
+
+# ShinkaEvolve run outputs
+backend/evolve/results/

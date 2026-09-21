@@ -1,0 +1,77 @@
+# ShinkaEvolve config for the FUDKII policy. Adapted from examples/circle_packing/shinka_small.yaml
+# (keys verbatim); the numbers are deliberately small — each evaluation is four backtests (~30 s).
+max_evaluation_jobs: 2
+max_proposal_jobs: 2
+max_db_workers: 2
+
+db_config:
+  num_islands: 2
+  archive_size: 30
+  elite_selection_ratio: 0.3
+  num_archive_inspirations: 1
+  num_top_k_inspirations: 1
+  migration_interval: 10
+  migration_rate: 0.1
+  island_elitism: true
+  enforce_island_separation: true
+  parent_selection_strategy: weighted
+  parent_selection_lambda: 10
+  archive_selection_strategy: "crowding"
+  island_selection_strategy: equal
+  archive_criteria:
+    combined_score: 1.0
+    loc: -0.3
+  enable_dynamic_islands: false
+  stagnation_threshold: 10
+  island_spawn_strategy: "best"
+  island_spawn_subtree_size: 2
+
+evo_config:
+  patch_types: [diff, full]
+  patch_type_probs: [0.7, 0.3]
+  num_generations: 60
+  max_api_costs: 10.0
+  max_patch_resamples: 3
+  max_patch_attempts: 1
+  max_novelty_attempts: 1
+  job_type: local
+  language: python
+  # any provider ShinkaEvolve supports; set the matching API key in the environment
+  llm_models:
+    - "claude-sonnet-5"
+    - "gpt-5.4-mini"
+  llm_kwargs:
+    temperatures: [0, 0.5, 1.0]
+    reasoning_efforts: [low, medium]
+    max_tokens: 8192
+  enable_controlled_oversubscription: false
+  proposal_target_mode: adaptive
+  proposal_target_min_samples: 8
+  proposal_target_ratio_cap: 1.75
+  proposal_buffer_max: 6
+  proposal_target_hard_cap: 26
+  proposal_target_ewma_alpha: 0.25
+  meta_rec_interval: null
+  meta_llm_models: ["gpt-5.4-mini"]
+  meta_llm_kwargs:
+    temperatures: [0]
+    max_tokens: 8192
+  embedding_model: text-embedding-3-small
+  code_embed_sim_threshold: 0.99
+  novelty_llm_models: ["gpt-5.4-mini"]
+  novelty_llm_kwargs:
+    temperatures: [0]
+  init_program_path: initial.py
+  llm_dynamic_selection: ucb1
+  llm_dynamic_selection_kwargs:
+    exploration_coef: 1.0
+    cost_aware_coef: 0.5
+  results_dir: results/kotsin_fudkii
+  evolve_prompts: false
+  prompt_evolution_interval: 5
+  prompt_patch_types: ["diff", "full"]
+  prompt_patch_type_probs: [0.5, 0.5]
+  prompt_archive_size: 10
+  prompt_percentile_recompute_interval: 1
+  prompt_ucb_exploration_constant: 2.0
+  prompt_epsilon: 0.25

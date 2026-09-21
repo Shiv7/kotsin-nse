@@ -295,6 +295,12 @@ export interface CommitteeStatus {
     mean_confidence: number | null
   }
   path_bars: number
+  blind?: boolean
+  holdout_frac?: number
+  n_tested?: number
+  autopilot?: boolean
+  autopilot_ist?: string
+  last_autopilot_ts?: number | null
 }
 
 export interface Bucket {
@@ -327,6 +333,14 @@ export interface ExperimentResult {
   patched?: { n: number; n_days: number; avg_r: number; avg_r_t: number | null; net: number; win_rate: number | null }
   delta_avg_r?: number | null
   p_value?: number | null
+  p_adjusted?: number | null
+  n_tested?: number
+  in_sample?: { delta_avg_r: number | null; p_value: number | null; verdict: string; baseline?: { n: number; avg_r: number }; patched?: { n: number; avg_r: number } }
+  out_of_sample?: { delta_avg_r: number | null; p_value: number | null; p_adjusted: number | null; verdict: string }
+  cost_stress?: { delta_avg_r: number | null; p_value: number | null; brokerage_mult: number; slippage_mult: number }
+  survives_cost_stress?: boolean
+  monthly?: { months: number; patched_beats_baseline: number }
+  split?: { train_start: string; train_end: string; test_start: string; test_end: string }
   symbols?: number
   seconds?: number
 }
@@ -357,7 +371,7 @@ export interface CohortFinding {
 
 export interface ReviewRow {
   id: string
-  kind: 'case' | 'cohort' | 'manual'
+  kind: 'case' | 'cohort' | 'manual' | 'autopilot'
   ts: number
   strategy?: string | null
   symbol?: string | null

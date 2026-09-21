@@ -21,6 +21,7 @@ from typing import Any
 from ..market.session import ist_hm, to_ist
 
 PATH_CHECKPOINTS = (1, 2, 4, 8, 16)
+BLIND_SYMBOL = "SYM"
 
 
 @dataclass(slots=True)
@@ -135,7 +136,10 @@ def path_metrics(
     return out
 
 
-def case_pack(case: Case) -> dict[str, Any]:
+def case_pack(case: Case, *, blind: bool = False) -> dict[str, Any]:
+    """``blind`` replaces the symbol, the date and the reference with tokens. Time of day, the
+    weekday, the zone timeframes and every number stay: they are the evidence. What goes is what
+    lets a model recall what this stock did on this date (Look-Ahead-Bench, 2026)."""
     ctx = dict((case.signal or {}).get("context") or {})
     ev = dict((case.signal or {}).get("evidence") or {})
     indi = dict(ctx.get("indicators") or {})
@@ -145,13 +149,14 @@ def case_pack(case: Case) -> dict[str, Any]:
     t1 = case.targets[0] if case.targets else None
     risk = abs(case.entry - case.stop)
 
+    when = to_ist(case.ts)
     pack: dict[str, Any] = {
-        "case.ref": case.ref,
+        "case.ref": "case" if blind else case.ref,
         "case.kind": case.kind,
         "case.strategy": case.strategy,
-        "case.symbol": case.symbol,
+        "case.symbol": BLIND_SYMBOL if blind else case.symbol,
         "case.direction": case.direction,
-        "case.ts_ist": to_ist(case.ts).strftime("%Y-%m-%d %H:%M"),
+        "case.ts_ist": when.strftime("%a %H:%M") if blind else when.strftime("%Y-%m-%d %H:%M"),
         "case.session_phase": case.session_phase,
         "case.exchange": case.exchange,
         "case.entry": _r(case.entry, 2),
@@ -262,7 +267,11 @@ def case_pack(case: Case) -> dict[str, Any]:
         pack.update(
             {
                 "out.filled": True,
-                "out.instrument": t.get("symbol") if case.kind == "ledger" else "underlying (backtest)",
+                "out.instrument": (
+                    ("option" if blind else t.get("symbol"))
+                    if case.kind == "ledger"
+                    else "underlying (backtest)"
+                ),
                 "out.qty": t.get("qty"),
                 "out.entry": _r(t.get("entry"), 2),
                 "out.exit": _r(t.get("exit"), 2),
@@ -285,13 +294,16 @@ def case_pack(case: Case) -> dict[str, Any]:
 
     pack.update(path_metrics(bullish=bullish, entry=case.entry, stop=case.stop, t1=t1, bars=case.bars_after))
     pack["book.mode"] = case.mode or None
-    pack["bars_before"] = [_bar_row(b) for b in case.bars_before]
-    pack["bars_after"] = [_bar_row(b) for b in case.bars_after]
+    pack["bars_before"] = [_bar_row(b, blind) for b in case.bars_before]
+    pack["bars_after"] = [_bar_row(b, blind) for b in case.bars_after]
     return pack
 
 
-def _bar_row(b: BarRow) -> dict[str, Any]:
-    return {"t": ist_hm(b.ts), "ts": b.ts, "o": b.o, "h": b.h, "l": b.l, "c": b.c, "v": b.v}
+def _bar_row(b: BarRow, blind: bool = False) -> dict[str, Any]:
+    row: dict[str, Any] = {"t": ist_hm(b.ts), "o": b.o, "h": b.h, "l": b.l, "c": b.c, "v": b.v}
+    if not blind:
+        row["ts"] = b.ts
+    return row
 
 
 def render_case(pack: Mapping[str, Any]) -> str:
@@ -315,4 +327,4 @@ def render_case(pack: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
-__all__ = ["BarRow", "Case", "atr_proxy", "case_pack", "path_metrics", "render_case"]
+__all__ = ["BLIND_SYMBOL", "BarRow", "Case", "atr_proxy", "case_pack", "path_metrics", "render_case"]

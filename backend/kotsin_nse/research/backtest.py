@@ -34,7 +34,7 @@ import time
 import uuid
 from collections import defaultdict
 from collections.abc import MutableMapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -265,6 +265,14 @@ class BacktestParams:
     #: report the modelled option overlay alongside the measured underlying result
     model_option_leg: bool = True
     lot_size: int = 1
+    #: the bar the strategy decides on: "30m" (the live engine) or "1d" — the same signal on daily
+    #: bars, positions held overnight, no force-flat. The cost share of a move falls with holding
+    #: time; this is the cheapest test of whether the signal has any edge at all once it is not
+    #: paying ₹80 per session.
+    decision_tf: str = "30m"
+    #: "intraday" (the cost model's STT) or "delivery": STT on both legs, and NO SHORTS — retail
+    #: cash equity cannot be carried short overnight, so bearish signals are not trades.
+    holding: str = "intraday"
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -275,13 +283,27 @@ class BacktestParams:
             "position_budget_inr": self.position_budget_inr,
             "slippage_bps": self.slippage_bps,
             "model_option_leg": self.model_option_leg,
+            "decision_tf": self.decision_tf,
+            "holding": self.holding,
         }
 
 
 class Backtester:
     def __init__(self, settings: Settings, params: BacktestParams | None = None) -> None:
         self.s = settings
-        self.p = params or BacktestParams()
+        p = params or BacktestParams()
+        if p.decision_tf != p.fudkii.tf:
+            # The strategy only reads bars of its own timeframe; a daily replay means a daily
+            # FUDKII. The last-bar-of-session rule has no meaning on a daily bar.
+            p = replace(
+                p,
+                fudkii=replace(
+                    p.fudkii,
+                    tf=p.decision_tf,
+                    eod_strong_only=p.fudkii.eod_strong_only and p.decision_tf != "1d",
+                ),
+            )
+        self.p = p
         self.costs = CostModel(settings)
 
     # -- loading ------------------------------------------------------------------------------------
@@ -340,14 +362,20 @@ class Backtester:
         start: date | None,
         end: date | None,
     ) -> None:
-        intraday = store.load(symbol, DECISION_TF)
+        tf = self.p.decision_tf
         daily = store.load(symbol, "1d")
+        intraday = daily if tf == "1d" else store.load(symbol, tf)
         if intraday.empty or daily.empty:
             log.warning("backtest.no_history", symbol=symbol)
             return
+        # Keep the indicators' warm-up context from BEFORE `start`; decide only inside the range.
+        # Without this every ranged run (a holdout, a fold) silently loses its first 50 bars, and
+        # two ranges that meet at a date are not the same as one run over both.
+        lo: int | None = None
         if start is not None:
             lo = int(pd.Timestamp(start).timestamp())
-            intraday = intraday[intraday["ts"] >= lo]
+            pos = int(intraday["ts"].searchsorted(lo))
+            intraday = intraday.iloc[max(0, pos - (self.p.fudkii.warm_bars + 10)) :]
         if end is not None:
             hi = int(pd.Timestamp(end).timestamp()) + 86400
             intraday = intraday[intraday["ts"] <= hi]
@@ -363,7 +391,7 @@ class Backtester:
             multiplier=1,
             underlying=symbol,
         )
-        bars = self._to_bars(intraday, symbol, symbol, DECISION_TF)
+        bars = self._to_bars(intraday, symbol, symbol, tf)
         dailies = {symbol: self._to_bars(daily, symbol, symbol, "1d")}
 
         bar_store = BarStore(max_bars=4000)
@@ -394,8 +422,18 @@ class Backtester:
                     result.trades.append(closed)
                     open_trade = None
 
-            # 3. decide. A new signal is only taken when flat.
+            # 3. decide. A new signal is only taken when flat, and only inside the range — the
+            #    bars before `start` exist to warm the indicators, not to trade.
             outcome = self._decide(fudkii, fukaa, ctx, fukaa_ctx, bar)
+            if lo is not None and bar.ts < lo:
+                continue
+            if self.p.holding == "delivery":
+                shorts = [x for x in outcome.signals if x.direction is Direction.BEARISH]
+                if shorts:
+                    result.binding_gates["DELIVERY:no_short"] = (
+                        result.binding_gates.get("DELIVERY:no_short", 0) + len(shorts)
+                    )
+                    outcome.signals = [x for x in outcome.signals if x.direction is not Direction.BEARISH]
             result.signals += len(outcome.signals)
             result.rejections += len(outcome.rejections)
             for rej in outcome.rejections:
@@ -488,7 +526,7 @@ class Backtester:
             if (trailed > t.stop) if sign > 0 else (trailed < t.stop):
                 t.stop = trailed
 
-        if past_force_flat(self.p.segment, bar.ts):
+        if self.p.decision_tf != "1d" and past_force_flat(self.p.segment, bar.ts):
             return self._close(t, bar, bar.close, ExitReason.EOD, inst)
         if t.bars_held >= self.p.limits.time_stop_bars:
             return self._close(t, bar, bar.close, ExitReason.TIME_STOP, inst)
@@ -503,6 +541,14 @@ class Backtester:
             self.costs.leg(inst, OrderSide.BUY if sign > 0 else OrderSide.SELL, t.entry, t.qty)
             + self.costs.leg(inst, OrderSide.SELL if sign > 0 else OrderSide.BUY, price, t.qty)
         ).total
+        if self.p.holding == "delivery" and inst.kind is InstrumentKind.EQUITY:
+            # Overnight cash equity is delivery: STT on BOTH legs at the delivery rate; the cost
+            # model's intraday rate applies to the sell leg only. Added here, in the open, so an
+            # intraday and a delivery replay differ by exactly these lines.
+            rate = self.s.cost_stt_pct_delivery_equity / 100
+            buy_value = (t.entry if sign > 0 else price) * t.qty * inst.multiplier
+            sell_value = (price if sign > 0 else t.entry) * t.qty * inst.multiplier
+            charges += buy_value * rate + sell_value * (rate - self.s.cost_stt_pct_sell_equity / 100)
         net = gross - charges
         r_unit_money = t.r_unit * t.qty * inst.multiplier
         opt_net = opt_r = None

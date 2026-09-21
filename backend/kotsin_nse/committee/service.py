@@ -19,12 +19,12 @@ import structlog
 
 from ..config import Segment, Settings
 from ..ledger.db import trades
-from ..market.session import session_phase
+from ..market.session import ist_hm, session_phase
 from ..research.backtest import BacktestParams
 from ..research.history import HistoryStore
 from .evidence import BarRow, Case, case_pack, render_case
-from .experiments import apply_changes, run_experiment
-from .forensics import TradeRec, forensics, from_backtest, from_ledger, render
+from .experiments import apply_changes, changes_key, run_experiment
+from .forensics import TradeRec, blind_view, forensics, from_backtest, from_ledger, render
 from .llm import LLM, AnthropicLLM
 from .memory import ReviewLog
 from .pipeline import reflect, run_case_committee, run_cohort_committee
@@ -77,6 +77,7 @@ class CommitteeService:
         self.errors = 0
         self.last_error = ""
         self.last_run_ts: float | None = None
+        self.last_autopilot_ts: float | None = None
         self._tasks: set[asyncio.Task[Any]] = set()
 
     @staticmethod
@@ -161,7 +162,13 @@ class CommitteeService:
             f = await self.forensics(source, strategy)
             if f["cohort"].get("n", 0) == 0:
                 raise KeyError(f"no trades in {source}" + (f" for {strategy}" if strategy else ""))
-            text = render(f, title=f"{source} strategy={strategy or 'ALL'}")
+            blind_map: dict[str, str] = {}
+            view: dict[str, Any] = f
+            title = f"{source} strategy={strategy or 'ALL'}"
+            if self.s.committee_blind:
+                view, blind_map = blind_view(f)
+                title = f"cohort strategy={strategy or 'ALL'}"
+            text = render(view, title=title)
             run = await run_cohort_committee(
                 self.llm,
                 ref=key,
@@ -177,6 +184,8 @@ class CommitteeService:
                 "symbol": None,
                 "run": run.to_json(),
                 "pack": {"cohort": f["cohort"], "dims": f["dims"]},
+                "blind": self.s.committee_blind,
+                "blind_map": blind_map,
                 "error": run.error,
             }
             if run.report is not None:
@@ -274,7 +283,8 @@ class CommitteeService:
             raise RuntimeError(f"a review of {case.ref} is already in progress")
         self.running.add(case.ref)
         try:
-            pack = case_pack(case)
+            blind = self.s.committee_blind
+            pack = case_pack(case, blind=blind)
             run = await run_case_committee(
                 self.llm,
                 ref=case.ref,
@@ -299,6 +309,8 @@ class CommitteeService:
                 "symbol": case.symbol,
                 "run": run.to_json(),
                 "pack": pack,
+                "blind": blind,
+                "blind_map": {"SYM": case.symbol, "case": case.ref} if blind else {},
                 "error": run.error,
             }
             if run.verdict is not None:
@@ -427,6 +439,8 @@ class CommitteeService:
                 changes=changes,
                 segment=segment,
                 max_symbols=self.s.committee_experiment_symbols,
+                holdout_frac=self.s.committee_holdout_frac,
+                n_tested=self.n_tested(),
             )
             reflection: str | None = None
             if self.llm is not None:
@@ -438,7 +452,13 @@ class CommitteeService:
                             f"changes: {h.get('changes')}\nexpected: {h.get('expected')}"
                         ),
                         result_text=json.dumps(
-                            {k: result.get(k) for k in ("verdict", "note", "baseline", "patched", "delta_avg_r", "p_value")},
+                            {
+                                k: result.get(k)
+                                for k in (
+                                    "verdict", "note", "out_of_sample", "in_sample", "cost_stress",
+                                    "survives_cost_stress", "monthly", "split", "n_tested",
+                                )
+                            },
                             default=str,
                         ),
                     )
@@ -466,6 +486,92 @@ class CommitteeService:
                 h["id"], status="error", error=str(exc)[:300], finished_ts=time.time()
             )
             log.exception("committee.experiment_failed", hypothesis=h.get("id"), error=str(exc))
+
+    def n_tested(self) -> int:
+        """How many hypotheses have been graded so far, plus this one — the Bonferroni divisor."""
+        graded = sum(
+            1 for h in self.log.hypotheses() if h.get("status") in ("confirmed", "refuted", "inconclusive")
+        )
+        return graded + 1
+
+    def vetoed(self, changes: list[Any]) -> str | None:
+        """The status of an already-graded hypothesis with the same changes, if any. AlphaMemo's
+        veto: a search that re-proposes a known failure has not learned, and a search that
+        re-runs a known success has not moved."""
+        key = changes_key(changes)
+        for h in self.log.hypotheses():
+            if h.get("status") in ("confirmed", "refuted", "inconclusive") and changes_key(
+                h.get("changes") or []
+            ) == key:
+                return str(h["status"])
+        return None
+
+    # -- autopilot ----------------------------------------------------------------------------------
+
+    async def autopilot_source(self) -> str:
+        """The ledger once it can carry a verdict; the newest backtest run until then."""
+        rows = await self.engine.ledger.recent(trades, 5000)
+        if len(rows) >= 30:
+            return "ledger"
+        root = self.s.data_dir / "backtests"
+        runs = sorted(root.glob("bt-*.json"), key=lambda x: x.stat().st_mtime, reverse=True) if root.exists() else []
+        if not runs:
+            raise KeyError("nothing to review: no ledger trades and no backtest runs")
+        return f"backtest:{runs[0].stem}"
+
+    async def autopilot_once(self, source: str | None = None) -> dict[str, Any]:
+        """One night's loop: cohort review → veto known results → up to N experiments → memory.
+        Sequential and bounded; every step lands in the log even when a later one fails."""
+        self._budget()
+        source = source or await self.autopilot_source()
+        review = await self.review_cohort(source, None)
+        if review.get("error"):
+            raise RuntimeError(f"cohort review failed: {review['error']}")
+        full = self.log.get(review["id"]) or {}
+        ran: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        for h in list(full.get("hypotheses") or []):
+            if len(ran) >= self.s.committee_autopilot_experiments:
+                break
+            prior = self.vetoed(h.get("changes") or [])
+            if prior:
+                self.log.update_hypothesis(h["id"], status="vetoed", veto=f"already {prior}")
+                skipped.append({"id": h["id"], "title": h.get("title"), "prior": prior})
+                continue
+            self.log.update_hypothesis(h["id"], status="running", started_ts=time.time(), error=None)
+            found = self.log.find_hypothesis(h["id"])
+            if found is None:
+                continue
+            entry, hh = found
+            await self._run_experiment(entry, hh)
+            graded = self.log.find_hypothesis(h["id"])
+            status = graded[1].get("status") if graded else "error"
+            ran.append({"id": h["id"], "title": h.get("title"), "status": status})
+        summary = self.log.append(
+            {
+                "kind": "autopilot",
+                "subject": {"source": source, "review_id": review["id"]},
+                "strategy": None,
+                "symbol": None,
+                "ran": ran,
+                "skipped": skipped,
+                "lesson": (
+                    f"autopilot on {source}: {len(ran)} experiment(s) "
+                    f"[{', '.join(r['status'] for r in ran) or 'none'}], {len(skipped)} vetoed"
+                ),
+            }
+        )
+        self.last_autopilot_ts = time.time()
+        log.info("committee.autopilot", source=source, ran=len(ran), vetoed=len(skipped))
+        return public(summary)
+
+    def autopilot_due(self, now: float, day: str, last_day: str) -> bool:
+        return (
+            self.s.committee_autopilot
+            and self.available
+            and day != last_day
+            and ist_hm(now) >= self.s.committee_autopilot_ist
+        )
 
     # -- auto review ---------------------------------------------------------------------------------
 
@@ -505,6 +611,12 @@ class CommitteeService:
             "llm": self.llm.stats() if self.llm else None,
             "log": self.log.stats(),
             "path_bars": self.s.committee_path_bars,
+            "blind": self.s.committee_blind,
+            "holdout_frac": self.s.committee_holdout_frac,
+            "n_tested": self.n_tested(),
+            "autopilot": self.s.committee_autopilot,
+            "autopilot_ist": self.s.committee_autopilot_ist,
+            "last_autopilot_ts": self.last_autopilot_ts,
         }
 
 

@@ -27,6 +27,7 @@ const STATUS_TONE: Record<string, Tone> = {
   refuted: 'red',
   inconclusive: 'amber',
   error: 'red',
+  vetoed: 'slate',
 }
 
 const HEADLINE: [string, string, (v: unknown) => string][] = [
@@ -137,7 +138,7 @@ function Hypotheses({ rows, onRun, busy, onProposed }: { rows: HypothesisRow[]; 
       <div className="mb-2">
         <Propose onDone={onProposed} />
       </div>
-      <Table head={['proposed', 'from', 'hypothesis', 'changes', 'status', 'baseline → patched', 'Δ avg R · p', 'lesson', '']} empty="no hypotheses yet — run a review">
+      <Table head={['proposed', 'from', 'hypothesis', 'changes', 'status', 'out-of-sample: baseline → patched', 'Δ · p (adj.)', 'in-sample Δ', 'cost stress', 'months won', 'lesson', '']} empty="no hypotheses yet — run a review, or propose one">
         {rows.map((h) => {
           const r = h.result
           return (
@@ -159,7 +160,20 @@ function Hypotheses({ rows, onRun, busy, onProposed }: { rows: HypothesisRow[]; 
                   'DM'
                 )}
               </td>
-              <td className="px-2 py-1.5 text-[11px]">{r?.delta_avg_r == null ? 'DM' : `${fmt.r(r.delta_avg_r)} · p ${fmt.n(r.p_value, 3)}`}</td>
+              <td className="px-2 py-1.5 text-[11px]">
+                {r?.delta_avg_r == null ? 'DM' : `${fmt.r(r.delta_avg_r)} · p ${fmt.n(r.p_value, 3)}${r.p_adjusted != null && r.n_tested && r.n_tested > 1 ? ` → ${fmt.n(r.p_adjusted, 3)} (×${r.n_tested})` : ''}`}
+              </td>
+              <td className="px-2 py-1.5 text-[11px] text-slate-400">{r?.in_sample?.delta_avg_r == null ? 'DM' : fmt.r(r.in_sample.delta_avg_r)}</td>
+              <td className="px-2 py-1.5 text-[11px]">
+                {r?.cost_stress ? (
+                  <span className={r.survives_cost_stress ? 'text-emerald-400' : 'text-rose-400'}>
+                    {r.survives_cost_stress ? 'survives' : 'fails'} {fmt.r(r.cost_stress.delta_avg_r)}
+                  </span>
+                ) : (
+                  'DM'
+                )}
+              </td>
+              <td className="px-2 py-1.5 text-[11px]">{r?.monthly ? `${r.monthly.patched_beats_baseline}/${r.monthly.months}` : 'DM'}</td>
               <td className="max-w-[20rem] px-2 py-1.5 text-[11px] text-slate-400">{h.reflection ?? h.error ?? r?.note ?? ''}</td>
               <td className="px-2 py-1.5">
                 <button disabled={busy || h.status === 'running'} className="rounded bg-sky-900/60 px-2 py-0.5 text-[11px] text-sky-200 hover:bg-sky-800 disabled:opacity-40" onClick={() => onRun(h.id)}>
@@ -290,13 +304,19 @@ export function Committee() {
       const r = await postJson<ReviewRow>('/api/committee/review/cohort', { source, strategy: strategy || null })
       openReview(r.id)
     })
-  const runExperiment = (id: string) => act('starting the experiment (two backtests in a worker thread)…', () => postJson('/api/committee/experiments/run', { hypothesis_id: id }))
+  const runExperiment = (id: string) => act('starting the experiment (six backtests in a worker thread)…', () => postJson('/api/committee/experiments/run', { hypothesis_id: id }))
+  const runAutopilot = () =>
+    act('autopilot: review, veto, experiments… (minutes)', async () => {
+      const r = await postJson<ReviewRow>('/api/committee/autopilot/run', { source })
+      openReview(r.id)
+    })
 
   return (
     <div className="space-y-4 p-4">
       <ErrorLine error={status.error ?? forensics.error ?? reviews.error} />
       <div className="flex flex-wrap gap-3">
         <Stat label="committee" value={s ? (s.available ? (s.auto ? 'auto' : 'on demand') : 'off') : 'DM'} sub={s ? (s.available ? `${s.model} · ${s.runs_today}/${s.max_runs_per_day} runs today` : 'set KN_ANTHROPIC_API_KEY to enable') : ''} />
+        <Stat label="grading" value={s ? `holdout ${Math.round((s.holdout_frac ?? 0.3) * 100)}%` : 'DM'} sub={s ? `${s.blind ? 'blind packs' : 'named packs'} · ${s.n_tested ? s.n_tested - 1 : 0} graded so far${s.autopilot ? ` · autopilot ${s.autopilot_ist} IST` : ''}` : ''} />
         <Stat label="est. spend" value={s?.llm ? `$${s.llm.est_cost_usd.toFixed(2)}` : 'DM'} sub={s?.llm ? `${s.llm.calls} calls · ${s.llm.errors} errors` : 'forensics are free'} />
         <Stat label="reviews" value={s ? s.log.entries : 'DM'} sub={s ? Object.entries(s.log.by_failure_mode).slice(0, 3).map(([k, v]) => `${k} ${v}`).join(' · ') || 'no verdicts yet' : ''} />
         <Stat label="hypotheses" value={s ? s.log.hypotheses : 'DM'} sub={s ? Object.entries(s.log.hypotheses_by_status).map(([k, v]) => `${k} ${v}`).join(' · ') || '—' : ''} />
@@ -322,6 +342,9 @@ export function Committee() {
             </select>
             <button disabled={busy || !s?.available || n === 0} className="rounded bg-violet-900/60 px-2 py-1 text-violet-200 hover:bg-violet-800 disabled:opacity-40" onClick={askCohort}>
               ask the committee (4 calls)
+            </button>
+            <button disabled={busy || !s?.available || n === 0} className="rounded bg-violet-900/40 px-2 py-1 text-violet-300 hover:bg-violet-800 disabled:opacity-40" onClick={runAutopilot} title="cohort review → veto known results → experiments → memory; blocks until done">
+              autopilot now
             </button>
             <span className="text-slate-400">{msg}</span>
           </div>

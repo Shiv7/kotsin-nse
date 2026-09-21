@@ -284,6 +284,29 @@ def forensics(rows: Sequence[TradeRec]) -> dict[str, Any]:
     return {"cohort": cohort, "dims": dims}
 
 
+def blind_view(f: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
+    """A copy with symbols and months replaced by tokens (``S01``, ``M01``) and the date range
+    removed, plus the mapping back. Bucket order is preserved, so "worst symbol" and "first
+    month" still mean what they meant."""
+    out: dict[str, Any] = {
+        "cohort": {k: v for k, v in f.get("cohort", {}).items() if k not in ("first_day", "last_day")},
+        "dims": {},
+    }
+    mapping: dict[str, str] = {}
+    for dim, buckets in f.get("dims", {}).items():
+        prefix = {"symbol": "S", "month": "M"}.get(dim)
+        rows = []
+        for i, b in enumerate(buckets, 1):
+            if prefix is None:
+                rows.append(dict(b))
+                continue
+            token = f"{prefix}{i:02d}"
+            mapping[token] = b["label"]
+            rows.append({**b, "label": token})
+        out["dims"][dim] = rows
+    return out, mapping
+
+
 def flat(f: Mapping[str, Any]) -> dict[str, Any]:
     """The citable key space: ``cohort.<k>`` and ``by_<dim>.<label>.<metric>``."""
     out: dict[str, Any] = {f"cohort.{k}": v for k, v in f.get("cohort", {}).items()}
@@ -328,6 +351,7 @@ def render(f: Mapping[str, Any], *, title: str = "") -> str:
 
 __all__ = [
     "TradeRec",
+    "blind_view",
     "flat",
     "forensics",
     "from_backtest",

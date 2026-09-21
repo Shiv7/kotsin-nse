@@ -114,9 +114,17 @@ Boundaries are enforced by `import-linter` (`backend/pyproject.toml`), not by co
 ## Review committee (`committee/`)
 
 See `docs/COMMITTEE.md`. Post-mortems on the algo's own signals and trades by Claude in structured
-roles, over deterministic forensic tables and a per-case evidence pack; every proposal is a
-parameter patch graded by running the backtester (baseline vs patched, within-day permutation
-test). Runs on its own tasks; the decision path never reads it. Off until `KN_ANTHROPIC_API_KEY`.
+roles, over deterministic forensic tables and a per-case evidence pack (blinded: no names, no
+dates); every proposal is a parameter patch graded by running the backtester **out of sample** —
+holdout, cost stress, Bonferroni over hypotheses tried, months won — and vetoed if already graded.
+A nightly autopilot runs the loop. Runs on its own tasks; the decision path never reads it. Off
+until `KN_ANTHROPIC_API_KEY`; forensics and experiments work without it.
+
+## Live archive (`ops/archive.py`)
+
+Per-IST-day Parquet of every 1m bar, every OI frame and the 30m microstructure metrics. The only
+record of what the socket delivered; without it FUKAA can never be backtested. Flushed every 5
+minutes and at shutdown, in a worker thread.
 
 ## What is deliberately absent
 

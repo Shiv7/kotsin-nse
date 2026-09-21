@@ -180,6 +180,18 @@ patched 364 trades **−0.34 R** (t −4.12), Δ +1.02 R, within-day permutation
 "Confirmed" there means *the change helps*, and in-sample on the same data the diagnosis came
 from; it does not mean the strategy is positive.
 
+Re-graded **out of sample** the same night, once the loop learned to hold data back
+(`docs/COMMITTEE.md`): holdout 2026-06-04 → 09-21, baseline 196 trades −1.32 R → patched 146 trades
+**−0.57 R**, Δ +0.75, within-day permutation p 0.0002, survives ×1.5 brokerage / ×2 slippage (Δ +0.71),
+patched wins all 4 months. In sample the same change read Δ +1.20 — the gap is the optimism a
+same-data grade carries. Real, robust, and still a losing strategy (t = −5.1).
+
+**Daily bars, delivery, long-only** (`kotsin-nse backtest --decision-tf 1d --holding delivery`,
+run `bt-0f1ff74a261d`): 24 trades in a year across 28 symbols, −0.78 R (t −1.55, too small to
+conclude), 33 % wins, charges 148 % of gross, 15 bearish signals refused (no overnight shorts in
+retail cash equity), `st_flip` the binding gate 5,589 times — the SuperTrend flip and the Bollinger
+break rarely coincide on daily bars. Slower does not make it better; it makes it rare.
+
 Widening the stop shrinks the loss but never turns it positive; gross converges on zero and
 charges decide the sign. **The entry has no edge; the stop only sets how fast it is paid for.**
 That is the same conclusion `kotsin-box/SESSION-PRIMER.md` reached on CAN2 ("entries, not exits").

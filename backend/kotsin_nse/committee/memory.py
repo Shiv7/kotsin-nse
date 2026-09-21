@@ -15,7 +15,7 @@ from typing import Any
 
 from ..domain import new_id
 
-HYP_STATUSES = ("pending", "running", "confirmed", "refuted", "inconclusive", "error")
+HYP_STATUSES = ("pending", "running", "confirmed", "refuted", "inconclusive", "error", "vetoed")
 
 
 class ReviewLog:

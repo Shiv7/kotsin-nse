@@ -79,6 +79,7 @@ from .market.session import (
 from .market.session import (
     session_phase as session_phase_of,
 )
+from .ops.archive import DailyArchive
 from .ops.health import Check, HealthMonitor
 from .ops.telegram import Telegram
 from .risk.costs import CostModel
@@ -143,6 +144,8 @@ class Engine:
         )
         self.health = HealthMonitor()
         self.committee = CommitteeService(self, settings, decision_tf=DECISION_TF)
+        self.archive = DailyArchive(settings.data_dir / "archive", enabled=settings.archive_enabled)
+        self._autopilot_day = ""
 
         self.http = httpx.AsyncClient(timeout=30)
         self.auth = Authenticator(settings, self.http)
@@ -251,6 +254,10 @@ class Engine:
         self._stop.set()
         await self.feed.stop()
         await self.committee.stop()
+        try:
+            await asyncio.to_thread(self.archive.flush, final=True)
+        except Exception as exc:  # noqa: BLE001 - shutting down; the archive must not block it
+            log.warning("archive.final_flush_failed", error=str(exc))
         for t in self._tasks:
             t.cancel()
         for t in self._tasks:
@@ -494,6 +501,12 @@ class Engine:
 
     async def _on_oi(self, oi: dict[str, Any]) -> None:
         fut_code = str(oi["scrip_code"])
+        self.archive.oi(
+            fut_code,
+            float(oi.get("recv_ts") or time.time()),
+            float(oi["open_interest"]),
+            float(oi["oi_change_pct"]) if oi.get("oi_change_pct") is not None else None,
+        )
         symbol = self._future_to_underlying.get(fut_code)
         if symbol is None:
             # Not a future we map to an underlying → an option strike. Keep its OI; the Options
@@ -563,6 +576,8 @@ class Engine:
 
     async def _on_bar_close(self, bar: UnifiedBar) -> None:
         await self.bus.publish(Topic.BAR, bar)
+        if bar.tf == "1m":
+            self.archive.bar(bar)
         if bar.tf != DECISION_TF:
             return
         for pos in self.positions.values():
@@ -571,6 +586,7 @@ class Engine:
         micro = self.micro.for_bar(bar.scrip_code, bar.ts)
         if micro:
             bar.extra["micro"] = micro
+            self.archive.micro(bar.scrip_code, bar.ts, micro)
         # Off the tick path: at 15:15 IST two hundred 30m bars close in the same second and each
         # waits on a REST round trip. Awaiting that inside the feed handler would stall every
         # symbol's ticks. Concurrency is bounded by the reconciler's semaphore.
@@ -629,6 +645,12 @@ class Engine:
             log.info("universe.intraday_rebuild", new_strikes=len(fresh))
         except Exception as exc:  # noqa: BLE001 - a failed rebuild keeps the overnight universe
             log.warning("universe.intraday_rebuild_failed", error=str(exc))
+
+    async def _autopilot(self) -> None:
+        try:
+            await self.committee.autopilot_once()
+        except Exception as exc:  # noqa: BLE001 - advisory; logged, never raised into the loop
+            log.warning("committee.autopilot_failed", error=str(exc))
 
     async def _decide(self, bar: UnifiedBar) -> None:
         base_out = self.fudkii.on_bar(self.contexts[StrategyKey.FUDKII], bar)
@@ -978,11 +1000,24 @@ class Engine:
     async def _housekeeping(self) -> None:
         last_reconcile = 0.0
         last_snapshot = 0.0
+        last_archive = time.time()
         last_day = ist_day(time.time()).isoformat()
         while not self._stop.is_set():
             now = time.time()
             try:
                 day = ist_day(now).isoformat()
+                if now - last_archive > self.s.archive_flush_s:
+                    last_archive = now
+                    await asyncio.to_thread(self.archive.flush)
+
+                # The nightly research loop, once per day after its hour, only with every segment
+                # closed — it runs six backtests in a worker thread and spends Claude calls.
+                if (
+                    self.committee.autopilot_due(now, day, self._autopilot_day)
+                    and not self.market_open_now()
+                ):
+                    self._autopilot_day = day
+                    self._decision_tasks.add(asyncio.create_task(self._autopilot()))
                 if day != last_day:
                     last_day = day
                     self._zone_cache.clear()
@@ -1141,6 +1176,7 @@ class Engine:
             "fidelity": self.reconciler.snapshot() if self.reconciler_ready else {},
             "micro": self.micro.stats(),
             "option_oi_tracked": len(self.option_oi),
+            "archive": self.archive.stats(),
             "telegram": self.telegram.stats(),
             "positions_open": len([p for p in self.positions.values() if p.status == "OPEN"]),
             "positions_stale_quote": len(self._stale_positions),
