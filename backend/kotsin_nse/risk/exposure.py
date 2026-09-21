@@ -43,20 +43,36 @@ class ExposureBook:
     def check(
         self,
         *,
+        strategy: str,
         underlying: str,
         outlay: float,
         positions: list[Position],
         total_capital: float,
     ) -> ExposureVerdict:
+        """Counts are per book; money is across all of them.
+
+        Scoping the counts to one book is what keeps a derived strategy tradeable: FUKAA fires on
+        the same underlying as FUDKII in the same batch, so a shared per-underlying count meant
+        whichever was handled first took the slot and the other could never fill. Measured on a
+        seeded session: 10 of 10 FUKAA signals rejected with "1 already open".
+        """
         lim = self.limits
         live = [p for p in positions if p.status == "OPEN"]
-        if len(live) >= lim.max_positions_total:
-            return ExposureVerdict(False, f"{len(live)} open ≥ cap {lim.max_positions_total}")
-        same = [p for p in live if p.underlying.symbol == underlying]
+        mine = [p for p in live if p.strategy == strategy]
+        if len(live) >= lim.max_positions_all_books:
+            return ExposureVerdict(
+                False, f"{len(live)} open across all books ≥ cap {lim.max_positions_all_books}"
+            )
+        if len(mine) >= lim.max_positions_per_strategy:
+            return ExposureVerdict(
+                False, f"{strategy} holds {len(mine)} ≥ cap {lim.max_positions_per_strategy}"
+            )
+        same = [p for p in mine if p.underlying.symbol == underlying]
         if len(same) >= lim.max_positions_per_underlying:
             return ExposureVerdict(
                 False,
-                f"{len(same)} already open in {underlying} ≥ cap {lim.max_positions_per_underlying}",
+                f"{strategy} already holds {len(same)} in {underlying} "
+                f"≥ cap {lim.max_positions_per_underlying}",
                 open_in_underlying=len(same),
             )
         current = self.by_underlying(live).get(underlying, 0.0)

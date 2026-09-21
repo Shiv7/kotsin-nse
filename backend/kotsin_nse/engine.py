@@ -603,6 +603,7 @@ class Engine:
             return
 
         verdict = self.exposure.check(
+            strategy=sig.strategy.value,
             underlying=sig.symbol,
             outlay=sizing.outlay,
             positions=list(self.positions.values()),

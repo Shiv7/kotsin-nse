@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import time
+from dataclasses import replace
 from itertools import pairwise
 
 from kotsin_nse.config import Segment, Settings
@@ -274,21 +275,50 @@ def test_apply_exit_reports_gross_and_accumulates_charges(option):
 # -- exposure ---------------------------------------------------------------------------------------------
 
 
-def test_exposure_is_aggregated_by_underlying_across_strategies(option):
-    """One SuperTrend flip can open a FUDKII position and a FUKAA position in the same option and
-    neither book's own sizing can see the other."""
+def test_a_book_may_not_double_up_on_one_underlying(option):
     book = ExposureBook(RiskLimits(max_positions_per_underlying=1))
     p = _position(option)
     p.strategy = "FUDKII"
-    v = book.check(underlying="RELIANCE", outlay=10_000, positions=[p], total_capital=1_000_000)
-    assert not v.allowed and "already open" in v.reason
+    v = book.check(strategy="FUDKII", underlying="RELIANCE", outlay=10_000,
+                   positions=[p], total_capital=1_000_000)
+    assert not v.allowed and "already holds" in v.reason
 
 
-def test_exposure_percentage_cap_binds(option):
-    book = ExposureBook(RiskLimits(max_positions_per_underlying=5, max_underlying_exposure_pct=5.0))
-    p = _position(option)
-    v = book.check(underlying="RELIANCE", outlay=40_000, positions=[p], total_capital=1_000_000)
+def test_a_derived_book_is_not_locked_out_by_its_own_parent(option):
+    """Regression, measured 2026-09-21 on a seeded session: 10 of 10 FUKAA signals were rejected
+    with "1 already open in X". FUKAA is derived from FUDKII, so the two always fire on the same
+    underlying in the same batch; a shared per-underlying count meant whichever was handled first
+    took the slot and the other could never fill a single trade in its life."""
+    book = ExposureBook(RiskLimits(max_positions_per_underlying=1))
+    held = _position(option)
+    held.strategy = "FUDKII"
+    v = book.check(strategy="FUKAA", underlying="RELIANCE", outlay=10_000,
+                   positions=[held], total_capital=1_000_000)
+    assert v.allowed, v.reason
+
+
+def test_money_is_still_capped_across_books(option):
+    """Counting per book must not reopen P15: one trigger fanning into several funded positions
+    is fine only while the total premium at risk in that underlying is capped."""
+    book = ExposureBook(RiskLimits(max_underlying_exposure_pct=5.0))
+    held = _position(option)
+    held.strategy = "FUDKII"
+    v = book.check(strategy="FUKAA", underlying="RELIANCE", outlay=40_000,
+                   positions=[held], total_capital=1_000_000)
     assert not v.allowed and "exposure" in v.reason
+
+
+def test_the_all_books_position_count_still_binds(option):
+    book = ExposureBook(RiskLimits(max_positions_all_books=2))
+    live = []
+    for i, sym in enumerate(("A", "B")):
+        p = _position(option)
+        p.id, p.strategy = f"p{i}", "FUDKII"
+        p.underlying = replace(option, symbol=sym, underlying=sym)
+        live.append(p)
+    v = book.check(strategy="FUKAA", underlying="C", outlay=1_000,
+                   positions=live, total_capital=1_000_000)
+    assert not v.allowed and "across all books" in v.reason
 
 
 def test_exposure_snapshot_buckets_by_symbol(option):

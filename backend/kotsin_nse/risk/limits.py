@@ -19,9 +19,18 @@ class RiskLimits:
     max_position_pct: float = 10.0
     #: absolute ceiling, whichever binds first
     max_position_inr: float = 100_000.0
-    max_positions_total: int = 5
-    max_positions_per_underlying: int = 1
-    #: aggregate premium at risk across every open position in one underlying
+    #: POSITION COUNTS ARE PER BOOK. FUKAA is derived from FUDKII, so the two fire on the same
+    #: underlying in the same batch; counting them together meant FUDKII always took the slot and
+    #: FUKAA — funded, gate-counted and advertised — could never take a single trade. That is the
+    #: shape of a strategy that has never fired in its life, and this codebase exists to not ship
+    #: it. The old stack ran them as separate books deliberately (cross-strategy scrip dedup was
+    #: excised 2026-06-24); what it lacked was a view of the aggregate, which is the next field.
+    max_positions_per_strategy: int = 3
+    max_positions_per_underlying: int = 1  # per book
+    #: ...and MONEY IS AGGREGATE. This is the P15 guard: one trigger fanning out into several
+    #: funded positions is fine, as long as the total premium at risk in that underlying is capped
+    #: across every book. Counting positions per book without this would just move the problem.
+    max_positions_all_books: int = 6
     max_underlying_exposure_pct: float = 20.0
     daily_loss_limit_pct: float = 3.0
     max_drawdown_pct: float = 15.0
