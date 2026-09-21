@@ -360,3 +360,21 @@ def test_session_is_usable_until_it_actually_expires():
     assert s.usable and s.valid and 590 < s.seconds_left <= 600
     dead = Session(access_token="x", client_code="c", expires_at=time.time() - 1)
     assert not dead.usable and dead.seconds_left == 0.0
+
+
+async def test_partial_bars_are_corrections_not_fidelity_measurements(equity):
+    """After a 23:46 restart the reconciler reported 30m exact=0/16: every one a PARTIAL bar made
+    of a single closing snapshot. Those are corrections, and must not dilute the metric."""
+    store = BarStore()
+    t = ist_ts("2026-09-18", "10:15")
+    frag = bar(t, 100.5, 100.5, 100.5, 100.5, 7)
+    frag.source = BarSource.PARTIAL
+    store.close(frag)
+    rest = _Rest({"30m": [_row("2026-09-18", "10:15", 100, 101, 99, 100.5, 500)]})
+    r = _reconciler(rest, store, equity)
+    c = await r.reconcile_bar(frag)
+    assert c.partial and c.replaced
+    s = r.stats["30m"]
+    assert (s.compared, s.exact, s.partial_replaced) == (0, 0, 1)
+    assert s.to_json()["exact_pct"] is None
+    assert store.last("RELIANCE", "30m").volume == 500

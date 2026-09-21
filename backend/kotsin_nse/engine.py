@@ -32,7 +32,7 @@ from .bars.micro import MicroAggregator
 from .bars.periods import monthly, previous_complete, weekly
 from .bars.pivots import Zone, classic_pivots, cluster_zones, pivot_points
 from .bars.store import BarStore
-from .bars.unified import UnifiedBar
+from .bars.unified import BarSource, UnifiedBar
 from .bars.verify import BarReconciler
 from .bus import Bus, Topic
 from .config import Segment, Settings
@@ -593,6 +593,15 @@ class Engine:
                 bar, timeout_s=self.s.decision_reconcile_timeout_s
             )
             if not check.found or check.error:
+                if bar.source is BarSource.PARTIAL:
+                    # The socket joined this bucket mid-way and the exchange could not confirm it.
+                    # What we hold is a fragment — after the 23:46 restart, literally one closing
+                    # snapshot — and a strategy must never mistake that for a bar. No decision.
+                    self.reconciler.decisions_skipped_partial += 1
+                    log.warning(
+                        "decide.skipped_partial", symbol=bar.symbol, ts=bar.ts, reason=check.error or "no REST bucket"
+                    )
+                    return
                 self.reconciler.decisions_on_live_bar += 1
             latest = self.store.last(bar.symbol, DECISION_TF)
             if latest is not None and latest.ts == bar.ts:

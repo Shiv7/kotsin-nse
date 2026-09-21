@@ -53,6 +53,9 @@ class BarCheck:
     found: bool
     exact: bool = False
     replaced: bool = False
+    #: the live build was PARTIAL (the socket joined mid-bucket). Expected to differ; counted
+    #: separately so the fidelity metric measures only bars built end to end.
+    partial: bool = False
     live: dict[str, float] | None = None
     rest: dict[str, float] | None = None
     error: str = ""
@@ -71,6 +74,7 @@ class BarCheck:
             "found": self.found,
             "exact": self.exact,
             "replaced": self.replaced,
+            "partial": self.partial,
             "diffs": self.diffs,
             "live": self.live,
             "rest": self.rest,
@@ -90,10 +94,22 @@ class TfStats:
     v_diff: int = 0
     missing_from_rest: int = 0
     rest_failures: int = 0
+    #: partial bars installed from REST — corrections, not fidelity failures
+    partial_replaced: int = 0
+    partial_missing: int = 0
 
     def record(self, c: BarCheck) -> None:
         if c.error:
             self.rest_failures += 1
+            return
+        if c.partial:
+            # A bar the socket joined mid-bucket was never a measurement of the feed. Measured
+            # 2026-09-21 after a 23:46 restart: 16/16 "differed" — every one a single closing
+            # snapshot. Count the correction; keep it out of `compared`.
+            if c.found:
+                self.partial_replaced += 1
+            else:
+                self.partial_missing += 1
             return
         if not c.found:
             self.missing_from_rest += 1
@@ -121,6 +137,8 @@ class TfStats:
             "v_diff": self.v_diff,
             "missing_from_rest": self.missing_from_rest,
             "rest_failures": self.rest_failures,
+            "partial_replaced": self.partial_replaced,
+            "partial_missing": self.partial_missing,
         }
 
 
@@ -157,6 +175,7 @@ class BarReconciler:
         self.stats: dict[str, TfStats] = {}
         self.recent: deque[BarCheck] = deque(maxlen=keep_checks)
         self.decisions_on_live_bar = 0  # times the decision proceeded without REST truth
+        self.decisions_skipped_partial = 0  # unconfirmed fragments that were NOT decided on
         self.last_sweep_ts: float | None = None
         self.sweeps = 0
 
@@ -168,14 +187,14 @@ class BarReconciler:
         try:
             return await asyncio.wait_for(self._reconcile(bar), timeout=timeout_s)
         except TimeoutError:
-            c = BarCheck(bar.symbol, bar.tf, bar.ts, found=False, error=f"timeout after {timeout_s:.0f}s")
+            c = BarCheck(bar.symbol, bar.tf, bar.ts, found=False, error=f"timeout after {timeout_s:.0f}s", partial=bar.source is BarSource.PARTIAL)
             self._record(c)
             return c
 
     async def _reconcile(self, bar: UnifiedBar) -> BarCheck:
         inst = self.resolve(bar.symbol)
         if inst is None:
-            c = BarCheck(bar.symbol, bar.tf, bar.ts, found=False, error="no instrument")
+            c = BarCheck(bar.symbol, bar.tf, bar.ts, found=False, error="no instrument", partial=bar.source is BarSource.PARTIAL)
             self._record(c)
             return c
         await asyncio.sleep(self.settle_delay_s)
@@ -185,7 +204,7 @@ class BarReconciler:
                 try:
                     rows = await self.rest.candles(inst, bar.tf, day, day)
                 except Exception as exc:  # noqa: BLE001 - REST failing must not stop the decision
-                    c = BarCheck(bar.symbol, bar.tf, bar.ts, found=False, error=str(exc)[:160])
+                    c = BarCheck(bar.symbol, bar.tf, bar.ts, found=False, error=str(exc)[:160], partial=bar.source is BarSource.PARTIAL)
                     self._record(c)
                     return c
             match = next((r for r in rows if int(ist_naive_to_ts(r["dt"])) == bar.ts), None)
@@ -195,14 +214,17 @@ class BarReconciler:
                 return c
             if attempt == 0:
                 await asyncio.sleep(self.retry_delay_s)
-        c = BarCheck(bar.symbol, bar.tf, bar.ts, found=False)
+        c = BarCheck(bar.symbol, bar.tf, bar.ts, found=False, partial=bar.source is BarSource.PARTIAL)
         self._record(c)
         return c
 
     def _install(self, bar: UnifiedBar, rest_row: dict[str, Any]) -> BarCheck:
         live, rest = _ohlcv(bar), _ohlcv(rest_row)
         exact = live == rest
-        c = BarCheck(bar.symbol, bar.tf, bar.ts, found=True, exact=exact, live=live, rest=rest)
+        c = BarCheck(
+            bar.symbol, bar.tf, bar.ts, found=True, exact=exact, live=live, rest=rest,
+            partial=bar.source is BarSource.PARTIAL,
+        )
         if exact:
             # The build was right; just mark it exchange-confirmed.
             bar.extra["confirmed"] = True
@@ -281,6 +303,7 @@ class BarReconciler:
         return {
             "by_tf": {tf: s.to_json() for tf, s in sorted(self.stats.items())},
             "decisions_on_live_bar": self.decisions_on_live_bar,
+            "decisions_skipped_partial": self.decisions_skipped_partial,
             "sweeps": self.sweeps,
             "last_sweep_ts": self.last_sweep_ts,
             "recent_diffs": [c.to_json() for c in list(self.recent)[-25:] if c.found and not c.exact],
