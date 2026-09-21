@@ -357,7 +357,7 @@ export interface CohortFinding {
 
 export interface ReviewRow {
   id: string
-  kind: 'case' | 'cohort'
+  kind: 'case' | 'cohort' | 'manual'
   ts: number
   strategy?: string | null
   symbol?: string | null

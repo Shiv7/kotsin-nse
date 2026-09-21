@@ -173,6 +173,13 @@ because the risk is tiny, so the grade selects for the stops least likely to sur
 | 1.0 ATR floor + wall | 303 | 34.7% | −0.30 | −3.01 | −47,585 | 467% |
 | stop floor 1.5 ATR | 199 | 36.7% | −0.27 | −3.02 | −42,465 | 154% |
 
+The review committee's experiment loop (`docs/COMMITTEE.md`) reproduced the first row on
+2026-09-22 without a model in the loop — hypothesis `fudkii.grade_policy.min_stop_atr = 1.0`,
+graded by the backtester on the 28 cached symbols: baseline 532 trades −1.36 R (t −7.97) →
+patched 364 trades **−0.34 R** (t −4.12), Δ +1.02 R, within-day permutation p = 0.0002, 13 s.
+"Confirmed" there means *the change helps*, and in-sample on the same data the diagnosis came
+from; it does not mean the strategy is positive.
+
 Widening the stop shrinks the loss but never turns it positive; gross converges on zero and
 charges decide the sign. **The entry has no edge; the stop only sets how fast it is paid for.**
 That is the same conclusion `kotsin-box/SESSION-PRIMER.md` reached on CAN2 ("entries, not exits").

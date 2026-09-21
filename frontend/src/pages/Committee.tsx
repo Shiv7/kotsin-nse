@@ -252,6 +252,7 @@ export function Committee() {
   const status = usePoll<CommitteeStatus>('/api/committee/status', 5000)
   const backtests = usePoll<{ id: string; trades: number; avg_r: number; created_ts: number }[]>('/api/backtests', 30000)
   const [source, setSource] = useState('ledger')
+  const [autoSourced, setAutoSourced] = useState(false)
   const [strategy, setStrategy] = useState('')
   const forensics = usePoll<Forensics>(`/api/committee/forensics?source=${encodeURIComponent(source)}&strategy=${strategy}`, 15000)
   const reviews = usePoll<ReviewRow[]>('/api/committee/reviews?limit=100', 8000)
@@ -262,6 +263,12 @@ export function Committee() {
   const s = status.data
   const c = forensics.data?.cohort ?? {}
   const n = (c.n as number) ?? 0
+  // An empty ledger is the normal state before the first paper trade; the newest backtest is the
+  // cohort worth reading then. Chosen once, so a person's own choice is never overridden.
+  if (!autoSourced && source === 'ledger' && forensics.data && n === 0 && (backtests.data ?? []).length > 0) {
+    setAutoSourced(true)
+    setSource(`backtest:${backtests.data![0].id}`)
+  }
 
   const act = async (label: string, fn: () => Promise<unknown>) => {
     setBusy(true)
@@ -359,8 +366,8 @@ export function Committee() {
                 <td className="px-2 py-1.5">{r.kind}</td>
                 <td className="px-2 py-1.5">{r.strategy ? <StrategyBadge k={r.strategy} /> : 'both'}</td>
                 <td className="px-2 py-1.5 font-mono text-[11px]">{r.symbol ?? ''} {subject.ref ?? subject.source ?? ''}</td>
-                <td className="px-2 py-1.5">{r.error ? <Badge tone="red">error</Badge> : r.failure_mode ? <Badge tone={MODE_TONE[r.failure_mode] ?? 'slate'}>{r.failure_mode}</Badge> : 'DM'}</td>
-                <td className="px-2 py-1.5">{fmt.n(r.confidence, 2)}</td>
+                <td className="px-2 py-1.5">{r.error ? <Badge tone="red">error</Badge> : r.failure_mode ? <Badge tone={MODE_TONE[r.failure_mode] ?? 'slate'}>{r.failure_mode}</Badge> : r.kind === 'manual' ? <Badge tone="blue">proposal</Badge> : 'DM'}</td>
+                <td className="px-2 py-1.5">{r.kind === 'manual' ? '—' : fmt.n(r.confidence, 2)}</td>
                 <td className="max-w-[28rem] px-2 py-1.5 text-[11px] text-slate-400">{r.error ?? r.lesson ?? r.verdict ?? ''}</td>
                 <td className="px-2 py-1.5">{(r.hypotheses ?? []).length || ''}</td>
               </tr>
