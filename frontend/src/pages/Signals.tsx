@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { Badge, Card, ErrorLine, GradeBadge, StrategyBadge, Table } from '../components/Ui'
-import { cls, fmt, ist, pnlColor } from '../lib/api'
+import { Link } from 'react-router-dom'
+import { cls, fmt, ist, pnlColor, postJson } from '../lib/api'
 import { usePoll } from '../lib/usePoll'
 import type { GateResult, RejectionRow, SignalRow, TradeRow } from '../types'
 
@@ -55,6 +56,16 @@ function SignalDetail({ s, trade }: { s: SignalRow; trade?: TradeRow }) {
   const isStop = (members: string[]) => stopZone !== '' && members.join(',') === stopZone
   const isTarget = (members: string[]) => targetZones.has(members.join(','))
   const filled = s.decision === 'PAPER_FILLED' || s.decision === 'SUBMITTED'
+  const [review, setReview] = useState('')
+  const askCommittee = async () => {
+    setReview('reviewing… (5 Claude calls)')
+    try {
+      const r = await postJson<{ failure_mode?: string; confidence?: number; lesson?: string; error?: string | null }>('/api/committee/review/signal', { signal_id: s.signal_id })
+      setReview(r.error ? `error: ${r.error}` : `${r.failure_mode} (${((r.confidence ?? 0) * 100).toFixed(0)}%) — ${r.lesson}`)
+    } catch (e) {
+      setReview(e instanceof Error ? e.message : String(e))
+    }
+  }
 
   return (
     <div className="grid gap-3 border-l-2 border-slate-700 bg-slate-950/60 p-3 md:grid-cols-3">
@@ -71,6 +82,14 @@ function SignalDetail({ s, trade }: { s: SignalRow; trade?: TradeRow }) {
           ]}
         />
         <div className="mt-2 text-[11px] text-slate-400">{s.reason}</div>
+        <button className="mt-2 rounded bg-violet-900/60 px-2 py-0.5 text-[11px] text-violet-200 hover:bg-violet-800" onClick={() => void askCommittee()}>
+          ask the committee why
+        </button>
+        {review && (
+          <div className="mt-1 text-[11px] text-slate-300">
+            {review} · <Link to="/committee" className="text-sky-400 underline">committee</Link>
+          </div>
+        )}
       </Card>
 
       <Card title="2 · Indicators on the bar" right={indi ? `BB(${indi.params.bb_period},${indi.params.bb_mult}) ST(${indi.params.st_atr_period},${indi.params.st_mult})` : ''}>

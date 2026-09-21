@@ -271,3 +271,109 @@ export interface IndicatorsResponse {
   params: Record<string, number>
   rows: IndicatorRow[]
 }
+
+// -- review committee ------------------------------------------------------------------------------
+
+export interface CommitteeStatus {
+  available: boolean
+  auto: boolean
+  model: string | null
+  runs_today: number
+  max_runs_per_day: number
+  running: string[]
+  experiments_running: number
+  errors: number
+  last_error: string
+  last_run_ts: number | null
+  llm: { model: string; calls: number; errors: number; est_cost_usd: number; input_tokens?: number; output_tokens?: number } | null
+  log: {
+    entries: number
+    by_kind: Record<string, number>
+    by_failure_mode: Record<string, number>
+    hypotheses: number
+    hypotheses_by_status: Record<string, number>
+    mean_confidence: number | null
+  }
+  path_bars: number
+}
+
+export interface Bucket {
+  label: string
+  n: number
+  n_days?: number
+  avg_r?: number
+  t?: number | null
+  win_rate?: number
+  net?: number
+  loss_share?: number
+  too_small?: boolean
+}
+
+export interface Forensics {
+  meta: { source: string; strategy: string | null; n: number; segment?: string | null; run?: Record<string, unknown> }
+  cohort: Record<string, number | string | boolean | null | Record<string, number>>
+  dims: Record<string, Bucket[]>
+}
+
+export interface ParamChange {
+  path: string
+  value: number
+}
+
+export interface ExperimentResult {
+  verdict: string
+  note?: string
+  baseline?: { n: number; n_days: number; avg_r: number; avg_r_t: number | null; net: number; win_rate: number | null }
+  patched?: { n: number; n_days: number; avg_r: number; avg_r_t: number | null; net: number; win_rate: number | null }
+  delta_avg_r?: number | null
+  p_value?: number | null
+  symbols?: number
+  seconds?: number
+}
+
+export interface HypothesisRow {
+  id: string
+  title: string
+  rationale: string
+  changes: ParamChange[]
+  expected: string
+  status: string
+  result?: ExperimentResult | null
+  reflection?: string | null
+  error?: string | null
+  review_id: string
+  review_kind?: string
+  review_ts?: number
+  subject?: Record<string, unknown>
+}
+
+export interface CohortFinding {
+  title: string
+  failure_mode: string
+  magnitude: string
+  evidence_keys: string[]
+  confidence: number
+}
+
+export interface ReviewRow {
+  id: string
+  kind: 'case' | 'cohort'
+  ts: number
+  strategy?: string | null
+  symbol?: string | null
+  subject?: Record<string, unknown>
+  failure_mode?: string | null
+  secondary?: string[]
+  confidence?: number | null
+  lesson?: string
+  verdict?: string
+  what_happened?: string
+  why?: string
+  counterfactual?: string
+  findings?: CohortFinding[]
+  not_explained?: string[]
+  hypotheses?: HypothesisRow[]
+  error?: string | null
+  run?: { calls: number; seconds: number; analysts?: unknown[]; debate?: unknown; verdict?: unknown; report?: unknown }
+  pack?: Record<string, unknown>
+}

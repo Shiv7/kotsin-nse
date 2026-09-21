@@ -35,6 +35,7 @@ from .bars.store import BarStore
 from .bars.unified import BarSource, UnifiedBar
 from .bars.verify import BarReconciler
 from .bus import Bus, Topic
+from .committee.service import CommitteeService
 from .config import Segment, Settings
 from .domain import (
     Direction,
@@ -74,7 +75,9 @@ from .market.session import (
     ist_hm,
     ist_naive_to_ts,
     past_force_flat,
-    spec,
+)
+from .market.session import (
+    session_phase as session_phase_of,
 )
 from .ops.health import Check, HealthMonitor
 from .ops.telegram import Telegram
@@ -139,6 +142,7 @@ class Engine:
             settings.telegram_chat_id,
         )
         self.health = HealthMonitor()
+        self.committee = CommitteeService(self, settings, decision_tf=DECISION_TF)
 
         self.http = httpx.AsyncClient(timeout=30)
         self.auth = Authenticator(settings, self.http)
@@ -246,6 +250,7 @@ class Engine:
     async def stop(self) -> None:
         self._stop.set()
         await self.feed.stop()
+        await self.committee.stop()
         for t in self._tasks:
             t.cancel()
         for t in self._tasks:
@@ -552,14 +557,7 @@ class Engine:
 
     def session_phase(self, symbol: str, ts: int) -> str:
         inst = self.underlyings.get(symbol)
-        segment = inst.segment if inst else Segment.NSE_EQ
-        sp = spec(segment)
-        hm = ist_hm(ts)
-        if hm >= sp.entry_cutoff.strftime("%H:%M"):
-            return "EOD"
-        if hm <= sp.open.strftime("%H:%M"):
-            return "OPEN"
-        return "MID"
+        return session_phase_of(inst.segment if inst else Segment.NSE_EQ, ts)
 
     # -- decision path -----------------------------------------------------------------------------
 
@@ -958,6 +956,8 @@ class Engine:
         if pos.status == "CLOSED":
             trade = _trade_from(pos, now)
             await self.ledger.insert_trade(_trade_json(trade))
+            # Advisory and fire-and-forget: the review never delays or touches the trade path.
+            self.committee.on_trade_closed(_trade_json(trade))
             self.positions.pop(pos.id, None)
             self.telegram.fire_and_forget(
                 f"🔴 {pos.strategy} {pos.underlying.symbol} closed {decision.reason.value} "

@@ -17,6 +17,7 @@ dependencies = [
     "numpy>=2.0",
     "structlog>=24",
     "pyotp>=2.9",
+    "anthropic>=1,<2",
 ]
 
 [dependency-groups]

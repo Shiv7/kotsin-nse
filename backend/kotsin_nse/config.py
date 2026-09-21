@@ -141,6 +141,21 @@ class Settings(BaseSettings):
     #: forced exit (force-flat or halt) overrides this and proceeds on the last known price.
     position_quote_max_age_s: float = 60.0
 
+    # ---- review committee -----------------------------------------------------------------------
+    # Post-mortems on the algo's own signals and trades, by Claude, with an experiment loop that
+    # grades every proposal by running the backtester. Advisory: nothing here reaches the decision
+    # path. Off until a key is present (``ANTHROPIC_API_KEY`` in the environment also works).
+    anthropic_api_key: SecretStr | None = None
+    committee_model: str = "claude-opus-5"
+    #: review every closed trade automatically (five Claude calls each), within the daily cap
+    committee_auto_review: bool = False
+    #: cost guard: a run is one case (5 calls) or one cohort (4)
+    committee_max_runs_per_day: int = 30
+    #: decision-frame bars after the signal shown to a case review ("what happened next")
+    committee_path_bars: int = 16
+    #: cap the symbols an experiment backtests (None = every symbol in the history cache)
+    committee_experiment_symbols: int | None = None
+
     # ---- LIVE_CAPPED caps ----------------------------------------------------------------------
     # Mode is state (R9); these only bound what an *armed* engine may do.
     live_segments: str = "NSE_EQ"
@@ -173,7 +188,7 @@ class Settings(BaseSettings):
     cost_gst_pct: float = 18.0
     slippage_bps_default: float = 5.0
 
-    @field_validator("max_universe", mode="before")
+    @field_validator("max_universe", "committee_experiment_symbols", mode="before")
     @classmethod
     def _uncapped_is_blank(cls, v: object) -> object:
         """``KN_MAX_UNIVERSE=`` means no cap.

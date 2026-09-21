@@ -201,3 +201,19 @@ def boundaries(segment: Segment, tf: str) -> tuple[str, ...]:
         out.append(cur.strftime("%H:%M"))
         cur += timedelta(seconds=step)
     return tuple(out)
+
+
+def session_phase(segment: Segment, ts: float) -> str:
+    """``OPEN`` | ``MID`` | ``EOD`` for the decision bar starting at ``ts``.
+
+    A strategy must know it is on the last bar of the session without knowing that the session is
+    IST, or that MCX closes at 23:30 while NSE closes at 15:30. The engine asks for its strategies
+    and the review committee asks for its post-mortems; this is the one answer.
+    """
+    sp = spec(segment)
+    hm = ist_hm(ts)
+    if hm >= sp.entry_cutoff.strftime("%H:%M"):
+        return "EOD"
+    if hm <= sp.open.strftime("%H:%M"):
+        return "OPEN"
+    return "MID"

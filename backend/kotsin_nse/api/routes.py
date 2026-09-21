@@ -47,6 +47,24 @@ class HaltRequest(BaseModel):
     reason: str = ""
 
 
+class ReviewSignalRequest(BaseModel):
+    signal_id: str
+
+
+class ReviewTradeRequest(BaseModel):
+    run_id: str
+    index: int = Field(ge=0, description="index into the run's trades list")
+
+
+class ReviewCohortRequest(BaseModel):
+    source: str = Field(description="'ledger' or 'backtest:<run id>'")
+    strategy: str | None = None
+
+
+class ExperimentRequest(BaseModel):
+    hypothesis_id: str
+
+
 def build_app(engine: Engine) -> FastAPI:
     app = FastAPI(title="kotsin-nse", version="0.1.0", docs_url="/api/docs", openapi_url="/api/openapi.json")
     api = APIRouter(prefix="/api")
@@ -208,6 +226,80 @@ def build_app(engine: Engine) -> FastAPI:
         }
 
     # -- market -----------------------------------------------------------------------------------
+
+    # -- review committee ---------------------------------------------------------------------------
+    # The GETs read state and cost nothing (forensics is deterministic). The review POSTs spend
+    # Claude calls, bounded by KN_COMMITTEE_MAX_RUNS_PER_DAY; the experiment POST runs the
+    # backtester in a worker thread. None of them can touch a position.
+
+    @api.get("/committee/status")
+    async def committee_status() -> dict[str, Any]:
+        return engine.committee.status()
+
+    @api.get("/committee/forensics")
+    async def committee_forensics(
+        source: str = "ledger", strategy: str | None = None
+    ) -> dict[str, Any]:
+        try:
+            return await engine.committee.forensics(source, strategy or None)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @api.get("/committee/reviews")
+    async def committee_reviews(
+        limit: int = Query(50, le=500), kind: str | None = None
+    ) -> list[dict[str, Any]]:
+        from ..committee.service import public
+
+        rows = [e for e in engine.committee.log.entries if not kind or e.get("kind") == kind]
+        return [public(e) for e in rows[-limit:]][::-1]
+
+    @api.get("/committee/reviews/{review_id}")
+    async def committee_review(review_id: str) -> dict[str, Any]:
+        e = engine.committee.log.get(review_id)
+        if e is None:
+            raise HTTPException(404, "unknown review")
+        return e
+
+    @api.get("/committee/hypotheses")
+    async def committee_hypotheses() -> list[dict[str, Any]]:
+        return engine.committee.log.hypotheses()[::-1]
+
+    @api.post("/committee/review/signal")
+    async def committee_review_signal(req: ReviewSignalRequest) -> dict[str, Any]:
+        try:
+            return await engine.committee.review_signal(req.signal_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @api.post("/committee/review/trade")
+    async def committee_review_trade(req: ReviewTradeRequest) -> dict[str, Any]:
+        try:
+            return await engine.committee.review_backtest_trade(req.run_id, req.index)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @api.post("/committee/review/cohort")
+    async def committee_review_cohort(req: ReviewCohortRequest) -> dict[str, Any]:
+        try:
+            return await engine.committee.review_cohort(req.source, req.strategy or None)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @api.post("/committee/experiments/run")
+    async def committee_run_experiment(req: ExperimentRequest) -> dict[str, Any]:
+        try:
+            return engine.committee.start_experiment(req.hypothesis_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @api.get("/universe")
     async def universe() -> list[dict[str, Any]]:

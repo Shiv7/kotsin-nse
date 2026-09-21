@@ -111,6 +111,13 @@ Boundaries are enforced by `import-linter` (`backend/pyproject.toml`), not by co
 9. Every 1 s, `risk.exits` evaluates each open position: option stop, underlying stop, hard floor,
    target ladder, trail, then the time stop and force-flat as backstops.
 
+## Review committee (`committee/`)
+
+See `docs/COMMITTEE.md`. Post-mortems on the algo's own signals and trades by Claude in structured
+roles, over deterministic forensic tables and a per-case evidence pack; every proposal is a
+parameter patch graded by running the backtester (baseline vs patched, within-day permutation
+test). Runs on its own tasks; the decision path never reads it. Off until `KN_ANTHROPIC_API_KEY`.
+
 ## What is deliberately absent
 
 | Not here | Why |

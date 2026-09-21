@@ -378,6 +378,18 @@ class Ledger:
         rows = await self.recent(signals, 1, order_col="ts", where=signals.c.strategy == strategy)
         return rows[0] if rows else None
 
+    async def signal(self, signal_id: str) -> dict[str, Any] | None:
+        rows = await self.recent(signals, 1, where=signals.c.signal_id == signal_id)
+        return rows[0] if rows else None
+
+    async def trade_for_signal(self, signal_id: str) -> dict[str, Any] | None:
+        """The closed trade a signal produced, if any. Columns exist for what is queried in bulk;
+        the signal id lives in the JSON, and a personal ledger is small enough to scan."""
+        for row in await self.recent(trades, 2000):
+            if row.get("signal_id") == signal_id:
+                return row
+        return None
+
     async def counts(self) -> dict[str, int]:
         out: dict[str, int] = {}
         async with self.engine.begin() as conn:
