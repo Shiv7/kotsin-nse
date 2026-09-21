@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
-from .unified import UnifiedBar
+from .unified import BarSource, UnifiedBar
 
 
 class BarStore:
@@ -29,7 +29,13 @@ class BarStore:
         key = (bar.symbol, bar.tf)
         series = self._closed[key]
         if series and series[-1].ts == bar.ts:
-            series[-1] = bar  # a REST backfill overwriting a partial bar for the same bucket
+            # A REST backfill may overwrite a partial bar for the same bucket — but never the
+            # other way round. On a mid-session start the REST bar lands first and the bucket we
+            # were mid-way through when the feed connected closes *after* it; letting that PARTIAL
+            # overwrite the broker's own candle replaces a correct bar with one missing every tick
+            # before connect, and stamps it complete=True for the strategies to read.
+            if not (series[-1].source is not BarSource.PARTIAL and bar.source is BarSource.PARTIAL):
+                series[-1] = bar
         else:
             series.append(bar)
             if len(series) > self.max_bars:

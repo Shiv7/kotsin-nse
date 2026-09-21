@@ -162,6 +162,17 @@ class Settings(BaseSettings):
     cost_gst_pct: float = 18.0
     slippage_bps_default: float = 5.0
 
+    @field_validator("max_universe", mode="before")
+    @classmethod
+    def _uncapped_is_blank(cls, v: object) -> object:
+        """``KN_MAX_UNIVERSE=`` means no cap.
+
+        The field documents ``None = no cap`` but every value arrives from the environment as a
+        string, so ``None`` had no spelling: blank failed int parsing and the only way to take the
+        whole list was a number chosen to exceed it — the "never 999" this rule exists to forbid.
+        """
+        return None if isinstance(v, str) and not v.strip() else v
+
     @field_validator("segments", "live_segments")
     @classmethod
     def _segments_valid(cls, v: str) -> str:

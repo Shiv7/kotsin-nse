@@ -22,7 +22,7 @@ import asyncio
 import base64
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -35,6 +35,9 @@ from ..base import VenueError
 log = structlog.get_logger(__name__)
 
 TOTP_WINDOW_S = 30
+#: A session younger than this is not the reason a call failed, so an error path may not drop
+#: it. Longer than the 30s OTP window, so a genuine re-auth still gets a fresh code.
+MIN_SESSION_AGE_S = 90.0
 #: Vendor-wide subscription key that ships inside py5paisa; it identifies the API product, not the
 #: user, and the historical-data host rejects the request without it.
 APIM_KEY = "c89fab8d895a426d9e00db380b433027"
@@ -45,6 +48,7 @@ class Session:
     access_token: str
     client_code: str
     expires_at: float
+    minted_at: float = field(default_factory=time.time)
 
     @property
     def valid(self) -> bool:
@@ -80,8 +84,25 @@ class Authenticator:
             self.session = await self._login()
             return self.session
 
-    def invalidate(self) -> None:
+    def invalidate(self, *, min_age_s: float = MIN_SESSION_AGE_S) -> bool:
+        """Drop the session so the next call re-logs in. Returns whether it actually dropped.
+
+        Guarded by age, because the caller is an error path. ``V2/NetPositionNetWise`` answers a
+        *flat book* with ``head.status=1`` — the same code a dead session uses — and reconcile runs
+        every 60s in LIVE. Ungated, a permanently flat account forces a full TOTP login every
+        minute for the whole session: the OTP window is 30s and single-use, so most of those
+        attempts fail, and the ones that do not churn the broker session the live feed is using.
+        A session minted seconds ago is not the reason a call failed.
+        """
+        if self.session is not None and time.time() - self.session.minted_at < min_age_s:
+            log.warning(
+                "fivepaisa.reauth_suppressed",
+                session_age_s=round(time.time() - self.session.minted_at, 1),
+                min_age_s=min_age_s,
+            )
+            return False
         self.session = None
+        return True
 
     async def public_ip(self) -> str:
         if self._public_ip:

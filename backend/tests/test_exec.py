@@ -217,3 +217,65 @@ async def test_reconcile_clean_thaws():
     r = Reconciler(FakeRest([]))
     report = await r.run([])
     assert report.clean and not r.frozen
+
+
+# -- the broker's overloaded status=1 ------------------------------------------------------------
+
+
+class _FakeAuth:
+    def __init__(self) -> None:
+        self.invalidations = 0
+
+    async def token(self):
+        from kotsin_nse.venue.fivepaisa.auth import Session
+
+        return Session(access_token="t", client_code="1", expires_at=time.time() + 3600)
+
+    def invalidate(self, **_kw) -> bool:
+        self.invalidations += 1
+        return True
+
+
+class _FakeResponse:
+    def __init__(self, payload: dict) -> None:
+        self._payload = payload
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict:
+        return self._payload
+
+
+class _FakeHttp:
+    def __init__(self, payload: dict) -> None:
+        self.payload = payload
+        self.posts = 0
+
+    async def post(self, *_a, **_kw) -> _FakeResponse:
+        self.posts += 1
+        return _FakeResponse(self.payload)
+
+
+async def test_a_flat_book_is_an_empty_reconcile_not_a_failed_one():
+    """Observed live 2026-09-21: a flat account answers with head.status=1, 'No record found.'
+
+    Treating that as an error froze entries on an account with nothing to reconcile, and — because
+    status 1 also means 'session dead' — re-logged in every 60s in LIVE to ask the same question.
+    """
+    from kotsin_nse.venue.fivepaisa.rest import FivePaisaREST
+
+    http = _FakeHttp(
+        {"head": {"status": "1", "statusDescription": "No record found."}, "body": {}}
+    )
+    auth = _FakeAuth()
+    rest = FivePaisaREST(Settings(), http, auth)
+
+    assert await rest.net_positions() == []
+    assert auth.invalidations == 0, "a flat book must not force a re-login"
+    assert http.posts == 1, "and must not be retried"
+
+    report = await Reconciler(rest).run([])
+    assert report.error == ""
+    assert report.clean is True
+    assert report.mismatches == []

@@ -32,6 +32,11 @@ log = structlog.get_logger(__name__)
 HISTORICAL_BASE = "https://openapi.5paisa.com/V2/historical/"
 VALID_INTERVALS = frozenset({"1m", "3m", "5m", "10m", "15m", "30m", "60m", "1d"})
 
+#: Messages the broker returns with ``head.status=1`` that mean "nothing to return", not "your
+#: session is dead". Observed live on 2026-09-21: a flat account answers ``V2/NetPositionNetWise``
+#: with exactly ``No record found.`` — the same status code a dead session uses.
+NO_RECORDS: tuple[str, ...] = ("no record found", "no data found", "no position")
+
 
 class FivePaisaREST:
     def __init__(self, settings: Settings, client: httpx.AsyncClient, auth: Authenticator) -> None:
@@ -51,7 +56,14 @@ class FivePaisaREST:
         sess = await self.auth.token()
         return {"Authorization": f"Bearer {sess.access_token}"}
 
-    async def _post(self, path: str, body: dict[str, Any], *, retry: bool = True) -> dict[str, Any]:
+    async def _post(
+        self,
+        path: str,
+        body: dict[str, Any],
+        *,
+        retry: bool = True,
+        empty_ok: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
         self.calls += 1
         headers = await self._bearer()
         url = self.s.endpoints.rest + path
@@ -68,9 +80,21 @@ class FivePaisaREST:
         head, resp = data.get("head") or {}, data.get("body") or {}
         status = str(head.get("status", head.get("Status", "0")))
         if status not in ("0", "None"):
+            # The broker overloads these codes: the same status=1 means "your session is dead" and
+            # "there is nothing to return". Log what it actually said — without it the only symptom
+            # is `head status=1` and there is no way to tell a flat book from a dead session.
+            message = str(head.get("statusDescription") or resp.get("Message") or "")
+            log.warning(
+                "fivepaisa.head_status", path=path, status=status, message=message[:200]
+            )
+            # Checked before the re-auth: "No record found." is a *successful* answer meaning the
+            # book is empty, and treating it as a failure froze a flat account out of trading while
+            # re-logging in every 60 seconds to ask the same question.
+            if any(m in message.strip().lower() for m in empty_ok):
+                return resp
             if retry and status in ("1", "9"):  # session states the broker signals this way
-                self.auth.invalidate()
-                return await self._post(path, body, retry=False)
+                if self.auth.invalidate():
+                    return await self._post(path, body, retry=False, empty_ok=empty_ok)
             self.failures += 1
             raise VenueError(f"{path}: head status={status}", raw=head)
         rms = resp.get("Status")
@@ -179,7 +203,11 @@ class FivePaisaREST:
     # -- account ---------------------------------------------------------------------------------
 
     async def net_positions(self) -> list[dict[str, Any]]:
-        resp = await self._post("V2/NetPositionNetWise", {"ClientCode": self.s.fp_client_code})
+        resp = await self._post(
+            "V2/NetPositionNetWise",
+            {"ClientCode": self.s.fp_client_code},
+            empty_ok=NO_RECORDS,
+        )
         out: list[dict[str, Any]] = []
         for row in resp.get("NetPositionDetail") or []:
             out.append(

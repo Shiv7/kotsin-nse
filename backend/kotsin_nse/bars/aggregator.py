@@ -22,6 +22,7 @@ from __future__ import annotations
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any
 
 import structlog
@@ -42,7 +43,11 @@ TIMEFRAMES: tuple[str, ...] = ("1m", "5m", "15m", "30m")
 @dataclass(slots=True)
 class SymbolState:
     instrument: Instrument
-    last_total_qty: int = 0
+    # None = no baseline yet. Zero is a *claim* — that we watched the session from its first
+    # trade — and on a mid-session start that claim is false: the first tick's TotalQty is the
+    # whole day so far, and `total - 0` books all of it into whatever bucket is open. None says
+    # "unknown", so the first tick primes the baseline and books nothing.
+    last_total_qty: int | None = None
     day: str = ""
     session_pv: float = 0.0  # Σ typical × volume, for the session VWAP
     session_v: float = 0.0
@@ -137,7 +142,12 @@ class Aggregator:
         prev = float(tick.get("prev_close") or 0)
         st.day = day
         st.session_pv = st.session_v = 0.0
-        st.last_total_qty = 0
+        # A zero baseline claims we watched this session from its first trade. That is true only if
+        # we were connected by the open — then TotalQty counts up from zero with us and nothing is
+        # lost. Connect at 14:10 and it is false: the first tick carries the whole day so far, and
+        # `total - 0` books every share since 09:15 into the bucket that happens to be open.
+        opened = session_open_ts(st.instrument.segment, date.fromisoformat(day))
+        st.last_total_qty = 0 if st.connected_since <= opened else None
         st.prev_close = prev if prev > 0 else st.prev_close
 
     @staticmethod
@@ -145,6 +155,9 @@ class Aggregator:
         total = int(tick.get("total_qty") or 0)
         if total <= 0:
             return float(tick.get("last_qty") or 0)
+        if st.last_total_qty is None:  # first tick for this symbol; no baseline to subtract
+            st.last_total_qty = total
+            return 0.0
         if total < st.last_total_qty:  # session reset or a stale frame; do not emit negative volume
             st.last_total_qty = total
             return 0.0

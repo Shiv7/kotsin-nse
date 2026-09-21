@@ -269,3 +269,55 @@ def test_tracking_the_same_instrument_twice_is_a_no_op(equity):
     agg.track(equity)
     agg.track(equity)
     assert len(agg.state) == 1
+
+
+async def test_a_mid_session_connect_does_not_book_the_whole_day_into_one_bar(equity):
+    """P-volume: connect at 14:10 and the first TotalQty is the day so far, not a bar's worth.
+
+    Observed live on 2026-09-21: the engine started at 14:10 IST and RELIANCE's 14:15 bucket came
+    out at 8,132,120 against the 714,679 the broker's own candle reported for the same window —
+    the whole session's volume, booked into whichever bucket happened to be open at connect.
+    """
+    store = BarStore()
+    agg = Aggregator(store, timeframes=("1m",))
+    agg.track(equity)
+    t = ist_ts("2026-09-18", "14:15")
+    agg.state[equity.scrip_code].connected_since = t - 5  # joined hours after the 09:15 open
+    for total in (8_000_000, 8_000_150, 8_000_400):
+        await agg.on_tick(
+            {"scrip_code": equity.scrip_code, "ltp": 100.0, "total_qty": total, "ts": t + 1}
+        )
+    forming = store.forming("RELIANCE", "1m")
+    assert forming is not None
+    # The first tick primes the baseline and books nothing; only the 150 + 250 traded while we
+    # were watching is ours to claim.
+    assert forming.volume == 400.0
+
+
+async def test_a_partial_bar_never_overwrites_the_brokers_own_candle(equity):
+    """The REST backfill lands first on a mid-session start; the partial bucket closes after it."""
+    t = ist_ts("2026-09-18", "14:15")
+
+    store = BarStore()
+    rest = bar(t, 100.0, 101.0, 99.0, 100.5, 714_679.0)
+    rest.source = BarSource.REST
+    store.close(rest)
+
+    partial = bar(t, 100.0, 101.0, 99.0, 100.5, 8_132_120.0)
+    partial.source = BarSource.PARTIAL
+    store.close(partial)
+
+    held = store.bars("RELIANCE", "30m")
+    assert len(held) == 1
+    assert held[0].volume == 714_679.0
+    assert held[0].source is BarSource.REST
+
+    # ...but REST overwriting a partial, the direction the code was written for, still works.
+    store2 = BarStore()
+    p = bar(t, 100.0, 101.0, 99.0, 100.5, 1.0)
+    p.source = BarSource.PARTIAL
+    store2.close(p)
+    r = bar(t, 100.0, 101.0, 99.0, 100.5, 714_679.0)
+    r.source = BarSource.REST
+    store2.close(r)
+    assert store2.bars("RELIANCE", "30m")[0].volume == 714_679.0
