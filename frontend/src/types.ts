@@ -86,10 +86,49 @@ export interface SignalRow {
   grade: string
   rr: number
   score: number
+  confidence: number
   reason: string
   gates: GateResult[]
   evidence: Record<string, number>
   source_signal_id: string
+  decision?: string
+  decision_reason?: string
+  context?: SignalContext
+}
+
+export interface Zone {
+  price: number
+  strength: number
+  wall: boolean
+  members: string[]
+}
+
+export interface SignalContext {
+  indicators?: {
+    bb_upper: number
+    bb_middle: number
+    bb_lower: number
+    st_value: number
+    st_trend: number
+    bars_in_trend: number
+    atr: number
+    params: Record<string, number>
+  }
+  confluence?: {
+    stop: number
+    stop_zone: string
+    targets: number[]
+    target_zones: string[]
+    grade: string
+    rr: number
+    fortress: number
+    room_ratio: number
+    note: string
+    policy: Record<string, number>
+  }
+  zones?: Zone[]
+  conviction?: Record<string, number | string>
+  volume?: Record<string, number | string | null>
 }
 
 export interface RejectionRow {
@@ -159,6 +198,8 @@ export interface StrategyView {
   binding: { gate: string; count: number }[]
   wallet: Wallet
   multipliers?: Record<string, number>
+  pnl?: { n: number; net: number; charges: number; last_closed_ts: number } | null
+  last_signal?: { ts: number; symbol: string; direction: string; grade: string; decision: string; signal_id: string } | null
 }
 
 export interface Health {
@@ -207,4 +248,20 @@ export interface UniverseRow {
   bars_30m: number
   bars_1d: number
   zones: number
+}
+
+export interface IndicatorRow {
+  ts: number
+  bb_upper: number | null
+  bb_middle: number | null
+  bb_lower: number | null
+  st_value: number | null
+  st_trend: number | null
+}
+
+export interface IndicatorsResponse {
+  symbol: string
+  tf: string
+  params: Record<string, number>
+  rows: IndicatorRow[]
 }

@@ -135,7 +135,13 @@ strategy's OI term at exactly zero for its entire life.
 
 ## 9. Artefact
 
-**None.** Same position as FUDKII, plus one specific debt: the MCX multiplier needs fitting before
+**Structurally untestable in the current backtester.** The 1-year run in FUDKII.md §8 shows FUKAA
+with 0 trades — but that is not evidence about FUKAA: REST history carries no open interest, so
+`ref_oi` (FAIL_CLOSED) never opens and the composite is missing its OI score. Testing FUKAA needs
+an OI history (the live archive will accumulate one) and then its own run. Until then: **no
+artefact, and the base signal it filters has been falsified (FUDKII.md §8).**
+
+**Inherited caveat.** Same position as FUDKII, plus one specific debt: the MCX multiplier needs fitting before
 a commodity trade. The honest baseline is the measured distribution — average passing surge 7.47×,
 maximum 38.34×, with a thin tail at 1.5–2.0× that only existed because the gate was 1.0.
 

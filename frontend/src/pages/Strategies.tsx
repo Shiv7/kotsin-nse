@@ -1,5 +1,5 @@
 import { Card, ErrorLine, Stat, StrategyBadge, Table } from '../components/Ui'
-import { fmt } from '../lib/api'
+import { fmt, ist, pnlColor } from '../lib/api'
 import { usePoll } from '../lib/usePoll'
 import type { StrategyView } from '../types'
 
@@ -43,9 +43,20 @@ export function Strategies() {
               </span>
             </div>
 
-            <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+            <div className="grid grid-cols-2 gap-3 md:grid-cols-6">
               <Stat label="Signals emitted" value={s.gates.passed} sub="the cheapest liveness test there is" />
               <Stat label="Candidates" value={s.gates.candidates} />
+              <Stat
+                label="Last trigger"
+                value={s.last_signal ? `${s.last_signal.symbol} ${s.last_signal.direction === 'BULLISH' ? '▲' : '▼'}` : 'never'}
+                sub={s.last_signal ? `${ist(s.last_signal.ts)} IST · grade ${s.last_signal.grade || '—'} · ${s.last_signal.decision ?? ''}` : 'no signal recorded'}
+              />
+              <Stat
+                label="Realised P&L"
+                value={s.pnl ? fmt.signedInr(s.pnl.net) : '₹0'}
+                tone={pnlColor(s.pnl?.net)}
+                sub={s.pnl ? `${s.pnl.n} closed · charges ${fmt.inr(s.pnl.charges)} · last ${ist(s.pnl.last_closed_ts)}` : 'no closed trades'}
+              />
               <Stat label="Wallet" value={fmt.inr(s.wallet.balance)} sub={`${s.wallet.trades} trades`} />
               <Stat
                 label="State"

@@ -124,22 +124,72 @@ Owned entirely by `risk/exits.py` — see that module. Option stop, underlying s
 T1–T4 ladder (40/30/20/10), breakeven after T1, peak trail armed at +3% with 40% giveback, time
 stop, segment force-flat. The stop only ever tightens.
 
-## 8. Artefact
+## 8. Artefact — 2026-09-21, real data, and the answer is no
 
-**None.** No backtest has been run against this implementation. The parameters are inherited from
-a live book that itself carried no located backtest artefact for its BB/ST periods — the ATR period
-was changed 14 → 7 "per user request" with no citation in the code.
+**Run `bt-875d519a3777`** (`docs/backtests/`): 24 liquid NSE F&O underlyings on their cash series,
+1 year of 5paisa 30m history (2025-09-22 → 2026-09-21), the inherited parameters, through this
+repo's live `Fudkii` → `ExitEngine` → `CostModel` code. Pessimistic fills: next-bar open plus
+slippage, stop assumed first when a bar covers both, stop fill worse than the stop price.
 
-Before this trades real money it needs: a backtest over ≥ 1 year on ≥ 50 symbols, a within-day
-permutation test, ≥ 300 out-of-sample trades, and a net edge after the cost model in
-`risk/costs.py`. The cost model says the bar is roughly **0.3% per round trip at ₹33,000 and 0.1%
-at ₹1.3 lakh** — which is why `risk/limits.py` defaults to the larger size.
+| | |
+|---|---|
+| trades | **481** over 194 days (not a small sample) |
+| win rate | **17.3%** |
+| avg R | **−1.40 ± 0.18** (day-clustered), **t = −7.96** |
+| gross / charges / net | −29,834 / 62,220 / **−92,054** — it loses *before* costs; charges are 209% of \|gross\| |
+| exits | SL-EQ 385 (80%) · TIME_STOP 74 · TARGET 21 · EOD 1 |
+| profit factor / max DD | 0.40 / −91,777 |
+| modelled option leg | −626,630 (a model, not a measurement — but the sign matches the old book's "OTM calls lose −5.47%/trade") |
+
+### The falsifier in §1 fired — inverted
+
+| grade | n | avg R | win |
+|---|---|---|---|
+| **A** | 345 | **−1.73** | 13.6% |
+| B | 69 | −0.72 | 26.1% |
+| C | 67 | −0.41 | 26.9% |
+
+Grade A is the *worst* bucket. The grade is anti-informative, which is this strategy's own kill
+condition.
+
+### Mechanism, measured
+
+* median confluence stop **0.23%** from entry (p25 0.14%, p75 0.35%); **89%** of stops < 0.5% away
+* 1R at ₹1L size = **₹225**; round-trip charges = **0.57R**
+* median MFE **+1.08R**, median MAE **−1.44R**, median hold **1 bar** — 1R is inside a single 30m
+  bar's noise
+* the 5 trades (1%) with a stop ≥ 1% away averaged **+0.15R**
+
+"Nearest of ~36 pivot lines" is a noise stop, not a structural one; grade A is high-RR precisely
+because the risk is tiny, so the grade selects for the stops least likely to survive.
+
+### Exploratory variants (hypotheses, not fixes — `GradePolicy.min_stop_atr`, `stop_requires_wall`)
+
+| variant | trades | win | avg R | t | net | charges/\|gross\| |
+|---|---|---|---|---|---|---|
+| baseline (inherited) | 481 | 17.3% | −1.40 | −7.96 | −92,054 | 209% |
+| stop floor 1.0 ATR | 320 | 34.7% | −0.31 | −3.59 | −49,694 | 498% |
+| stop must be a wall | 405 | 20.2% | −1.17 | −6.39 | −72,026 | 267% |
+| 1.0 ATR floor + wall | 303 | 34.7% | −0.30 | −3.01 | −47,585 | 467% |
+| stop floor 1.5 ATR | 199 | 36.7% | −0.27 | −3.02 | −42,465 | 154% |
+
+Widening the stop shrinks the loss but never turns it positive; gross converges on zero and
+charges decide the sign. **The entry has no edge; the stop only sets how fast it is paid for.**
+That is the same conclusion `kotsin-box/SESSION-PRIMER.md` reached on CAN2 ("entries, not exits").
+
+### What this does not say
+
+* It is measured on the **underlying**. The option leg is modelled.
+* No OI in REST history, so nothing here tests OI-gated variants.
+* FUKAA is not tested by this run at all — see FUKAA.md §9.
+
+**Do not trade this with money as it stands.**
 
 ## 9. Open items
 
 | Item | Type | Impact |
 |---|---|---|
-| no backtest artefact | unvalidated | every parameter is inherited, not justified |
+| the inherited entry has no measured edge | **falsified** | see §8 — a different entry is needed, not a different exit |
 | delta is estimated, not observed | approximation | the option stop/target projection is crude; the chain does not publish a Greek on this feed |
 | the ATR 14 → 7 change is uncited | unvalidated | a core parameter with no recorded reason |
 | grade distribution unmeasured here | unknown | the gate counters will answer it on the first session |

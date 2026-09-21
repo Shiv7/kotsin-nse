@@ -1,0 +1,127 @@
+{
+ "id": "bt-0f4b00a663d6",
+ "created_ts": 1790012534.483755,
+ "params": {
+  "segment": "NSE_EQ",
+  "fudkii": {
+   "tf": "30m",
+   "bb_period": 20,
+   "bb_mult": 2.0,
+   "st_atr_period": 7,
+   "st_mult": 3.0,
+   "require_both": true,
+   "flip_max_bars_ago": 0,
+   "warm_bars": 50,
+   "room_atr_period": 14,
+   "grade_floor": true,
+   "eod_strong_only": true,
+   "eod_min_fortress": 10.0,
+   "grade_policy": {
+    "rr_hard_floor": 1.0,
+    "rr_a": 2.5,
+    "rr_b": 1.8,
+    "rr_c": 1.2,
+    "room_min_atr": 0.5,
+    "fortress_block": 12.0,
+    "max_targets": 4,
+    "min_stop_atr": 1.5,
+    "stop_requires_wall": false
+   }
+  },
+  "fukaa": {
+   "volume_multiplier_nse": 4.0,
+   "volume_multiplier_mcx": 2.0,
+   "volume_multiplier_cds": 2.0,
+   "avg_bars": 6,
+   "avg_volume_floor": 1000.0,
+   "watching_ttl_minutes": 35,
+   "composite_min": 60.0,
+   "rr_floor": 0.5,
+   "require_ref_oi": true,
+   "tier_floor": "S4",
+   "top_n": null,
+   "max_same_direction": null,
+   "atr_period": 14,
+   "promote_on_t_plus_1": true
+  },
+  "limits": {
+   "risk_per_trade_pct": 1.0,
+   "max_position_pct": 10.0,
+   "max_position_inr": 100000.0,
+   "max_positions_per_strategy": 3,
+   "max_positions_per_underlying": 1,
+   "max_positions_all_books": 6,
+   "max_underlying_exposure_pct": 20.0,
+   "daily_loss_limit_pct": 3.0,
+   "max_drawdown_pct": 15.0,
+   "entry_cutoff_buffer_min": 45,
+   "time_stop_bars": 8,
+   "target_ladder": [
+    0.4,
+    0.3,
+    0.2,
+    0.1
+   ],
+   "breakeven_after_t1": true,
+   "trail_giveback_pct": 40.0,
+   "trail_arm_pct": 3.0,
+   "hard_floor_pct": 50.0
+  },
+  "position_budget_inr": 100000,
+  "slippage_bps": 5.0,
+  "model_option_leg": true
+ },
+ "symbols": 24,
+ "bars": 73521,
+ "signals": 199,
+ "rejections": 73671,
+ "trades": 199,
+ "gross": -16734.38,
+ "charges": 25730.0,
+ "net": -42464.58,
+ "charges_share_of_gross": 153.8,
+ "win_rate": 36.7,
+ "avg_r": -0.273,
+ "avg_r_stderr": 0.0903,
+ "avg_r_t": -3.02,
+ "n_days": 130,
+ "sample_too_small": false,
+ "profit_factor": 0.5401536518160401,
+ "max_drawdown": -44688.24,
+ "by_strategy": {
+  "FUDKII": {
+   "trades": 199,
+   "net": -42464.58,
+   "avg_r": -0.273,
+   "win_rate": 36.7
+  }
+ },
+ "by_exit_reason": {
+  "SL-EQ": {
+   "n": 79,
+   "net": -75948.75
+  },
+  "TIME_STOP": {
+   "n": 105,
+   "net": 15566.41
+  },
+  "TARGET": {
+   "n": 12,
+   "net": 17268.34
+  },
+  "EOD": {
+   "n": 3,
+   "net": 649.42
+  }
+ },
+ "binding_gates": {
+  "FUDKII:st_flip": 70975,
+  "FUDKII:bb_break": 1017,
+  "FUDKII:confluence_grade": 858,
+  "FUDKII:history": 460,
+  "FUKAA:volume_surge": 294,
+  "FUKAA:composite": 55,
+  "FUDKII:eod_strong_only": 12
+ },
+ "modelled_option_net": -341348.94
+}

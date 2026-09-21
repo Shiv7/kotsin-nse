@@ -37,7 +37,8 @@ log = structlog.get_logger(__name__)
 
 #: Timeframes the engine maintains. 30m is FUDKII's and FUKAA's decision frame; the rest are for
 #: the chart, the ATR used by risk, and future strategies.
-TIMEFRAMES: tuple[str, ...] = ("1m", "5m", "15m", "30m")
+#: 1m/2m/3m are for the chart and for anyone watching the tape; the decision frame is 30m.
+TIMEFRAMES: tuple[str, ...] = ("1m", "2m", "3m", "5m", "15m", "30m")
 
 
 @dataclass(slots=True)

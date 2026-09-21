@@ -26,8 +26,8 @@ from ..config import Segment
 
 IST = ZoneInfo("Asia/Kolkata")
 
-TF_SECONDS: dict[str, int] = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "60m": 3600}
-INTRADAY_TFS: tuple[str, ...] = ("1m", "5m", "15m", "30m", "60m")
+TF_SECONDS: dict[str, int] = {"1m": 60, "2m": 120, "3m": 180, "5m": 300, "15m": 900, "30m": 1800, "60m": 3600}
+INTRADAY_TFS: tuple[str, ...] = ("1m", "2m", "3m", "5m", "15m", "30m", "60m")
 
 
 @dataclass(frozen=True, slots=True)

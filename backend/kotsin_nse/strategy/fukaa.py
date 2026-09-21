@@ -34,6 +34,7 @@ months after the interaction was deleted.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from ..bars.indicators import atr, volume_surges
 from ..bars.unified import UnifiedBar
@@ -87,6 +88,7 @@ class Watching:
     expires_ts: int
     base_signal_id: str
     evidence: dict[str, float] = field(default_factory=dict)
+    context: dict[str, Any] = field(default_factory=dict)
 
 
 class Fukaa:
@@ -291,6 +293,12 @@ class Fukaa:
                 source_signal_id=(
                     base.signal_id if base is not None else (watching.base_signal_id if watching else "")
                 ),
+                context={**(dict(base.context) if base is not None else (dict(watching.context) if watching else {})),
+                         "conviction": {"composite": conv.composite, "tier": conv.tier.value,
+                                        "volume_score": conv.volume_score, "oi_score": conv.oi_score,
+                                        "momentum_score": conv.momentum_score, "rr_score": conv.rr_score},
+                         "volume": {"surge_t": surge_t, "surge_t1": surge_t1, "baseline": baseline,
+                                    "multiplier": mult, "exchange": exchange}},
             )
         )
         return out
@@ -315,6 +323,7 @@ class Fukaa:
             expires_ts=bar.ts + self.cfg.watching_ttl_minutes * 60,
             base_signal_id=base.signal_id,
             evidence=dict(base.evidence),
+            context=dict(base.context),
         )
 
     def _reject(

@@ -27,6 +27,7 @@ Differences from the Java original, each deliberate:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from ..bars.indicators import atr, bars_in_trend, bollinger, supertrend
 from ..bars.pivots import GradePolicy, compute_confluence
@@ -168,13 +169,37 @@ class Fudkii:
         if not chain_passed(gates):
             return self._reject(out, bar, direction, gates, evidence, "")
 
+        zones = ctx.zones(bar.symbol)
         conf = compute_confluence(
             close=bar.close,
             bullish=direction is Direction.BULLISH,
-            zones=ctx.zones(bar.symbol),
+            zones=zones,
             atr_value=room_atr,
             policy=cfg.grade_policy,
         )
+        context: dict[str, Any] = {
+            "indicators": {
+                "bb_upper": bb.upper, "bb_middle": bb.middle, "bb_lower": bb.lower,
+                "st_value": st.value, "st_trend": st.trend, "bars_in_trend": trend_bars,
+                "atr": room_atr,
+                "params": {"bb_period": cfg.bb_period, "bb_mult": cfg.bb_mult,
+                           "st_atr_period": cfg.st_atr_period, "st_mult": cfg.st_mult},
+            },
+            "confluence": {
+                "stop": conf.stop, "stop_zone": conf.stop_zone,
+                "targets": list(conf.targets), "target_zones": list(conf.target_zones),
+                "grade": conf.grade, "rr": conf.rr, "fortress": conf.fortress,
+                "room_ratio": conf.room_ratio, "note": conf.note,
+                "policy": {"rr_hard_floor": cfg.grade_policy.rr_hard_floor,
+                           "rr_a": cfg.grade_policy.rr_a, "rr_b": cfg.grade_policy.rr_b,
+                           "rr_c": cfg.grade_policy.rr_c, "room_min_atr": cfg.grade_policy.room_min_atr},
+            },
+            "zones": [
+                {"price": round(z.price, 2), "strength": round(z.strength, 2),
+                 "wall": z.is_wall, "members": list(z.members)}
+                for z in sorted(zones, key=lambda z: z.price)
+            ],
+        }
         evidence.update(
             {
                 "rr": conf.rr,
@@ -229,6 +254,7 @@ class Fudkii:
                 ),
                 gates=tuple(gates),
                 evidence=evidence,
+                context=context,
             )
         )
         return out

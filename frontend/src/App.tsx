@@ -4,6 +4,7 @@ import { ModeBanner } from './components/ModeBanner'
 import { usePoll } from './lib/usePoll'
 import { Backtest } from './pages/Backtest'
 import { Chart } from './pages/Chart'
+import { Options } from './pages/Options'
 import { Overview } from './pages/Overview'
 import { Risk } from './pages/Risk'
 import { Signals } from './pages/Signals'
@@ -19,6 +20,7 @@ const PAGES = [
   ['/trades', 'Trades'],
   ['/strategies', 'Strategies'],
   ['/chart', 'Chart'],
+  ['/options', 'Options'],
   ['/backtest', 'Backtest'],
   ['/universe', 'Universe'],
   ['/risk', 'Risk'],
@@ -35,6 +37,7 @@ function Pages() {
         <Route path="/trades" element={<Trades />} />
         <Route path="/strategies" element={<Strategies />} />
         <Route path="/chart" element={<Chart />} />
+        <Route path="/options" element={<Options />} />
         <Route path="/backtest" element={<Backtest />} />
         <Route path="/universe" element={<Universe />} />
         <Route path="/risk" element={<Risk />} />

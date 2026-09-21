@@ -76,7 +76,7 @@ than pretending to have a feed.
 | 7 | Live: real orders, reconciliation, kill | 5 restarts with an open position → zero unreconciled | ⬜ built, **never run against the broker**; no resting stop at the venue ([runbook](docs/RUNBOOK.md)) |
 | 8 | Backtester replaying the same strategy/risk code | a null strategy backtests to exactly −charges | ✅ (tested; the option leg is modelled, not measured) |
 
-**Nothing here has traded.** No parameter in this repo carries a backtest artefact yet; the ones
+**Nothing here has traded, and the first real backtest says it should not** — FUDKII with the inherited parameters averages −1.40R (t = −8) over 481 trades on a year of real data; see `docs/strategies/FUDKII.md` §8. No parameter in this repo carries a *validated* artefact; the ones
 inherited from the old stack carry its evidence and its caveats, both recorded in
 [`docs/strategies/`](docs/strategies/).
 

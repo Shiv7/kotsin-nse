@@ -12,23 +12,27 @@ works even when everything else is frozen.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
+from datetime import date
 from pathlib import Path
 from typing import Any
 
 import sqlalchemy as sa
-from fastapi import APIRouter, FastAPI, HTTPException, Query
+from fastapi import APIRouter, FastAPI, HTTPException, Query, WebSocket
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from ..bars.indicators import bollinger, supertrend
 from ..bars.unified import UnifiedBar
-from ..engine import Engine, _position_json
+from ..engine import SELECTION_POLICY, Engine, _position_json
 from ..exec.gateway import Mode
 from ..ledger.db import events, rejections, signals, trades
-from ..market.session import ist_hm, to_ist
+from ..market.session import TF_SECONDS, ist_hm, to_ist
 from ..strategy.keys import ALL_KEYS
+from .ws import Hub, handle, pump
 
 
 class ModeRequest(BaseModel):
@@ -83,6 +87,21 @@ def build_app(engine: Engine) -> FastAPI:
         """
         stats = engine.strategy_stats()
         hist = await engine.ledger.gate_histogram()
+        pnl = await engine.ledger.pnl_by_strategy()
+        last = {k.value: await engine.ledger.last_signal(k.value) for k in ALL_KEYS}
+
+        def _last(key: str) -> dict[str, Any] | None:
+            row = last.get(key)
+            if not row:
+                return None
+            return {
+                "ts": row["ts"],
+                "symbol": row["symbol"],
+                "direction": row["direction"],
+                "grade": row.get("grade"),
+                "decision": row.get("decision"),
+                "signal_id": row["signal_id"],
+            }
         by_strategy: dict[str, list[dict[str, Any]]] = {}
         for row in hist:
             by_strategy.setdefault(row["strategy"], []).append(
@@ -95,6 +114,8 @@ def build_app(engine: Engine) -> FastAPI:
                 "gates": stats["FUDKII"],
                 "binding": by_strategy.get("FUDKII", []),
                 "wallet": engine.wallets["FUDKII"].to_json(),
+                "pnl": pnl.get("FUDKII"),
+                "last_signal": _last("FUDKII"),
             },
             "fukaa": {
                 "key": "FUKAA",
@@ -102,6 +123,8 @@ def build_app(engine: Engine) -> FastAPI:
                 "gates": stats["FUKAA"],
                 "binding": by_strategy.get("FUKAA", []),
                 "wallet": engine.wallets["FUKAA"].to_json(),
+                "pnl": pnl.get("FUKAA"),
+                "last_signal": _last("FUKAA"),
                 "multipliers": {
                     "N": engine.fukaa.multiplier("N"),
                     "M": engine.fukaa.multiplier("M"),
@@ -205,6 +228,8 @@ def build_app(engine: Engine) -> FastAPI:
 
     @api.get("/bars/{symbol}")
     async def bars(symbol: str, tf: str = "30m", n: int = Query(200, le=1000)) -> dict[str, Any]:
+        if tf != "1d" and tf not in TF_SECONDS:
+            raise HTTPException(400, f"unknown timeframe {tf!r}; known: {sorted(TF_SECONDS)} or 1d")
         rows = engine.store.bars(symbol.upper(), tf, n)
         if not rows:
             raise HTTPException(404, f"no {tf} bars for {symbol}")
@@ -220,32 +245,135 @@ def build_app(engine: Engine) -> FastAPI:
             ],
         }
 
+    @api.get("/indicators/{symbol}")
+    async def indicators(symbol: str, tf: str = "30m", n: int = Query(300, le=1000)) -> dict[str, Any]:
+        """Bollinger and SuperTrend per bar — computed by the SAME functions, with the SAME live
+        config, that FUDKII decides on. Not a charting-library reimplementation: if these lines
+        disagree with a signal, the signal is wrong, not the chart."""
+        cfg = engine.fudkii.cfg
+        sym = symbol.upper()
+        warm = max(cfg.bb_period, cfg.st_atr_period) + 1
+        bars = engine.store.bars(sym, tf, n + warm + 60)
+        if not bars:
+            raise HTTPException(404, f"no {tf} bars for {sym}")
+        closes = [b.close for b in bars]
+        st_pts = supertrend(bars, cfg.st_atr_period, cfg.st_mult)
+        rows: list[dict[str, Any]] = []
+        for i, b in enumerate(bars):
+            bb = bollinger(closes[: i + 1], cfg.bb_period, cfg.bb_mult)
+            p = st_pts[i]
+            rows.append(
+                {
+                    "ts": b.ts,
+                    "bb_upper": round(bb.upper, 4) if bb else None,
+                    "bb_middle": round(bb.middle, 4) if bb else None,
+                    "bb_lower": round(bb.lower, 4) if bb else None,
+                    "st_value": round(p.value, 4) if p else None,
+                    "st_trend": p.trend if p else None,
+                }
+            )
+        return {
+            "symbol": sym,
+            "tf": tf,
+            "params": {
+                "bb_period": cfg.bb_period,
+                "bb_mult": cfg.bb_mult,
+                "st_atr_period": cfg.st_atr_period,
+                "st_mult": cfg.st_mult,
+            },
+            "rows": rows[-n:],
+        }
+
     @api.get("/chain/{symbol}")
-    async def chain(symbol: str) -> dict[str, Any]:
+    async def chain(symbol: str, expiry: str | None = None) -> dict[str, Any]:
+        """The option chain, plus **which strike the engine would actually buy right now**.
+
+        The second half is the point. The rule is "OTM at entry, roughly ATM at the confluence T1",
+        and it is the step that decides what a signal costs — a chain you can look at but whose
+        selection you cannot see is how an enrichment step quietly picks a strike nobody would have
+        chosen. This runs the real `select_option` against the live quotes for both directions and
+        reports the choice, or the reason there isn't one.
+        """
+        from ..domain import Direction, OptionType
+        from ..instrument.select import choose_expiry, estimate_delta, select_option
+
         cat = engine.catalogue_loader.catalogue
         sym = symbol.upper()
         exps = cat.expiries(sym)
         if not exps:
-            raise HTTPException(404, f"no option chain for {sym}")
-        expiry = exps[0]
-        rows = []
-        for ot in ("CE", "PE"):
-            from ..domain import OptionType
+            raise HTTPException(
+                404,
+                f"no option chain for {sym} — the chain comes from the scrip master, which needs a "
+                f"broker session (see boot notes)",
+            )
+        chosen_expiry = expiry if expiry in exps else (
+            choose_expiry(exps, date.today(), SELECTION_POLICY) or exps[0]
+        )
+        underlying = engine.underlyings.get(sym)
+        spot = engine.ltps.get(underlying.scrip_code) if underlying else None
 
-            for inst in cat.chain(sym, expiry, OptionType(ot)):
+        by_strike: dict[float, dict[str, Any]] = {}
+        for ot in ("CE", "PE"):
+            for inst in cat.chain(sym, chosen_expiry, OptionType(ot)):
                 q = engine.quotes.get(inst.scrip_code)
-                rows.append(
-                    {
-                        "scrip_code": inst.scrip_code,
-                        "strike": inst.strike,
-                        "type": ot,
-                        "lot_size": inst.lot_size,
-                        "ltp": q.ltp if q else None,
-                        "bid": q.bid if q else None,
-                        "ask": q.ask if q else None,
-                    }
+                row = by_strike.setdefault(
+                    inst.strike, {"strike": inst.strike, "lot_size": inst.lot_size}
                 )
-        return {"symbol": sym, "expiry": expiry, "expiries": exps, "rows": rows}
+                row[ot] = {
+                    "scrip_code": inst.scrip_code,
+                    "ltp": q.ltp if q else None,
+                    "bid": q.bid if q else None,
+                    "ask": q.ask if q else None,
+                    "spread_pct": round(q.spread_pct, 2) if q and q.spread_pct else None,
+                    "age_s": round(time.time() - q.ts, 1) if q else None,
+                    "delta_est": round(
+                        estimate_delta(spot=spot or 0, strike=inst.strike, option_type=OptionType(ot)), 3
+                    )
+                    if spot
+                    else None,
+                }
+
+        selection: dict[str, Any] = {}
+        if spot:
+            bars = engine.store.bars(sym, "30m", 1)
+            for direction in (Direction.BULLISH, Direction.BEARISH):
+                rows_for = cat.chain(sym, chosen_expiry, direction.option_type)
+                sel = select_option(
+                    chain=rows_for,
+                    quotes=engine.quotes,
+                    spot=spot,
+                    target1=None,
+                    direction=direction,
+                    now=time.time(),
+                    policy=SELECTION_POLICY,
+                )
+                selection[direction.value] = {
+                    "ok": sel.ok,
+                    "reason": sel.reason,
+                    "anchor": sel.anchor,
+                    "strike": sel.instrument.strike if sel.instrument else None,
+                    "scrip_code": sel.instrument.scrip_code if sel.instrument else None,
+                    "name": sel.instrument.name if sel.instrument else None,
+                    "premium": sel.premium,
+                    "spread_pct": sel.spread_pct,
+                }
+            _ = bars
+
+        return {
+            "symbol": sym,
+            "spot": spot,
+            "expiry": chosen_expiry,
+            "expiries": exps,
+            "rows": [by_strike[k] for k in sorted(by_strike)],
+            "selection": selection,
+            "policy": {
+                "min_days_to_expiry": SELECTION_POLICY.min_days_to_expiry,
+                "min_premium": SELECTION_POLICY.min_premium,
+                "max_premium": SELECTION_POLICY.max_premium,
+                "max_spread_pct": SELECTION_POLICY.max_spread_pct,
+                "max_quote_age_s": SELECTION_POLICY.max_quote_age_s,
+            },
+        }
 
     # -- research -----------------------------------------------------------------------------------
 
@@ -339,6 +467,26 @@ def build_app(engine: Engine) -> FastAPI:
         return engine.gateway.stats()
 
     app.include_router(api)
+
+    # One socket of state diffs: every forming bar and every LTP, once a second. The chart's
+    # live candle and the position LTPs come from here, not from polling the REST surface.
+    hub = Hub()
+
+    def _snapshot() -> dict[str, Any]:
+        return {
+            "ts": time.time(),
+            "mode": engine.mode().value,
+            "ltps": dict(engine.ltps),
+            "forming": {f"{b.symbol}:{b.tf}": b.to_json() for b in engine.store.forming_all()},
+        }
+
+    @app.websocket("/ws")
+    async def ws_endpoint(ws: WebSocket) -> None:
+        await handle(ws, hub)
+
+    @app.on_event("startup")
+    async def _start_pump() -> None:
+        app.state.ws_pump = asyncio.create_task(pump(hub, _snapshot, 1.0))
 
     dist = Path(__file__).resolve().parents[3] / "frontend" / "dist"
     if dist.exists():

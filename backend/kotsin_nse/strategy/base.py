@@ -56,6 +56,10 @@ class Signal:
     gates: tuple[GateResult, ...] = ()
     evidence: Mapping[str, float] = field(default_factory=dict)
     source_signal_id: str = ""  # set on a derived signal
+    #: Everything a reviewer needs to reconstruct WHY: the zones the confluence engine saw, which
+    #: zone became the stop, which zones became the targets, and the indicator values on the bar.
+    #: Stored with the signal so the explanation cannot drift from the decision.
+    context: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def signal_id(self) -> str:
@@ -83,6 +87,7 @@ class Signal:
             "gates": [g.to_json() for g in self.gates],
             "evidence": dict(self.evidence),
             "source_signal_id": self.source_signal_id,
+            "context": dict(self.context),
         }
 
 

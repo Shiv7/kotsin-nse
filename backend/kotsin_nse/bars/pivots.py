@@ -257,6 +257,15 @@ class GradePolicy:
     room_min_atr: float = 0.5  # below this there is no room ahead: cap at C
     fortress_block: float = 12.0  # a wall this strong with rr < 1 is an F even so
     max_targets: int = 4
+    #: EXPLORATORY — 0 = off (the inherited behaviour). A 1-year backtest on 24 NSE names
+    #: (bt-875d519a3777, 2026-09-21) found the median confluence stop 0.23% from entry, inside
+    #: a single 30m bar's noise: 80% of exits were the stop and grade A averaged −1.73R. This
+    #: floors the stop at N ATR from the close so 1R is a market distance, not a pivot-line
+    #: distance. It is a hypothesis under test, not a validated parameter.
+    min_stop_atr: float = 0.0
+    #: EXPLORATORY — only a wall (strength ≥ WALL_MIN_STRENGTH) may be the stop zone; a lone fib
+    #: line 0.2% below price is not a structural level.
+    stop_requires_wall: bool = False
 
 
 def compute_confluence(
@@ -282,6 +291,9 @@ def compute_confluence(
 
     behind = [z for z in zones if (z.price < close) == bullish]
     ahead = [z for z in zones if (z.price > close) == bullish]
+    if pol.stop_requires_wall:
+        walls_behind = [z for z in behind if z.is_wall]
+        behind = walls_behind or behind  # no wall behind at all → fall back rather than skip
     behind.sort(key=lambda z: abs(close - z.price))
     ahead.sort(key=lambda z: abs(z.price - close))
 
@@ -291,6 +303,10 @@ def compute_confluence(
     else:
         stop = tick(close - sign * atr_value)
         stop_label, note = "", "no zone behind close — stop fell back to 1 ATR"
+
+    if pol.min_stop_atr > 0 and abs(close - stop) < pol.min_stop_atr * atr_value:
+        stop = tick(close - sign * pol.min_stop_atr * atr_value)
+        note = (note + "; " if note else "") + f"stop widened to {pol.min_stop_atr:g} ATR floor"
 
     risk = abs(close - stop)
     if risk <= 0:

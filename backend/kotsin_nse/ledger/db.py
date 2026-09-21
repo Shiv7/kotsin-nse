@@ -233,7 +233,7 @@ class Ledger:
                     grade=sig.get("grade", ""),
                     decision=decision,
                     decision_reason=reason,
-                    json=_j(sig),
+                    json=_j({**sig, "decision": decision, "decision_reason": reason}),
                     created_ts=time.time(),
                 )
                 .on_conflict_do_nothing(index_elements=[signals.c.signal_id])
@@ -359,6 +359,24 @@ class Ledger:
         async with self.engine.begin() as conn:
             rows = (await conn.execute(stmt.order_by(sa.desc("n")))).mappings().all()
         return [dict(r) for r in rows]
+
+    async def pnl_by_strategy(self) -> dict[str, dict[str, Any]]:
+        """Trades, net, and the last close per book — the 'when did it last fire and what did it
+        make' a reviewer asks first."""
+        stmt = sa.select(
+            trades.c.strategy,
+            sa.func.count().label("n"),
+            sa.func.sum(trades.c.net).label("net"),
+            sa.func.sum(trades.c.charges).label("charges"),
+            sa.func.max(trades.c.closed_ts).label("last_closed_ts"),
+        ).group_by(trades.c.strategy)
+        async with self.engine.begin() as conn:
+            rows = (await conn.execute(stmt)).mappings().all()
+        return {r["strategy"]: dict(r) for r in rows}
+
+    async def last_signal(self, strategy: str) -> dict[str, Any] | None:
+        rows = await self.recent(signals, 1, order_col="ts", where=signals.c.strategy == strategy)
+        return rows[0] if rows else None
 
     async def counts(self) -> dict[str, int]:
         out: dict[str, int] = {}

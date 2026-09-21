@@ -66,6 +66,9 @@ class BarStore:
     def forming(self, symbol: str, tf: str) -> UnifiedBar | None:
         return self._forming.get((symbol, tf))
 
+    def forming_all(self) -> list[UnifiedBar]:
+        return list(self._forming.values())
+
     def count(self, symbol: str, tf: str) -> int:
         return len(self._closed.get((symbol, tf), []))
 
