@@ -13,7 +13,7 @@ export function Chart() {
   const [tf, setTf] = useState<(typeof TFS)[number]>('30m')
   const first = universe.data?.[0]?.symbol
   const active = symbol || first || ''
-  const { data, error } = usePoll<BarsResponse>(active ? `/api/bars/${active}?tf=${tf}&n=300` : '/api/health', 5000)
+  const { data, error } = usePoll<BarsResponse>(active ? `/api/bars/${active}?tf=${tf}&n=300` : null, 5000)
 
   const box = useRef<HTMLDivElement>(null)
   const chart = useRef<IChartApi | null>(null)
@@ -48,7 +48,7 @@ export function Chart() {
   }, [])
 
   useEffect(() => {
-    if (!candles.current || !data?.bars) return
+    if (!candles.current || !Array.isArray(data?.bars)) return
     candles.current.setData(
       data.bars.map((b) => ({ time: b.ts as never, open: b.o, high: b.h, low: b.l, close: b.c })),
     )
@@ -98,13 +98,22 @@ export function Chart() {
         )}
       </div>
 
-      <Card title={`${active} ${tf}`} right={`${data?.bars.length ?? 0} bars`}>
+      {!symbols.length && (
+        <Card title="No symbols">
+          <p className="text-[11px] leading-relaxed text-slate-500">
+            The universe is empty, so there is nothing to chart. It is built from the scrip master
+            at boot, which needs a broker session — see the boot notes on Overview.
+          </p>
+        </Card>
+      )}
+
+      <Card title={`${active || '—'} ${tf}`} right={`${data?.bars?.length ?? 0} bars`}>
         <div ref={box} />
       </Card>
 
       <Card title="Confluence zones" right="stop and targets are drawn from these">
         <Table head={['Price', 'Strength', 'Wall?', 'Members']} empty="no zones — needs 25+ daily bars">
-          {(data?.zones ?? []).map((z) => (
+          {(Array.isArray(data?.zones) ? data.zones : []).map((z) => (
             <tr key={z.price} className="border-b border-slate-900">
               <td className="px-2 py-1.5">{fmt.n(z.price)}</td>
               <td className="px-2 py-1.5">{fmt.n(z.strength, 1)}</td>

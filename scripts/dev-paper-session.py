@@ -211,6 +211,11 @@ async def main() -> None:
         for f in data.glob("*.db*"):
             f.unlink()
     data.mkdir(parents=True, exist_ok=True)
+    # The calendar is read from the data dir, so a dev dir without it warns "no holiday list" and
+    # treats every weekday as a trading day — true, but misleading here. Use the real one.
+    real_holidays = Path(__file__).resolve().parents[1] / "backend" / "data" / "holidays.txt"
+    if real_holidays.exists():
+        (data / "holidays.txt").write_text(real_holidays.read_text())
 
     settings = Settings(
         _env_file=None,

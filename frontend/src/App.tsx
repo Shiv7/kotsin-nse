@@ -1,4 +1,5 @@
-import { BrowserRouter, NavLink, Route, Routes } from 'react-router-dom'
+import { BrowserRouter, NavLink, Route, Routes, useLocation } from 'react-router-dom'
+import { ErrorBoundary } from './components/ErrorBoundary'
 import { ModeBanner } from './components/ModeBanner'
 import { usePoll } from './lib/usePoll'
 import { Backtest } from './pages/Backtest'
@@ -23,6 +24,25 @@ const PAGES = [
   ['/risk', 'Risk'],
   ['/system', 'System'],
 ] as const
+
+function Pages() {
+  const { pathname } = useLocation()
+  return (
+    <ErrorBoundary page={pathname}>
+      <Routes>
+        <Route path="/" element={<Overview />} />
+        <Route path="/signals" element={<Signals />} />
+        <Route path="/trades" element={<Trades />} />
+        <Route path="/strategies" element={<Strategies />} />
+        <Route path="/chart" element={<Chart />} />
+        <Route path="/backtest" element={<Backtest />} />
+        <Route path="/universe" element={<Universe />} />
+        <Route path="/risk" element={<Risk />} />
+        <Route path="/system" element={<System />} />
+      </Routes>
+    </ErrorBoundary>
+  )
+}
 
 export default function App() {
   const { data: health, error } = usePoll<Health>('/api/health', 4000)
@@ -51,17 +71,7 @@ export default function App() {
           </div>
         </nav>
         <main className="min-w-0 flex-1">
-          <Routes>
-            <Route path="/" element={<Overview />} />
-            <Route path="/signals" element={<Signals />} />
-            <Route path="/trades" element={<Trades />} />
-            <Route path="/strategies" element={<Strategies />} />
-            <Route path="/chart" element={<Chart />} />
-            <Route path="/backtest" element={<Backtest />} />
-            <Route path="/universe" element={<Universe />} />
-            <Route path="/risk" element={<Risk />} />
-            <Route path="/system" element={<System />} />
-          </Routes>
+          <Pages />
         </main>
       </div>
     </BrowserRouter>

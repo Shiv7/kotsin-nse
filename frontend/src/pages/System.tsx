@@ -42,7 +42,9 @@ export function System() {
               <td className="px-2 py-1.5 font-mono text-[11px]">{c.name}</td>
               <td className={'px-2 py-1.5 ' + (c.ok ? 'text-emerald-400' : 'text-rose-400')}>{c.ok ? 'ok' : 'failing'}</td>
               <td className="px-2 py-1.5">{c.consecutive_failures}</td>
-              <td className="px-2 py-1.5 text-slate-400">{c.detail}</td>
+              {/* `detail` describes what failing MEANS, so showing it on a passing check reads
+                  like a warning that is not happening. */}
+              <td className="px-2 py-1.5 text-slate-400">{c.ok ? '' : c.detail}</td>
             </tr>
           ))}
         </Table>
