@@ -155,6 +155,9 @@ class Engine:
         # into each other, and a second RiskLimits makes that structural.
         self.exits_rt = ExitEngine(RT_X_LIMITS)
         self._exits_by_strategy = {StrategyKey.FUDKII_RT_X.value: self.exits_rt}
+        #: The twin is checked against its own pool — 30 slots, its own lot cap — rather than
+        #: skipping the check entirely, which is what it did when first written.
+        self.exposure_rt = ExposureBook(RT_X_LIMITS)
         #: Published by the exit loop each tick, read by the API. One computation, so the card
         #: and the decision can never disagree.
         self.position_marks: dict[str, dict[str, Any]] = {}
@@ -903,6 +906,16 @@ class Engine:
         cost = pos.entry * pos.qty * inst.multiplier
         if twin_wallet.available < cost:
             log.info("rt_twin.skipped", symbol=pos.underlying.symbol, reason="wallet")
+            return
+        verdict = self.exposure_rt.check(
+            strategy=StrategyKey.FUDKII_RT_X.value,
+            underlying=pos.underlying.symbol,
+            outlay=cost,
+            positions=list(self.positions.values()),
+            total_capital=sum(w.balance for w in self.wallets.values()),
+        )
+        if not verdict.ok:
+            log.info("rt_twin.skipped", symbol=pos.underlying.symbol, reason=verdict.reason)
             return
         twin = replace(
             pos,

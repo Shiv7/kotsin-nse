@@ -326,3 +326,61 @@ def test_exposure_snapshot_buckets_by_symbol(option):
     snap = book.snapshot([_position(option)], 1_000_000)
     assert "RELIANCE" in snap["by_underlying"]
     assert snap["gross"] > 0
+
+
+def _option(*, lot_size: int):
+    from kotsin_nse.config import Segment
+    from kotsin_nse.domain import Instrument, InstrumentKind, OptionType
+
+    return Instrument(
+        scrip_code="1", symbol="X", segment=Segment.NSE_FO, kind=InstrumentKind.OPTION,
+        name="X CE", lot_size=lot_size, tick_size=0.05, multiplier=1, expiry="2026-09-29",
+        strike=1500.0, option_type=OptionType.CE, underlying="X",
+    )
+
+
+def test_the_lot_cap_binds_alongside_the_rupee_cap_whichever_is_lower():
+    """BLUESTARCO on 2026-09-22: Rs 1,00,000 of a 15.26 premium is 20 lots of 325, and it took all
+    20 because nothing capped the count. FUDKII-RT's exit ladder is written in lots — one at T1, the
+    rest on the trail — so for that book the count has to be the specified four."""
+    from kotsin_nse.risk.limits import RT_X_LIMITS, RiskLimits
+    from kotsin_nse.risk.sizing import size_position
+
+    inst = _option(lot_size=325)
+    common = dict(
+        instrument=inst, premium=15.26, option_stop=14.0, option_target1=21.0,
+        balance=1_000_000.0, available=1_000_000.0, costs=CostModel(Settings(_env_file=None)),
+    )
+    uncapped = size_position(limits=RiskLimits(), **common)
+    capped = size_position(limits=RT_X_LIMITS, **common)
+
+    assert uncapped.lots == 20, "the base book is unchanged — the rupee cap alone bound"
+    assert capped.lots == 4
+    assert capped.qty == 4 * 325
+    assert "lot cap 4" in capped.reason
+    assert capped.outlay < uncapped.outlay
+
+
+def test_a_rupee_cap_tighter_than_the_lot_cap_still_wins():
+    """Whichever binds LOWER: a rich premium can seat fewer than four lots and that is the answer."""
+    from kotsin_nse.risk.limits import RT_X_LIMITS
+    from kotsin_nse.risk.sizing import size_position
+
+    out = size_position(
+        instrument=_option(lot_size=325), premium=120.0, option_stop=110.0, option_target1=180.0,
+        balance=1_000_000.0, available=1_000_000.0, limits=RT_X_LIMITS, costs=CostModel(Settings(_env_file=None)),
+    )
+    assert out.lots < 4, "Rs 1,00,000 does not seat four lots of a 120.00 premium"
+    assert out.reason == "ok", "the lot ceiling did not bind, so it is not reported"
+
+
+def test_the_rt_pool_is_thirty_slots_and_the_base_book_keeps_its_own():
+    from kotsin_nse.risk.limits import RT_X_LIMITS, RiskLimits
+
+    assert RT_X_LIMITS.max_positions_per_strategy == 30
+    assert RT_X_LIMITS.max_lots == 4
+    # The all-books ceiling counts FUDKII's positions too, so the base book's 6 would have stopped
+    # the twins at three pairs.
+    assert RT_X_LIMITS.max_positions_all_books == 60
+    assert RiskLimits().max_lots is None
+    assert RiskLimits().max_positions_per_strategy == 3

@@ -19,6 +19,12 @@ class RiskLimits:
     max_position_pct: float = 10.0
     #: absolute ceiling, whichever binds first
     max_position_inr: float = 100_000.0
+    #: hard ceiling on lots, whichever of this and the rupee cap binds *lower*. ``None`` = no
+    #: lot ceiling, which is what the existing books have always had: BLUESTARCO sized to 20
+    #: lots on 2026-09-22 because Rs 1,00,000 of a 15.26 premium is 20 lots of 325, and nothing
+    #: said otherwise. FUDKII-RT's exit ladder is written in lots (one at T1, the rest on the
+    #: trail), so for that book the count has to be the specified one.
+    max_lots: int | None = None
     #: POSITION COUNTS ARE PER BOOK. FUKAA is derived from FUDKII, so the two fire on the same
     #: underlying in the same batch; counting them together meant FUDKII always took the slot and
     #: FUKAA — funded, gate-counted and advertised — could never take a single trade. That is the
@@ -80,6 +86,12 @@ class RiskLimits:
 #: FUDKII-RT-X's exit policy. Everything else is the base book's; only the exit differs, which is
 #: the whole point of running the two side by side.
 RT_X_LIMITS = RiskLimits(
+    max_lots=4,                     # Rs 1,00,000 or 4 lots, whichever binds lower
+    max_positions_per_strategy=30,  # its own pool of slots
+    #: The all-books ceiling counts every live position, FUDKII's included, so the base book's
+    #: 6 would stop the twins at three pairs. Raised only for the guard the twin is checked
+    #: against; FUDKII keeps its own conservative ceiling.
+    max_positions_all_books=60,
     time_stop_bars=None,            # exits on targets, ratchet, stop or the close — never a clock
     sustain_s=75.0,                 # continuous option-side breach before it counts
     hard_floor_below_stop_pct=9.0,  # path-independent escape hatch

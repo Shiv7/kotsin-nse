@@ -63,6 +63,12 @@ def size_position(
     budget = min(limits.position_budget(balance), available)
     by_budget = int(budget // unit_cost)
     lots = max(0, min(by_risk, by_budget))
+    # The lot ceiling binds alongside the rupee one — whichever is lower wins, and which one
+    # bound is worth knowing: cut to one lot by a rich premium is a liquidity fact, cut to the
+    # ceiling is a policy one.
+    capped_by_lots = limits.max_lots is not None and lots > limits.max_lots
+    if capped_by_lots:
+        lots = limits.max_lots
     if lots < 1:
         why = (
             "risk budget below one lot"
@@ -90,7 +96,14 @@ def size_position(
                 f"costs are {cost_share:.0%} of the move to T1 (cap {max_cost_share_of_target:.0%})",
             )
 
-    return SizingResult(qty, lots, outlay, risk_inr, cost_share, "ok")
+    return SizingResult(
+        qty,
+        lots,
+        outlay,
+        risk_inr,
+        cost_share,
+        f"ok (lot cap {limits.max_lots})" if capped_by_lots else "ok",
+    )
 
 
 def lots_of(instrument: Instrument, qty: int) -> int:
