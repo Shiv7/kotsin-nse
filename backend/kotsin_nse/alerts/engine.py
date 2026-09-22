@@ -23,6 +23,7 @@ from ..bars.unified import UnifiedBar
 from ..market.session import TF_SECONDS
 from . import entry as entry_model
 from . import plan as planner
+from . import rtcard
 from .detectors import (
     BB_BOOKS,
     Alert,
@@ -31,6 +32,7 @@ from .detectors import (
     FudkoiDetector,
     PivotBossDetector,
 )
+from .plan import approximate_delta
 
 log = structlog.get_logger(__name__)
 
@@ -83,6 +85,7 @@ class AlertEngine:
                 )
                 a.plan = tp.to_json()
                 a.cta = planner.cta(tp, a.score, a.kind)
+                a.card = self._rt_card(a, bar, history, tp)
             else:
                 a.cta = planner.cta(None, a.score, a.kind)
             return
@@ -100,6 +103,67 @@ class AlertEngine:
             tp = None
         a.plan = tp.to_json() if tp else None
         a.cta = planner.cta(tp, a.score, a.kind)
+
+    def _rt_card(self, a: Alert, bar: UnifiedBar, history: list[UnifiedBar], tp: Any) -> dict[str, Any]:
+        """Walls on both sides, the dual-trigger stop, the option ladder and the odds."""
+        from ..bars.indicators import atr as _atr
+
+        ev = a.evidence or {}
+        bullish = a.direction == "BULLISH"
+        zones = self.engine.zones_for(a.symbol)
+        atr_v = _atr(history, 14) if history else None
+        price = float(ev.get("entry") or bar.close)
+        listed = (tp.listed or {}) if tp else {}
+        opt_ltp = listed.get("ltp")
+        eq_ltp = self.engine.ltps.get(
+            getattr(self.engine.underlyings.get(a.symbol), "scrip_code", "")
+        )
+
+        ahead = behind = None
+        if atr_v:
+            ahead = rtcard.find_wall(zones, price, atr_v, ahead=True, bullish=bullish)
+            behind = rtcard.find_wall(zones, price, atr_v, ahead=False, bullish=bullish)
+
+        stop = float(ev.get("stop") or 0)
+        target = float(ev.get("target") or 0)
+        odds = rtcard.hit_probability(price, stop, target) if stop and target else {"pT1": None}
+
+        strike = listed.get("strike") or (tp.strike if tp else 0)
+        delta = abs(approximate_delta(eq_ltp or price, float(strike or 0), "CE" if bullish else "PE"))
+
+        return {
+            "wallAhead": ahead.to_json() if ahead else None,
+            "wallBehind": behind.to_json() if behind else None,
+            "odds": odds,
+            "confidence": rtcard.confidence(
+                wall_ahead=ahead, wall_behind=behind, surge=ev.get("volumeSurge"), p_t1=odds.get("pT1")
+            ),
+            "stop": rtcard.dual_stop(
+                bullish=bullish,
+                equity_entry=price,
+                equity_stop=stop,
+                option_entry=opt_ltp,
+                option_ltp=opt_ltp,
+                equity_ltp=eq_ltp,
+                delta=delta,
+                basis="pivot",
+            ) if stop else None,
+            "optionLadder": rtcard.option_ladder(
+                option_entry=opt_ltp, equity_entry=price, targets=[target], delta=delta
+            ) if (opt_ltp and target) else [],
+            "volumeBaseline": rtcard.same_slot_volume(history, bar) if history else None,
+            "greeks": {
+                "delta": round(delta, 3),
+                "deltaSource": "logistic approximation on moneyness",
+                "dte": rtcard.dte(listed.get("expiry", "")) if listed.get("expiry") else None,
+                "gamma": None,
+                "theta": None,
+                "iv": None,
+                "unavailable": "no implied-vol source on this venue — gamma, theta and IV are not computed",
+            },
+            "atr30m": round(atr_v, 2) if atr_v else None,
+            "liveEquity": eq_ltp,
+        }
 
     def _listed_option(self, symbol: str, direction: str, spot: float) -> dict[str, Any] | None:
         """The real contract nearest the OTM strike, when the chain actually lists one.

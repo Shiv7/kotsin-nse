@@ -1,0 +1,113 @@
+"""The FUDKII-RT card: walls both sides, dual-trigger stop, geometric odds."""
+
+from __future__ import annotations
+
+from kotsin_nse.alerts import rtcard
+from kotsin_nse.bars.pivots import WALL_MIN_STRENGTH, Zone
+
+
+def _zones() -> list[Zone]:
+    return [
+        Zone(price=90.0, strength=9.2, members=["1d.S1", "1wk.S2"]),   # support below
+        Zone(price=97.0, strength=2.0, members=["1mo.FIB_S1"]),        # weak, just below
+        Zone(price=104.0, strength=15.2, members=["1d.R1", "1wk.R1", "1mo.PIVOT"]),  # wall above
+    ]
+
+
+def test_a_bullish_trade_finds_the_wall_above_and_the_support_below():
+    z = _zones()
+    ahead = rtcard.find_wall(z, 100.0, atr=2.0, ahead=True, bullish=True)
+    behind = rtcard.find_wall(z, 100.0, atr=2.0, ahead=False, bullish=True)
+    assert ahead is not None and ahead.price == 104.0 and ahead.side == "AHEAD"
+    assert ahead.qualifies and ahead.grade == "FORTRESS"
+    assert ahead.timeframes == ["1d", "1mo", "1wk"]
+    assert ahead.dist_atr == 2.0
+    # The nearest zone below is the weak one — nearest, not strongest, is the honest answer.
+    assert behind is not None and behind.price == 97.0 and behind.side == "BEHIND"
+    assert not behind.qualifies and behind.grade == "WEAK"
+
+
+def test_the_sides_swap_for_a_bearish_trade():
+    z = _zones()
+    ahead = rtcard.find_wall(z, 100.0, atr=2.0, ahead=True, bullish=False)
+    behind = rtcard.find_wall(z, 100.0, atr=2.0, ahead=False, bullish=False)
+    assert ahead.price == 97.0, "a bearish trade travels down, so the wall ahead is below"
+    assert behind.price == 104.0, "and the structure behind it is above"
+
+
+def test_a_single_daily_level_is_not_a_wall_but_a_daily_plus_a_weekly_is():
+    """WALL_MIN_STRENGTH = 5.2 with TF_WEIGHT 1d=4.0, 1wk=3.2 — the threshold sits between them."""
+    lone = rtcard.find_wall(
+        [Zone(price=104.0, strength=4.0, members=["1d.R1"])], 100.0, atr=2.0, ahead=True, bullish=True
+    )
+    pair = rtcard.find_wall(
+        [Zone(price=104.0, strength=7.2, members=["1d.R1", "1wk.R1"])],
+        100.0, atr=2.0, ahead=True, bullish=True,
+    )
+    assert not lone.qualifies
+    assert pair.qualifies
+    assert lone.strength < WALL_MIN_STRENGTH < pair.strength
+
+
+def test_a_seven_r_setup_is_a_twelve_percent_chance_not_a_good_one():
+    """Gambler's ruin: P(target first) = risk / (risk + reward). High R:R IS low probability."""
+    o = rtcard.hit_probability(entry=100.0, stop=99.0, target=108.0)
+    assert o["pT1"] == 11.1
+    o2 = rtcard.hit_probability(entry=100.0, stop=95.0, target=105.0)
+    assert o2["pT1"] == 50.0, "symmetric barriers are a coin flip"
+    assert "ignores theta" in o["note"]
+
+
+def test_the_stop_fires_on_whichever_side_is_reached_first():
+    st = rtcard.dual_stop(
+        bullish=True, equity_entry=100.0, equity_stop=96.0,
+        option_entry=5.0, option_ltp=5.0, equity_ltp=100.0, delta=0.5, basis="pivot",
+    )
+    # 4.00 of adverse equity move x 0.5 delta = 2.00 off the premium.
+    assert st["optionStop"] == 3.0
+    assert st["equityStop"] == 96.0
+    assert st["constantForSession"] is True, "a pivot stop does not move all session"
+    assert st["deltaRefreshS"] == 10.0
+    # equity is 4% above its stop; the option is 40% above its own — equity triggers first.
+    assert st["equityDistPct"] == 4.0
+    assert st["optionDistPct"] == 40.0
+    assert st["triggersFirst"] == "EQUITY"
+
+
+def test_a_bearish_stop_measures_distance_the_other_way():
+    st = rtcard.dual_stop(
+        bullish=False, equity_entry=100.0, equity_stop=104.0,
+        option_entry=5.0, option_ltp=5.0, equity_ltp=100.0, delta=0.5, basis="pivot",
+    )
+    assert st["optionStop"] == 3.0
+    assert st["equityDistPct"] == 4.0, "price must RISE 4% to stop a bearish trade"
+
+
+def test_the_option_ladder_is_linear_in_delta_and_says_so():
+    lad = rtcard.option_ladder(option_entry=5.0, equity_entry=100.0, targets=[104.0, 110.0], delta=0.5)
+    assert lad[0]["option"] == 7.0   # 4.00 x 0.5
+    assert lad[1]["option"] == 10.0  # 10.00 x 0.5
+    assert lad[0]["optionGainPct"] == 40.0
+
+
+def test_support_behind_raises_confidence_and_an_obstacle_ahead_lowers_it():
+    strong_behind = rtcard.find_wall(
+        [Zone(price=98.0, strength=15.2, members=["1d.S1", "1wk.S1", "1mo.S1"])],
+        100.0, atr=2.0, ahead=False, bullish=True,
+    )
+    strong_ahead = rtcard.find_wall(
+        [Zone(price=102.0, strength=15.2, members=["1d.R1", "1wk.R1", "1mo.R1"])],
+        100.0, atr=2.0, ahead=True, bullish=True,
+    )
+    supported = rtcard.confidence(wall_ahead=None, wall_behind=strong_behind, surge=2.0, p_t1=50.0)
+    blocked = rtcard.confidence(wall_ahead=strong_ahead, wall_behind=None, surge=2.0, p_t1=50.0)
+    assert supported["score"] > blocked["score"]
+    assert any("support" in c["factor"] for c in supported["components"])
+    assert any(c["points"] < 0 for c in blocked["components"])
+
+
+def test_dte_counts_days_to_expiry():
+    from datetime import date
+
+    assert rtcard.dte("2026-09-29", today=date(2026, 9, 22)) == 7
+    assert rtcard.dte("", today=date(2026, 9, 22)) is None

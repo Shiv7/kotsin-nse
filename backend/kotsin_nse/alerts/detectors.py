@@ -73,6 +73,7 @@ class Alert:
     company: str = ""
     exchange: str = "N"
     bar_close: int = 0
+    card: dict[str, Any] | None = None
     fired_at: float = 0.0
 
     def to_json(self) -> dict[str, Any]:
@@ -93,6 +94,7 @@ class Alert:
             "company": self.company,
             "exchange": self.exchange,
             "barClose": self.bar_close,
+            "card": self.card,
             "firedAt": self.fired_at,
         }
 
