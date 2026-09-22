@@ -21,6 +21,8 @@ type Alert = {
   evidence: Record<string, unknown>
   company: string
   exchange: string
+  barClose: number
+  firedAt: number
   cta: { action: string; text: string }
   plan: Plan | null
 }
@@ -83,6 +85,14 @@ const ORDER = ['FUDKII_RT', 'FUDKOI', 'PIVOTBOSS', 'NSE_BB_30', 'MCX_BB_30', 'MC
 
 const ist = (ts: number) =>
   new Date(ts * 1000).toLocaleTimeString('en-IN', { hour12: false, timeZone: 'Asia/Kolkata' })
+
+/** Bar timestamps land on bucket boundaries, so they never carry a second. The moment a book
+ *  fired does — and it is the only one of the three that answers "when did this happen". */
+const istPrecise = (ts: number) => {
+  const d = new Date(ts * 1000)
+  const hhmmss = d.toLocaleTimeString('en-IN', { hour12: false, timeZone: 'Asia/Kolkata' })
+  return `${hhmmss}.${String(d.getMilliseconds()).padStart(3, '0')}`
+}
 
 function dirTone(d: Alert['direction']) {
   return d === 'BULLISH' ? 'text-emerald-400' : d === 'BEARISH' ? 'text-rose-400' : 'text-slate-400'
@@ -244,7 +254,12 @@ function Row({ a }: { a: Alert }) {
             <span className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-400">
               {a.book} · {a.tf} · {a.exchange}
             </span>
-            <span className="ml-auto font-mono text-[11px] text-slate-500">{ist(a.ts)} IST</span>
+            <span
+              className="ml-auto font-mono text-[11px] text-slate-400"
+              title={`bar ${ist(a.ts)}-${ist(a.barClose)} · fired ${istPrecise(a.firedAt)}`}
+            >
+              {a.firedAt ? istPrecise(a.firedAt) : ist(a.barClose || a.ts)} IST
+            </span>
           </div>
           {a.company && <div className="truncate text-[11px] text-slate-600">{a.company}</div>}
           {a.kind !== 'TRIGGER' && a.evidence?.ageMinutes !== undefined && (
@@ -259,6 +274,12 @@ function Row({ a }: { a: Alert }) {
               <span className="text-slate-600">this row is a re-check, not an entry</span>
             </div>
           )}
+          <div className="text-[10px] text-slate-600">
+            {a.tf} bar {ist(a.ts)}–{ist(a.barClose)}
+            {a.firedAt > a.barClose && a.barClose > 0 && (
+              <span> · decided {(a.firedAt - a.barClose).toFixed(1)}s after the close</span>
+            )}
+          </div>
           <div className="mt-1 text-[11px] text-slate-400">{a.reason}</div>
           {a.cta?.text && (
             <div className={`mt-2 rounded border px-2 py-1 text-[11px] ${tone}`}>

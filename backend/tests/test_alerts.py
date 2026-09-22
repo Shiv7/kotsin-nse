@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from kotsin_nse.alerts.detectors import (
     BB_BOOKS,
+    Alert,
     BbBreakDetector,
     Cooldown,
     DailyCap,
@@ -230,3 +231,47 @@ def test_a_keepalive_is_never_presented_as_an_entry():
     assert "artefact" in cta(tight, score=80.0, kind="KEEPALIVE")["text"]
 
     assert cta(plan, score=80.0, kind="EXPIRED")["action"] == "STAND_DOWN"
+
+
+def test_an_alert_carries_the_bar_start_the_bar_close_and_the_moment_it_fired():
+    """The card was showing bar-start as the alert time: a 14:45 firing read as 14:15:00.
+
+    Half an hour early, and never with a second on it, because a bar timestamp is a bucket
+    boundary and not a moment. Three fields, three facts.
+    """
+    import time as _t
+
+    from kotsin_nse.alerts.engine import AlertEngine
+
+    eng = AlertEngine.__new__(AlertEngine)
+    eng.alerts, eng.counts = {}, {}
+
+    bucket_start = 1_790_066_700  # 14:15 IST
+    a = Alert(
+        book="PIVOTBOSS", symbol="BHEL", scrip_code="1", tf="30m", ts=bucket_start,
+        direction="BULLISH", score=50.0, reason="", price=1.0,
+    )
+    before = _t.time()
+    eng._emit(a)
+
+    assert a.ts == bucket_start, "the bar keeps its own identity"
+    assert a.bar_close == bucket_start + 1800, "a 30m bucket closes 30 minutes after it opens"
+    assert a.fired_at >= before, "and the firing is stamped when it actually happened"
+    assert a.fired_at % 1 != 0 or a.fired_at > bucket_start, "fired_at is wall clock, not a bucket"
+
+    j = a.to_json()
+    assert j["barClose"] == bucket_start + 1800
+    assert j["firedAt"] == a.fired_at
+
+
+def test_a_one_minute_book_closes_one_minute_after_it_opens():
+    from kotsin_nse.alerts.engine import AlertEngine
+
+    eng = AlertEngine.__new__(AlertEngine)
+    eng.alerts, eng.counts = {}, {}
+    a = Alert(
+        book="FUDKII_RT", symbol="X", scrip_code="1", tf="1m", ts=1_790_066_700,
+        direction="BULLISH", score=1.0, reason="", price=1.0, kind="KEEPALIVE",
+    )
+    eng._emit(a)
+    assert a.bar_close == 1_790_066_760

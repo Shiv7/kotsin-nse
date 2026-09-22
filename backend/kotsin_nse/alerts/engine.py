@@ -20,6 +20,7 @@ import structlog
 from ..bars.indicators import atr
 from ..bars.pivots import PivotLevels, classic_pivots
 from ..bars.unified import UnifiedBar
+from ..market.session import TF_SECONDS
 from . import plan as planner
 from .detectors import (
     BB_BOOKS,
@@ -128,6 +129,10 @@ class AlertEngine:
         }
 
     def _emit(self, a: Alert) -> None:
+        # Stamped here rather than in the detector: the detector is a pure function of the bars
+        # it is handed and may not read a clock, or it would not replay identically.
+        a.fired_at = time.time()
+        a.bar_close = int(a.ts + TF_SECONDS.get(a.tf, 0))
         ring = self.alerts.setdefault(a.book, deque(maxlen=RING))
         ring.appendleft(a)
         self.counts[a.book] = self.counts.get(a.book, 0) + 1

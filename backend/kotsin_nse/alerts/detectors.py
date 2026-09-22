@@ -39,7 +39,21 @@ def _trend_name(point: Any) -> str | None:
 
 @dataclass(slots=True)
 class Alert:
-    """One firing. ``evidence`` carries the numbers that made it fire, never a bare verdict."""
+    """One firing. ``evidence`` carries the numbers that made it fire, never a bare verdict.
+
+    Three different times, because they are three different facts and the card was showing the
+    least useful one:
+
+    * ``ts`` — the bar's bucket **start**. The bar's identity, and why it always lands on a
+      boundary with ``:00`` seconds. A 30m bar stamped 14:15 is the 14:15-14:45 bucket.
+    * ``bar_close`` — when that bucket closed, i.e. when the book could first have decided.
+    * ``fired_at`` — when this process actually emitted it, to the millisecond. Later than the
+      close by however long the exchange-candle reconcile took.
+
+    Showing ``ts`` as the alert time put a 14:45 firing on the card as 14:15 — half an hour early
+    and never with a second on it. The dashboard hit the same thing and left a note about it
+    (``getEpoch``: "prefer firedAt (actual publish moment) over triggerTime (candle close)").
+    """
 
     book: str
     symbol: str
@@ -58,6 +72,8 @@ class Alert:
     cta: dict[str, str] = field(default_factory=dict)
     company: str = ""
     exchange: str = "N"
+    bar_close: int = 0
+    fired_at: float = 0.0
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -76,6 +92,8 @@ class Alert:
             "cta": self.cta,
             "company": self.company,
             "exchange": self.exchange,
+            "barClose": self.bar_close,
+            "firedAt": self.fired_at,
         }
 
 
