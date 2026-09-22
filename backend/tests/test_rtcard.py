@@ -111,3 +111,55 @@ def test_dte_counts_days_to_expiry():
 
     assert rtcard.dte("2026-09-29", today=date(2026, 9, 22)) == 7
     assert rtcard.dte("", today=date(2026, 9, 22)) is None
+
+
+def test_the_option_stop_triggers_on_adverse_movement_before_the_equity_does():
+    """The point of the delta leg: a CE bleeds as spot falls, a PE bleeds as spot rises, so the
+    option level can be reached while the equity is still short of its own."""
+    # Bullish CE. Equity entered 100, stop 96, premium 5.00, delta 0.5 -> option stop 3.00.
+    # Spot has slipped to 97 (not yet stopped) but the premium has collapsed to 2.80.
+    st = rtcard.dual_stop(
+        bullish=True, equity_entry=100.0, equity_stop=96.0,
+        option_entry=5.0, option_ltp=2.80, equity_ltp=97.0, delta=0.5, basis="pivot",
+    )
+    assert st["optionStop"] == 3.0
+    assert st["equityHit"] is False, "97 has not reached the 96 equity stop"
+    assert st["optionHit"] is True, "but 2.80 is through the 3.00 option stop"
+    assert st["triggered"] is True
+    assert st["triggeredBy"] == "OPTION"
+
+    # Bearish PE, the mirror: spot rising is the adverse direction.
+    st2 = rtcard.dual_stop(
+        bullish=False, equity_entry=100.0, equity_stop=104.0,
+        option_entry=5.0, option_ltp=2.80, equity_ltp=103.0, delta=0.5, basis="pivot",
+    )
+    assert st2["equityHit"] is False
+    assert st2["optionHit"] is True
+    assert st2["triggeredBy"] == "OPTION"
+
+
+def test_neither_side_hit_reports_no_trigger():
+    st = rtcard.dual_stop(
+        bullish=True, equity_entry=100.0, equity_stop=96.0,
+        option_entry=5.0, option_ltp=5.4, equity_ltp=100.8, delta=0.5, basis="pivot",
+    )
+    assert st["triggered"] is False and st["triggeredBy"] is None
+
+
+def test_the_card_projects_the_option_levels_the_engine_itself_would_set():
+    """Not a second copy of the formula: map_levels_to_option is the engine's own."""
+    from kotsin_nse.instrument.select import map_levels_to_option
+
+    stop, targets = map_levels_to_option(
+        equity_entry=100.0, equity_stop=96.0, equity_targets=(104.0, 110.0),
+        option_premium=5.0, delta=0.5,
+    )
+    card_stop = rtcard.dual_stop(
+        bullish=True, equity_entry=100.0, equity_stop=96.0, option_entry=5.0,
+        option_ltp=5.0, equity_ltp=100.0, delta=0.5, basis="pivot",
+    )["optionStop"]
+    card_ladder = [r["option"] for r in rtcard.option_ladder(
+        option_entry=5.0, equity_entry=100.0, targets=[104.0, 110.0], delta=0.5
+    )]
+    assert card_stop == stop
+    assert card_ladder == list(targets)

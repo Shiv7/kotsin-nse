@@ -27,6 +27,7 @@ from typing import Any
 
 from ..bars.pivots import WALL_MIN_STRENGTH, Zone
 from ..bars.unified import UnifiedBar
+from ..instrument.select import map_levels_to_option
 
 #: Delta is restamped at least this often. Spot moves, so a level computed off a stale delta is a
 #: level in the wrong place.
@@ -168,9 +169,16 @@ def dual_stop(
     move = abs(equity_entry - equity_stop)
     opt_stop = None
     if option_entry is not None and delta > 0:
-        # A long option loses delta x the adverse underlying move, whichever way the trade is
-        # pointed: a CE falls as spot falls, a PE falls as spot rises.
-        opt_stop = max(round(option_entry - delta * move, 2), 0.05)
+        # Projected by the engine's own map_levels_to_option, not by a second copy of the formula.
+        # The card has to name the level the engine would actually set on the position; two
+        # implementations of one projection drift the moment either is retuned.
+        opt_stop, _ = map_levels_to_option(
+            equity_entry=equity_entry,
+            equity_stop=equity_stop,
+            equity_targets=(),
+            option_premium=option_entry,
+            delta=delta,
+        )
 
     eq_dist_pct = (
         (equity_ltp - equity_stop) / equity_ltp * 100 * (1 if bullish else -1)
@@ -182,6 +190,13 @@ def dual_stop(
         if option_ltp and opt_stop and option_ltp > 0
         else None
     )
+
+    # Has either side already gone? The option level is reached when the premium falls to it,
+    # which is what happens when the underlying moves *against* the trade — a CE bleeds as spot
+    # falls, a PE bleeds as spot rises. So the option leg stops the trade out on adverse movement
+    # even when the equity has not yet reached its own level, which is the case worth flagging.
+    eq_hit = eq_dist_pct is not None and eq_dist_pct <= 0
+    opt_hit = opt_dist_pct is not None and opt_dist_pct <= 0
 
     nearer = None
     if eq_dist_pct is not None and opt_dist_pct is not None:
@@ -203,6 +218,10 @@ def dual_stop(
         "deltaTs": time.time(),
         "deltaRefreshS": DELTA_REFRESH_S,
         "triggersFirst": nearer,
+        "equityHit": eq_hit,
+        "optionHit": opt_hit,
+        "triggered": eq_hit or opt_hit,
+        "triggeredBy": "EQUITY" if eq_hit else ("OPTION" if opt_hit else None),
         "rule": "exit on whichever is reached first — the equity level or the delta-adjusted option level",
     }
 
@@ -216,18 +235,26 @@ def option_ladder(
     goes in the money and the real premium runs further than this says. Labelled modelled for that
     reason; it is a floor on the upside, not a forecast.
     """
+    _, projected = map_levels_to_option(
+        equity_entry=equity_entry,
+        equity_stop=equity_entry,  # unused for the target side
+        equity_targets=tuple(targets),
+        option_premium=option_entry,
+        delta=delta,
+    )
     out = []
-    for i, t in enumerate(targets, start=1):
+    for i, (t, opt) in enumerate(zip(targets, projected, strict=False), start=1):
         move = abs(t - equity_entry)
         out.append(
             {
                 "n": i,
                 "equity": round(t, 2),
-                "option": round(option_entry + delta * move, 2),
+                "option": opt,
                 "equityMove": round(move, 2),
-                "optionGainPct": round(delta * move / option_entry * 100, 1)
+                "optionGainPct": round((opt - option_entry) / option_entry * 100, 1)
                 if option_entry > 0
                 else None,
+                "source": "pivot confluence wall (strength >= 5.2)",
             }
         )
     return out

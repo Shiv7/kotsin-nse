@@ -32,7 +32,6 @@ from .detectors import (
     FudkoiDetector,
     PivotBossDetector,
 )
-from .plan import approximate_delta
 
 log = structlog.get_logger(__name__)
 
@@ -129,7 +128,19 @@ class AlertEngine:
         odds = rtcard.hit_probability(price, stop, target) if stop and target else {"pT1": None}
 
         strike = listed.get("strike") or (tp.strike if tp else 0)
-        delta = abs(approximate_delta(eq_ltp or price, float(strike or 0), "CE" if bullish else "PE"))
+        # estimate_delta is what map_levels_to_option and the live position use. The dashboard's
+        # logistic is a different curve; showing it here would put a different option stop on
+        # the card from the one the engine would set.
+        from ..domain import OptionType
+        from ..instrument.select import estimate_delta
+
+        delta = abs(
+            estimate_delta(
+                spot=eq_ltp or price,
+                strike=float(strike or 0),
+                option_type=OptionType.CE if bullish else OptionType.PE,
+            )
+        )
 
         return {
             "wallAhead": ahead.to_json() if ahead else None,
