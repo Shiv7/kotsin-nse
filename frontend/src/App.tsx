@@ -5,6 +5,7 @@ import { usePoll } from './lib/usePoll'
 import { Backtest } from './pages/Backtest'
 import { Chart } from './pages/Chart'
 import { Committee } from './pages/Committee'
+import { HotStocks } from './pages/HotStocks'
 import { Options } from './pages/Options'
 import { Overview } from './pages/Overview'
 import { Risk } from './pages/Risk'
@@ -24,6 +25,7 @@ const PAGES = [
   ['/options', 'Options'],
   ['/backtest', 'Backtest'],
   ['/committee', 'Committee'],
+  ['/hot-stocks', 'Hot Stocks'],
   ['/universe', 'Universe'],
   ['/risk', 'Risk'],
   ['/system', 'System'],
@@ -42,6 +44,7 @@ function Pages() {
         <Route path="/options" element={<Options />} />
         <Route path="/backtest" element={<Backtest />} />
         <Route path="/committee" element={<Committee />} />
+        <Route path="/hot-stocks" element={<HotStocks />} />
         <Route path="/universe" element={<Universe />} />
         <Route path="/risk" element={<Risk />} />
         <Route path="/system" element={<System />} />

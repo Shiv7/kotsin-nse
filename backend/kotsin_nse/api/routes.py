@@ -29,6 +29,7 @@ from ..bars.indicators import bollinger, supertrend
 from ..bars.unified import UnifiedBar
 from ..engine import SELECTION_POLICY, Engine, _position_json
 from ..exec.gateway import Mode
+from ..hotstocks.service import HotStocksService
 from ..ledger.db import events, rejections, signals, trades
 from ..market.session import TF_SECONDS, ist_hm, to_ist
 from ..strategy.keys import ALL_KEYS
@@ -80,6 +81,7 @@ class ProposeRequest(BaseModel):
 def build_app(engine: Engine) -> FastAPI:
     app = FastAPI(title="kotsin-nse", version="0.1.0", docs_url="/api/docs", openapi_url="/api/openapi.json")
     api = APIRouter(prefix="/api")
+    hot_stocks_service = HotStocksService(engine, engine.s.data_dir / "hotstocks-sectors.tsv")
 
     # -- health & system ---------------------------------------------------------------------------
 
@@ -401,6 +403,38 @@ def build_app(engine: Engine) -> FastAPI:
         """How often the live bar build disagrees with the exchange's own candle, by timeframe."""
         return engine.reconciler.snapshot()
 
+    # -- hot stocks -------------------------------------------------------------------------------
+
+    @api.get("/hot-stocks")
+    async def hot_stocks(refresh: bool = False) -> dict[str, Any]:
+        """CAN1: the F&O universe ranked on the v2 score.
+
+        The score's flow, delivery and relative-strength buckets are built from NSE's own published
+        data (bhavcopy, disclosed deals, index levels) — not the broker, which serves none of it.
+        Anything the exchange did not publish is reported in ``unavailable`` and scores zero in its
+        bucket rather than being guessed at.
+        """
+        return await hot_stocks_service.rank(force=refresh)
+
+    @api.get("/can2")
+    async def can2() -> dict[str, Any]:
+        """The live book beside CAN1 — this engine's own open positions and wallets."""
+        return hot_stocks_service.live_book(
+            [
+                _position_view(engine, p)
+                for p in engine.positions.values()
+                if p.status == "OPEN"
+            ]
+        )
+
+    @api.get("/hot-stocks/{symbol}")
+    async def hot_stock(symbol: str) -> dict[str, Any]:
+        book = await hot_stocks_service.rank()
+        for c in book["fno"] + book["nonFno"]:
+            if c["symbol"] == symbol.upper():
+                return c
+        raise HTTPException(404, f"{symbol} is not ranked")
+
     @api.get("/bars/{symbol}")
     async def bars(symbol: str, tf: str = "30m", n: int = Query(200, le=1000)) -> dict[str, Any]:
         if tf != "1d" and tf not in TF_SECONDS:
@@ -669,9 +703,26 @@ def build_app(engine: Engine) -> FastAPI:
 
         @app.get("/{path:path}")
         async def spa(path: str) -> FileResponse:
+            """The SPA shell — served with caching off, deliberately.
+
+            Vite fingerprints every asset (``index-DXC8QuCb.js``), so those are immutable and may
+            be cached forever. ``index.html`` is the opposite: it is the only file that names which
+            fingerprint is current, and a rebuild changes that name. Served with no
+            ``Cache-Control``, browsers apply a heuristic freshness lifetime to a 200 carrying
+            ``last-modified`` — so after a deploy they keep asking for a bundle that no longer
+            exists, get a 404 for the only script on the page, and render nothing at all. A blank
+            app with a healthy API, on every page at once.
+            """
             if path.startswith("api/"):
                 raise HTTPException(404)
-            return FileResponse(dist / "index.html")
+            return FileResponse(
+                dist / "index.html",
+                headers={
+                    "Cache-Control": "no-store, no-cache, must-revalidate",
+                    "Pragma": "no-cache",
+                    "Expires": "0",
+                },
+            )
 
     return app
 
