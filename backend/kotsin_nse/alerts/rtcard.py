@@ -330,3 +330,87 @@ def dte(expiry: str, today: date | None = None) -> int | None:
     except (ValueError, TypeError):
         return None
     return (d - (today or date.today())).days
+
+
+# ── FUDKII-RT position sizing ────────────────────────────────────────────────────────────────────
+
+#: Per trade, inclusive of margin. Whatever is not spent goes back to the wallet rather than being
+#: reserved — an unspent slot is capital that can take the next signal.
+RT_MAX_CAPITAL_INR = 100_000.0
+#: Hard lot cap. The binding constraint is whichever of the two is *lower*, so a contract whose
+#: single lot already costs more than the cap is declined rather than part-filled.
+RT_MAX_LOTS = 4
+#: Concurrency ceiling. A trade occupies exactly one slot from entry to final exit — scaling out in
+#: tranches at T1-T4 is one trade leaving in pieces, not four trades.
+RT_MAX_CONCURRENT = 30
+
+
+def size(
+    *,
+    option_premium: float | None,
+    lot_size: int,
+    multiplier: int = 1,
+    open_trades: int = 0,
+    max_capital: float = RT_MAX_CAPITAL_INR,
+    max_lots: int = RT_MAX_LOTS,
+    max_concurrent: int = RT_MAX_CONCURRENT,
+) -> dict[str, Any]:
+    """Lots for one FUDKII-RT entry, and what the caps did to it.
+
+    Two ceilings, and the lower one wins: ``max_capital`` rupees, or ``max_lots`` lots. Reporting
+    which one bound matters — a trade cut to one lot by a rich premium is a different fact from one
+    cut to four by the lot cap, and only the first is a liquidity problem.
+    """
+    cost_per_lot = (option_premium or 0) * max(lot_size, 1) * max(multiplier, 1)
+    slots_left = max(0, max_concurrent - open_trades)
+
+    if cost_per_lot <= 0:
+        return {
+            "lots": 0, "qty": 0, "capital": 0.0, "costPerLot": 0.0,
+            "binding": "no premium", "rejected": True,
+            "reason": "the contract is not quoting, so it cannot be sized",
+            "slotsLeft": slots_left, "maxConcurrent": max_concurrent,
+            "unusedReturnedToWallet": 0.0, "capPerTrade": max_capital, "maxLots": max_lots,
+        }
+
+    by_capital = int(max_capital // cost_per_lot)
+    lots = min(max_lots, by_capital)
+    binding = "lot cap" if by_capital >= max_lots else "capital cap"
+
+    if slots_left <= 0:
+        return {
+            "lots": 0, "qty": 0, "capital": 0.0, "costPerLot": round(cost_per_lot, 2),
+            "binding": "concurrency", "rejected": True,
+            "reason": f"{open_trades} trades already open against a {max_concurrent} ceiling",
+            "slotsLeft": 0, "maxConcurrent": max_concurrent,
+            "unusedReturnedToWallet": 0.0, "capPerTrade": max_capital, "maxLots": max_lots,
+        }
+
+    if lots < 1:
+        return {
+            "lots": 0, "qty": 0, "capital": 0.0, "costPerLot": round(cost_per_lot, 2),
+            "binding": "capital cap", "rejected": True,
+            "reason": (
+                f"one lot costs Rs {cost_per_lot:,.0f}, above the Rs {max_capital:,.0f} a trade may "
+                f"take — declined rather than part-filled"
+            ),
+            "slotsLeft": slots_left, "maxConcurrent": max_concurrent,
+            "unusedReturnedToWallet": 0.0, "capPerTrade": max_capital, "maxLots": max_lots,
+        }
+
+    capital = lots * cost_per_lot
+    return {
+        "lots": lots,
+        "qty": lots * max(lot_size, 1),
+        "capital": round(capital, 2),
+        "costPerLot": round(cost_per_lot, 2),
+        "binding": binding,
+        "rejected": False,
+        "reason": "",
+        "slotsLeft": slots_left,
+        "maxConcurrent": max_concurrent,
+        # Not reserved: the cap is a ceiling on what a trade may take, not an allocation it holds.
+        "unusedReturnedToWallet": round(max_capital - capital, 2),
+        "capPerTrade": max_capital,
+        "maxLots": max_lots,
+    }

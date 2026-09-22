@@ -25,6 +25,36 @@ type Alert = {
   firedAt: number
   cta: { action: string; text: string }
   plan: Plan | null
+  card: RtCard | null
+}
+
+type WallJ = {
+  price: number; strength: number; members: string[]; timeframes: string[]
+  levels: number; distAtr: number; distPct: number; grade: string
+  qualifies: boolean; min: number; side: string
+}
+
+type RtCard = {
+  wallAhead: WallJ | null
+  wallBehind: WallJ | null
+  odds: { pT1: number | null; risk?: number; reward?: number; model?: string; note?: string }
+  confidence: { score: number; components: { factor: string; points: number; detail: string }[]; note: string }
+  stop: {
+    basis: string; constantForSession: boolean; equityStop: number; equityMove: number
+    equityDistPct: number | null; optionStop: number | null; optionDistPct: number | null
+    delta: number; deltaRefreshS: number; triggersFirst: string | null
+    equityHit: boolean; optionHit: boolean; triggered: boolean; triggeredBy: string | null; rule: string
+  } | null
+  optionLadder: { n: number; equity: number; option: number; equityMove: number; optionGainPct: number | null; source: string }[]
+  volumeBaseline: { ratio: number; median: number; sessions: number; slot: string } | null
+  greeks: { delta: number; deltaSource: string; dte: number | null; gamma: null; theta: null; iv: null; unavailable: string }
+  sizing: {
+    lots: number; qty: number; capital: number; costPerLot: number; binding: string
+    rejected: boolean; reason: string; slotsLeft: number; maxConcurrent: number
+    unusedReturnedToWallet: number; capPerTrade: number; maxLots: number
+  }
+  atr30m: number | null
+  liveEquity: number | null
 }
 
 type Plan = {
@@ -308,6 +338,182 @@ function Option({ plan }: { plan: Plan }) {
   )
 }
 
+
+const WALL_TONE: Record<string, string> = {
+  FORTRESS: 'border-amber-400/50 bg-amber-400/15 text-amber-200',
+  STRONG: 'border-amber-500/40 bg-amber-500/10 text-amber-300',
+  AVERAGE: 'border-slate-500/40 bg-slate-700/50 text-slate-300',
+  WEAK: 'border-slate-600/40 bg-slate-800/60 text-slate-400',
+}
+
+function WallChip({ w }: { w: WallJ }) {
+  const supportive = w.side === 'BEHIND'
+  return (
+    <div
+      className={`rounded border px-2 py-1.5 ${WALL_TONE[w.grade] ?? WALL_TONE.WEAK}`}
+      title={`${w.levels} level${w.levels === 1 ? '' : 's'} · ${w.timeframes.join(', ')} · ${w.members.join(', ')} · needs ${w.min} to qualify`}
+    >
+      <div className="flex items-baseline gap-1.5 text-[11px]">
+        <span className="font-semibold">
+          {supportive ? 'Support behind' : 'Wall ahead'}
+        </span>
+        <span className="tabular-nums">{w.strength.toFixed(2)}</span>
+        <span className="opacity-80">{w.grade}</span>
+        {!w.qualifies && <span className="font-normal opacity-70">· needs {w.min}</span>}
+      </div>
+      <div className="mt-0.5 text-[10px] opacity-80">
+        {w.price.toFixed(2)} · {w.distAtr.toFixed(2)}× ATR · {w.levels} lvl · {w.timeframes.join('+')}
+      </div>
+      <div className="text-[10px] opacity-60">
+        {supportive ? 'structure under the stop' : 'price must pay through this'}
+      </div>
+    </div>
+  )
+}
+
+function RtPanel({ c }: { c: RtCard }) {
+  const st = c.stop
+  const conf = c.confidence
+  const sz = c.sizing
+  return (
+    <div className="mt-2 space-y-2 rounded border border-indigo-500/25 bg-indigo-500/[0.04] p-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-[10px] uppercase tracking-wide text-indigo-300">FUDKII-RT</span>
+        <span className="rounded border border-indigo-500/40 bg-indigo-500/10 px-1.5 py-0.5 text-[11px] font-bold tabular-nums text-indigo-200">
+          confidence {conf.score.toFixed(0)}
+        </span>
+        {c.odds.pT1 !== null && (
+          <span
+            className="rounded bg-slate-800 px-1.5 py-0.5 text-[11px] tabular-nums text-slate-300"
+            title={c.odds.note}
+          >
+            {c.odds.pT1.toFixed(0)}% to T1 first
+          </span>
+        )}
+        {c.atr30m !== null && <span className="text-[10px] text-slate-600">ATR30m {f(c.atr30m)}</span>}
+        {c.volumeBaseline && (
+          <span
+            className={`text-[10px] ${c.volumeBaseline.ratio > 1.5 ? 'text-emerald-400' : c.volumeBaseline.ratio < 0.85 ? 'text-rose-400' : 'text-slate-500'}`}
+            title={`vs the median of ${c.volumeBaseline.sessions} earlier sessions at the same ${c.volumeBaseline.slot} slot`}
+          >
+            vol {c.volumeBaseline.ratio.toFixed(2)}× its own slot
+          </span>
+        )}
+      </div>
+
+      <div className="grid gap-2 sm:grid-cols-2">
+        {c.wallBehind ? <WallChip w={c.wallBehind} /> : (
+          <div className="rounded border border-rose-500/30 bg-rose-500/5 px-2 py-1.5 text-[11px] text-rose-300/80">
+            No wall behind — nothing structural under the stop.
+          </div>
+        )}
+        {c.wallAhead ? <WallChip w={c.wallAhead} /> : (
+          <div className="rounded border border-emerald-500/30 bg-emerald-500/5 px-2 py-1.5 text-[11px] text-emerald-300/80">
+            Clear ahead — no zone between price and open air.
+          </div>
+        )}
+      </div>
+
+      {st && (
+        <div className={`rounded p-2 ${st.triggered ? 'border border-rose-500/50 bg-rose-500/10' : 'bg-slate-950/50'}`}>
+          <div className="mb-1 flex flex-wrap items-baseline gap-2 text-[10px]">
+            <span className="uppercase tracking-wide text-slate-500">stop — whichever hits first</span>
+            {st.triggered ? (
+              <span className="rounded bg-rose-500/25 px-1.5 py-0.5 font-bold text-rose-200">
+                TRIGGERED by {st.triggeredBy}
+              </span>
+            ) : (
+              <span className="text-slate-600">nearer: {st.triggersFirst ?? '—'}</span>
+            )}
+          </div>
+          <div className="grid grid-cols-2 gap-2 text-[11px]">
+            <div className={st.equityHit ? 'text-rose-300' : ''}>
+              <span className="text-slate-500">equity </span>
+              <span className="tabular-nums text-slate-200">{f(st.equityStop)}</span>
+              {st.equityDistPct !== null && (
+                <span className="text-slate-500"> · {st.equityDistPct.toFixed(2)}% away</span>
+              )}
+              <div className="text-[10px] text-slate-600">
+                {st.basis} · {st.constantForSession ? 'fixed for the session' : 'refreshed'}
+              </div>
+            </div>
+            <div className={st.optionHit ? 'text-rose-300' : ''}>
+              <span className="text-slate-500">option </span>
+              <span className="tabular-nums text-slate-200">{f(st.optionStop)}</span>
+              {st.optionDistPct !== null && (
+                <span className="text-slate-500"> · {st.optionDistPct.toFixed(2)}% away</span>
+              )}
+              <div className="text-[10px] text-slate-600">
+                δ {st.delta.toFixed(2)} · restamped every {st.deltaRefreshS}s
+              </div>
+            </div>
+          </div>
+          <div className="mt-1 text-[10px] text-slate-600">
+            The option leg stops the trade out on adverse movement even before the equity reaches
+            its own level.
+          </div>
+        </div>
+      )}
+
+      {c.optionLadder.length > 0 && (
+        <div className="rounded bg-slate-950/50 p-2">
+          <div className="mb-1 text-[10px] uppercase tracking-wide text-slate-500">
+            target ladder — pivot confluence walls
+          </div>
+          <div className="grid gap-x-3 gap-y-0.5 text-[11px] sm:grid-cols-2">
+            {c.optionLadder.map((t) => (
+              <div key={t.n}>
+                <span className="text-slate-500">T{t.n} </span>
+                <span className="tabular-nums text-emerald-400">{f(t.equity)}</span>
+                <span className="text-slate-600"> → opt </span>
+                <span className="tabular-nums text-emerald-300">{f(t.option)}</span>
+                {t.optionGainPct !== null && (
+                  <span className="text-slate-600"> (+{t.optionGainPct.toFixed(0)}%)</span>
+                )}
+              </div>
+            ))}
+          </div>
+          <div className="mt-0.5 text-[10px] text-slate-600">
+            delta-projected, linear — gamma makes this a floor on the upside, not a forecast
+          </div>
+        </div>
+      )}
+
+      <div className="rounded bg-slate-950/50 p-2">
+        <div className="mb-1 text-[10px] uppercase tracking-wide text-slate-500">sizing</div>
+        {sz.rejected ? (
+          <div className="text-[11px] text-amber-300">
+            Not sizeable — {sz.reason}
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-[11px]">
+            <span className="rounded border border-slate-600/50 bg-slate-800 px-1.5 py-0.5 font-semibold text-slate-200">
+              {sz.lots} lot{sz.lots === 1 ? '' : 's'} · {sz.qty} qty
+            </span>
+            <span className="text-slate-500">
+              ₹{sz.capital.toLocaleString('en-IN', { maximumFractionDigits: 0 })} of ₹
+              {sz.capPerTrade.toLocaleString('en-IN')}
+            </span>
+            <span className="text-slate-600">bound by {sz.binding}</span>
+            <span className="text-slate-600">
+              ₹{sz.unusedReturnedToWallet.toLocaleString('en-IN', { maximumFractionDigits: 0 })} back
+              to the wallet
+            </span>
+            <span className="text-slate-600">
+              {sz.slotsLeft}/{sz.maxConcurrent} slots free
+            </span>
+          </div>
+        )}
+      </div>
+
+      <div className="text-[10px] text-slate-600">
+        δ {c.greeks.delta.toFixed(2)} ({c.greeks.deltaSource})
+        {c.greeks.dte !== null && ` · DTE ${c.greeks.dte}d`} · γ θ IV: {c.greeks.unavailable}
+      </div>
+    </div>
+  )
+}
+
 function Row({ a }: { a: Alert }) {
   const [open, setOpen] = useState(false)
   const ev = Object.entries(a.evidence ?? {}).filter(([, v]) => v !== null && v !== undefined)
@@ -368,6 +574,7 @@ function Row({ a }: { a: Alert }) {
           <Option plan={a.plan} />
         </div>
       )}
+      {a.card && <RtPanel c={a.card} />}
       {!a.plan && a.kind === 'TRIGGER' && (
         <div className="mt-2 rounded bg-slate-950/50 p-2 text-[11px] text-slate-600">
           No stop/target ladder could be built — the engine had no pivot zones or no ATR for this

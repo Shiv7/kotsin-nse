@@ -172,6 +172,15 @@ class AlertEngine:
                 "iv": None,
                 "unavailable": "no implied-vol source on this venue — gamma, theta and IV are not computed",
             },
+            # One slot per trade from entry to final exit: a tranche scale-out at T1-T4 is one
+            # trade leaving in pieces, so open POSITIONS is the counter, not fills.
+            "sizing": rtcard.size(
+                option_premium=opt_ltp,
+                lot_size=int(listed.get("lotSize") or 1),
+                open_trades=sum(
+                    1 for pos in self.engine.positions.values() if pos.status == "OPEN"
+                ),
+            ),
             "atr30m": round(atr_v, 2) if atr_v else None,
             "liveEquity": eq_ltp,
         }

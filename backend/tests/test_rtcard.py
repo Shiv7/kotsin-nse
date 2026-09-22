@@ -163,3 +163,36 @@ def test_the_card_projects_the_option_levels_the_engine_itself_would_set():
     )]
     assert card_stop == stop
     assert card_ladder == list(targets)
+
+
+def test_sizing_takes_the_lower_of_the_capital_cap_and_the_lot_cap():
+    """Rs 1,00,000 or 4 lots, whichever binds first — and the card says which one did."""
+    # Cheap premium: 4 lots cost 40,000, so the LOT cap binds, not the capital one.
+    cheap = rtcard.size(option_premium=20.0, lot_size=500, open_trades=0)
+    assert cheap["lots"] == 4 and cheap["binding"] == "lot cap"
+    assert cheap["capital"] == 40_000
+    assert cheap["unusedReturnedToWallet"] == 60_000, "unspent capital is not reserved"
+
+    # Rich premium: one lot is 35,000, so capital allows 2 and the CAPITAL cap binds.
+    rich = rtcard.size(option_premium=70.0, lot_size=500, open_trades=0)
+    assert rich["lots"] == 2 and rich["binding"] == "capital cap"
+    assert rich["capital"] == 70_000
+    assert rich["unusedReturnedToWallet"] == 30_000
+
+
+def test_a_lot_too_expensive_for_the_cap_is_declined_not_part_filled():
+    out = rtcard.size(option_premium=300.0, lot_size=500, open_trades=0)  # 1,50,000 a lot
+    assert out["rejected"] and out["lots"] == 0
+    assert "declined rather than part-filled" in out["reason"]
+
+
+def test_concurrency_is_capped_at_thirty_open_trades():
+    assert rtcard.size(option_premium=20.0, lot_size=500, open_trades=29)["lots"] == 4
+    full = rtcard.size(option_premium=20.0, lot_size=500, open_trades=30)
+    assert full["rejected"] and full["binding"] == "concurrency"
+    assert full["slotsLeft"] == 0
+
+
+def test_a_contract_that_is_not_quoting_cannot_be_sized():
+    out = rtcard.size(option_premium=None, lot_size=500, open_trades=0)
+    assert out["rejected"] and out["binding"] == "no premium"
