@@ -414,3 +414,79 @@ def size(
         "capPerTrade": max_capital,
         "maxLots": max_lots,
     }
+
+
+def size_with_fallback(
+    *,
+    chain: list[Any],
+    spot: float,
+    direction: str,
+    quote_of: Any,
+    multiplier: int = 1,
+    open_trades: int = 0,
+    max_capital: float = RT_MAX_CAPITAL_INR,
+    max_lots: int = RT_MAX_LOTS,
+) -> dict[str, Any]:
+    """The nearest OTM strike whose full ``max_lots`` fit inside the cap.
+
+    One step OTM is the preference, not a requirement. When its premium is rich enough that four
+    lots breach the cap, the answer is not to take one lot of it — a quarter position carries the
+    same charges against a quarter of the move — but to step further out, where the premium is
+    lower and four lots fit. Each step is recorded so the card can say how far it had to walk and
+    what that cost in delta.
+
+    Returns the chosen contract alongside the ordinary :func:`size` result, or the nearest strike's
+    rejection when no strike on the chain can seat a full position.
+    """
+    want = "CE" if direction == "BULLISH" else "PE"
+    # Ordered by increasing moneyness distance, and only strikes that are genuinely out of it.
+    otm = [
+        o for o in chain
+        if getattr(o.option_type, "value", o.option_type) == want
+        and ((o.strike > spot) if want == "CE" else (o.strike < spot))
+    ]
+    otm.sort(key=lambda o: abs(o.strike - spot))
+    if not otm:
+        return {**size(option_premium=None, lot_size=1, open_trades=open_trades), "contract": None,
+                "stepsOut": None, "fallbackReason": "no OTM strike on the chain"}
+
+    first: dict[str, Any] | None = None
+    for steps, o in enumerate(otm):
+        q = quote_of(o.scrip_code)
+        premium = getattr(q, "ltp", None) if q else None
+        sized = size(
+            option_premium=premium,
+            lot_size=o.lot_size,
+            multiplier=multiplier,
+            open_trades=open_trades,
+            max_capital=max_capital,
+            max_lots=max_lots,
+        )
+        if first is None:
+            first = {**sized, "contract": _contract(o, premium), "stepsOut": steps,
+                     "fallbackReason": ""}
+        if not sized["rejected"] and sized["lots"] >= max_lots:
+            return {
+                **sized,
+                "contract": _contract(o, premium),
+                "stepsOut": steps,
+                "fallbackReason": (
+                    "" if steps == 0
+                    else f"stepped {steps} strike{'s' if steps > 1 else ''} further out so all "
+                         f"{max_lots} lots fit inside the cap"
+                ),
+            }
+    # Nothing seats a full position; report the nearest strike honestly rather than the last.
+    return {**(first or {}), "fallbackReason": "no strike on this chain seats a full position"}
+
+
+def _contract(o: Any, premium: float | None) -> dict[str, Any]:
+    return {
+        "scripCode": o.scrip_code,
+        "symbol": getattr(o, "name", ""),
+        "strike": o.strike,
+        "type": getattr(o.option_type, "value", o.option_type),
+        "expiry": getattr(o, "expiry", ""),
+        "lotSize": o.lot_size,
+        "ltp": premium,
+    }

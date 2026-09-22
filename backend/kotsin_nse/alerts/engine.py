@@ -102,10 +102,10 @@ class AlertEngine:
             tp = None
         a.plan = tp.to_json() if tp else None
         a.cta = planner.cta(tp, a.score, a.kind)
-        # The wall/odds/sizing panel is not RT-specific: every book benefits from knowing what
-        # stands in front of the trade, what stands under the stop, and what the geometry alone
-        # says the odds are. RT keeps its own branch above because its ladder is inherited.
-        if tp:
+        # FUDKII-RT only. The wall panel, the dual-trigger stop and the lot caps are that book's
+        # rules, and nothing else here has been given them — a PIVOTBOSS alert wearing FUDKII-RT's
+        # sizing would be asserting a position size no one specified for it.
+        if tp and a.book == "FUDKII_RT":
             a.card = self._rt_card(a, bar, history, tp)
 
     def _rt_card(self, a: Alert, bar: UnifiedBar, history: list[UnifiedBar], tp: Any) -> dict[str, Any]:
@@ -184,9 +184,11 @@ class AlertEngine:
             },
             # One slot per trade from entry to final exit: a tranche scale-out at T1-T4 is one
             # trade leaving in pieces, so open POSITIONS is the counter, not fills.
-            "sizing": rtcard.size(
-                option_premium=opt_ltp,
-                lot_size=int(listed.get("lotSize") or 1),
+            "sizing": rtcard.size_with_fallback(
+                chain=list(getattr(self.engine.groups.get(a.symbol), "options", []) or []),
+                spot=eq_ltp or price,
+                direction=a.direction,
+                quote_of=self.engine.quotes.get,
                 open_trades=sum(
                     1 for pos in self.engine.positions.values() if pos.status == "OPEN"
                 ),

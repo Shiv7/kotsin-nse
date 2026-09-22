@@ -196,3 +196,77 @@ def test_concurrency_is_capped_at_thirty_open_trades():
 def test_a_contract_that_is_not_quoting_cannot_be_sized():
     out = rtcard.size(option_premium=None, lot_size=500, open_trades=0)
     assert out["rejected"] and out["binding"] == "no premium"
+
+
+class _Opt:
+    def __init__(self, code, strike, otype, lot, name="", expiry="2026-09-29"):
+        self.scrip_code, self.strike, self.option_type = code, strike, otype
+        self.lot_size, self.name, self.expiry = lot, name or f"X {strike} {otype}", expiry
+
+
+def test_a_rich_near_strike_steps_further_out_until_four_lots_fit():
+    """One lot of a rich strike is not the answer: a quarter position pays the same charges
+    against a quarter of the move. Step out to where a full position seats."""
+    chain = [
+        _Opt("a", 1220.0, "CE", 500),  # 70/lot x 500 = 35,000 -> only 2 lots fit
+        _Opt("b", 1240.0, "CE", 500),  # 40 -> 20,000 -> 4 lots = 80,000, fits
+        _Opt("c", 1260.0, "CE", 500),
+    ]
+    prem = {"a": 70.0, "b": 40.0, "c": 15.0}
+
+    class Q:
+        def __init__(self, ltp): self.ltp = ltp
+
+    out = rtcard.size_with_fallback(
+        chain=chain, spot=1210.0, direction="BULLISH",
+        quote_of=lambda code: Q(prem[code]), open_trades=0,
+    )
+    assert out["lots"] == 4
+    assert out["contract"]["strike"] == 1240.0
+    assert out["stepsOut"] == 1
+    assert "stepped 1 strike" in out["fallbackReason"]
+    assert out["capital"] == 80_000
+
+
+def test_the_nearest_strike_is_kept_when_it_already_seats_a_full_position():
+    chain = [_Opt("a", 1220.0, "CE", 500), _Opt("b", 1240.0, "CE", 500)]
+
+    class Q:
+        def __init__(self, ltp): self.ltp = ltp
+
+    out = rtcard.size_with_fallback(
+        chain=chain, spot=1210.0, direction="BULLISH",
+        quote_of=lambda c: Q(20.0), open_trades=0,
+    )
+    assert out["stepsOut"] == 0 and out["fallbackReason"] == ""
+    assert out["contract"]["strike"] == 1220.0
+
+
+def test_a_bearish_trade_walks_strikes_downward():
+    chain = [_Opt("a", 1200.0, "PE", 500), _Opt("b", 1180.0, "PE", 500)]
+
+    class Q:
+        def __init__(self, ltp): self.ltp = ltp
+
+    prem = {"a": 90.0, "b": 30.0}
+    out = rtcard.size_with_fallback(
+        chain=chain, spot=1210.0, direction="BEARISH",
+        quote_of=lambda c: Q(prem[c]), open_trades=0,
+    )
+    assert out["contract"]["strike"] == 1180.0, "further OTM for a put is a LOWER strike"
+    assert out["lots"] == 4
+
+
+def test_when_no_strike_seats_a_full_position_the_nearest_is_reported_not_the_last():
+    chain = [_Opt("a", 1220.0, "CE", 500), _Opt("b", 1240.0, "CE", 500)]
+
+    class Q:
+        def __init__(self, ltp): self.ltp = ltp
+
+    out = rtcard.size_with_fallback(
+        chain=chain, spot=1210.0, direction="BULLISH",
+        quote_of=lambda c: Q(70.0), open_trades=0,
+    )
+    assert out["contract"]["strike"] == 1220.0, "the nearest, so the card shows what was wanted"
+    assert out["lots"] == 2
+    assert out["fallbackReason"] == "no strike on this chain seats a full position"
