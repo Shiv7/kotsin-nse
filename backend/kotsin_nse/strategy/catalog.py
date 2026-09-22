@@ -1,0 +1,299 @@
+"""Every book the old stack ran, what it needs, and whether this engine can run it yet.
+
+The ``/all-strategies`` page is a *port plan*, not a mirror. The dashboard's ``/strategy`` page
+renders one tab per book by fetching ``/strategy-state/<book>/…`` from a Mongo collection that
+**streamingcandle** fills over Kafka — the signal there *is* the computation, so unlike HotStocks
+(whose inputs turned out to be public NSE publications this engine can fetch itself) there is no
+external source that can stand in for a book this repo does not implement.
+
+So each entry records four things, and never guesses at any of them:
+
+* ``params`` — the values actually deployed in the old stack, transcribed from
+  ``streamingcandle/src/main/resources/application.properties`` with the key kept verbatim so a
+  reader can grep for it. Not defaults, not recommendations: what was running.
+* ``have`` / ``need`` — which inputs this engine already produces and which it does not. This is
+  the honest measure of what a port costs; several books need nothing new at all.
+* ``status`` — ``live`` only when this repo computes it. Everything else is ``not_ported``, which
+  the page states plainly rather than rendering an empty tab that looks like a quiet market.
+
+Pure data, no imports: the ``strategy is pure`` contract forbids this package from reaching for
+venue, exec, ledger, api, ops, feed or instrument, and a table of facts needs none of them.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+SRC = "streamingcandle/src/main/resources/application.properties"
+
+
+@dataclass(frozen=True, slots=True)
+class Book:
+    key: str
+    label: str
+    tf: str
+    summary: str
+    status: str  # "live" | "not_ported"
+    params: dict[str, str] = field(default_factory=dict)
+    have: tuple[str, ...] = ()
+    need: tuple[str, ...] = ()
+    source: str = ""
+    note: str = ""
+
+    def to_json(self) -> dict[str, object]:
+        return {
+            "key": self.key,
+            "label": self.label,
+            "tf": self.tf,
+            "summary": self.summary,
+            "status": self.status,
+            "params": self.params,
+            "have": list(self.have),
+            "need": list(self.need),
+            "source": self.source,
+            "note": self.note,
+            "paramsSource": SRC if self.params else "",
+        }
+
+
+#: Inputs this engine already produces, named once so the entries below can reference them.
+BARS = "30m/1m bars on the session grid"
+PIVOTS = "MTF pivot zones + confluence stop/targets"
+OI = "live OI (socket, GetScripInfoForFuture)"
+DEPTH = "20-level depth + L1 OFI / microprice (bars/micro.py)"
+CHAIN = "option chain, lot size, expiry"
+COST = "cost model + sizing from the stop"
+
+BOOKS: tuple[Book, ...] = (
+    Book(
+        key="FUDKII",
+        label="FUDKII",
+        tf="30m",
+        summary="SuperTrend flip coinciding with a Bollinger break, expressed as an OTM option.",
+        status="live",
+        params={
+            "fudkii.trigger.st.period": "7",
+            "fudkii.trigger.bb.period": "20",
+            "fudkii.trigger.bb.mult": "2.0",
+            "fudkii.trigger.require.both": "true",
+        },
+        have=(BARS, PIVOTS, CHAIN, COST),
+        source="kotsin_nse/strategy/fudkii.py",
+        note=(
+            "Runs here. The inherited parameters backtest at −1.40R (t = −7.96) over 481 trades; "
+            "see docs/strategies/FUDKII.md §8 before trusting a signal."
+        ),
+    ),
+    Book(
+        key="FUKAA",
+        label="FUKAA",
+        tf="30m",
+        summary="The same trigger, admitted only when volume confirms participation.",
+        status="live",
+        params={
+            "fukaa.trigger.volume.multiplier": "4.0",
+            "fukaa.trigger.avg.candles": "6",
+            "fukaa.trigger.watching.ttl.minutes": "35",
+            "fukaa.selection.composite.min": "60.0",
+            "fukaa.selection.gate.rr.floor": "0.5",
+            "fukaa.selection.refoi.nse": "5.0",
+            "fukaa.selection.refoi.mcx": "8.0",
+            "fukaa.selection.top.n": "999",
+            "fukaa.selection.max.same.direction": "999",
+        },
+        have=(BARS, PIVOTS, CHAIN, COST, OI),
+        source="kotsin_nse/strategy/fukaa.py",
+        note=(
+            "Runs here. Note the deployed top.n and max.same.direction were both 999 — the "
+            "sentinel R4 exists to forbid; this repo spells the same thing None/OFF."
+        ),
+    ),
+    Book(
+        key="FUDKII_RT",
+        label="FUDKII-RT",
+        tf="1m on a 30m signal",
+        summary=(
+            "A fired FUDKII signal kept alive and re-evaluated on every tick until it expires, "
+            "rather than being decided once at the boundary."
+        ),
+        status="not_ported",
+        params={
+            "fudkii.rt.living.enabled": "true",
+            "fudkii.rt.living.ttl.ms": "2100000 (35m)",
+            "fudkii.rt.living.refresh.ms": "60000 (1m)",
+            "fudkii.rt.living.reeval.ms": "300000 (5m)",
+            "fudkii.rt.living.reeval.rr.gate": "1.0",
+        },
+        have=(BARS, PIVOTS, CHAIN, COST),
+        need=("a living-signal store with a TTL", "re-evaluation on the 1m close"),
+        source="streamingcandle FudkiiRtKeepAliveEngine.java, FudkiiRtSignalConsumer.java",
+        note=(
+            "Closest to portable of the unported books: every input already exists here, and the "
+            "1m bars it re-evaluates on are already built and archived. What is missing is the "
+            "keep-alive loop itself."
+        ),
+    ),
+    Book(
+        key="FUDKOI",
+        label="FUDKOI",
+        tf="30m",
+        summary="FUDKII gated on an open-interest move, so the option leg has flow behind it.",
+        status="not_ported",
+        params={
+            "fudkoi.trigger.enabled": "true",
+            "fudkoi.trigger.oi.threshold.mcx": "100.0",
+            "fudkoi.trigger.kafka.topic": "kotsin_FUDKOI",
+        },
+        have=(BARS, PIVOTS, CHAIN, OI),
+        need=("an OI history per strike — the archive began 2026-09-22, so it is days away",),
+        source="streamingcandle (FUDKOI trigger)",
+        note="Blocked only on OI depth, not on logic: the socket already delivers what it needs.",
+    ),
+    Book(
+        key="PIVOTBOSS",
+        label="PIVOTBOSS",
+        tf="daily bias + intraday",
+        summary="CPR width regime and pivot confluence as a directional day bias.",
+        status="not_ported",
+        params={
+            "pivotboss.bias.threshold.strong": "65",
+            "pivotboss.bias.threshold.mild": "40",
+            "pivotboss.cpr.width.narrowFactor": "0.5",
+            "pivotboss.cpr.width.wideFactor": "1.5",
+            "pivotboss.cadence.maxPerScripPerDay": "2",
+            "pivotboss.cadence.cooldownMinutes": "60",
+            "pivotboss.cadence.globalDailyCap": "30",
+            "pivotboss.confluence.bpsIndex": "15",
+        },
+        have=(PIVOTS, BARS),
+        need=("a CPR width regime classifier", "the bias scorer and its cadence caps"),
+        source="streamingcandle CprWidthRegimeDetector.java, BiasScore.java, DayBias.java",
+        note=(
+            "This engine already computes the CPR (TC/BC) and the MTF zones the bias is scored "
+            "from — the Hot Stocks cards render them today. The scorer on top is what is absent."
+        ),
+    ),
+    Book(
+        key="MCX_BB_30",
+        label="MCX_BB30",
+        tf="30m (MCX)",
+        summary="Bollinger break on MCX commodities with a volume-surge floor and a cooldown.",
+        status="not_ported",
+        params={
+            "mcxbb30.trigger.cooldown.ms": "see " + SRC,
+            "mcxbb.trigger.min.score": "see " + SRC,
+            "mcxbb30.trigger.kafka.topic": "kotsin_MCX_BB_30",
+        },
+        have=(BARS, PIVOTS, COST),
+        need=("the trigger's score function and cooldown bookkeeping",),
+        source="streamingcandle (mcxbb30 trigger)",
+        note=(
+            "Mechanically the cheapest port: bollinger() and supertrend() already exist in "
+            "bars/indicators.py, MCX bars are built on the right :00/:30 grid, and the engine has "
+            "run a full MCX session."
+        ),
+    ),
+    Book(
+        key="MCX_BB_15",
+        label="MCX_BB15",
+        tf="15m (MCX)",
+        summary="The same break on the 15m frame, with a shorter cooldown.",
+        status="not_ported",
+        params={
+            "mcxbb15.trigger.cooldown.ms": "1800000 (30m)",
+            "mcxbb15.trigger.min.volume.surge": "1.0",
+            "mcxbb15.trigger.kafka.topic": "kotsin_MCX_BB_15",
+        },
+        have=(BARS, PIVOTS, COST),
+        need=("the trigger's score function and cooldown bookkeeping",),
+        source="streamingcandle (mcxbb15 trigger)",
+    ),
+    Book(
+        key="NSE_BB_30",
+        label="NSE_BB30",
+        tf="30m (NSE)",
+        summary="The MCX break ported to NSE equities, with a higher surge floor.",
+        status="not_ported",
+        params={
+            "nsebb30.trigger.cooldown.ms": "5400000 (90m)",
+            "nsebb30.trigger.min.volume.surge": "1.5",
+            "nsebb30.trigger.kafka.topic": "kotsin_NSE_BB_30",
+        },
+        have=(BARS, PIVOTS, COST),
+        need=("the trigger's score function and cooldown bookkeeping",),
+        source="streamingcandle (nsebb30 trigger)",
+    ),
+    Book(
+        key="RETEST",
+        label="RETEST",
+        tf="5m",
+        summary="A broken level retested and held, scored before entry.",
+        status="not_ported",
+        params={
+            "retest.v2.enabled": "true",
+            "retest.v2.fresh.turn.5m.max.bars": "2",
+            "retest.v2.rtscore.min": "70",
+        },
+        have=(BARS, PIVOTS),
+        need=("broken-level tracking", "the RT score"),
+        source="streamingcandle BrokenLevel.java, CandidateLevel.java",
+    ),
+    Book(
+        key="MICROALPHA",
+        label="MICROALPHA",
+        tf="5m",
+        summary="Order-flow imbalance and book pressure as a short-horizon conviction score.",
+        status="not_ported",
+        params={
+            "microalpha.enabled": "false  (already off in the old stack)",
+            "microalpha.trigger.min.conviction": "15",
+            "microalpha.trigger.high.conviction": "40",
+            "microalpha.trigger.cooldown.minutes": "10",
+            "microalpha.trigger.max.signals.per.day": "8",
+            "microalpha.trigger.require.orderbook": "true",
+            "microalpha.trigger.atr.stop.multiplier": "1.5",
+            "microalpha.flow.ofi.weight": "0.40",
+        },
+        have=(DEPTH, BARS),
+        need=("the conviction blend on top of OFI",),
+        source="streamingcandle (microalpha)",
+        note=(
+            "Was already disabled in the old stack (enabled=false). This venue has no trade tape "
+            "and no aggressor side, so Kyle's λ and VPIN are not computable — bars/micro.py says "
+            "so rather than approximating them, and any port inherits that limit."
+        ),
+    ),
+    Book(
+        key="QUANT",
+        label="QUANT",
+        tf="multi",
+        summary="A composite score across timeframes, cached for the other books to read.",
+        status="not_ported",
+        params={
+            "quant.score.timeframes": "see " + SRC,
+            "quant.score.options.analytics.enabled": "see " + SRC,
+        },
+        have=(BARS, PIVOTS, OI, CHAIN),
+        need=("the score definition and its cache",),
+        source="streamingcandle (quant.score)",
+    ),
+    Book(
+        key="MERE",
+        label="MERE",
+        tf="30m MTF",
+        summary="Multi-timeframe agreement book; the old repo carries its backtest, not its config.",
+        status="not_ported",
+        params={},
+        have=(BARS, PIVOTS),
+        need=("the definition itself — no deployed config exists to transcribe",),
+        source="streamingcandle/backtest/mere_mtf_backtest.py (research only)",
+        note=(
+            "The only book here with no deployed parameters anywhere in the old stack: it lived as "
+            "a backtest script. Porting it means choosing parameters, which is a research task, "
+            "not a transcription."
+        ),
+    ),
+)
+
+BY_KEY: dict[str, Book] = {b.key: b for b in BOOKS}
+LIVE_KEYS: tuple[str, ...] = tuple(b.key for b in BOOKS if b.status == "live")

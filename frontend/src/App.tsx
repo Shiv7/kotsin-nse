@@ -2,6 +2,7 @@ import { BrowserRouter, NavLink, Route, Routes, useLocation } from 'react-router
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { ModeBanner } from './components/ModeBanner'
 import { usePoll } from './lib/usePoll'
+import { AllStrategies } from './pages/AllStrategies'
 import { Backtest } from './pages/Backtest'
 import { Chart } from './pages/Chart'
 import { Committee } from './pages/Committee'
@@ -26,6 +27,7 @@ const PAGES = [
   ['/backtest', 'Backtest'],
   ['/committee', 'Committee'],
   ['/hot-stocks', 'Hot Stocks'],
+  ['/all-strategies', 'All Strategies'],
   ['/universe', 'Universe'],
   ['/risk', 'Risk'],
   ['/system', 'System'],
@@ -45,6 +47,7 @@ function Pages() {
         <Route path="/backtest" element={<Backtest />} />
         <Route path="/committee" element={<Committee />} />
         <Route path="/hot-stocks" element={<HotStocks />} />
+        <Route path="/all-strategies" element={<AllStrategies />} />
         <Route path="/universe" element={<Universe />} />
         <Route path="/risk" element={<Risk />} />
         <Route path="/system" element={<System />} />

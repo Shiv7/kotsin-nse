@@ -32,6 +32,7 @@ from ..exec.gateway import Mode
 from ..hotstocks.service import HotStocksService
 from ..ledger.db import events, rejections, signals, trades
 from ..market.session import TF_SECONDS, ist_hm, to_ist
+from ..strategy.catalog import BOOKS, LIVE_KEYS
 from ..strategy.keys import ALL_KEYS
 from .ws import Hub, handle, pump
 
@@ -402,6 +403,54 @@ def build_app(engine: Engine) -> FastAPI:
     async def fidelity() -> dict[str, Any]:
         """How often the live bar build disagrees with the exchange's own candle, by timeframe."""
         return engine.reconciler.snapshot()
+
+    @api.get("/all-strategies")
+    async def all_strategies() -> dict[str, Any]:
+        """Every book the old stack ran, with live state for the two this engine computes.
+
+        A tab whose book is not ported says so. The alternative — an empty tab fed by an endpoint
+        that returns ``[]`` — is indistinguishable from a quiet market, and that ambiguity is what
+        let a strategy sit dead for six weeks in the old stack with a dashboard showing no signals.
+        """
+        stats = engine.strategy_stats()
+        hist = await engine.ledger.gate_histogram()
+        pnl = await engine.ledger.pnl_by_strategy()
+        binding: dict[str, list[dict[str, Any]]] = {}
+        for row in hist:
+            binding.setdefault(row["strategy"], []).append(
+                {"gate": row["binding_gate"], "count": row["n"]}
+            )
+
+        cfg = {"FUDKII": _dc(engine.fudkii.cfg), "FUKAA": _dc(engine.fukaa.cfg)}
+        open_by_strategy: dict[str, int] = {}
+        for p in engine.positions.values():
+            if p.status == "OPEN":
+                open_by_strategy[p.strategy] = open_by_strategy.get(p.strategy, 0) + 1
+
+        books = []
+        for b in BOOKS:
+            row = b.to_json()
+            if b.status == "live":
+                row["live"] = {
+                    "config": cfg.get(b.key, {}),
+                    "gates": stats.get(b.key, {}),
+                    "binding": binding.get(b.key, []),
+                    "wallet": engine.wallets[b.key].to_json() if b.key in engine.wallets else None,
+                    "pnl": pnl.get(b.key),
+                    "last_signal": await engine.ledger.last_signal(b.key),
+                    "open_positions": open_by_strategy.get(b.key, 0),
+                }
+            books.append(row)
+
+        return {
+            "books": books,
+            "live": list(LIVE_KEYS),
+            "ported": sum(1 for b in BOOKS if b.status == "live"),
+            "total": len(BOOKS),
+            "mode": engine.mode().value,
+            "universe": len(engine.underlyings),
+            "segments": [s.value for s in engine.s.segment_list],
+        }
 
     # -- hot stocks -------------------------------------------------------------------------------
 
