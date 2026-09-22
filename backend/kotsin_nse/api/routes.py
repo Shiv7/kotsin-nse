@@ -452,6 +452,15 @@ def build_app(engine: Engine) -> FastAPI:
             "segments": [s.value for s in engine.s.segment_list],
         }
 
+    @api.get("/alerts")
+    async def alerts(book: str | None = None, limit: int = Query(100, le=500)) -> dict[str, Any]:
+        """Realtime firings from the ported books. Advisory: none of these can place an order."""
+        return {
+            "alerts": engine.alerts.feed(book, limit),
+            **engine.alerts.stats(),
+            "now_ist": ist_hm(time.time()),
+        }
+
     # -- hot stocks -------------------------------------------------------------------------------
 
     @api.get("/hot-stocks")

@@ -1,0 +1,175 @@
+"""Runs the ported books on every closed bar and keeps what fired.
+
+One instance, driven from ``Engine._on_bar_close``, so the detectors see exactly the bars the
+decision path sees — including the exchange-reconciled ones, since a book that fired on a live
+build the broker later corrected would be reporting a bar that never existed.
+
+Alerts live in a bounded ring per book. They are **not** written to the ledger: the ledger is the
+record of what the engine traded, and these books do not trade. Mixing an advisory alert into it
+would make ``signals`` stop meaning "something the gateway saw".
+"""
+
+from __future__ import annotations
+
+import time
+from collections import deque
+from typing import Any
+
+import structlog
+
+from ..bars.pivots import PivotLevels, classic_pivots
+from ..bars.unified import UnifiedBar
+from .detectors import (
+    BB_BOOKS,
+    Alert,
+    BbBreakDetector,
+    FudkiiRtDetector,
+    FudkoiDetector,
+    PivotBossDetector,
+)
+
+log = structlog.get_logger(__name__)
+
+#: Per book. A trading day across 216 underlyings does not come close, and the page pages anyway.
+RING = 500
+#: Bars of history a detector is handed. Enough for BB(20), SuperTrend(7) and a 20-bar volume
+#: median with room to warm.
+LOOKBACK = 120
+
+
+class AlertEngine:
+    def __init__(self, engine: Any) -> None:
+        self.engine = engine
+        self.bb = [BbBreakDetector(c) for c in BB_BOOKS]
+        self.fudkoi = FudkoiDetector()
+        self.pivotboss = PivotBossDetector()
+        self.rt = FudkiiRtDetector()
+        self.alerts: dict[str, deque[Alert]] = {}
+        self.counts: dict[str, int] = {}
+        self.evaluated: dict[str, int] = {}
+        self._cpr_avg: dict[str, float] = {}
+        self.started_ts = time.time()
+
+    # -- plumbing ---------------------------------------------------------------------------------
+
+    def _emit(self, a: Alert) -> None:
+        ring = self.alerts.setdefault(a.book, deque(maxlen=RING))
+        ring.appendleft(a)
+        self.counts[a.book] = self.counts.get(a.book, 0) + 1
+        log.info(
+            "alert",
+            book=a.book,
+            symbol=a.symbol,
+            direction=a.direction,
+            kind=a.kind,
+            score=round(a.score, 1),
+            reason=a.reason[:120],
+        )
+
+    def _seen(self, book: str) -> None:
+        self.evaluated[book] = self.evaluated.get(book, 0) + 1
+
+    def _segment_exch(self, symbol: str) -> str:
+        inst = self.engine.underlyings.get(symbol)
+        return inst.segment.exch if inst else "N"
+
+    def _cpr_for(self, symbol: str) -> tuple[PivotLevels | None, float | None]:
+        """Today's CPR from the previous complete session, and its recent average width."""
+        dailies = self.engine.store.bars(symbol, "1d", 25)
+        if len(dailies) < 12:
+            return None, None
+        prev = dailies[-2] if len(dailies) >= 2 else dailies[-1]
+        levels = classic_pivots(prev.high, prev.low, prev.close)
+        cached = self._cpr_avg.get(symbol)
+        if cached is None:
+            widths = []
+            for b in dailies[-12:-1]:
+                lv = classic_pivots(b.high, b.low, b.close)
+                if lv and lv.cpr_width > 0:
+                    widths.append(lv.cpr_width)
+            cached = sum(widths) / len(widths) if widths else 0.0
+            self._cpr_avg[symbol] = cached
+        return levels, cached or None
+
+    def adopt_signal(self, sig: dict[str, Any]) -> None:
+        """A FUDKII signal just fired — hand it to the living-signal book."""
+        self.rt.adopt(sig, time.time())
+
+    # -- the bar path -----------------------------------------------------------------------------
+
+    def on_bar(self, bar: UnifiedBar) -> None:
+        """Every closed bar of every timeframe. Never raises into the feed."""
+        try:
+            self._on_bar(bar)
+        except Exception as exc:  # noqa: BLE001 - an advisory book may not stall the engine
+            log.warning("alerts.failed", book="?", symbol=bar.symbol, tf=bar.tf, error=str(exc))
+
+    def _on_bar(self, bar: UnifiedBar) -> None:
+        if bar.tf == "1m":
+            for a in self.rt.on_bar(bar):
+                self._emit(a)
+            return
+
+        history = self.engine.store.bars(bar.symbol, bar.tf, LOOKBACK)
+        if len(history) < 25:
+            return
+        exch = self._segment_exch(bar.symbol)
+
+        for det in self.bb:
+            if det.cfg.tf != bar.tf:
+                continue
+            # MCX books run on MCX instruments and the NSE book on NSE ones; the same break on the
+            # wrong exchange is a different book with different deployed parameters.
+            if det.cfg.book.startswith("MCX") != (exch == "M"):
+                continue
+            self._seen(det.cfg.book)
+            a = det.on_bar(bar, history)
+            if a:
+                self._emit(a)
+
+        if bar.tf == "30m":
+            self._seen("FUDKOI")
+            a = self.fudkoi.on_bar(bar, history, exch=exch)
+            if a:
+                self._emit(a)
+
+            self._seen("PIVOTBOSS")
+            levels, avg = self._cpr_for(bar.symbol)
+            from ..market.session import ist_day
+
+            pb = self.pivotboss.on_bar(
+                bar,
+                history,
+                levels=levels,
+                zones=self.engine.zones_for(bar.symbol),
+                cpr_avg_width=avg,
+                day=ist_day(bar.ts).isoformat(),
+            )
+            if pb:
+                self._emit(pb)
+
+    # -- reads ------------------------------------------------------------------------------------
+
+    def feed(self, book: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        if book:
+            return [a.to_json() for a in list(self.alerts.get(book, ()))[:limit]]
+        merged: list[Alert] = []
+        for ring in self.alerts.values():
+            merged.extend(ring)
+        merged.sort(key=lambda a: a.ts, reverse=True)
+        return [a.to_json() for a in merged[:limit]]
+
+    def stats(self) -> dict[str, Any]:
+        return {
+            "counts": dict(self.counts),
+            "evaluated": dict(self.evaluated),
+            "living": len(self.rt.living),
+            "suppressedByCap": {
+                "PIVOTBOSS": self.pivotboss.cap.suppressed,
+            },
+            "capReached": {
+                "PIVOTBOSS": self.pivotboss.cap.global_cap_reached,
+            },
+            "uptime_s": round(time.time() - self.started_ts, 1),
+            "books": sorted({*self.counts, *self.evaluated, "FUDKII_RT"}),
+        }

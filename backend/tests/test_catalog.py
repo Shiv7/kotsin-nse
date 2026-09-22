@@ -22,8 +22,26 @@ def test_every_unported_book_says_what_it_still_needs():
             assert b.source, f"{b.key} is unported but cites no source to port from"
 
 
-def test_status_is_only_ever_one_of_two_values():
-    assert {b.status for b in BOOKS} <= {"live", "not_ported"}
+def test_status_is_only_ever_one_of_the_three_defined_values():
+    assert {b.status for b in BOOKS} <= {"live", "alerting", "not_ported"}
+
+
+def test_an_alerting_book_has_a_detector_and_claims_nothing_missing():
+    """"alerting" means it computes here — so it may not still be listing what it needs."""
+    from kotsin_nse.strategy.catalog import ALERTING_KEYS
+
+    assert ALERTING_KEYS, "the alerting tier exists; something should be in it"
+    for key in ALERTING_KEYS:
+        b = BY_KEY[key]
+        assert not b.need, f"{key} computes here but still lists {b.need}"
+        assert "alerts/detectors.py" in b.source, f"{key} must cite its detector"
+
+
+def test_alerting_is_never_confused_with_live():
+    """A published book is not a traded one. Nothing reaches the gateway by being written."""
+    from kotsin_nse.strategy.catalog import ALERTING_KEYS
+
+    assert not set(ALERTING_KEYS) & set(LIVE_KEYS)
 
 
 def test_keys_are_unique_and_addressable():

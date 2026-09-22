@@ -27,6 +27,7 @@ from typing import Any
 import httpx
 import structlog
 
+from .alerts.engine import AlertEngine
 from .bars.aggregator import Aggregator
 from .bars.micro import MicroAggregator
 from .bars.periods import monthly, previous_complete, weekly
@@ -159,6 +160,9 @@ class Engine:
             on_oi=self._on_oi,
         )
         self.aggregator = Aggregator(self.store, on_bar_close=self._on_bar_close)
+        #: Advisory books — they read the same closed bars the decision path does and emit
+        #: alerts only. Deliberately outside the gateway: nothing here can place an order.
+        self.alerts = AlertEngine(self)
         self._segment_by_code: dict[str, Segment] = {}
         self.micro = MicroAggregator(
             tf_seconds=TF_SECONDS[DECISION_TF],
@@ -578,6 +582,9 @@ class Engine:
         await self.bus.publish(Topic.BAR, bar)
         if bar.tf == "1m":
             self.archive.bar(bar)
+        # Advisory books run on every frame — MCX_BB15 decides on 15m and FUDKII-RT on 1m, so
+        # this must sit above the decision-timeframe return, not inside it.
+        self.alerts.on_bar(bar)
         if bar.tf != DECISION_TF:
             return
         for pos in self.positions.values():
@@ -674,6 +681,7 @@ class Engine:
 
     async def _handle_signal(self, sig: Signal, bar: UnifiedBar) -> None:
         await self.bus.publish(Topic.SIGNAL, sig)
+        self.alerts.adopt_signal(sig.to_json())
         underlying = self.underlyings.get(sig.symbol)
         if underlying is None:
             await self.ledger.insert_signal(sig.to_json(), "NO_UNDERLYING", "not in the universe")

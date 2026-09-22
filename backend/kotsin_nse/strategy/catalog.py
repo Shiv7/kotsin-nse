@@ -13,8 +13,10 @@ So each entry records four things, and never guesses at any of them:
   reader can grep for it. Not defaults, not recommendations: what was running.
 * ``have`` / ``need`` — which inputs this engine already produces and which it does not. This is
   the honest measure of what a port costs; several books need nothing new at all.
-* ``status`` — ``live`` only when this repo computes it. Everything else is ``not_ported``, which
-  the page states plainly rather than rendering an empty tab that looks like a quiet market.
+* ``status`` — ``live`` when this repo trades it, ``alerting`` when it computes and publishes the
+  book but deliberately keeps it out of the gateway, ``not_ported`` when it does not compute it
+  at all. The page states which, plainly, rather than rendering an empty tab that looks like a
+  quiet market. Nothing moves to ``live`` on the strength of having been written.
 
 Pure data, no imports: the ``strategy is pure`` contract forbids this package from reaching for
 venue, exec, ledger, api, ops, feed or instrument, and a table of facts needs none of them.
@@ -33,7 +35,7 @@ class Book:
     label: str
     tf: str
     summary: str
-    status: str  # "live" | "not_ported"
+    status: str  # "live" | "alerting" | "not_ported"
     params: dict[str, str] = field(default_factory=dict)
     have: tuple[str, ...] = ()
     need: tuple[str, ...] = ()
@@ -116,7 +118,7 @@ BOOKS: tuple[Book, ...] = (
             "A fired FUDKII signal kept alive and re-evaluated on every tick until it expires, "
             "rather than being decided once at the boundary."
         ),
-        status="not_ported",
+        status="alerting",
         params={
             "fudkii.rt.living.enabled": "true",
             "fudkii.rt.living.ttl.ms": "2100000 (35m)",
@@ -125,12 +127,9 @@ BOOKS: tuple[Book, ...] = (
             "fudkii.rt.living.reeval.rr.gate": "1.0",
         },
         have=(BARS, PIVOTS, CHAIN, COST),
-        need=("a living-signal store with a TTL", "re-evaluation on the 1m close"),
-        source="streamingcandle FudkiiRtKeepAliveEngine.java, FudkiiRtSignalConsumer.java",
+        source="alerts/detectors.py FudkiiRtDetector",
         note=(
-            "Closest to portable of the unported books: every input already exists here, and the "
-            "1m bars it re-evaluates on are already built and archived. What is missing is the "
-            "keep-alive loop itself."
+            "Ported. Adopts each FUDKII signal as it fires, re-checks it on the 1m close every 5 minutes, and retires it when the reward left falls under the 1.0R gate or the 35m TTL runs out — emitting the retirement, because a signal that quietly vanished looks identical to one that was never taken."
         ),
     ),
     Book(
@@ -138,23 +137,24 @@ BOOKS: tuple[Book, ...] = (
         label="FUDKOI",
         tf="30m",
         summary="FUDKII gated on an open-interest move, so the option leg has flow behind it.",
-        status="not_ported",
+        status="alerting",
         params={
             "fudkoi.trigger.enabled": "true",
             "fudkoi.trigger.oi.threshold.mcx": "100.0",
             "fudkoi.trigger.kafka.topic": "kotsin_FUDKOI",
         },
         have=(BARS, PIVOTS, CHAIN, OI),
-        need=("an OI history per strike — the archive began 2026-09-22, so it is days away",),
-        source="streamingcandle (FUDKOI trigger)",
-        note="Blocked only on OI depth, not on logic: the socket already delivers what it needs.",
+        source="alerts/detectors.py FudkoiDetector",
+        note=(
+            "Ported. The FUDKII geometry plus the OI confirmation, thresholded at the deployed 100% on MCX and the 5% NSE reference. Cash equity carries no OI, so it reads the underlying's front future — and declines to fire when OI is absent rather than treating absent as zero."
+        ),
     ),
     Book(
         key="PIVOTBOSS",
         label="PIVOTBOSS",
         tf="daily bias + intraday",
         summary="CPR width regime and pivot confluence as a directional day bias.",
-        status="not_ported",
+        status="alerting",
         params={
             "pivotboss.bias.threshold.strong": "65",
             "pivotboss.bias.threshold.mild": "40",
@@ -166,11 +166,9 @@ BOOKS: tuple[Book, ...] = (
             "pivotboss.confluence.bpsIndex": "15",
         },
         have=(PIVOTS, BARS),
-        need=("a CPR width regime classifier", "the bias scorer and its cadence caps"),
-        source="streamingcandle CprWidthRegimeDetector.java, BiasScore.java, DayBias.java",
+        source="alerts/detectors.py PivotBossDetector",
         note=(
-            "This engine already computes the CPR (TC/BC) and the MTF zones the bias is scored "
-            "from — the Hot Stocks cards render them today. The scorer on top is what is absent."
+            "Ported. CPR width against its own 11-session average gives the regime; only NARROW is actionable, since a wide CPR is a range day and not a signal. Bias is distance from the central pivot in ATR plus the room to the next confluence wall, under the deployed cadence caps of 2 per scrip and 30 a day."
         ),
     ),
     Book(
@@ -178,19 +176,16 @@ BOOKS: tuple[Book, ...] = (
         label="MCX_BB30",
         tf="30m (MCX)",
         summary="Bollinger break on MCX commodities with a volume-surge floor and a cooldown.",
-        status="not_ported",
+        status="alerting",
         params={
             "mcxbb30.trigger.cooldown.ms": "see " + SRC,
             "mcxbb.trigger.min.score": "see " + SRC,
             "mcxbb30.trigger.kafka.topic": "kotsin_MCX_BB_30",
         },
         have=(BARS, PIVOTS, COST),
-        need=("the trigger's score function and cooldown bookkeeping",),
-        source="streamingcandle (mcxbb30 trigger)",
+        source="alerts/detectors.py BbBreakDetector",
         note=(
-            "Mechanically the cheapest port: bollinger() and supertrend() already exist in "
-            "bars/indicators.py, MCX bars are built on the right :00/:30 grid, and the engine has "
-            "run a full MCX session."
+            "Ported. Shares one detector with its NSE and 15m siblings; only the cooldown and surge floor differ, which is exactly how the three differed in the old stack."
         ),
     ),
     Book(
@@ -198,30 +193,28 @@ BOOKS: tuple[Book, ...] = (
         label="MCX_BB15",
         tf="15m (MCX)",
         summary="The same break on the 15m frame, with a shorter cooldown.",
-        status="not_ported",
+        status="alerting",
         params={
             "mcxbb15.trigger.cooldown.ms": "1800000 (30m)",
             "mcxbb15.trigger.min.volume.surge": "1.0",
             "mcxbb15.trigger.kafka.topic": "kotsin_MCX_BB_15",
         },
         have=(BARS, PIVOTS, COST),
-        need=("the trigger's score function and cooldown bookkeeping",),
-        source="streamingcandle (mcxbb15 trigger)",
+        source="alerts/detectors.py BbBreakDetector",
     ),
     Book(
         key="NSE_BB_30",
         label="NSE_BB30",
         tf="30m (NSE)",
         summary="The MCX break ported to NSE equities, with a higher surge floor.",
-        status="not_ported",
+        status="alerting",
         params={
             "nsebb30.trigger.cooldown.ms": "5400000 (90m)",
             "nsebb30.trigger.min.volume.surge": "1.5",
             "nsebb30.trigger.kafka.topic": "kotsin_NSE_BB_30",
         },
         have=(BARS, PIVOTS, COST),
-        need=("the trigger's score function and cooldown bookkeeping",),
-        source="streamingcandle (nsebb30 trigger)",
+        source="alerts/detectors.py BbBreakDetector",
     ),
     Book(
         key="RETEST",
@@ -297,3 +290,5 @@ BOOKS: tuple[Book, ...] = (
 
 BY_KEY: dict[str, Book] = {b.key: b for b in BOOKS}
 LIVE_KEYS: tuple[str, ...] = tuple(b.key for b in BOOKS if b.status == "live")
+#: Books this engine computes and publishes, but does not trade.
+ALERTING_KEYS: tuple[str, ...] = tuple(b.key for b in BOOKS if b.status == "alerting")
