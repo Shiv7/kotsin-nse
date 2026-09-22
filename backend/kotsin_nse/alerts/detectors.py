@@ -52,6 +52,12 @@ class Alert:
     price: float
     evidence: dict[str, Any] = field(default_factory=dict)
     kind: str = "TRIGGER"  # TRIGGER | KEEPALIVE | EXPIRED
+    #: The stop/target ladder and OTM contract this alert implies. Attached after the detector
+    #: returns, because geometry needs zones and the chain, and a detector stays pure.
+    plan: dict[str, Any] | None = None
+    cta: dict[str, str] = field(default_factory=dict)
+    company: str = ""
+    exchange: str = "N"
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -66,6 +72,10 @@ class Alert:
             "price": self.price,
             "evidence": self.evidence,
             "kind": self.kind,
+            "plan": self.plan,
+            "cta": self.cta,
+            "company": self.company,
+            "exchange": self.exchange,
         }
 
 

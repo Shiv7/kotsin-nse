@@ -154,3 +154,31 @@ def test_detectors_cannot_reach_the_gateway():
         text = f.read_text()
         assert "from ..exec" not in text and "from ..venue" not in text, f
         assert "place_order" not in text, f
+
+
+def test_a_noise_stop_is_declined_however_rich_its_reward():
+    """The measured failure: grade A was worst (-1.73R) because high R:R came from a tiny stop.
+
+    DRREDDY, live on 2026-09-22: entry 1210.70, stop 1208.70, ATR 5.93 — 0.34 ATR away — graded A
+    at 7.40R. The CTA must decline that, not headline it.
+    """
+    from kotsin_nse.alerts.plan import TradePlan, cta
+
+    plan = TradePlan(
+        entry=1210.7, stop=1208.7, targets=[1225.5], rr=7.4, grade="A", atr=5.93,
+        option_type="CE", strike=1220.0, strike_interval=10.0, delta=0.48,
+        fortress=9.0, room_atr=11.56, stop_zone="1d.FIB_R1", target_zones=[], note="",
+        listed=None,
+    )
+    out = cta(plan, score=82.0, kind="TRIGGER")
+    assert out["action"] == "AVOID"
+    assert "0.34 ATR" in out["text"]
+
+    # The same geometry with a stop a full ATR out is allowed through.
+    roomy = TradePlan(
+        entry=1210.7, stop=1203.0, targets=[1240.0], rr=3.8, grade="A", atr=5.93,
+        option_type="CE", strike=1220.0, strike_interval=10.0, delta=0.48,
+        fortress=9.0, room_atr=4.0, stop_zone="1d.S1", target_zones=["1d.R1"], note="",
+        listed=None,
+    )
+    assert cta(roomy, score=82.0, kind="TRIGGER")["action"] == "PRIMARY"

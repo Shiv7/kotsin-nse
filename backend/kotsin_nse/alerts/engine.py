@@ -17,8 +17,10 @@ from typing import Any
 
 import structlog
 
+from ..bars.indicators import atr
 from ..bars.pivots import PivotLevels, classic_pivots
 from ..bars.unified import UnifiedBar
+from . import plan as planner
 from .detectors import (
     BB_BOOKS,
     Alert,
@@ -51,6 +53,63 @@ class AlertEngine:
         self.started_ts = time.time()
 
     # -- plumbing ---------------------------------------------------------------------------------
+
+    def _enrich(self, a: Alert, bar: UnifiedBar, history: list[UnifiedBar]) -> None:
+        """Attach the plan and the CTA. Never raises — an alert without a plan still publishes."""
+        inst = self.engine.underlyings.get(a.symbol)
+        a.company = getattr(inst, "name", "") if inst else ""
+        a.exchange = inst.segment.exch if inst else "N"
+        if a.kind != "TRIGGER":
+            a.cta = planner.cta(None, a.score, a.kind)
+            return
+        try:
+            tp = planner.build(
+                bar=bar,
+                direction=a.direction,
+                zones=self.engine.zones_for(a.symbol),
+                atr_value=atr(history, 14),
+                tick_size=getattr(inst, "tick_size", 0.05) or 0.05,
+                listed=self._listed_option(a.symbol, a.direction, bar.close),
+            )
+        except Exception as exc:  # noqa: BLE001 - the alert is the point; the plan is a bonus
+            log.warning("alerts.plan_failed", symbol=a.symbol, error=str(exc))
+            tp = None
+        a.plan = tp.to_json() if tp else None
+        a.cta = planner.cta(tp, a.score, a.kind)
+
+    def _listed_option(self, symbol: str, direction: str, spot: float) -> dict[str, Any] | None:
+        """The real contract nearest the OTM strike, when the chain actually lists one.
+
+        The theoretical strike comes off a ladder heuristic; this is what the exchange has. A
+        position was opened yesterday on a strike outside the subscribed band and never quoted, so
+        the card shows whether the contract it names is one the engine can actually price.
+        """
+        g = self.engine.groups.get(symbol)
+        if not g or not getattr(g, "options", None):
+            return None
+        want = "CE" if direction == "BULLISH" else "PE"
+        target, _ = planner.otm_strike(spot, direction)
+        best = None
+        for o in g.options:
+            if o.option_type.value != want:
+                continue
+            if best is None or abs(o.strike - target) < abs(best.strike - target):
+                best = o
+        if best is None:
+            return None
+        ltp = self.engine.ltps.get(best.scrip_code)
+        return {
+            "scripCode": best.scrip_code,
+            "symbol": best.name,
+            "strike": best.strike,
+            "type": want,
+            "expiry": best.expiry,
+            "lotSize": best.lot_size,
+            "ltp": ltp,
+            "oi": self.engine.option_oi.get(best.scrip_code),
+            "quotes": ltp is not None,
+            "strikeGapFromTheoretical": round(best.strike - target, 2),
+        }
 
     def _emit(self, a: Alert) -> None:
         ring = self.alerts.setdefault(a.book, deque(maxlen=RING))
@@ -107,6 +166,7 @@ class AlertEngine:
     def _on_bar(self, bar: UnifiedBar) -> None:
         if bar.tf == "1m":
             for a in self.rt.on_bar(bar):
+                self._enrich(a, bar, [])
                 self._emit(a)
             return
 
@@ -125,12 +185,14 @@ class AlertEngine:
             self._seen(det.cfg.book)
             a = det.on_bar(bar, history)
             if a:
+                self._enrich(a, bar, history)
                 self._emit(a)
 
         if bar.tf == "30m":
             self._seen("FUDKOI")
             a = self.fudkoi.on_bar(bar, history, exch=exch)
             if a:
+                self._enrich(a, bar, history)
                 self._emit(a)
 
             self._seen("PIVOTBOSS")
@@ -146,6 +208,7 @@ class AlertEngine:
                 day=ist_day(bar.ts).isoformat(),
             )
             if pb:
+                self._enrich(pb, bar, history)
                 self._emit(pb)
 
     # -- reads ------------------------------------------------------------------------------------
