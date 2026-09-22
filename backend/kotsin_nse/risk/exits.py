@@ -347,3 +347,40 @@ def apply_exit(
         pos.exit_price = fill_price
         pos.exit_reason = decision.reason.value
     return gross
+
+
+def replay_gap(
+    pos: Position, candles: list[tuple[float, float]], limits: RiskLimits
+) -> ExitDecision | None:
+    """Re-run the breach logic over minutes the feed missed, oldest first.
+
+    A paused clock is correct while the quote is absent, but on reconnect the engine knows only
+    where the premium is *now* — not where it went. The broker does serve 1m candles for a listed
+    option, so the gap can be walked rather than guessed at, and the sustain decided on what
+    actually happened instead of on the first tick after recovery.
+
+    ``candles`` is ``[(ts, close)]``. Two limits are honest to state: the resolution is one minute,
+    so a breach that began and ended inside a single candle is invisible; and an expired contract
+    leaves the scrip master, so this only works while the option is still listed. The hard floor
+    covers both, being path-independent.
+    """
+    if limits.sustain_s is None or not candles:
+        return None
+    for ts, close in sorted(candles):
+        if close <= 0 or pos.option_sl <= 0:
+            continue
+        if close > pos.option_sl:
+            pos.breach_since = None
+            continue
+        if pos.breach_since is None:
+            pos.breach_since = ts
+        elif ts - pos.breach_since >= limits.sustain_s:
+            return ExitDecision(
+                pos.id,
+                ExitReason.SL_OP,
+                close,
+                pos.qty_remaining,
+                f"replayed the feed gap: below {pos.option_sl:.2f} continuously for "
+                f"{ts - pos.breach_since:.0f}s (1m resolution)",
+            )
+    return None

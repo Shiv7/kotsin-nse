@@ -293,3 +293,51 @@ async def test_a_flat_book_is_an_empty_reconcile_not_a_failed_one():
     assert report.error == ""
     assert report.clean is True
     assert report.mismatches == []
+
+
+async def test_paper_positions_are_not_reconciled_against_the_broker():
+    """A paper position deliberately does not exist at the venue. Comparing it anyway made every
+    open paper position a PHANTOM, froze entries, and turned a clean session into a halted one the
+    moment it filled — observed 2026-09-22."""
+    from kotsin_nse.config import Segment
+    from kotsin_nse.domain import (
+        Direction,
+        Instrument,
+        InstrumentKind,
+        OptionType,
+        Position,
+        PosSide,
+    )
+
+    inst = Instrument(
+        scrip_code="59121", symbol="X", segment=Segment.NSE_FO, kind=InstrumentKind.OPTION,
+        name="X PE", lot_size=100, tick_size=0.05, multiplier=1, expiry="2026-09-29",
+        strike=100.0, option_type=OptionType.PE, underlying="X",
+    )
+    pos = Position(
+        id="p1", strategy="FUDKII", instrument=inst, underlying=inst, side=PosSide.LONG,
+        qty=100, entry=10.0, opened_ts=1.0, signal_id="s", direction=Direction.BEARISH,
+        equity_entry=100.0, equity_sl=101.0, equity_targets=(), option_sl=9.0,
+        option_targets=(), qty_remaining=100,
+    )
+
+    # The broker holds nothing, as it should for paper.
+    r = Reconciler(FakeRest([]))
+    paper = await r.run([pos], at_venue=False)
+    assert paper.clean and not paper.mismatches, "a paper book has nothing to reconcile"
+    assert not r.frozen
+
+    # In LIVE the same state is a genuine phantom and must still freeze.
+    r2 = Reconciler(FakeRest([]))
+    live = await r2.run([pos], at_venue=True)
+    assert live.mismatches and live.mismatches[0].kind is MismatchKind.PHANTOM
+    assert r2.frozen
+
+
+async def test_a_broker_orphan_is_reported_even_in_paper():
+    """Paper or not, a real position sitting at the broker that the engine knows nothing about is
+    dangerous — so the venue side is still read."""
+    r = Reconciler(FakeRest([{"scrip_code": "99", "exch": "N", "exch_type": "D", "net_qty": 50,
+                              "buy_avg": 1.0, "sell_avg": 0.0, "mtm": 0.0, "symbol": "Z"}]))
+    rep = await r.run([], at_venue=False)
+    assert rep.mismatches and rep.mismatches[0].kind is MismatchKind.ORPHAN

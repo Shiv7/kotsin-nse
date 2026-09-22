@@ -148,3 +148,60 @@ def test_the_base_book_is_untouched_by_the_rt_policy():
     pos = _pos(strategy="FUDKII")
     d = e.evaluate(pos, _view(option_ltp=16.5, option_mid=16.5))
     assert d is not None, "the base book exits on the touch, with no grace period"
+
+
+def test_a_feed_gap_is_replayed_from_the_candles_rather_than_guessed():
+    """On reconnect the engine knows where the premium is, not where it went. The broker serves 1m
+    candles for a listed option, so the gap is walked."""
+    from kotsin_nse.risk.exits import replay_gap
+
+    pos = _pos()
+    # three minutes below the 17.00 stop while the socket was down
+    gap = [(3000.0, 16.8), (3060.0, 16.5), (3120.0, 16.4)]
+    d = replay_gap(pos, gap, RT_X_LIMITS)
+    assert d is not None and "replayed the feed gap" in d.note
+
+    # a gap that recovered mid-way must not accumulate across the recovery
+    pos2 = _pos()
+    assert replay_gap(pos2, [(3000.0, 16.8), (3060.0, 18.0), (3120.0, 16.9)], RT_X_LIMITS) is None
+    assert pos2.breach_since == 3120.0, "the clock restarted at the last breach, not the first"
+
+
+def test_replay_is_inert_for_a_book_without_a_sustain_policy():
+    from kotsin_nse.risk.exits import replay_gap
+
+    pos = _pos(strategy="FUDKII")
+    assert replay_gap(pos, [(3000.0, 1.0)], RiskLimits()) is None
+
+
+def test_the_rt_twin_mirrors_the_entry_exactly_so_only_the_exit_differs():
+    """Same contract, same qty, same fill price, same instant. If the entries differed by a tick
+    the two curves would be comparing entries as well as exits."""
+    from dataclasses import replace
+
+    from kotsin_nse.strategy.keys import StrategyKey
+
+    primary = _pos(strategy=StrategyKey.FUDKII.value, id="pos-a")
+    twin = replace(
+        primary,
+        id="pos-b",
+        strategy=StrategyKey.FUDKII_RT_X.value,
+        note=f"{primary.note} · RT exit policy, twin of {primary.id}",
+    )
+    for field in ("instrument", "qty", "entry", "opened_ts", "option_sl", "option_targets",
+                  "equity_sl", "equity_targets", "direction", "signal_id"):
+        assert getattr(twin, field) == getattr(primary, field), field
+    assert twin.id != primary.id
+    assert twin.strategy == "FUDKII_RT_X"
+    assert "twin of pos-a" in twin.note
+
+
+def test_the_two_books_take_different_exits_from_identical_state():
+    """The point of the pair: same position, same market, two answers."""
+    base = ExitEngine(RiskLimits())
+    rt = ExitEngine(RT_X_LIMITS)
+    a, b = _pos(strategy="FUDKII"), _pos(strategy="FUDKII_RT_X")
+    v = _view(option_ltp=16.5, option_mid=16.5, now=2000.0)
+
+    assert base.evaluate(a, v) is not None, "the base book exits on the touch"
+    assert rt.evaluate(b, v) is None, "the RT book waits for the breach to hold"

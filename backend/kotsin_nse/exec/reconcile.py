@@ -88,7 +88,20 @@ class Reconciler:
         self.frozen = False
         self.freeze_reason = ""
 
-    async def run(self, positions: list[Position]) -> ReconcileReport:
+    async def run(
+        self, positions: list[Position], *, at_venue: bool = True
+    ) -> ReconcileReport:
+        """Compare the local book against the broker's.
+
+        ``at_venue`` is False in SHADOW and PAPER, where the engine's positions deliberately do not
+        exist at the broker. Comparing them anyway makes every open paper position a PHANTOM, which
+        freezes entries — so a paper session would run clean until its first fill and then halt
+        itself for the rest of the day. Found 2026-09-22 with one paper position open.
+
+        The venue side is still read in those modes, because an ORPHAN means something regardless:
+        a real position sitting at the broker that this engine knows nothing about is dangerous
+        whether or not the engine is paper-trading.
+        """
         report = ReconcileReport()
         try:
             venue_rows = await self.rest.net_positions()
@@ -100,9 +113,11 @@ class Reconciler:
             return report
 
         venue = {r["scrip_code"]: r for r in venue_rows if r["net_qty"] != 0}
-        local = {
-            p.instrument.scrip_code: p for p in positions if p.status == "OPEN" and p.qty_remaining
-        }
+        local = (
+            {p.instrument.scrip_code: p for p in positions if p.status == "OPEN" and p.qty_remaining}
+            if at_venue
+            else {}
+        )
         report.checked = len(venue) + len(local)
 
         for code, row in venue.items():

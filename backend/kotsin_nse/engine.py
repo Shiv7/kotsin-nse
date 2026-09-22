@@ -155,6 +155,9 @@ class Engine:
         # into each other, and a second RiskLimits makes that structural.
         self.exits_rt = ExitEngine(RT_X_LIMITS)
         self._exits_by_strategy = {StrategyKey.FUDKII_RT_X.value: self.exits_rt}
+        #: Published by the exit loop each tick, read by the API. One computation, so the card
+        #: and the decision can never disagree.
+        self.position_marks: dict[str, dict[str, Any]] = {}
         self.exposure = ExposureBook(self.limits)
         self.calendar = TradingCalendar.from_file(settings.data_dir / "holidays.txt")
         self.telegram = Telegram(
@@ -379,7 +382,10 @@ class Engine:
             options=n_opts, underlyings=len(universe),
         )
         if self.reconciler_positions is not None:
-            await self.reconciler_positions.run(list(self.positions.values()))
+            await self.reconciler_positions.run(
+                list(self.positions.values()),
+                at_venue=self.mode() in (Mode.LIVE, Mode.LIVE_CAPPED),
+            )
 
     def _prev_close(self, symbol: str) -> float | None:
         bars = self.store.bars(symbol, "1d")
@@ -856,7 +862,13 @@ class Engine:
         wallet.apply_charges(result.fill.charges, result.fill.ts)
         await self.ledger.upsert_position(_position_json(pos))
         await self.ledger.upsert_wallet(wallet.strategy, wallet.to_json())
-        await self._open_rt_twin(pos, inst, result)
+        # A twin failing must never cost the real entry. The primary position is already
+        # registered and its wallet charged by this point; the mirror is strictly additive, so
+        # it is wrapped rather than allowed to unwind a trade that succeeded.
+        try:
+            await self._open_rt_twin(pos, inst, result)
+        except Exception as exc:
+            log.exception("rt_twin.failed", of=pos.id, symbol=pos.underlying.symbol, error=str(exc))
         log.info(
             "position.open",
             strategy=pos.strategy,
@@ -1026,6 +1038,18 @@ class Engine:
                 halted=halted,
                 daily_loss_hit=wallet.halted and wallet.halt_reason.startswith("DAILY_LOSS"),
             )
+            # The exact numbers the exit is judged against, published so the card shows these
+            # and not a second computation of them.
+            self.position_marks[pos.id] = {
+                "mid": mid,
+                "spread_pct": spread,
+                "quote_ok": view.quote_ok,
+                "option_sl": pos.option_sl,
+                "breach_since": pos.breach_since,
+                "peak_mid": pos.peak_mid,
+                "trail_dwell": pos.trail_dwell,
+                "ts": now,
+            }
             engine_for = self._exits_by_strategy.get(pos.strategy, self.exits)
             decision = engine_for.evaluate(pos, view)
             if decision is None:
@@ -1155,7 +1179,10 @@ class Engine:
                 if self.reconciler_positions is not None and now - last_reconcile > 60:
                     last_reconcile = now
                     if self.mode() in (Mode.LIVE, Mode.LIVE_CAPPED):
-                        await self.reconciler_positions.run(list(self.positions.values()))
+                        await self.reconciler_positions.run(
+                list(self.positions.values()),
+                at_venue=self.mode() in (Mode.LIVE, Mode.LIVE_CAPPED),
+            )
 
                 # The socket was opened with a token that dies at 23:59:59 IST. Once it has, drop
                 # the socket so the run loop reconnects with a fresh login — otherwise it can sit

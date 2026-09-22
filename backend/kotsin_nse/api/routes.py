@@ -190,7 +190,14 @@ def build_app(engine: Engine) -> FastAPI:
 
     @api.get("/positions")
     async def positions() -> list[dict[str, Any]]:
-        return [_position_view(engine, p) for p in engine.positions.values()]
+        out = []
+        for p in engine.positions.values():
+            row = _position_view(engine, p)
+            # The exit loop's own numbers, not a second computation: if a stop is breached on this
+            # row it is breached in the engine too.
+            row["marks"] = engine.position_marks.get(p.id)
+            out.append(row)
+        return out
 
     @api.get("/signals")
     async def recent_signals(limit: int = Query(100, le=500)) -> list[dict[str, Any]]:
