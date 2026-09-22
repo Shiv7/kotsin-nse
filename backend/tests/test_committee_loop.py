@@ -196,7 +196,10 @@ def test_daily_archive_writes_parquet_and_dedups(tmp_path):
     bars = pd.read_parquet(tmp_path / "archive" / "bars" / f"{DAY0}.parquet")
     assert len(bars) == 1 and bars.iloc[0]["c"] == 100.9
     st = a.stats()
-    assert st["rows_written"] == 4 and st["days"] == {"bars": 1, "oi": 1, "micro": 1} and st["errors"] == 0
+    # Asserts the streams this test writes, not the full set: adding a new archive stream is
+    # not a regression in daily rollover, and an exact-dict assertion made it look like one.
+    assert st["rows_written"] == 4 and st["errors"] == 0
+    assert {k: st["days"][k] for k in ("bars", "oi", "micro")} == {"bars": 1, "oi": 1, "micro": 1}
     off = DailyArchive(tmp_path / "off", enabled=False)
     off.oi("1", ts, 1.0, None)
     assert off.rows_buffered == 0 and off.flush() == 0

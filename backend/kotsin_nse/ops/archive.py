@@ -36,6 +36,8 @@ KEYS: dict[str, tuple[str, ...]] = {
     "bars": ("symbol", "ts"),
     "oi": ("scrip_code", "ts"),
     "micro": ("scrip_code", "bucket_ts"),
+    # Sampled rather than bar-aggregated, so the de-dup key is the sample instant itself.
+    "option_quotes": ("scrip_code", "ts"),
 }
 
 
@@ -83,6 +85,41 @@ class DailyArchive:
             "oi",
             ts,
             {"scrip_code": str(scrip_code), "ts": float(ts), "oi": float(oi), "change_pct": change_pct},
+        )
+
+    def option_quote(
+        self,
+        scrip_code: str,
+        ts: float,
+        *,
+        ltp: float | None,
+        bid: float | None,
+        ask: float | None,
+        spot: float | None,
+        delta: float | None,
+    ) -> None:
+        """A sampled option quote, with the spot and delta that priced it.
+
+        Option 1m bars cannot be built the way underlying bars are: an option Instrument's
+        ``symbol`` is the underlying root (``catalogue.py:152``), so tracking one in the aggregator
+        trips the bar-series collision guard that exists to stop futures ticks landing in the
+        equity's series. Sampling the quote instead costs nothing and answers the question that
+        needs answering — whether the premium moved by more than delta explains, which is the
+        whole gamma-versus-theta test. The spot and delta are stored beside it so the residual can
+        be computed without re-deriving either.
+        """
+        self._add(
+            "option_quotes",
+            ts,
+            {
+                "scrip_code": str(scrip_code),
+                "ts": float(ts),
+                "ltp": None if ltp is None else float(ltp),
+                "bid": None if bid is None else float(bid),
+                "ask": None if ask is None else float(ask),
+                "spot": None if spot is None else float(spot),
+                "delta": None if delta is None else float(delta),
+            },
         )
 
     def micro(self, scrip_code: str, bucket_ts: int, metrics: Mapping[str, Any]) -> None:

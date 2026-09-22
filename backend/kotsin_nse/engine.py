@@ -1065,6 +1065,9 @@ class Engine:
             try:
                 await self.aggregator.flush_stale()
                 await self._manage_positions()
+                # Same tick as the exit evaluation, deliberately: the card must show the
+                # numbers the stop is being judged against, not a second computation of them.
+                self.alerts.refresh_live()
             except Exception as exc:
                 log.exception("clock.failed", error=str(exc))
             await asyncio.sleep(1.0)

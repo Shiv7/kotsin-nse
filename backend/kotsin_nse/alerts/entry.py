@@ -22,6 +22,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+# Pure fill arithmetic, shared with the paper matcher so a modelled price and a booked one are
+# never two different calculations.
+from ..exec.paper import walk_book
+
 #: A quote older than this is not an entry price. Matches the engine's own rule for pricing an
 #: open position's stop (``Settings.position_quote_max_age_s``).
 MAX_QUOTE_AGE_S = 60.0
@@ -89,8 +93,7 @@ def model(
     lots: int = 1,
 ) -> Entry:
     """The entry as it would actually happen, priced off the ask ladder at this instant."""
-    from ..exec.paper import walk_book
-
+    
     qty = max(lot_size, 1) * max(lots, 1)
     ltp = getattr(quote, "ltp", None) if quote else None
     bid = getattr(quote, "bid", None) if quote else None
@@ -150,4 +153,86 @@ def model(
         notional=fill * qty if fill else None,
         stale=stale,
         note=note,
+    )
+
+
+@dataclass(slots=True)
+class ExitWalk:
+    """What selling a given quantity actually realises, walked down the bid ladder."""
+
+    lots: int
+    qty: int
+    fill: float | None
+    source: str
+    levels_walked: int
+    capped: bool
+    slippage_vs_mid_pct: float | None
+    slippage_vs_ltp_pct: float | None
+    proceeds: float | None
+
+    def to_json(self) -> dict[str, Any]:
+        r = lambda v, d=2: None if v is None else round(v, d)  # noqa: E731
+        return {
+            "lots": self.lots,
+            "qty": self.qty,
+            "fill": r(self.fill),
+            "source": self.source,
+            "levelsWalked": self.levels_walked,
+            "capped": self.capped,
+            "slippageVsMidPct": r(self.slippage_vs_mid_pct, 3),
+            "slippageVsLtpPct": r(self.slippage_vs_ltp_pct, 3),
+            "proceeds": r(self.proceeds, 0),
+        }
+
+
+def exit_walk(
+    *, quote: Any | None, book: Any | None, lot_size: int, lots: int, now: float
+) -> ExitWalk:
+    """Selling is not buying in reverse — it is a different ladder at a different depth.
+
+    An entry lifts the ask; an exit hits the **bid**, and on a naked OTM the two are not mirror
+    images. The bid side thins first when the trade goes against you, which is exactly when the
+    exit matters, so a spread measured at entry is the wrong number by the time it is used.
+
+    Quantity matters as much as side. One lot at T1 and three lots on the trail walk to different
+    depths and realise different prices, so they are separate walks and are reported separately
+    rather than as one average that describes neither.
+    """
+    qty = max(lot_size, 1) * max(lots, 1)
+    bid = getattr(quote, "bid", None) if quote else None
+    ask = getattr(quote, "ask", None) if quote else None
+    ltp = getattr(quote, "ltp", None) if quote else None
+    mid = (bid + ask) / 2 if (bid and ask and bid > 0 and ask > 0) else ltp
+
+    bids = getattr(book, "bids", None) if book else None
+    book_age = now - getattr(book, "ts", now) if book else None
+
+    fill: float | None = None
+    source, levels, capped = "none", 0, False
+    if bids and book_age is not None and book_age <= MAX_QUOTE_AGE_S:
+        touch = bids[0][0]
+        walk = walk_book(bids, qty, touch=touch, ceiling_pct=LADDER_CEILING_PCT, buy=False)
+        if walk.filled >= qty and walk.avg_price > 0:
+            fill, source, levels, capped = walk.avg_price, "ladder", walk.levels, walk.capped
+        elif walk.filled > 0:
+            # The book cannot absorb the whole position inside the ceiling. That is the number
+            # worth seeing: a size the market will not take at a price worth taking.
+            fill, source, levels, capped = walk.avg_price, "partial — book too thin", walk.levels, True
+        elif bid and bid > 0:
+            fill, source = bid, "touch (ladder too thin)"
+    elif bid and bid > 0:
+        fill, source = bid, "touch (no live depth)"
+    elif ltp and ltp > 0:
+        fill, source = ltp, "last trade (no bid)"
+
+    return ExitWalk(
+        lots=max(lots, 1),
+        qty=qty,
+        fill=fill,
+        source=source,
+        levels_walked=levels,
+        capped=capped,
+        slippage_vs_mid_pct=(fill - mid) / mid * 100 if (fill and mid and mid > 0) else None,
+        slippage_vs_ltp_pct=(fill - ltp) / ltp * 100 if (fill and ltp and ltp > 0) else None,
+        proceeds=fill * qty if fill else None,
     )

@@ -55,6 +55,17 @@ type RtCard = {
   }
   atr30m: number | null
   liveEquity: number | null
+  marksTs?: number
+  exitWalks?: {
+    t1_1lot: Walk
+    trail_3lots: Walk
+  }
+}
+
+type Walk = {
+  lots: number; qty: number; fill: number | null; source: string
+  levelsWalked: number; capped: boolean
+  slippageVsMidPct: number | null; slippageVsLtpPct: number | null; proceeds: number | null
 }
 
 type Plan = {
@@ -116,6 +127,8 @@ type Resp = {
   evaluated: Record<string, number>
   living: number
   books: string[]
+  marksAgeS: number | null
+  refreshes: number
   suppressedByCap: Record<string, number>
   capReached: Record<string, boolean>
   uptime_s: number
@@ -506,6 +519,54 @@ function RtPanel({ c }: { c: RtCard }) {
         )}
       </div>
 
+      {c.exitWalks && (
+        <div className="rounded bg-slate-950/50 p-2">
+          <div className="mb-1 flex items-baseline gap-2">
+            <span className="text-[10px] uppercase tracking-wide text-slate-500">
+              exit slippage — walked down the bid
+            </span>
+            {c.marksTs && (
+              <span className="font-mono text-[10px] text-slate-600">
+                marked {istPrecise(c.marksTs)}
+              </span>
+            )}
+          </div>
+          <div className="grid gap-x-4 gap-y-1 text-[11px] sm:grid-cols-2">
+            {([['T1 · 1 lot', c.exitWalks.t1_1lot], ['trail · 3 lots', c.exitWalks.trail_3lots]] as const).map(
+              ([label, w]) => (
+                <div key={label}>
+                  <span className="text-slate-500">{label} </span>
+                  {w.fill === null ? (
+                    <span className="text-rose-400">no bid</span>
+                  ) : (
+                    <>
+                      <span className="tabular-nums text-slate-200">{f(w.fill)}</span>
+                      {w.slippageVsMidPct !== null && (
+                        <span className={w.slippageVsMidPct < -1 ? 'text-amber-400' : 'text-slate-500'}>
+                          {' '}{w.slippageVsMidPct.toFixed(2)}% vs mid
+                        </span>
+                      )}
+                      <div className="text-[10px] text-slate-600">
+                        {w.source === 'ladder'
+                          ? `${w.levelsWalked} bid level${w.levelsWalked === 1 ? '' : 's'}`
+                          : w.source}
+                        {w.capped && <span className="text-amber-400"> · capped</span>}
+                        {w.proceeds !== null &&
+                          ` · ₹${w.proceeds.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`}
+                      </div>
+                    </>
+                  )}
+                </div>
+              ),
+            )}
+          </div>
+          <div className="mt-1 text-[10px] text-slate-600">
+            An entry lifts the ask, an exit hits the bid — and the bid side thins first when the
+            trade goes against you. Recomputed every second, not frozen at entry.
+          </div>
+        </div>
+      )}
+
       <div className="text-[10px] text-slate-600">
         δ {c.greeks.delta.toFixed(2)} ({c.greeks.deltaSource})
         {c.greeks.dte !== null && ` · DTE ${c.greeks.dte}d`} · γ θ IV: {c.greeks.unavailable}
@@ -635,6 +696,11 @@ export function Alerts() {
         <div className="text-right text-xs text-slate-500">
           <div>
             {total} fired today · {data.living} living signals · {data.now_ist} IST
+            {data.marksAgeS !== null && data.marksAgeS !== undefined && (
+              <span className={data.marksAgeS > 5 ? ' text-amber-400' : ' text-emerald-400'}>
+                {' '}· marks {data.marksAgeS.toFixed(1)}s old
+              </span>
+            )}
           </div>
           <div className="text-[10px] text-slate-600">
             advisory only — nothing here reaches the gateway

@@ -56,6 +56,8 @@ class AlertEngine:
         self._pending_bar_close = 0.0
         self._pending_fired_at = 0.0
         self.started_ts = time.time()
+        self.last_refresh_ts = 0.0
+        self.refreshes = 0
 
     # -- plumbing ---------------------------------------------------------------------------------
 
@@ -377,5 +379,91 @@ class AlertEngine:
                 "PIVOTBOSS": self.pivotboss.cap.global_cap_reached,
             },
             "uptime_s": round(time.time() - self.started_ts, 1),
+            "marksAgeS": round(time.time() - self.last_refresh_ts, 2) if self.last_refresh_ts else None,
+            "refreshes": self.refreshes,
             "books": sorted({*self.counts, *self.evaluated, "FUDKII_RT"}),
         }
+
+    # -- live marks -------------------------------------------------------------------------------
+
+    def refresh_live(self) -> int:
+        """Recompute every volatile number on every live card. Driven at 1s by the engine clock.
+
+        The alternative — computing these in the API read path — would give the card fresh numbers
+        that the exit loop never saw, so a stop could appear breached on screen while the engine's
+        own evaluation used something else. One computation, one cadence, one answer: whatever
+        fires, fires on the numbers the card was showing.
+
+        Delta, the option-side stop, the bid/ask and both exit walks move every tick; the walls,
+        the odds and the equity stop do not, so they are left alone.
+        """
+        from ..domain import OptionType
+        from ..instrument.select import estimate_delta
+
+        now = time.time()
+        touched = 0
+        for ring in self.alerts.values():
+            for a in ring:
+                card, plan = a.card, a.plan
+                if not card or not plan:
+                    continue
+                listed = plan.get("listed") or {}
+                code = listed.get("scripCode")
+                if not code:
+                    continue
+                q = self.engine.quotes.get(code)
+                book = self.engine.book_for(code)
+                inst = self.engine.underlyings.get(a.symbol)
+                spot = self.engine.ltps.get(getattr(inst, "scrip_code", "")) or plan.get("entry")
+                if not spot:
+                    continue
+                bullish = a.direction == "BULLISH"
+                delta = abs(
+                    estimate_delta(
+                        spot=spot,
+                        strike=float(listed.get("strike") or 0),
+                        option_type=OptionType.CE if bullish else OptionType.PE,
+                    )
+                )
+                ltp = getattr(q, "ltp", None) if q else None
+                st = card.get("stop")
+                if st:
+                    card["stop"] = rtcard.dual_stop(
+                        bullish=bullish,
+                        equity_entry=float(plan.get("entry") or spot),
+                        equity_stop=float(st["equityStop"]),
+                        option_entry=float(listed.get("ltp") or 0) or None,
+                        option_ltp=ltp,
+                        equity_ltp=spot,
+                        delta=delta,
+                        basis=st.get("basis", "pivot"),
+                    )
+                lot = int(listed.get("lotSize") or 1)
+                # T1 takes one lot; the trail takes the rest. Different depths, different prices,
+                # so they are separate walks rather than one average that describes neither.
+                card["exitWalks"] = {
+                    "t1_1lot": entry_model.exit_walk(
+                        quote=q, book=book, lot_size=lot, lots=1, now=now
+                    ).to_json(),
+                    "trail_3lots": entry_model.exit_walk(
+                        quote=q, book=book, lot_size=lot, lots=3, now=now
+                    ).to_json(),
+                }
+                card["liveEquity"] = spot
+                card["greeks"] = {**card.get("greeks", {}), "delta": round(delta, 3)}
+                card["marksTs"] = now
+                # Sampled here because this is the one place that already holds the quote, the
+                # spot and the delta together — the three numbers the gamma residual needs.
+                self.engine.archive.option_quote(
+                    code,
+                    now,
+                    ltp=ltp,
+                    bid=getattr(q, "bid", None) if q else None,
+                    ask=getattr(q, "ask", None) if q else None,
+                    spot=spot,
+                    delta=delta,
+                )
+                touched += 1
+        self.last_refresh_ts = now
+        self.refreshes += 1
+        return touched

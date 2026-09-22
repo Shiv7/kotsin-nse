@@ -352,3 +352,59 @@ def test_a_thin_ladder_falls_back_to_the_touch_and_says_so():
     )
     assert e.fill == 10.4, "no depth — the touch is the honest price"
     assert "no live depth" in e.fill_source
+
+
+def test_an_exit_sells_into_the_bid_and_is_priced_per_quantity():
+    """Selling is not buying in reverse: it hits the bid, and one lot and three lots walk to
+    different depths, so they are different prices — not one average describing neither."""
+    from types import SimpleNamespace
+
+    from kotsin_nse.alerts.entry import exit_walk
+
+    now = 1_790_000_000.0
+    quote = SimpleNamespace(ltp=10.0, bid=9.8, ask=10.4, ts=now)
+    # 9.45 is inside the 5% ladder ceiling below the 9.80 touch; a 9.00 rung would not be, and
+    # walk_book refuses to model a fill that far through the book.
+    book = SimpleNamespace(
+        bids=[(9.8, 500), (9.6, 400), (9.45, 5000)], asks=[(10.4, 500)], ts=now
+    )
+    one = exit_walk(quote=quote, book=book, lot_size=500, lots=1, now=now)
+    three = exit_walk(quote=quote, book=book, lot_size=500, lots=3, now=now)
+
+    assert one.fill == 9.8 and one.levels_walked == 1, "one lot clears the touch"
+    # 500@9.80 + 400@9.60 + 600@9.45 = 14,410 for 1500 -> 9.6067
+    assert round(three.fill, 3) == 9.607
+    assert three.fill < one.fill, "size pays for depth"
+    assert three.levels_walked == 3
+    assert one.slippage_vs_mid_pct is not None and one.slippage_vs_mid_pct < 0, "a sale realises below mid"
+    assert three.proceeds is not None and three.proceeds > 0
+    assert not three.capped, "every rung taken sits inside the ceiling"
+
+
+def test_a_thin_bid_book_reports_a_partial_rather_than_a_confident_price():
+    from types import SimpleNamespace
+
+    from kotsin_nse.alerts.entry import exit_walk
+
+    now = 1_790_000_000.0
+    thin = SimpleNamespace(bids=[(9.8, 100)], asks=[(10.4, 100)], ts=now)
+    out = exit_walk(
+        quote=SimpleNamespace(ltp=10.0, bid=9.8, ask=10.4, ts=now),
+        book=thin, lot_size=500, lots=3, now=now,
+    )
+    assert out.capped
+    assert "too thin" in out.source, "a size the market will not take is the number worth seeing"
+
+
+def test_a_stale_bid_book_falls_back_to_the_touch_and_says_so():
+    from types import SimpleNamespace
+
+    from kotsin_nse.alerts.entry import exit_walk
+
+    now = 1_790_000_000.0
+    out = exit_walk(
+        quote=SimpleNamespace(ltp=10.0, bid=9.8, ask=10.4, ts=now),
+        book=SimpleNamespace(bids=[(9.8, 5000)], asks=[], ts=now - 300),
+        lot_size=500, lots=1, now=now,
+    )
+    assert out.fill == 9.8 and "no live depth" in out.source
