@@ -1,29 +1,10 @@
 import { useMemo, useState } from 'react'
+import { Gates } from '../components/Gates'
 import { Badge, Card, ErrorLine, GradeBadge, StrategyBadge, Table } from '../components/Ui'
 import { Link } from 'react-router-dom'
 import { cls, fmt, ist, pnlColor, postJson } from '../lib/api'
 import { usePoll } from '../lib/usePoll'
-import type { GateResult, RejectionRow, SignalRow, TradeRow } from '../types'
-
-function Gates({ gates }: { gates: GateResult[] }) {
-  return (
-    <div className="flex flex-wrap gap-1">
-      {gates.map((g) => (
-        <span
-          key={g.name}
-          title={`${g.name}: value ${g.value ?? 'missing'} vs ${g.threshold ?? '—'} ${g.note}`}
-          className={
-            'rounded px-1 py-0.5 text-[10px] ' +
-            (g.missing ? 'bg-amber-900/50 text-amber-300' : g.passed ? 'bg-emerald-900/40 text-emerald-400' : 'bg-rose-900/50 text-rose-300')
-          }
-        >
-          {g.name}
-          {g.missing && '?'}
-        </span>
-      ))}
-    </div>
-  )
-}
+import type { RejectionRow, SignalRow, TradeRow } from '../types'
 
 function KV({ rows }: { rows: [string, unknown][] }) {
   return (

@@ -13,7 +13,6 @@ works even when everything else is frozen.
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 from datetime import date
 from pathlib import Path
@@ -687,10 +686,33 @@ def build_app(engine: Engine) -> FastAPI:
 
     @api.get("/backtests/{run_id}")
     async def backtest_detail(run_id: str) -> dict[str, Any]:
+        from ..research.backtest import load_run
+
         path = engine.s.data_dir / "backtests" / f"{run_id}.json"
         if not path.exists() or ".." in run_id or "/" in run_id:
             raise HTTPException(404, f"no backtest {run_id}")
-        return json.loads(path.read_text())
+        run = load_run(path)
+        # the decision payloads (`details`) are served one trade at a time by /trades/{index}
+        return {"summary": run.get("summary"), "trades": run.get("trades") or []}
+
+    @api.get("/backtests/{run_id}/trades/{index}")
+    async def backtest_trade(
+        run_id: str, index: int, before: int = Query(80, le=400), after: int = Query(16, le=200)
+    ) -> dict[str, Any]:
+        """One trade, explained — bars, the strategy's own lines, zones, levels, path, FUKAA's
+        verdict. Computed by research.debug from the stored decision; served, not derived, here."""
+        from ..research.debug import trade_view
+        from ..research.history import HistoryStore
+
+        path = engine.s.data_dir / "backtests" / f"{run_id}.json"
+        if not path.exists() or ".." in run_id or "/" in run_id:
+            raise HTTPException(404, f"no backtest {run_id}")
+        try:
+            return await asyncio.to_thread(
+                trade_view, path, index, HistoryStore(engine.s.data_dir / "history"), before=before, after=after
+            )
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
 
     @api.get("/history")
     async def history_coverage() -> list[dict[str, Any]]:

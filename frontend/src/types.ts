@@ -391,3 +391,111 @@ export interface ReviewRow {
   run?: { calls: number; seconds: number; analysts?: unknown[]; debate?: unknown; verdict?: unknown; report?: unknown }
   pack?: Record<string, unknown>
 }
+
+
+// -- backtest trade debugger --------------------------------------------------------------------
+
+export interface BtTradeRow {
+  strategy: string
+  symbol: string
+  direction: string
+  day: string
+  entry_ts: number
+  exit_ts: number
+  entry: number
+  exit: number
+  stop: number
+  target1: number | null
+  qty: number
+  gross: number
+  charges: number
+  net: number
+  r_multiple: number
+  mfe_r: number
+  mae_r: number
+  exit_reason: string
+  grade: string
+  bars_held: number
+  opt_net_modelled: number | null
+  opt_r_modelled: number | null
+  stop_at_exit?: number
+  targets_hit?: number
+}
+
+export interface BtSummary {
+  id: string
+  created_ts: number
+  symbols: number
+  bars: number
+  signals: number
+  rejections: number
+  trades: number
+  gross: number
+  charges: number
+  net: number
+  charges_share_of_gross: number | null
+  win_rate: number | null
+  avg_r: number
+  avg_r_stderr: number | null
+  avg_r_t: number | null
+  n_days: number
+  sample_too_small: boolean
+  profit_factor: number | null
+  max_drawdown: number
+  by_strategy: Record<string, { trades: number; net: number; avg_r: number; win_rate: number }>
+  by_exit_reason: Record<string, { n: number; net: number }>
+  binding_gates: Record<string, number>
+  modelled_option_net: number | null
+  params: Record<string, unknown>
+  fukaa_on_triggers?: { triggers: number; taken: number; watching: number; rejected: number; not_evaluated: number; by_gate: Record<string, number> }
+}
+
+export interface BtDetail {
+  summary: BtSummary
+  trades: BtTradeRow[]
+}
+
+export interface FukaaVerdict {
+  verdict: 'TAKEN' | 'WATCHING' | 'REJECTED'
+  binding_gate?: string
+  gates: GateResult[]
+  evidence: Record<string, number>
+  note?: string
+  reason?: string
+}
+
+export interface TradeView {
+  run_id: string
+  index: number
+  count: number
+  tf: string
+  trade: BtTradeRow
+  signal: SignalRow | null
+  fukaa: FukaaVerdict | null
+  bars: { ts: number; o: number; h: number; l: number; c: number; v: number; bb_upper: number | null; bb_middle: number | null; bb_lower: number | null; st_value: number | null; st_trend: number | null; roles: string[] }[]
+  indicator_params: Record<string, number>
+  zones: Zone[]
+  levels: {
+    decision_ts: number
+    entry_ts: number
+    exit_ts: number
+    entry: number
+    stop: number
+    stop_at_exit: number | null
+    targets: number[]
+    exit: number
+    risk: number
+    stop_dist_pct: number | null
+    stop_dist_atr: number | null
+    atr: number | null
+    t1_dist_atr: number | null
+    stop_zone: string | null
+    target_zones: string[] | null
+    rr: number | null
+    grade: string | null
+    fortress: number | null
+    room_ratio: number | null
+    note: string | null
+  }
+  path: Record<string, number | string | boolean | null>
+}

@@ -154,6 +154,22 @@ class BtTrade:
     #: modelled option overlay — NOT a measurement (see the module docstring)
     opt_net_modelled: float | None = None
     opt_r_modelled: float | None = None
+    #: where the stop stood when the trade closed (after breakeven / trail), and rungs taken
+    stop_at_exit: float = 0.0
+    targets_hit: int = 0
+    #: the decision, kept whole: the Signal the strategy emitted (gates, evidence, context —
+    #: indicators, confluence, zones) and FUKAA's verdict on the same trigger. Without these a
+    #: backtest trade is a number nobody can argue with; with them the Backtest page can show
+    #: exactly why the stop sat where it sat and why FUKAA did or did not take the trigger.
+    signal: dict[str, Any] | None = None
+    fukaa: dict[str, Any] | None = None
+
+    def light(self) -> dict[str, Any]:
+        """The row without the decision payload — what a table needs."""
+        d = asdict(self)
+        d.pop("signal", None)
+        d.pop("fukaa", None)
+        return d
 
 
 @dataclass(slots=True)
@@ -172,6 +188,8 @@ class OpenTrade:
     trough: float
     bars_held: int = 0
     targets_hit: int = 0
+    signal: dict[str, Any] | None = None
+    fukaa: dict[str, Any] | None = None
 
     @property
     def r_unit(self) -> float:
@@ -243,6 +261,7 @@ class BacktestResult:
             "by_strategy": by_strategy,
             "by_exit_reason": {k: {"n": v["n"], "net": round(v["net"], 2)} for k, v in by_reason.items()},
             "binding_gates": dict(sorted(self.binding_gates.items(), key=lambda kv: -kv[1])),
+            "fukaa_on_triggers": fukaa_funnel(self.trades),
             "modelled_option_net": round(
                 sum(t.opt_net_modelled for t in self.trades if t.opt_net_modelled is not None), 2
             )
@@ -403,6 +422,7 @@ class Backtester:
 
         open_trade: OpenTrade | None = None
         pending: Signal | None = None
+        pending_fukaa: dict[str, Any] | None = None
 
         for i, bar in enumerate(bars):
             result.bars += 1
@@ -412,8 +432,8 @@ class Backtester:
 
             # 1. an entry decided on the previous bar fills at THIS bar's open.
             if pending is not None and open_trade is None:
-                open_trade = self._open(pending, bar, instrument)
-                pending = None
+                open_trade = self._open(pending, bar, instrument, fukaa=pending_fukaa)
+                pending = pending_fukaa = None
 
             # 2. manage an open position on this bar's range.
             if open_trade is not None:
@@ -447,6 +467,7 @@ class Backtester:
                     (s for s in outcome.signals if s.strategy is StrategyKey.FUKAA),
                     outcome.signals[0],
                 )
+                pending_fukaa = fukaa_verdict(outcome, pending)
 
         if open_trade is not None:
             result.trades.append(
@@ -468,7 +489,9 @@ class Backtester:
 
     # -- position handling --------------------------------------------------------------------------
 
-    def _open(self, sig: Signal, bar: UnifiedBar, inst: Instrument) -> OpenTrade | None:
+    def _open(
+        self, sig: Signal, bar: UnifiedBar, inst: Instrument, *, fukaa: dict[str, Any] | None = None
+    ) -> OpenTrade | None:
         slip = self.p.slippage_bps / 1e4
         fill = bar.open * (1 + slip * sig.direction.sign)
         risk = abs(fill - sig.stop)
@@ -492,6 +515,8 @@ class Backtester:
             grade=sig.grade,
             peak=fill,
             trough=fill,
+            signal=sig.to_json(),
+            fukaa=fukaa,
         )
 
     def _manage(
@@ -577,6 +602,10 @@ class Backtester:
             bars_held=t.bars_held,
             opt_net_modelled=opt_net,
             opt_r_modelled=opt_r,
+            stop_at_exit=round(t.stop, 2),
+            targets_hit=t.targets_hit,
+            signal=t.signal,
+            fukaa=t.fukaa,
         )
 
     def _model_option(self, t: OpenTrade, exit_price: float, inst: Instrument) -> tuple[float, float]:
@@ -626,17 +655,81 @@ class Backtester:
 # -- persistence ---------------------------------------------------------------------------------------
 
 
+def fukaa_verdict(outcome: Outcome, taken: Signal) -> dict[str, Any] | None:
+    """What FUKAA said about the trigger that became this trade, on the trigger bar.
+
+    Three answers: it took it (the trade IS the FUKAA signal), it parked it (``WATCHING`` — the
+    T+1 promotion may still fire on a later bar, which the backtester then treats as a separate
+    signal), or it rejected it at a named gate. ``None`` when FUKAA never evaluated the bar."""
+    if taken.strategy is StrategyKey.FUKAA:
+        return {"verdict": "TAKEN", "signal_id": taken.signal_id, "gates": [g.to_json() for g in taken.gates],
+                "evidence": dict(taken.evidence), "reason": taken.reason}
+    rej = next(
+        (r for r in outcome.rejections if r.strategy is StrategyKey.FUKAA and r.ts == taken.ts),
+        None,
+    )
+    if rej is None:
+        return None
+    verdict = "WATCHING" if rej.note.startswith("WATCHING") else "REJECTED"
+    return {"verdict": verdict, "binding_gate": rej.binding_gate, "gates": [g.to_json() for g in rej.gates],
+            "evidence": dict(rej.evidence), "note": rej.note}
+
+
+def fukaa_funnel(trades: Sequence[BtTrade]) -> dict[str, Any]:
+    """Among the triggers that were traded: how many FUKAA took, parked, or rejected — and at
+    which gate. The question "why does FUKAA never fire" answered on the trades a person can open."""
+    out: dict[str, Any] = {"triggers": len(trades), "taken": 0, "watching": 0, "rejected": 0, "not_evaluated": 0, "by_gate": {}}
+    for t in trades:
+        f = t.fukaa
+        if not f:
+            out["not_evaluated"] += 1
+            continue
+        v = f.get("verdict")
+        if v == "TAKEN":
+            out["taken"] += 1
+        elif v == "WATCHING":
+            out["watching"] += 1
+        else:
+            out["rejected"] += 1
+            g = str(f.get("binding_gate") or "?")
+            out["by_gate"][g] = out["by_gate"].get(g, 0) + 1
+    return out
+
+
 def save(result: BacktestResult, root: Path) -> Path:
+    """``trades`` stays a light table; the decision payloads live in ``details``, index-aligned
+    with it, so a 4,000-trade run opens in the UI without shipping 20 MB of zones."""
     root.mkdir(parents=True, exist_ok=True)
     path = root / f"{result.id}.json"
     path.write_text(
         json.dumps(
-            {"summary": result.summary(), "trades": [asdict(t) for t in result.trades]},
+            {
+                "summary": result.summary(),
+                "trades": [t.light() for t in result.trades],
+                "details": [{"signal": t.signal, "fukaa": t.fukaa} for t in result.trades],
+            },
             indent=2,
             default=str,
         )
     )
     return path
+
+
+_RUN_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
+def load_run(path: Path) -> dict[str, Any]:
+    """The whole artefact, cached by mtime — the debugger asks for one trade at a time."""
+    key = str(path)
+    mtime = path.stat().st_mtime
+    hit = _RUN_CACHE.get(key)
+    if hit is not None and hit[0] == mtime:
+        return hit[1]
+    run = json.loads(path.read_text())
+    if len(_RUN_CACHE) > 4:
+        _RUN_CACHE.clear()
+    _RUN_CACHE[key] = (mtime, run)
+    return run
 
 
 def load_summaries(root: Path, limit: int = 25) -> list[dict[str, Any]]:
