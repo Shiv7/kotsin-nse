@@ -102,6 +102,11 @@ class AlertEngine:
             tp = None
         a.plan = tp.to_json() if tp else None
         a.cta = planner.cta(tp, a.score, a.kind)
+        # The wall/odds/sizing panel is not RT-specific: every book benefits from knowing what
+        # stands in front of the trade, what stands under the stop, and what the geometry alone
+        # says the odds are. RT keeps its own branch above because its ladder is inherited.
+        if tp:
+            a.card = self._rt_card(a, bar, history, tp)
 
     def _rt_card(self, a: Alert, bar: UnifiedBar, history: list[UnifiedBar], tp: Any) -> dict[str, Any]:
         """Walls on both sides, the dual-trigger stop, the option ladder and the odds."""
@@ -111,7 +116,7 @@ class AlertEngine:
         bullish = a.direction == "BULLISH"
         zones = self.engine.zones_for(a.symbol)
         atr_v = _atr(history, 14) if history else None
-        price = float(ev.get("entry") or bar.close)
+        price = float(ev.get("entry") or (tp.entry if tp else 0) or bar.close)
         listed = (tp.listed or {}) if tp else {}
         opt_ltp = listed.get("ltp")
         eq_ltp = self.engine.ltps.get(
@@ -123,8 +128,10 @@ class AlertEngine:
             ahead = rtcard.find_wall(zones, price, atr_v, ahead=True, bullish=bullish)
             behind = rtcard.find_wall(zones, price, atr_v, ahead=False, bullish=bullish)
 
-        stop = float(ev.get("stop") or 0)
-        target = float(ev.get("target") or 0)
+        stop = float(ev.get("stop") or (tp.stop if tp and tp.stop else 0) or 0)
+        target = float(
+            ev.get("target") or (tp.targets[0] if tp and tp.targets else 0) or 0
+        )
         odds = rtcard.hit_probability(price, stop, target) if stop and target else {"pT1": None}
 
         strike = listed.get("strike") or (tp.strike if tp else 0)
@@ -160,8 +167,11 @@ class AlertEngine:
                 basis="pivot",
             ) if stop else None,
             "optionLadder": rtcard.option_ladder(
-                option_entry=opt_ltp, equity_entry=price, targets=[target], delta=delta
-            ) if (opt_ltp and target) else [],
+                option_entry=opt_ltp,
+                equity_entry=price,
+                targets=list(tp.targets) if (tp and tp.targets) else ([target] if target else []),
+                delta=delta,
+            ) if (opt_ltp and (target or (tp and tp.targets))) else [],
             "volumeBaseline": rtcard.same_slot_volume(history, bar) if history else None,
             "greeks": {
                 "delta": round(delta, 3),
