@@ -151,6 +151,45 @@ def build(
     )
 
 
+def from_living(
+    *,
+    entry: float,
+    stop: float,
+    target: float,
+    direction: str,
+    atr_value: float | None,
+    listed: dict[str, Any] | None = None,
+) -> TradePlan:
+    """The plan a *living* signal already carries.
+
+    Deliberately not recomputed through ``compute_confluence``: the parent FUDKII signal shipped
+    with a ladder, and a keep-alive that quoted different levels from the signal it is keeping
+    alive would be describing a different trade. The only thing that moves is the reward left,
+    which the detector measures against the current price.
+    """
+    risk = abs(entry - stop)
+    option_type = "CE" if direction == "BULLISH" else "PE"
+    strike, interval = otm_strike(entry, direction)
+    return TradePlan(
+        entry=entry,
+        stop=stop,
+        targets=[target],
+        rr=abs(target - entry) / risk if risk > 0 else 0.0,
+        grade="",
+        atr=atr_value,
+        option_type=option_type,
+        strike=strike,
+        strike_interval=interval,
+        delta=approximate_delta(entry, strike, option_type),
+        fortress=0.0,
+        room_atr=0.0,
+        stop_zone="inherited from the signal",
+        target_zones=[],
+        note="ladder inherited from the parent FUDKII signal",
+        listed=listed,
+    )
+
+
 #: A stop closer than this to entry, measured in ATR, is inside a single decision bar's noise.
 #: Not a guess: ``docs/strategies/FUDKII.md`` §8 measured the median confluence stop at 0.23% of
 #: price with 89% inside 0.5%, a median hold of one bar, and 80% of exits at the stop — and the
@@ -163,6 +202,23 @@ NOISE_STOP_ATR = 1.0
 def cta(plan: TradePlan | None, score: float, kind: str) -> dict[str, str]:
     if kind == "EXPIRED":
         return {"action": "STAND_DOWN", "text": "Signal retired — no longer actionable."}
+    if kind == "KEEPALIVE":
+        # Not an entry. The entry happened when the parent signal fired at its 30m boundary; this
+        # is the re-check that says the trade is still the trade. Reading a keep-alive as a fresh
+        # entry would have you entering the same signal every five minutes.
+        if plan is None:
+            return {"action": "HOLD", "text": "Signal still live."}
+        stop_atr = abs(plan.entry - plan.stop) / plan.atr if plan.atr and plan.stop else None
+        noise = f" Stop is {stop_atr:.2f} ATR out — that R is an artefact of its tightness." if (
+            stop_atr is not None and stop_atr < NOISE_STOP_ATR
+        ) else ""
+        return {
+            "action": "HOLD",
+            "text": (
+                f"Already entered at {plan.entry:.2f} when the parent signal fired — this is a "
+                f"5-minute re-check, not a new entry.{noise}"
+            ),
+        }
     if plan is None:
         return {
             "action": "OBSERVE",

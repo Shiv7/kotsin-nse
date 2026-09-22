@@ -96,6 +96,7 @@ function kindTone(k: Alert['kind']) {
 
 const CTA_TONE: Record<string, string> = {
   PRIMARY: 'border-emerald-500/50 bg-emerald-500/15 text-emerald-300',
+  HOLD: 'border-indigo-500/40 bg-indigo-500/10 text-indigo-300',
   OBSERVE: 'border-sky-500/40 bg-sky-500/10 text-sky-300',
   WAIT_PULLBACK: 'border-amber-500/40 bg-amber-500/10 text-amber-300',
   AVOID: 'border-rose-500/40 bg-rose-500/10 text-rose-300',
@@ -135,10 +136,14 @@ function Ladder({ plan, direction }: { plan: Plan; direction: string }) {
   return (
     <div className="rounded bg-slate-950/50 p-2">
       <div className="mb-1 flex items-baseline gap-2">
-        <span className="text-[10px] uppercase tracking-wide text-slate-500">trade plan</span>
-        <span className={`rounded border px-1 py-0.5 text-[9px] ${GRADE_TONE[plan.grade] ?? GRADE_TONE.F}`}>
-          grade {plan.grade}
+        <span className="text-[10px] uppercase tracking-wide text-slate-500">
+          {plan.stopZone === 'inherited from the signal' ? 'trade plan (inherited)' : 'trade plan'}
         </span>
+        {plan.grade && (
+          <span className={`rounded border px-1 py-0.5 text-[9px] ${GRADE_TONE[plan.grade] ?? GRADE_TONE.F}`}>
+            grade {plan.grade}
+          </span>
+        )}
         <span className="text-[10px] tabular-nums text-slate-400">{f(plan.rr)}R</span>
         {plan.atr !== null && (
           <span className="text-[10px] text-slate-600">ATR {f(plan.atr)}</span>
@@ -242,6 +247,18 @@ function Row({ a }: { a: Alert }) {
             <span className="ml-auto font-mono text-[11px] text-slate-500">{ist(a.ts)} IST</span>
           </div>
           {a.company && <div className="truncate text-[11px] text-slate-600">{a.company}</div>}
+          {a.kind !== 'TRIGGER' && a.evidence?.ageMinutes !== undefined && (
+            <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px]">
+              <span className="rounded border border-indigo-500/30 bg-indigo-500/10 px-1.5 py-0.5 text-indigo-300">
+                entered {ist(a.ts - Number(a.evidence.ageMinutes) * 60)} IST
+              </span>
+              <span className="text-slate-500">
+                {String(a.evidence.ageMinutes)}m ago · re-checked every 5m · TTL{' '}
+                {String(a.evidence.ttlMinutes ?? 35)}m
+              </span>
+              <span className="text-slate-600">this row is a re-check, not an entry</span>
+            </div>
+          )}
           <div className="mt-1 text-[11px] text-slate-400">{a.reason}</div>
           {a.cta?.text && (
             <div className={`mt-2 rounded border px-2 py-1 text-[11px] ${tone}`}>

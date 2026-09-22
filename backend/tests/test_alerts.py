@@ -182,3 +182,51 @@ def test_a_noise_stop_is_declined_however_rich_its_reward():
         listed=None,
     )
     assert cta(roomy, score=82.0, kind="TRIGGER")["action"] == "PRIMARY"
+
+
+def test_a_keepalive_carries_the_parent_signals_ladder_and_option_leg():
+    """All 22 FUDKII-RT rows on 2026-09-22 had no plan and no OTM strike, because _enrich returned
+    early for anything that was not a TRIGGER. A living signal has an entry, a stop and a target —
+    there was never a reason to drop them."""
+    from kotsin_nse.alerts.plan import from_living
+
+    plan = from_living(
+        entry=100.0, stop=98.0, target=110.0, direction="BULLISH", atr_value=4.0, listed=None
+    )
+    assert plan.targets == [110.0]
+    assert plan.rr == 5.0
+    assert plan.option_type == "CE"
+    # getStrikeInterval is a strict `price > 100`, so a spot of exactly 100 sits on the 1.0
+    # rung, not the 2.5 one. Ported verbatim, boundary included.
+    assert plan.strike_interval == 1.0
+    assert plan.strike == 101.0, "one ladder step OTM of a 100 spot"
+    assert plan.note.startswith("ladder inherited")
+
+    bear = from_living(
+        entry=100.0, stop=102.0, target=90.0, direction="BEARISH", atr_value=4.0
+    )
+    assert bear.option_type == "PE"
+    assert bear.strike == 99.0
+
+    # Just above the boundary the rung changes, which is the behaviour worth pinning.
+    above = from_living(
+        entry=101.0, stop=99.0, target=110.0, direction="BULLISH", atr_value=4.0
+    )
+    assert above.strike_interval == 2.5
+
+
+def test_a_keepalive_is_never_presented_as_an_entry():
+    """A re-check every five minutes must not read as a fresh entry five minutes apart."""
+    from kotsin_nse.alerts.plan import cta, from_living
+
+    plan = from_living(entry=100.0, stop=98.0, target=110.0, direction="BULLISH", atr_value=4.0)
+    out = cta(plan, score=80.0, kind="KEEPALIVE")
+    assert out["action"] == "HOLD"
+    assert "not a new entry" in out["text"]
+    assert "100.00" in out["text"], "it must name the price actually entered at"
+
+    # And a tight inherited stop still gets called out, since R is measured against it.
+    tight = from_living(entry=100.0, stop=99.9, target=110.0, direction="BULLISH", atr_value=4.0)
+    assert "artefact" in cta(tight, score=80.0, kind="KEEPALIVE")["text"]
+
+    assert cta(plan, score=80.0, kind="EXPIRED")["action"] == "STAND_DOWN"

@@ -60,7 +60,23 @@ class AlertEngine:
         a.company = getattr(inst, "name", "") if inst else ""
         a.exchange = inst.segment.exch if inst else "N"
         if a.kind != "TRIGGER":
-            a.cta = planner.cta(None, a.score, a.kind)
+            # A living signal is not plan-less: its parent shipped a ladder, and the card needs the
+            # option leg as much as an entry does. Inherit rather than recompute, so a keep-alive
+            # never quotes different levels from the signal it is keeping alive.
+            ev = a.evidence or {}
+            if {"entry", "stop", "target"} <= set(ev):
+                tp = planner.from_living(
+                    entry=float(ev["entry"]),
+                    stop=float(ev["stop"]),
+                    target=float(ev["target"]),
+                    direction=a.direction,
+                    atr_value=atr(history, 14) if history else None,
+                    listed=self._listed_option(a.symbol, a.direction, float(ev["entry"])),
+                )
+                a.plan = tp.to_json()
+                a.cta = planner.cta(tp, a.score, a.kind)
+            else:
+                a.cta = planner.cta(None, a.score, a.kind)
             return
         try:
             tp = planner.build(
@@ -165,9 +181,14 @@ class AlertEngine:
 
     def _on_bar(self, bar: UnifiedBar) -> None:
         if bar.tf == "1m":
-            for a in self.rt.on_bar(bar):
-                self._enrich(a, bar, [])
-                self._emit(a)
+            out = self.rt.on_bar(bar)
+            if out:
+                # The decision frame's bars, not the 1m ones: the inherited ladder was measured
+                # against the 30m ATR, so the noise check must use the same yardstick.
+                decision = self.engine.store.bars(bar.symbol, "30m", LOOKBACK)
+                for a in out:
+                    self._enrich(a, bar, decision)
+                    self._emit(a)
             return
 
         history = self.engine.store.bars(bar.symbol, bar.tf, LOOKBACK)
