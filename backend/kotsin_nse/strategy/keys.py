@@ -25,6 +25,11 @@ class StrategyKey(StrEnum):
     #: compared is the exit. Its own wallet and its own slots, so the two equity curves stand apart
     #: and neither can starve the other of capital.
     FUDKII_RT_X = "FUDKII_RT_X"
+    #: The same RT exit policy on MCX, in its own wallet. Commodities and equities do not share a
+    #: purse here: one CRUDEOIL lot is a different size of bet from one BLUESTARCO lot, and a book
+    #: holding both would have its equity curve driven by whichever happened to fire first. Sized at
+    #: Rs 30,00,000 so its thirty slots are reachable — the NSE book's Rs 10,00,000 binds at ten.
+    FUDKII_RT_MCX = "FUDKII_RT_MCX"
 
     @property
     def display_name(self) -> str:
@@ -32,11 +37,17 @@ class StrategyKey(StrEnum):
             StrategyKey.FUDKII: "FUDKII",
             StrategyKey.FUKAA: "FUKAA",
             StrategyKey.FUDKII_RT_X: "FUDKII-RT-X",
+            StrategyKey.FUDKII_RT_MCX: "FUDKII-RT-MCX",
         }[self]
 
     @property
     def wallet_id(self) -> str:
         return f"strategy-wallet-{self.value}"
 
+
+#: Opening capital per book. Anything not listed takes ``paper_initial_inr``.
+INITIAL_INR: dict[StrategyKey, float] = {
+    StrategyKey.FUDKII_RT_MCX: 3_000_000.0,
+}
 
 ALL_KEYS: tuple[StrategyKey, ...] = tuple(StrategyKey)

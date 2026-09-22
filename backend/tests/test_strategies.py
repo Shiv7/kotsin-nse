@@ -323,5 +323,10 @@ def test_the_registry_is_an_enum_and_names_every_book_that_trades():
     """Three keys now: FUDKII, FUKAA, and FUDKII_RT_X — the RT *exit* policy trading FUDKII's
     own entries on its own wallet, so the two exit policies produce comparable equity curves.
     """
-    assert ALL_KEYS == (StrategyKey.FUDKII, StrategyKey.FUKAA, StrategyKey.FUDKII_RT_X)
+    assert ALL_KEYS == (
+        StrategyKey.FUDKII,
+        StrategyKey.FUKAA,
+        StrategyKey.FUDKII_RT_X,
+        StrategyKey.FUDKII_RT_MCX,
+    )
     assert StrategyKey.FUDKII.wallet_id == "strategy-wallet-FUDKII"

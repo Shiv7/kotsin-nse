@@ -135,6 +135,30 @@ BOOKS: tuple[Book, ...] = (
         ),
     ),
     Book(
+        key="FUDKII_RT_MCX",
+        label="FUDKII-RT-MCX",
+        tf="30m entry, 1s exit",
+        summary=(
+            "The RT exit policy on MCX commodities, in its own Rs 30,00,000 wallet so its thirty "
+            "slots are reachable."
+        ),
+        status="live",
+        params={
+            "initial_inr": "3,000,000",
+            "max_lots": "4",
+            "max_positions_per_strategy": "30",
+            "sustain_s": "75 (continuous breach)",
+            "peak_giveback_pct": "2.0 (floored at 1.5x the live spread)",
+        },
+        have=("30m/1m bars on the session grid", "MTF pivot zones + confluence stop/targets"),
+        source="kotsin_nse/risk/exits.py (RT policy branch)",
+        note=(
+            "Separate from the NSE book on purpose: one CRUDEOIL lot is a different size of bet "
+            "from one equity lot, and a shared wallet would let whichever fired first decide what "
+            "the other could afford. Bands on the contract's own realised vol, not India VIX."
+        ),
+    ),
+    Book(
         key="FUDKII_RT",
         label="FUDKII-RT",
         tf="1m on a 30m signal",

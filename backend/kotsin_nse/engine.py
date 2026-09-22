@@ -105,7 +105,7 @@ from .risk.wallet import Wallet
 from .strategy.base import Outcome, Signal
 from .strategy.fudkii import Fudkii, FudkiiConfig
 from .strategy.fukaa import Fukaa, FukaaConfig, select
-from .strategy.keys import ALL_KEYS, StrategyKey
+from .strategy.keys import ALL_KEYS, INITIAL_INR, StrategyKey
 from .venue.fivepaisa.auth import Authenticator
 from .venue.fivepaisa.rest import FivePaisaREST
 from .venue.fivepaisa.ws import FivePaisaFeed
@@ -154,7 +154,10 @@ class Engine:
         # engine rather than a flag inside the shared one — the two must never be able to drift
         # into each other, and a second RiskLimits makes that structural.
         self.exits_rt = ExitEngine(RT_X_LIMITS)
-        self._exits_by_strategy = {StrategyKey.FUDKII_RT_X.value: self.exits_rt}
+        self._exits_by_strategy = {
+            StrategyKey.FUDKII_RT_X.value: self.exits_rt,
+            StrategyKey.FUDKII_RT_MCX.value: self.exits_rt,
+        }
         #: The twin is checked against its own pool — 30 slots, its own lot cap — rather than
         #: skipping the check entirely, which is what it did when first written.
         self.exposure_rt = ExposureBook(RT_X_LIMITS)
@@ -900,7 +903,15 @@ class Engine:
         """
         if pos.strategy != StrategyKey.FUDKII.value:
             return
-        twin_wallet = self.wallets.get(StrategyKey.FUDKII_RT_X.value)
+        # Commodities and equities keep separate purses: one CRUDEOIL lot is a different size of
+        # bet from one BLUESTARCO lot, and a shared wallet would let whichever fired first decide
+        # what the other could afford.
+        twin_key = (
+            StrategyKey.FUDKII_RT_MCX
+            if pos.underlying.segment is Segment.MCX_FO
+            else StrategyKey.FUDKII_RT_X
+        )
+        twin_wallet = self.wallets.get(twin_key.value)
         if twin_wallet is None or twin_wallet.halted:
             return
         cost = pos.entry * pos.qty * inst.multiplier
@@ -908,7 +919,7 @@ class Engine:
             log.info("rt_twin.skipped", symbol=pos.underlying.symbol, reason="wallet")
             return
         verdict = self.exposure_rt.check(
-            strategy=StrategyKey.FUDKII_RT_X.value,
+            strategy=twin_key.value,
             underlying=pos.underlying.symbol,
             outlay=cost,
             positions=list(self.positions.values()),
@@ -920,7 +931,7 @@ class Engine:
         twin = replace(
             pos,
             id=new_id("pos"),
-            strategy=StrategyKey.FUDKII_RT_X.value,
+            strategy=twin_key.value,
             note=f"{pos.note} · RT exit policy, twin of {pos.id}",
         )
         self.positions[twin.id] = twin
@@ -1244,7 +1255,9 @@ class Engine:
         for key in ALL_KEYS:
             data = stored.get(key.value)
             self.wallets[key.value] = (
-                Wallet.from_json(data) if data else Wallet.new(key.value, self.s.paper_initial_inr)
+                Wallet.from_json(data)
+                if data
+                else Wallet.new(key.value, INITIAL_INR.get(key, self.s.paper_initial_inr))
             )
         await self._persist_wallets()
 

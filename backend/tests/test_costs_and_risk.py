@@ -384,3 +384,16 @@ def test_the_rt_pool_is_thirty_slots_and_the_base_book_keeps_its_own():
     assert RT_X_LIMITS.max_positions_all_books == 60
     assert RiskLimits().max_lots is None
     assert RiskLimits().max_positions_per_strategy == 3
+
+
+def test_the_mcx_rt_book_has_its_own_wallet_and_enough_of_it_to_reach_its_slots():
+    """Commodities and equities do not share a purse: one CRUDEOIL lot is a different size of bet
+    from one BLUESTARCO lot, and a shared wallet would let whichever fired first decide what the
+    other could afford."""
+    from kotsin_nse.strategy.keys import INITIAL_INR, StrategyKey
+
+    assert INITIAL_INR[StrategyKey.FUDKII_RT_MCX] == 3_000_000.0
+    assert StrategyKey.FUDKII_RT_X not in INITIAL_INR, "the NSE book keeps the default"
+    # 30 slots at the Rs 1,00,000 per-trade cap needs Rs 30,00,000 to be reachable at all; the
+    # NSE book's Rs 10,00,000 binds at ten, which is the number that actually applies there.
+    assert INITIAL_INR[StrategyKey.FUDKII_RT_MCX] / 100_000 == 30
