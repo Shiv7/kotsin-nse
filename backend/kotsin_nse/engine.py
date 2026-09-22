@@ -50,6 +50,7 @@ from .domain import (
     ExitReason,
     Instrument,
     InstrumentKind,
+    OptionType,
     OrderIntent,
     OrderSide,
     Position,
@@ -63,6 +64,7 @@ from .exec.live import LiveExecutor
 from .exec.paper import BookSnapshot, PaperMatcher
 from .exec.reconcile import Reconciler
 from .instrument.catalogue import CatalogueLoader
+from .instrument.legs import LegPivotLoader, otm_legs
 from .instrument.select import (
     Quote,
     SelectionPolicy,
@@ -179,6 +181,10 @@ class Engine:
         self.auth = Authenticator(settings, self.http)
         self.rest = FivePaisaREST(settings, self.http, self.auth)
         self.catalogue_loader = CatalogueLoader(settings, self.rest.scrip_master_csv)
+        #: One daily pivot ladder per traded leg — the front future and the OTM strikes — as
+        #: distinct from the underlying's own. A premium sitting on its own S1 is a different
+        #: proposition from one in mid-air, whatever the equity is doing.
+        self.leg_pivots = LegPivotLoader(self.rest)
         self.feed = FivePaisaFeed(
             settings,
             self.auth,
@@ -382,6 +388,7 @@ class Engine:
         await self.feed.subscribe("mf", subs["mf"])
         await self.feed.subscribe("md", subs["md"])
         await self.feed.subscribe("oi", subs["oi"])
+        self._leg_task = asyncio.create_task(self._load_leg_pivots(groups.values()))
         log.info(
             "engine.subscribed",
             mf=len(subs["mf"]), md=len(subs["md"]), oi=len(subs["oi"]),
@@ -891,6 +898,37 @@ class Engine:
             f"{inst.name or inst.scrip_code} qty {pos.qty} @ {pos.entry:.2f} "
             f"SL {pos.option_sl:.2f} grade {pos.grade} [{self.mode().value}]"
         )
+
+    async def _load_leg_pivots(self, groups: Any) -> None:
+        """Previous-session pivots for the future and eight OTM strikes of every F&O name.
+
+        Deliberately off the boot path: roughly two thousand REST calls, and the open should not
+        wait on them. Publishes per leg as it goes, so a name is usable the moment its own legs
+        land rather than when the last one does.
+        """
+        try:
+            today = ist_day(time.time())
+            legs: list[Instrument] = []
+            cat = self.catalogue_loader.catalogue
+            for g in groups:
+                if g.futures:
+                    legs.append(g.futures[0])
+                if not g.option_expiry:
+                    continue
+                spot = (self.ltps.get(g.equity.scrip_code) if g.equity else None) or g.close or 0.0
+                # The FULL chain, not g.options: that is the subscribed shortlist — five strikes a
+                # side around spot, so half of it is in the money and the OTM filter leaves fewer
+                # than eight. The catalogue has every listed strike.
+                chain = [
+                    o
+                    for ot in (OptionType.CE, OptionType.PE)
+                    for o in cat.chain(g.root, g.option_expiry, ot)
+                ]
+                legs.extend(otm_legs(chain=chain, spot=spot))
+            if legs:
+                await self.leg_pivots.load(legs, today)
+        except Exception as exc:  # noqa: BLE001 - advisory levels never stall the engine
+            log.warning("legs.load_failed", error=str(exc))
 
     async def _open_rt_twin(self, pos: Position, inst: Instrument, result: Any) -> None:
         """Mirror a FUDKII entry into FUDKII_RT_X so only the exit policy differs.

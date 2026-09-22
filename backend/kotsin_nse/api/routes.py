@@ -468,6 +468,29 @@ def build_app(engine: Engine) -> FastAPI:
             "now_ist": ist_hm(time.time()),
         }
 
+    @api.get("/leg-pivots")
+    async def leg_pivots() -> dict[str, Any]:
+        """Previous-session pivots for the legs actually traded — future and OTM strikes."""
+        return engine.leg_pivots.stats()
+
+    @api.get("/leg-pivots/{symbol}")
+    async def leg_pivots_for(symbol: str) -> dict[str, Any]:
+        g = engine.groups.get(symbol.upper())
+        if g is None:
+            raise HTTPException(404, f"{symbol} is not in the universe")
+        # Every leg loaded for this root, not only the subscribed shortlist: the ladders are
+        # computed on the full OTM set, and showing the subscribed few would hide most of them.
+        rows = [lp.to_json() for lp in engine.leg_pivots.for_root(symbol.upper())]
+        return {
+            "symbol": symbol.upper(),
+            "underlyingZones": [
+                {"price": round(z.price, 2), "strength": round(z.strength, 2), "members": z.members}
+                for z in engine.zones_for(symbol.upper())
+            ],
+            "legs": sorted(rows, key=lambda r: (r["kind"], r["strike"])),
+            **engine.leg_pivots.stats(),
+        }
+
     # -- hot stocks -------------------------------------------------------------------------------
 
     @api.get("/hot-stocks")
