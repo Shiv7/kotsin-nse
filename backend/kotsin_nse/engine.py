@@ -29,9 +29,16 @@ import structlog
 
 from .alerts.engine import AlertEngine
 from .bars.aggregator import Aggregator
+from .bars.indicators import atr
 from .bars.micro import MicroAggregator
 from .bars.periods import monthly, previous_complete, weekly
-from .bars.pivots import Zone, classic_pivots, cluster_zones, pivot_points
+from .bars.pivots import (
+    ZONE_TOLERANCE_PCT,
+    Zone,
+    classic_pivots,
+    cluster_zones,
+    pivot_points,
+)
 from .bars.store import BarStore
 from .bars.unified import BarSource, UnifiedBar
 from .bars.verify import BarReconciler
@@ -79,6 +86,12 @@ from .market.session import (
 )
 from .market.session import (
     session_phase as session_phase_of,
+)
+from .market.volatility import (
+    INDIA_VIX_SCRIP,
+    Regime,
+    regime_for_commodity,
+    regime_for_equity,
 )
 from .ops.archive import DailyArchive
 from .ops.health import Check, HealthMonitor
@@ -341,6 +354,17 @@ class Engine:
         # symbol, and tracking it wrote futures ticks into the equity's bars (found 2026-09-21).
         # `subscriptions()` puts them on mf+oi only; the aggregator ignores untracked codes.
         subs = UniverseBuilder.subscriptions(groups.values())
+        # India VIX rides the cash feed and is not a tradeable root, so it never enters the
+        # universe — it is subscribed for its price alone, and only where it means something.
+        # MCX bands on the contract's own realised vol instead: an equity-index implied vol says
+        # nothing about crude, and a confident wrong regime is worse than no regime.
+        if any(seg is not Segment.MCX_FO for seg in self.s.segment_list):
+            vix = self.catalogue_loader.catalogue.get(INDIA_VIX_SCRIP)
+            if vix is not None:
+                subs["mf"] = [*subs["mf"], vix]
+                log.info("engine.india_vix_subscribed", scrip=INDIA_VIX_SCRIP)
+            else:
+                log.warning("engine.india_vix_missing", scrip=INDIA_VIX_SCRIP)
         await self.feed.subscribe("mf", subs["mf"])
         await self.feed.subscribe("md", subs["md"])
         await self.feed.subscribe("oi", subs["oi"])
@@ -540,14 +564,21 @@ class Engine:
     # -- pivots --------------------------------------------------------------------------------------
 
     def zones_for(self, symbol: str) -> list[Zone]:
-        """Daily + weekly + monthly pivot zones, cached per calendar day.
+        """Daily + weekly + monthly pivot zones, clustered at the volatility regime's width.
 
-        Computed from **completed** periods only, so the levels are fixed for the session. Cached
-        because clustering 30-odd levels for 200 symbols on every bar would be the single hottest
-        thing in the process for no benefit.
+        The *levels* come from completed periods only and are fixed for the session. The width
+        they are merged at is not: it is ``k x ATR`` with ``k`` set by India VIX on NSE and by
+        the contract's own realised vol on MCX, so the same pivots cluster differently in a calm
+        tape and a violent one. The cache is therefore keyed by the regime as well as the day —
+        a band change recomputes, anything else is served from cache, because clustering thirty
+        levels for two hundred symbols on every bar would be the hottest thing in the process.
+
+        An open position is unaffected by a band change: its stop was stamped onto the position
+        at entry and never moves. Only *new* signals see the new width.
         """
         today = date.today()
-        key = today.isoformat()
+        regime = self.volatility_regime(symbol)
+        key = f"{today.isoformat()}:{regime.band.value}"
         hit = self._zone_cache.get(symbol)
         if hit and hit[0] == key:
             return hit[1]
@@ -568,9 +599,42 @@ class Engine:
                 lv = classic_pivots(p.high, p.low, p.close)
                 if lv:
                     points += pivot_points(lv, tf)
-        zones = cluster_zones(points)
+        atr_v = atr(self.store.bars(symbol, DECISION_TF, 60), 14)
+        px = self.ltps.get(
+            getattr(self.underlyings.get(symbol), 'scrip_code', '')
+        ) or (dailies[-1].close if dailies else 0.0)
+        # ATR expressed as a percentage of price, because cluster_zones works in percent — the
+        # conversion is what makes 'k x ATR' and a percentage tolerance the same statement.
+        tol = (
+            regime.k * atr_v / px * 100
+            if atr_v and px > 0
+            else ZONE_TOLERANCE_PCT
+        )
+        zones = cluster_zones(points, tolerance_pct=tol)
         self._zone_cache[symbol] = (key, zones)
         return zones
+
+    def volatility_regime(self, symbol: str) -> Regime:
+        """India VIX for NSE, the contract's own realised vol for MCX."""
+        inst = self.underlyings.get(symbol)
+        if inst is not None and inst.segment is Segment.MCX_FO:
+            return regime_for_commodity(self._atr_pct_history(symbol))
+        return regime_for_equity(self.india_vix())
+
+    def india_vix(self) -> float | None:
+        """Last India VIX print. None when it is not subscribed or has not ticked."""
+        return self.ltps.get(INDIA_VIX_SCRIP)
+
+    def _atr_pct_history(self, symbol: str) -> list[float]:
+        """Daily ATR as a percent of close, one per session — the commodity vol baseline."""
+        dailies = self.store.bars(symbol, '1d', 40)
+        out: list[float] = []
+        for i in range(15, len(dailies)):
+            a = atr(dailies[: i + 1], 14)
+            c = dailies[i].close
+            if a and c > 0:
+                out.append(a / c * 100)
+        return out
 
     def session_phase(self, symbol: str, ts: int) -> str:
         inst = self.underlyings.get(symbol)
