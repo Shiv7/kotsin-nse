@@ -58,6 +58,25 @@ type Plan = {
     oi: number | null
     quotes: boolean
     strikeGapFromTheoretical: number
+    entry: {
+      ts: number
+      lagFromBarCloseS: number
+      lagFromFiredS: number
+      lots: number
+      qty: number
+      ltp: number | null
+      bid: number | null
+      ask: number | null
+      quoteAgeS: number | null
+      fill: number | null
+      fillSource: string
+      levelsWalked: number
+      capped: boolean
+      slippageVsLtpPct: number | null
+      notional: number | null
+      stale: boolean
+      note: string
+    } | null
   } | null
 }
 
@@ -230,6 +249,59 @@ function Option({ plan }: { plan: Plan }) {
       {l && !l.quotes && (
         <div className="mt-1 text-[10px] text-rose-400/80">
           This contract is not quoting — a stop checked against it could not be evaluated.
+        </div>
+      )}
+      {l?.entry && (
+        <div className="mt-2 border-t border-slate-800 pt-2">
+          <div className="mb-1 flex items-baseline gap-2">
+            <span className="text-[10px] uppercase tracking-wide text-slate-500">
+              modelled entry
+            </span>
+            <span className="font-mono text-[10px] text-slate-500">
+              {istPrecise(l.entry.ts)} IST
+            </span>
+            <span className="text-[10px] text-slate-600">
+              +{l.entry.lagFromBarCloseS.toFixed(1)}s after the bar closed
+            </span>
+          </div>
+          {l.entry.stale || l.entry.fill === null ? (
+            <div className="text-[11px] text-rose-400/90">
+              No entry price — {l.entry.note}. Pricing this off a stale quote would put the wrong
+              premium on every downstream number.
+            </div>
+          ) : (
+            <>
+              <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-[11px]">
+                <span className="rounded border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-0.5 font-semibold tabular-nums text-emerald-300">
+                  fill {f(l.entry.fill)}
+                </span>
+                <span className="text-slate-500">
+                  bid <span className="tabular-nums text-slate-400">{f(l.entry.bid)}</span>
+                  {' / ask '}
+                  <span className="tabular-nums text-slate-300">{f(l.entry.ask)}</span>
+                  {' / ltp '}
+                  <span className="tabular-nums text-slate-400">{f(l.entry.ltp)}</span>
+                </span>
+                {l.entry.slippageVsLtpPct !== null && (
+                  <span className={l.entry.slippageVsLtpPct > 0 ? 'text-amber-400' : 'text-slate-500'}>
+                    {l.entry.slippageVsLtpPct > 0 ? '+' : ''}
+                    {l.entry.slippageVsLtpPct.toFixed(2)}% vs last trade
+                  </span>
+                )}
+                <span className="text-slate-600">
+                  {l.entry.qty} qty ({l.entry.lots} lot) · ₹
+                  {l.entry.notional?.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+                </span>
+              </div>
+              <div className="mt-0.5 text-[10px] text-slate-600">
+                {l.entry.fillSource === 'ladder'
+                  ? `walked ${l.entry.levelsWalked} ask level${l.entry.levelsWalked === 1 ? '' : 's'}`
+                  : l.entry.fillSource}
+                {l.entry.capped && <span className="text-amber-400"> · capped by the ladder ceiling</span>}
+                {l.entry.quoteAgeS !== null && ` · quote ${l.entry.quoteAgeS.toFixed(1)}s old`}
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>

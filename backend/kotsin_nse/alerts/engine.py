@@ -21,6 +21,7 @@ from ..bars.indicators import atr
 from ..bars.pivots import PivotLevels, classic_pivots
 from ..bars.unified import UnifiedBar
 from ..market.session import TF_SECONDS
+from . import entry as entry_model
 from . import plan as planner
 from .detectors import (
     BB_BOOKS,
@@ -51,12 +52,18 @@ class AlertEngine:
         self.counts: dict[str, int] = {}
         self.evaluated: dict[str, int] = {}
         self._cpr_avg: dict[str, float] = {}
+        self._pending_bar_close = 0.0
+        self._pending_fired_at = 0.0
         self.started_ts = time.time()
 
     # -- plumbing ---------------------------------------------------------------------------------
 
     def _enrich(self, a: Alert, bar: UnifiedBar, history: list[UnifiedBar]) -> None:
-        """Attach the plan and the CTA. Never raises — an alert without a plan still publishes."""
+        """Attach the plan, the entry model and the CTA. Never raises."""
+        # The entry is modelled at *this* instant, so the option's quote age is measured against
+        # the moment the trade would be placed rather than the moment the bar closed.
+        self._pending_bar_close = float(bar.ts + TF_SECONDS.get(bar.tf, 0))
+        self._pending_fired_at = time.time()
         inst = self.engine.underlyings.get(a.symbol)
         a.company = getattr(inst, "name", "") if inst else ""
         a.exchange = inst.segment.exch if inst else "N"
@@ -114,6 +121,7 @@ class AlertEngine:
                 best = o
         if best is None:
             return None
+        q = self.engine.quotes.get(best.scrip_code)
         ltp = self.engine.ltps.get(best.scrip_code)
         return {
             "scripCode": best.scrip_code,
@@ -126,6 +134,19 @@ class AlertEngine:
             "oi": self.engine.option_oi.get(best.scrip_code),
             "quotes": ltp is not None,
             "strikeGapFromTheoretical": round(best.strike - target, 2),
+            # The entry as it would actually happen: priced off the ask ladder at this instant,
+            # not off the last trade at signal time. A buy lifts the ask, and the quote has an age.
+            "entry": entry_model.model(
+                now=time.time(),
+                bar_close=self._pending_bar_close,
+                fired_at=self._pending_fired_at,
+                underlying_ltp=self.engine.ltps.get(
+                    getattr(self.engine.underlyings.get(symbol), "scrip_code", "")
+                ),
+                quote=q,
+                book=self.engine.book_for(best.scrip_code),
+                lot_size=best.lot_size,
+            ).to_json(),
         }
 
     def _emit(self, a: Alert) -> None:

@@ -146,15 +146,24 @@ def test_cooldown_and_daily_cap_are_bar_clock_not_wall_clock():
     assert cap.allows("X", "2026-09-23"), "a new day resets both"
 
 
-def test_detectors_cannot_reach_the_gateway():
-    """Advisory means advisory: nothing in the alerts package may import exec or venue."""
+def test_alerts_cannot_place_an_order():
+    """Advisory means advisory. The invariant is "cannot reach a broker", not "cannot import".
+
+    This deliberately allows ``exec.paper.walk_book``: it is pure fill arithmetic — it imports only
+    domain and risk.costs and contains no order call — and the entry model must walk the ladder the
+    *same* way the paper matcher does. A second implementation of the fill would drift from the one
+    that books the trade, which is the failure this reuse prevents. What stays banned is the
+    gateway, the live executor and the venue.
+    """
     import pathlib
 
     src = pathlib.Path(__file__).resolve().parents[1] / "kotsin_nse" / "alerts"
+    banned = ("..exec.gateway", "..exec.live", "..venue", "place_order", "square_off")
     for f in src.glob("*.py"):
         text = f.read_text()
-        assert "from ..exec" not in text and "from ..venue" not in text, f
-        assert "place_order" not in text, f
+        for token in banned:
+            assert token not in text, f"{f.name} reaches for {token}"
+
 
 
 def test_a_noise_stop_is_declined_however_rich_its_reward():
@@ -275,3 +284,71 @@ def test_a_one_minute_book_closes_one_minute_after_it_opens():
     )
     eng._emit(a)
     assert a.bar_close == 1_790_066_760
+
+
+def test_an_entry_is_priced_off_the_ask_ladder_not_the_last_trade():
+    """A buy lifts the ask and walks it. Reporting the LTP as the entry understates cost on every
+    trade in the same direction — and the measured round trip is already 0.299%."""
+    from types import SimpleNamespace
+
+    from kotsin_nse.alerts.entry import model
+
+    now = 1_790_000_000.0
+    quote = SimpleNamespace(ltp=10.0, bid=9.8, ask=10.4, ts=now - 1)
+    book = SimpleNamespace(
+        asks=[(10.4, 100), (10.6, 400), (11.0, 5000)], bids=[(9.8, 500)], ts=now - 1
+    )
+    e = model(
+        now=now, bar_close=now - 2, fired_at=now - 1.2, underlying_ltp=1500.0,
+        quote=quote, book=book, lot_size=500,
+    )
+    assert e.fill is not None and e.fill > quote.ltp, "an entry costs more than the last trade"
+    assert e.fill_source == "ladder"
+    # 100 + 400 fills 500 exactly, so the 11.00 rung is never touched.
+    assert e.levels_walked == 2, "one lot of 500 does not fit on a 100-lot touch"
+    # 100@10.4 + 400@10.6 = 5280 for 500 -> 10.56
+    assert round(e.fill, 2) == 10.56
+    assert e.slippage_vs_ltp_pct is not None and e.slippage_vs_ltp_pct > 5
+    assert e.notional == 10.56 * 500
+    assert e.lag_from_bar_close_s == 2.0
+    assert not e.stale
+
+
+def test_a_stale_quote_yields_no_entry_price_at_all():
+    """A premium from a minute ago is not the premium now, and a confident wrong number is worse
+    than an absent one — the same judgement position_quote_max_age_s already encodes."""
+    from types import SimpleNamespace
+
+    from kotsin_nse.alerts.entry import model
+
+    now = 1_790_000_000.0
+    stale = SimpleNamespace(ltp=10.0, bid=9.8, ask=10.4, ts=now - 120)
+    e = model(
+        now=now, bar_close=now - 2, fired_at=now - 1, underlying_ltp=1500.0,
+        quote=stale, book=None, lot_size=500,
+    )
+    assert e.stale
+    assert e.fill is None
+    assert "120s old" in e.note
+
+    never = model(
+        now=now, bar_close=now - 2, fired_at=now - 1, underlying_ltp=1500.0,
+        quote=None, book=None, lot_size=500,
+    )
+    assert never.fill is None
+    assert never.note == "no quote for this contract"
+
+
+def test_a_thin_ladder_falls_back_to_the_touch_and_says_so():
+    from types import SimpleNamespace
+
+    from kotsin_nse.alerts.entry import model
+
+    now = 1_790_000_000.0
+    e = model(
+        now=now, bar_close=now - 2, fired_at=now - 1, underlying_ltp=1500.0,
+        quote=SimpleNamespace(ltp=10.0, bid=9.8, ask=10.4, ts=now),
+        book=None, lot_size=500,
+    )
+    assert e.fill == 10.4, "no depth — the touch is the honest price"
+    assert "no live depth" in e.fill_source
