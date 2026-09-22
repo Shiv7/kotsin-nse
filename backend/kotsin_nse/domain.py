@@ -237,6 +237,13 @@ class Position:
     exit_price: float | None = None
     exit_reason: str | None = None
     pnl: float | None = None
+    #: FUDKII-RT exit state. ``breach_since`` is the start of a *continuous* option-side
+    #: breach — cleared on recovery, paused (not cleared) when the quote is missing.
+    breach_since: float | None = None
+    #: highest option MID seen since the watermark armed, and how many consecutive reads have
+    #: sat below the give-back level.
+    peak_mid: float = 0.0
+    trail_dwell: int = 0
     grade: str = ""
     note: str = ""
 

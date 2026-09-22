@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import MutableMapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 from typing import Any
 
@@ -99,7 +99,7 @@ from .ops.telegram import Telegram
 from .risk.costs import CostModel
 from .risk.exits import ExitEngine, MarketView, apply_exit
 from .risk.exposure import ExposureBook
-from .risk.limits import RiskLimits
+from .risk.limits import RT_X_LIMITS, RiskLimits
 from .risk.sizing import size_position
 from .risk.wallet import Wallet
 from .strategy.base import Outcome, Signal
@@ -150,6 +150,11 @@ class Engine:
         self.costs = CostModel(settings)
         self.limits = RiskLimits()
         self.exits = ExitEngine(self.limits)
+        # FUDKII_RT_X trades FUDKII's entries under a different exit policy, so it gets its own
+        # engine rather than a flag inside the shared one — the two must never be able to drift
+        # into each other, and a second RiskLimits makes that structural.
+        self.exits_rt = ExitEngine(RT_X_LIMITS)
+        self._exits_by_strategy = {StrategyKey.FUDKII_RT_X.value: self.exits_rt}
         self.exposure = ExposureBook(self.limits)
         self.calendar = TradingCalendar.from_file(settings.data_dir / "holidays.txt")
         self.telegram = Telegram(
@@ -851,6 +856,7 @@ class Engine:
         wallet.apply_charges(result.fill.charges, result.fill.ts)
         await self.ledger.upsert_position(_position_json(pos))
         await self.ledger.upsert_wallet(wallet.strategy, wallet.to_json())
+        await self._open_rt_twin(pos, inst, result)
         log.info(
             "position.open",
             strategy=pos.strategy,
@@ -866,6 +872,44 @@ class Engine:
             f"🟢 {pos.strategy} {pos.underlying.symbol} {sig.direction.value} "
             f"{inst.name or inst.scrip_code} qty {pos.qty} @ {pos.entry:.2f} "
             f"SL {pos.option_sl:.2f} grade {pos.grade} [{self.mode().value}]"
+        )
+
+    async def _open_rt_twin(self, pos: Position, inst: Instrument, result: Any) -> None:
+        """Mirror a FUDKII entry into FUDKII_RT_X so only the exit policy differs.
+
+        Same contract, same quantity, same fill price and the same instant. If the entries differed
+        by even a tick the two equity curves would be comparing entries as well as exits, and the
+        question being asked — does the RT exit policy do better — would no longer have a clean
+        answer. The fill is *copied*, not re-matched: re-running the matcher would walk the ask
+        ladder a second time and produce a different price for a trade that never happened twice.
+        """
+        if pos.strategy != StrategyKey.FUDKII.value:
+            return
+        twin_wallet = self.wallets.get(StrategyKey.FUDKII_RT_X.value)
+        if twin_wallet is None or twin_wallet.halted:
+            return
+        cost = pos.entry * pos.qty * inst.multiplier
+        if twin_wallet.available < cost:
+            log.info("rt_twin.skipped", symbol=pos.underlying.symbol, reason="wallet")
+            return
+        twin = replace(
+            pos,
+            id=new_id("pos"),
+            strategy=StrategyKey.FUDKII_RT_X.value,
+            note=f"{pos.note} · RT exit policy, twin of {pos.id}",
+        )
+        self.positions[twin.id] = twin
+        twin_wallet.reserve(cost, result.fill.ts)
+        twin_wallet.apply_charges(result.fill.charges, result.fill.ts)
+        await self.ledger.upsert_position(_position_json(twin))
+        await self.ledger.upsert_wallet(twin_wallet.strategy, twin_wallet.to_json())
+        log.info(
+            "rt_twin.open",
+            twin=twin.id,
+            of=pos.id,
+            symbol=pos.underlying.symbol,
+            qty=twin.qty,
+            entry=twin.entry,
         )
 
     async def _select_instrument(self, underlying: Instrument, sig: Signal) -> Any:
@@ -967,7 +1011,13 @@ class Engine:
                     )
                 continue
             self._stale_positions.discard(pos.id)
+            q = self.quotes.get(pos.instrument.scrip_code)
+            mid = q.mid if q else None
+            spread = (q.spread_pct / 100) if (q and q.spread_pct is not None) else None
             view = MarketView(
+                option_mid=mid,
+                spread_pct=spread,
+                quote_ok=bool(q and (now - q.ts) <= self.s.position_quote_max_age_s),
                 option_ltp=ltp,
                 underlying_ltp=self.ltps.get(pos.underlying.scrip_code),
                 now=now,
@@ -976,7 +1026,8 @@ class Engine:
                 halted=halted,
                 daily_loss_hit=wallet.halted and wallet.halt_reason.startswith("DAILY_LOSS"),
             )
-            decision = self.exits.evaluate(pos, view)
+            engine_for = self._exits_by_strategy.get(pos.strategy, self.exits)
+            decision = engine_for.evaluate(pos, view)
             if decision is None:
                 continue
             await self._exit(pos, decision, now)

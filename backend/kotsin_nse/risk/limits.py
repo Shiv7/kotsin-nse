@@ -36,8 +36,31 @@ class RiskLimits:
     max_drawdown_pct: float = 15.0
     #: new entries stop this many minutes before the segment's force-flat
     entry_cutoff_buffer_min: int = 45
-    #: a position older than this is closed regardless of price
-    time_stop_bars: int = 8  # 8 × 30m = one session
+    #: a position older than this is closed regardless of price. ``None`` switches it off, which
+    #: is what the RT policy does — it exits on its targets, its ratchet, its stop or the close,
+    #: and a bar count cutting a live trade at four hours is an exit nobody asked for. The
+    #: default stays 8 so the books that already rely on it are unchanged.
+    time_stop_bars: int | None = 8  # 8 × 30m
+    # ── FUDKII-RT exit policy (off by default; only the RT_X book turns these on) ───────────
+    #: an option-side breach must hold for this long before it exits. Measured as *continuous*
+    #: breach: any recovery above the level resets the clock, because a touch now and another
+    #: in five minutes is not a five-minute sustain.
+    sustain_s: float | None = None
+    #: below this much through the option stop, exit at once whatever the sustain says. The
+    #: escape hatch: a collapse is not a wick, and it is path-independent so a feed gap cannot
+    #: hide it.
+    hard_floor_below_stop_pct: float = 9.0
+    #: give-back from the peak, as a fraction. Floored by the live spread — on a 20.00 premium
+    #: with a 0.20 spread, 2% is two ticks and one print would trip it.
+    peak_giveback_pct: float | None = None
+    peak_giveback_spread_mult: float = 1.5
+    #: consecutive 1s samples required below a trail level. A single bad print is exactly one
+    #: sample, so requiring three is the cheapest guard there is.
+    trail_dwell_samples: int = 3
+    #: the peak watermark only starts after the position has been open this long, so the first
+    #: seconds of entry noise cannot set a peak the trade then has to live under.
+    peak_arm_after_s: float = 90.0
+
     #: fraction of the position taken at each target
     target_ladder: tuple[float, ...] = (0.4, 0.3, 0.2, 0.1)
     #: once T1 prints, the stop moves to entry — the "T1 staircase"
@@ -52,3 +75,15 @@ class RiskLimits:
 
     def position_budget(self, balance: float) -> float:
         return min(balance * self.max_position_pct / 100, self.max_position_inr)
+
+
+#: FUDKII-RT-X's exit policy. Everything else is the base book's; only the exit differs, which is
+#: the whole point of running the two side by side.
+RT_X_LIMITS = RiskLimits(
+    time_stop_bars=None,            # exits on targets, ratchet, stop or the close — never a clock
+    sustain_s=75.0,                 # continuous option-side breach before it counts
+    hard_floor_below_stop_pct=9.0,  # path-independent escape hatch
+    peak_giveback_pct=2.0,          # floored at 1.5x the live spread
+    trail_dwell_samples=3,
+    peak_arm_after_s=90.0,
+)

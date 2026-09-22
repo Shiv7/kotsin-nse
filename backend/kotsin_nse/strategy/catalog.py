@@ -111,6 +111,30 @@ BOOKS: tuple[Book, ...] = (
         ),
     ),
     Book(
+        key="FUDKII_RT_X",
+        label="FUDKII-RT-X",
+        tf="30m entry, 1s exit",
+        summary=(
+            "FUDKII's entries under the RT exit policy — sustained option stop, hard floor and a "
+            "peak ratchet — on its own wallet, so only the exit differs."
+        ),
+        status="live",
+        params={
+            "sustain_s": "75 (continuous breach)",
+            "hard_floor_below_stop_pct": "9.0",
+            "peak_giveback_pct": "2.0 (floored at 1.5x the live spread)",
+            "trail_dwell_samples": "3",
+            "peak_arm_after_s": "90",
+            "time_stop_bars": "None (off)",
+        },
+        have=("30m/1m bars on the session grid", "MTF pivot zones + confluence stop/targets"),
+        source="kotsin_nse/risk/exits.py (RT policy branch)",
+        note=(
+            "Runs beside FUDKII on the same signal and the same contract at the same entry, so the "
+            "only variable is the exit. Both curves are paper."
+        ),
+    ),
+    Book(
         key="FUDKII_RT",
         label="FUDKII-RT",
         tf="1m on a 30m signal",

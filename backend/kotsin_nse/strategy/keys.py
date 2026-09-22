@@ -20,10 +20,19 @@ class StrategyKey(StrEnum):
     FUDKII = "FUDKII"
     #: The same trigger, admitted only when volume confirms participation.
     FUKAA = "FUKAA"
+    #: The FUDKII trigger under the RT *exit* policy — sustain, hard floor, peak ratchet. Its
+    #: entries are FUDKII's, taken on the same contract at the same price, so the only thing being
+    #: compared is the exit. Its own wallet and its own slots, so the two equity curves stand apart
+    #: and neither can starve the other of capital.
+    FUDKII_RT_X = "FUDKII_RT_X"
 
     @property
     def display_name(self) -> str:
-        return {StrategyKey.FUDKII: "FUDKII", StrategyKey.FUKAA: "FUKAA"}[self]
+        return {
+            StrategyKey.FUDKII: "FUDKII",
+            StrategyKey.FUKAA: "FUKAA",
+            StrategyKey.FUDKII_RT_X: "FUDKII-RT-X",
+        }[self]
 
     @property
     def wallet_id(self) -> str:

@@ -149,7 +149,7 @@ async def test_engine_boots_without_credentials_and_says_why(settings):
     try:
         assert e.mode() is Mode.SHADOW
         assert any("credentials" in n for n in e.boot_notes)
-        assert set(e.wallets) == {"FUDKII", "FUKAA"}
+        assert set(e.wallets) == {"FUDKII", "FUKAA", "FUDKII_RT_X"}
         assert e.wallets["FUDKII"].balance == settings.paper_initial_inr
     finally:
         await e.stop()
@@ -295,7 +295,7 @@ async def test_signals_and_rejections_are_both_persisted(settings, monkeypatch):
 
 
 def test_strategy_key_is_the_only_registry():
-    assert [k.value for k in StrategyKey] == ["FUDKII", "FUKAA"]
+    assert [k.value for k in StrategyKey] == ["FUDKII", "FUKAA", "FUDKII_RT_X"]
     assert Signal(
         strategy=StrategyKey.FUDKII, symbol="RELIANCE", direction=Direction.BULLISH,
         ts=int(ist_ts("2026-09-18", "11:00")), entry=100.0, stop=98.0,
