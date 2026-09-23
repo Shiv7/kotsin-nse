@@ -47,6 +47,9 @@ type RtCard = {
   } | null
   optionLadder: { n: number; equity: number; option: number; equityMove: number; optionGainPct: number | null; source: string }[]
   volumeBaseline: { ratio: number; median: number; sessions: number; slot: string } | null
+  /** the twin's actual fill (mark_entered) and the books that declined the mirror (mark_skipped) */
+  entered?: { ts: number; ist: string; price: number; qty: number; lagFromFiredS: number | null } | null
+  skipped?: { book: string; reason: string }[]
   greeks: { delta: number; deltaSource: string; dte: number | null; gamma: null; theta: null; iv: null; unavailable: string }
   sizing: {
     lots: number; qty: number; capital: number; costPerLot: number; binding: string
@@ -413,6 +416,20 @@ function RtPanel({ c }: { c: RtCard }) {
             vol {c.volumeBaseline.ratio.toFixed(2)}× its own slot
           </span>
         )}
+        {c.entered && (
+          <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] tabular-nums text-emerald-300" title="the twin's actual fill">
+            filled {c.entered.ist} @ {c.entered.price} × {c.entered.qty}
+          </span>
+        )}
+        {(c.skipped ?? []).map(s => (
+          <span
+            key={s.book}
+            className="rounded border border-rose-500/40 bg-rose-500/10 px-1.5 py-0.5 text-[10px] text-rose-300"
+            title={s.reason}
+          >
+            {s.book.replace('FUDKII_', '').replace('_', '-')} skipped · {s.reason}
+          </span>
+        ))}
       </div>
 
       <div className="grid gap-2 sm:grid-cols-2">
