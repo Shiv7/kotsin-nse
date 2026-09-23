@@ -1276,6 +1276,24 @@ class Engine:
         if opened:
             self.alerts.mark_entered(pos.signal_id, ts=result.fill.ts, price=pos.entry, qty=pos.qty)
 
+    async def reset_wallet(self, strategy: str, initial: float | None = None) -> Wallet:
+        """Start a book's purse over — the operator's reset between experiments. Refused while the
+        book holds an open position: a reset under an open trade would release capital that is
+        still at risk. The old record is written to the event log first, so the curve it ends is
+        not lost with it."""
+        old = self.wallets.get(strategy)
+        if old is None:
+            raise KeyError(f"no wallet for {strategy}")
+        if any(p.status == "OPEN" and p.strategy == strategy for p in self.positions.values()):
+            raise RuntimeError(f"{strategy} has an open position — flatten before resetting")
+        amount = float(initial) if initial else float(INITIAL_INR.get(StrategyKey(strategy), self.s.paper_initial_inr))
+        fresh = Wallet.new(strategy, amount, now=time.time())
+        self.wallets[strategy] = fresh
+        await self.ledger.event("wallet.reset", {"strategy": strategy, "initial": amount, "previous": old.to_json()})
+        await self.ledger.upsert_wallet(strategy, fresh.to_json())
+        log.info("wallet.reset", strategy=strategy, initial=amount, previous_balance=round(old.balance, 2))
+        return fresh
+
     def _stamp_own_ladder(self, pos: Position, inst: Instrument, lim: RiskLimits, symbol: str) -> None:
         """The RT/CT books' targets: nothing delta-projected — the contract's own levels from its
         previous session(s) (LegPivotLoader, thin-bar and zero-range guarded), per the book's

@@ -423,3 +423,28 @@ async def test_shadow_mode_reports_an_exit_once_instead_of_failing_every_second(
         assert e._shadow_exits == {pos.id}, "reported once, not once per tick"
     finally:
         await e.stop()
+
+
+async def test_a_wallet_reset_starts_the_purse_over_unless_the_book_is_in_a_trade(settings):
+    from kotsin_nse.config import Segment
+    from kotsin_nse.domain import Direction, Instrument, InstrumentKind, Position, PosSide
+
+    e = Engine(settings)
+    await e.start()
+    try:
+        w = e.wallets["FUDKII_RT_X"]
+        w.balance, w.realized_pnl, w.trades = 1_008_095.0, 8_353.0, 2
+        fresh = await e.reset_wallet("FUDKII_RT_X")
+        assert (fresh.initial, fresh.balance, fresh.peak, fresh.realized_pnl, fresh.trades) == (settings.paper_initial_inr,) * 3 + (0.0, 0)
+        assert e.wallets["FUDKII_RT_X"] is fresh
+        assert (await e.reset_wallet("FUDKII_RT_MCX")).initial == 3_000_000.0, "a book with its own opening capital keeps it"
+        assert (await e.reset_wallet("FUDKII", 2_000_000)).balance == 2_000_000.0
+        opt = Instrument("1", "X", Segment.NSE_FO, InstrumentKind.OPTION, lot_size=1, underlying="X")
+        e.positions["o"] = Position(id="o", strategy="FUDKII", instrument=opt, underlying=opt, side=PosSide.LONG, qty=1,
+                                    entry=1.0, opened_ts=1.0, signal_id="s", direction=Direction.BULLISH)
+        with pytest.raises(RuntimeError):
+            await e.reset_wallet("FUDKII")
+        with pytest.raises(KeyError):
+            await e.reset_wallet("NOPE")
+    finally:
+        await e.stop()

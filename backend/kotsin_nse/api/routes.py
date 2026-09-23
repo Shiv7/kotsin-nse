@@ -48,6 +48,10 @@ class HaltRequest(BaseModel):
     reason: str = ""
 
 
+class WalletResetRequest(BaseModel):
+    initial: float | None = None
+
+
 class ReviewSignalRequest(BaseModel):
     signal_id: str
 
@@ -286,6 +290,18 @@ def build_app(engine: Engine) -> FastAPI:
     @api.get("/committee/hypotheses")
     async def committee_hypotheses() -> list[dict[str, Any]]:
         return engine.committee.log.hypotheses()[::-1]
+
+    @api.post("/wallets/{strategy}/reset")
+    async def wallet_reset(strategy: str, req: WalletResetRequest | None = None) -> dict[str, Any]:
+        """Start a book's purse over at ``initial`` (default: the book's opening capital). Refused
+        with 409 while the book holds an open position."""
+        try:
+            w = await engine.reset_wallet(strategy.upper(), req.initial if req else None)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return w.to_json()
 
     @api.post("/committee/review/signal")
     async def committee_review_signal(req: ReviewSignalRequest) -> dict[str, Any]:
