@@ -31,7 +31,11 @@ class RiskLimits:
     #: shape of a strategy that has never fired in its life, and this codebase exists to not ship
     #: it. The old stack ran them as separate books deliberately (cross-strategy scrip dedup was
     #: excised 2026-06-24); what it lacked was a view of the aggregate, which is the next field.
-    max_positions_per_strategy: int = 3
+    #: Thirty concurrent positions per book (operator, 2026-09-24) — the parent, FUKAA and every
+    #: RT/CT twin alike. It was 3, which is where the parent stopped on a busy morning while its
+    #: own twins ran to 30: the same trigger filled in four books and the parent was the one that
+    #: ran out of slots. The real constraint is the book's own Rs 10,00,000 wallet and its lot cap.
+    max_positions_per_strategy: int = 30
     max_positions_per_underlying: int = 1  # per book
     #: ...and since 2026-09-23 the MONEY IS PER BOOK TOO: every book — the parent, its RT twins, the
     #: CT fades — is checked against its own positions and its own wallet. The cross-book
@@ -39,7 +43,7 @@ class RiskLimits:
     #: 21–23 Sep replay showed the parent's ceiling (which counted its own twins, four positions a
     #: fill) turning the 09:45 burst into a lottery over two names. This field is now a per-book
     #: ceiling that sits above ``max_positions_per_strategy``; it never binds first.
-    max_positions_all_books: int = 6
+    max_positions_all_books: int = 90
     max_underlying_exposure_pct: float = 20.0
     daily_loss_limit_pct: float = 3.0
     max_drawdown_pct: float = 15.0

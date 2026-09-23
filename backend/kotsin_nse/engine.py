@@ -302,6 +302,15 @@ class Engine:
         self._daily_due = False  # a full refetch is owed: day roll or a refresh slot
         self._legs_due = False  # a full leg reload is owed: day roll
         self._daily_refresh_done: set[str] = set()  # "YYYY-MM-DD HH:MM" slots already run
+        #: the alert-ring reset slots already run, same shape. Seeded here, at construction, and
+        #: not in the universe path: a process that boots after the slot has nothing to clear, and
+        #: seeding it anywhere that a boot can skip means the first housekeeping tick wipes the
+        #: session's own signals.
+        self._alerts_reset_done: set[str] = (
+            {f"{ist_today().isoformat()} {settings.alerts_reset_ist}"}
+            if ist_hm(time.time()) >= settings.alerts_reset_ist
+            else set()
+        )
         self._pivot_repair_task: asyncio.Task[Any] | None = None
         self._last_pivot_repair = 0.0
         # -- each name's own implied vol (docs/PIVOTS.md §6): its VIX, for the option ladder --
@@ -2140,6 +2149,7 @@ class Engine:
                     self._decision_tasks.add(asyncio.create_task(self._autopilot()))
                 if day != last_day:
                     last_day = day
+                    self._alerts_reset_done.clear()
                     self._zone_cache.clear()
                     self._daily_due = self._legs_due = True
                     self._daily_refresh_done.clear()
@@ -2194,6 +2204,13 @@ class Engine:
                     self._refresh_stock_iv()
                 # The pivot data plane (docs/PIVOTS.md §3): refresh slots, then the periodic audit.
                 hm = ist_hm(now)
+                # The alert page is emptied for the coming session, every book and twin together.
+                stamp = f"{day} {self.s.alerts_reset_ist}"
+                if hm >= self.s.alerts_reset_ist and stamp not in self._alerts_reset_done:
+                    self._alerts_reset_done.add(stamp)
+                    self.alerts.reset_day(day)
+                    self._signals_today.clear()
+                    self._fut_cache.clear()
                 for slot in self.s.daily_refresh_hm:
                     stamp = f"{day} {slot}"
                     if hm >= slot and stamp not in self._daily_refresh_done:

@@ -507,10 +507,13 @@ def build_app(engine: Engine) -> FastAPI:
         }
 
     @api.get("/alerts")
-    async def alerts(book: str | None = None, limit: int = Query(100, le=500)) -> dict[str, Any]:
+    async def alerts(book: str | None = None, limit: int | None = Query(None, ge=1)) -> dict[str, Any]:
+        """Every alert of the session by default. ``limit`` is a caller's choice, not a policy:
+        the page shows the whole day and the rings are emptied at 00:30 IST."""
         """Realtime firings from the ported books. Advisory: none of these can place an order."""
         return {
             "alerts": engine.alerts.feed(book, limit),
+            "resetIst": engine.s.alerts_reset_ist,
             **engine.alerts.stats(),
             "now_ist": ist_hm(time.time()),
         }

@@ -36,8 +36,10 @@ from .detectors import (
 
 log = structlog.get_logger(__name__)
 
-#: Per book. A trading day across 216 underlyings does not come close, and the page pages anyway.
-RING = 500
+#: Per book, and a ceiling rather than a page size: the ring is emptied every session
+#: (``reset_day``, 00:30 IST), and a day across 216 underlyings does not come near this, so no
+#: signal is ever dropped for want of room. The page asks for all of them.
+RING = 5000
 #: a carded contract stays on the tape (``ops/tape.py``) this long after the alert fired. The ring
 #: holds a whole day; the tape wants the window the card was live in, not every contract since 09:15.
 TAPE_CARD_TTL_S = 1800.0
@@ -62,6 +64,8 @@ class AlertEngine:
         self.started_ts = time.time()
         self.last_refresh_ts = 0.0
         self.refreshes = 0
+        #: the session the rings were last emptied for; "" until the first reset
+        self.reset_day_stamp = ""
 
     # -- plumbing ---------------------------------------------------------------------------------
 
@@ -442,17 +446,42 @@ class AlertEngine:
 
     # -- reads ------------------------------------------------------------------------------------
 
-    def feed(self, book: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    def feed(self, book: str | None = None, limit: int | None = None) -> list[dict[str, Any]]:
+        """Today's alerts, newest first. ``limit=None`` — the default, and what the page asks for
+        — is every one of them: the session's signals are the whole point of the page, and a page
+        that silently shows the newest 100 of 140 is a page that lies about the day."""
         if book:
-            return [a.to_json() for a in list(self.alerts.get(book, ()))[:limit]]
-        merged: list[Alert] = []
-        for ring in self.alerts.values():
-            merged.extend(ring)
-        merged.sort(key=lambda a: a.ts, reverse=True)
-        return [a.to_json() for a in merged[:limit]]
+            rows = list(self.alerts.get(book, ()))
+        else:
+            rows = [a for ring in self.alerts.values() for a in ring]
+            rows.sort(key=lambda a: a.ts, reverse=True)
+        return [a.to_json() for a in (rows[:limit] if limit else rows)]
+
+    def reset_day(self, day: str) -> dict[str, int]:
+        """Empty the page for the coming session (``KN_ALERTS_RESET_IST``, 00:30 IST).
+
+        Yesterday's triggers are on the ledger and on the trigger-card tabs, which are read per
+        day; the alert rings are the *live* view and were the one thing that carried across the
+        roll, so a 09:20 page opened with a day of stale cards above the new ones. The detectors
+        are rebuilt rather than poked: their daily caps, cooldowns and the living book are the
+        rest of yesterday, and a fresh instance is the same state a fresh process would have.
+        """
+        cleared = {book: len(ring) for book, ring in self.alerts.items() if ring}
+        self.alerts.clear()
+        self.counts.clear()
+        self.evaluated.clear()
+        self._cpr_avg.clear()
+        self.bb = [BbBreakDetector(c) for c in BB_BOOKS]
+        self.fudkoi = FudkoiDetector()
+        self.pivotboss = PivotBossDetector()
+        self.rt = FudkiiRtDetector()
+        self.reset_day_stamp = day
+        log.info("alerts.reset_day", day=day, cleared=cleared)
+        return cleared
 
     def stats(self) -> dict[str, Any]:
         return {
+            "resetDay": self.reset_day_stamp,
             "counts": dict(self.counts),
             "evaluated": dict(self.evaluated),
             "living": len(self.rt.living),

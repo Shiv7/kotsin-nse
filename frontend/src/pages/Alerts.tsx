@@ -139,6 +139,9 @@ type Resp = {
   capReached: Record<string, boolean>
   uptime_s: number
   now_ist: string
+  /** the IST slot the rings are emptied at, and the session they were last emptied for */
+  resetIst: string
+  resetDay: string
 }
 
 const LABEL: Record<string, string> = {
@@ -697,7 +700,9 @@ function Row({ a }: { a: Alert }) {
 export function Alerts() {
   const [book, setBook] = useState<string>('ALL')
   const [bookView, setBookView] = useState<string | null>(null)
-  const path = book === 'ALL' ? '/api/alerts?limit=200' : `/api/alerts?book=${book}&limit=200`
+  // No limit: the page shows every signal of the session, for every book and twin. The rings are
+  // emptied at 00:30 IST, so "the session" is what it says.
+  const path = book === 'ALL' ? '/api/alerts' : `/api/alerts?book=${book}`
   const { data, error } = usePoll<Resp>(path, 3000)
 
   if (error) {
@@ -718,6 +723,9 @@ export function Alerts() {
   }
 
   const total = Object.values(data.counts).reduce((a, b) => a + b, 0)
+  // `total` is what fired; `shown` is what the page holds. They differ only if a book ever
+  // overran the ring, which a session does not — stating both is how you would know.
+  const shown = data.alerts.length
 
   return (
     <div className="p-6">
@@ -725,7 +733,8 @@ export function Alerts() {
         <h1 className="text-2xl font-semibold text-slate-100">Live Alerts</h1>
         <div className="text-right text-xs text-slate-500">
           <div>
-            {total} fired today · {data.living} living signals · {data.now_ist} IST
+            {total} fired this session · {shown} shown · {data.living} living signals ·{' '}
+            {data.now_ist} IST
             {data.marksAgeS !== null && data.marksAgeS !== undefined && (
               <span className={data.marksAgeS > 5 ? ' text-amber-400' : ' text-emerald-400'}>
                 {' '}· marks {data.marksAgeS.toFixed(1)}s old
@@ -733,7 +742,8 @@ export function Alerts() {
             )}
           </div>
           <div className="text-[10px] text-slate-600">
-            advisory only — nothing here reaches the gateway
+            advisory only — nothing here reaches the gateway · every signal shown, no page cap ·
+            clears {data.resetIst} IST for the next session
           </div>
         </div>
       </div>

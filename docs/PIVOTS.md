@@ -152,6 +152,25 @@ The route and the wall are stamped on the ENTRY card (`card.route`); a COUNTER w
 flipped side is recorded as `COUNTER_NO_PLAN`. The in-trend mirrors (RT-X/N/Y) trade regardless of
 the route — the fade is beside them, not instead of them.
 
+**One session on the page, all of it** (operator, 2026-09-24). Three rules, one for each place a
+signal could go missing:
+
+- **Nothing is capped for display.** `/api/alerts` returns every alert of the session (`limit` is a
+  caller's choice, not a policy) and the page asks for all of them. The per-book ring is a ceiling
+  a session cannot reach (5000), not a page size. PIVOTBOSS's *global* daily cap — 30 firings a day,
+  spent in arrival order across 216 underlyings that close the same 30m bar, so the survivors were
+  the earliest rather than the strongest — is off; its per-scrip cadence (2 a day, 60-minute
+  cooldown) stays, because one symbol not repeating itself is not a signal lost.
+- **The page is emptied at 00:30 IST** (`KN_ALERTS_RESET_IST`, `alerts/engine.py::reset_day`), for
+  every book and twin together: rings, counts, the detectors' caps and cooldowns, the living book,
+  and the engine's `_signals_today`. Yesterday's triggers stay on the ledger and on the trigger-card
+  tabs, which are read per day. The slot is half an hour past the date roll on purpose — 5paisa
+  refuses every login for ~20 minutes past midnight IST.
+- **Thirty concurrent positions per book** (`RiskLimits.max_positions_per_strategy`), parent and
+  twin alike, each against its own wallet and its own count. It was 3 for the parent while its own
+  twins ran to 30, so on a busy morning the same trigger filled in four books and the parent was
+  the one that ran out of slots. One position per name per book is unchanged.
+
 **The tick tape** (`ops/tape.py`, 2026-09-23 evening). Every rule in the table above is a
 wall-clock rule, and until now the only record of the prices they were evaluated against was the
 broker's 1-minute candle. The tape writes the top of book of every held contract (and its equity and

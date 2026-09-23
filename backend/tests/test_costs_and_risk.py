@@ -389,7 +389,9 @@ def test_the_rt_pool_is_thirty_slots_and_the_base_book_keeps_its_own():
     # a per-book ceiling above the 30-slot pool: every book counts only its own positions
     assert RT_X_LIMITS.max_positions_all_books == 90 > RT_X_LIMITS.max_positions_per_strategy
     assert RiskLimits().max_lots is None
-    assert RiskLimits().max_positions_per_strategy == 3
+    # every book, parent and twin alike, gets the same thirty slots (operator, 2026-09-24)
+    assert RiskLimits().max_positions_per_strategy == 30
+    assert RiskLimits().max_positions_all_books == 90
 
 
 def test_the_mcx_rt_book_has_its_own_wallet_and_enough_of_it_to_reach_its_slots():

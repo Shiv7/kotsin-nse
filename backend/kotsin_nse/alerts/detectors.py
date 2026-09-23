@@ -353,7 +353,12 @@ class PivotBossConfig:
     wide_factor: float = 1.5  # pivotboss.cpr.width.wideFactor
     max_per_scrip_per_day: int = 2  # pivotboss.cadence.maxPerScripPerDay
     cooldown_minutes: int = 60  # pivotboss.cadence.cooldownMinutes
-    global_daily_cap: int = 30  # pivotboss.cadence.globalDailyCap
+    #: OFF since 2026-09-24 (operator: every strategy shows every signal). It was 30 a day, and
+    #: with 216 underlyings evaluating on the same 30m boundary it was spent in arrival order on
+    #: the first boundary that reached it — the survivors were the earliest, not the strongest,
+    #: and the book went quiet for the rest of the day for no reason a reader could see. The
+    #: per-scrip cadence above stays: that is one symbol not repeating itself, not a signal lost.
+    global_daily_cap: int | None = None
 
 
 class PivotBossDetector:

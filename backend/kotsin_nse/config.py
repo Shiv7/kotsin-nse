@@ -160,6 +160,11 @@ class Settings(BaseSettings):
     #: the NSE close, so the official closing price lands the same evening, and before the MCX
     #: open, so a process that stayed up overnight starts the day on official candles.
     daily_refresh_hm: tuple[str, ...] = ("08:30", "15:45")
+    #: IST wall-clock slot at which the alert rings are emptied for the coming session, so the
+    #: page opens blank (``alerts/engine.py::reset_day``). After midnight rather than on the date
+    #: roll, deliberately: 5paisa refuses logins for ~20 minutes past midnight IST, and the half
+    #: hour keeps the two apart. Every book and twin is cleared together.
+    alerts_reset_ist: str = "00:30"
     #: scripFinder's strike shortlist: ±band around the previous close, N per side, nearest expiry
     universe_band_pct: float = 12.0
     universe_strikes_per_side: int = 5
