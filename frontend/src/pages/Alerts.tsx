@@ -755,6 +755,17 @@ export function Alerts() {
       )}
 
       <div className="mb-4 flex items-center gap-1 overflow-x-auto whitespace-nowrap border-b border-slate-800 pb-2">
+        <span className="mr-1 flex-none text-[10px] uppercase tracking-wide text-slate-500">trigger cards</span>
+        {BOOK_TABS.map(([k, label]) => (
+          <button
+            key={k}
+            onClick={() => setBookView(bookView === k ? null : k)}
+            className={`rounded px-2.5 py-1 text-xs ${bookView === k ? 'bg-indigo-500/20 text-indigo-100' : 'text-slate-400 hover:text-white'}`}
+          >
+            {label}
+          </button>
+        ))}
+        <span className="mx-2 inline-block h-4 w-px flex-none bg-slate-700" aria-hidden="true" />
         <button
           onClick={() => { setBook('ALL'); setBookView(null) }}
           className={`rounded px-2.5 py-1 text-xs ${
@@ -783,17 +794,6 @@ export function Alerts() {
             </button>
           )
         })}
-        <span className="mx-2 inline-block h-4 w-px flex-none bg-slate-700" aria-hidden="true" />
-        <span className="mr-1 flex-none text-[10px] uppercase tracking-wide text-slate-500">trigger cards</span>
-        {BOOK_TABS.map(([k, label]) => (
-          <button
-            key={k}
-            onClick={() => setBookView(bookView === k ? null : k)}
-            className={`rounded px-2.5 py-1 text-xs ${bookView === k ? 'bg-indigo-500/20 text-indigo-100' : 'text-slate-400 hover:text-white'}`}
-          >
-            {label}
-          </button>
-        ))}
       </div>
 
       {bookView ? (
