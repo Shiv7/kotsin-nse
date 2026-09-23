@@ -120,7 +120,7 @@ from .risk.limits import CT_X_LIMITS, CT_Y_LIMITS, RT_N_LIMITS, RT_X_LIMITS, RT_
 from .risk.sizing import size_position
 from .risk.wallet import Wallet
 from .strategy.base import Outcome, Signal
-from .strategy.counter import counter_route, flipped_signal
+from .strategy.counter import Leg, counter_route, flipped_signal
 from .strategy.fudkii import Fudkii, FudkiiConfig
 from .strategy.fukaa import Fukaa, FukaaConfig, select
 from .strategy.keys import ALL_KEYS, INITIAL_INR, StrategyKey
@@ -267,6 +267,8 @@ class Engine:
         self.quotes: dict[str, Quote] = {}
         self.ltps: dict[str, float] = {}
         self._zone_cache: dict[str, tuple[str, list[Zone]]] = {}
+        #: the front future's candles per symbol for the current trigger bar (see _fut_context)
+        self._fut_cache: dict[str, tuple[int, dict[str, Any] | None]] = {}
         # -- the pivot data plane (docs/PIVOTS.md) --
         self.daily_cache = DailyCache(settings.data_dir / "daily")
         self._daily_failed: set[str] = set()  # 1d fetch raised; the repair loop retries every pass
@@ -1305,12 +1307,9 @@ class Engine:
         underlying = self.underlyings.get(sig.symbol)
         if underlying is None or underlying.segment is Segment.MCX_FO:
             return
-        points = self._pivot_points(sig.symbol)
-        atr_v = atr(self.store.bars(sig.symbol, DECISION_TF, 60), 14) or 0.0
-        dec = counter_route(
-            points, bullish=sig.direction is Direction.BULLISH, close=bar.close, high=bar.high, low=bar.low,
-            atr=atr_v, st_flipped="ST flip" in sig.reason,
-        )
+        legs = await self._counter_legs(underlying, bar)
+        atr_v = legs[0].atr if legs else 0.0
+        dec = counter_route(legs, bullish=sig.direction is Direction.BULLISH, st_flipped="ST flip" in sig.reason)
         self.alerts.mark_route(sig.signal_id, decision=dec.to_json())
         log.info("counter.route", symbol=sig.symbol, route=dec.route, reason=dec.reason)
         if dec.route != "COUNTER":
@@ -1324,6 +1323,72 @@ class Engine:
             await self.ledger.insert_signal(sig.to_json(), "COUNTER_NO_PLAN", dec.reason)
             return
         await self._handle_signal(fade, bar)
+
+    async def _counter_legs(self, underlying: Instrument, bar: UnifiedBar) -> list[Leg]:
+        """The equity's side of the trigger from the store, the front future's from the broker
+        (``_fut_context``): candle, ATR30m, classic levels with their weights, volume surges."""
+        from .instrument.legs import levels_from_candles, weekly_from_rows
+        from .market.session import to_ist
+
+        eq_bars = self.store.bars(underlying.symbol, DECISION_TF, 60)
+        s_t, s_t1, _ = volume_surges([b.volume for b in eq_bars], window=6, floor=1000.0)
+        legs = [Leg(
+            "equity", bar.open, bar.high, bar.low, bar.close, atr(eq_bars, 14) or 0.0,
+            self._pivot_points(underlying.symbol), s_t, s_t1,
+        )]
+        ctx = await self._fut_context(underlying)
+        if ctx is None:
+            return legs
+        trigger = to_ist(bar.ts).strftime("%Y-%m-%dT%H:%M")
+        rows = [r for r in ctx["bars30"] if str(r["dt"])[:16] <= trigger]
+        if not rows or str(rows[-1]["dt"])[:16] != trigger:
+            return legs
+        t = rows[-1]
+        trs = [
+            max(b["h"] - b["l"], abs(b["h"] - a["c"]), abs(b["l"] - a["c"]))
+            for a, b in zip(rows[-15:-1], rows[-14:], strict=False)
+        ]
+        f_t, f_t1, _ = volume_surges([float(r["v"]) for r in rows], window=6, floor=1000.0)
+        today = ist_today()
+        points: list[PivotPoint] = []
+        got = levels_from_candles(ctx["rows1d"], today, min_volume=0.0)
+        if got:
+            points += pivot_points(got[0], "1d")
+        wk = weekly_from_rows(ctx["front"], ctx["rows1d"], today)
+        if wk:
+            points += pivot_points(wk[0], "1wk")
+        legs.append(Leg(
+            "future", float(t["o"]), float(t["h"]), float(t["l"]), float(t["c"]),
+            sum(trs) / len(trs) if trs else 0.0, points, f_t, f_t1,
+        ))
+        return legs
+
+    async def _fut_context(self, underlying: Instrument) -> dict[str, Any] | None:
+        """The front future's side of a trigger — its 30m candles for the last three sessions and
+        its daily candles for the levels — fetched from the broker once per trigger bar (the engine
+        holds no futures bars) and shared by the counter route and the dried-volume gate. None when
+        there is no future or the broker does not answer: absent, never a verdict."""
+        if underlying.segment is not Segment.NSE_EQ:
+            return None
+        front = self.catalogue_loader.catalogue.front_future(underlying.symbol, on=ist_today())
+        if front is None:
+            return None
+        eq = self.store.bars(underlying.symbol, DECISION_TF, 1)
+        bucket = int(eq[-1].ts) if eq else 0
+        hit = self._fut_cache.get(underlying.symbol)
+        if hit is not None and hit[0] == bucket:
+            return hit[1]
+        today = ist_today()
+        start30 = self.calendar.previous_trading_day(self.calendar.previous_trading_day(today))
+        try:
+            rows30 = await self.rest.candles(front, DECISION_TF, start30.isoformat(), today.isoformat())
+            rows1d = await self.rest.candles(front, "1d", (today - timedelta(days=35)).isoformat(), today.isoformat())
+        except Exception as exc:  # noqa: BLE001 — a route input must never fail the fill path
+            log.warning("fut.context_unknown", symbol=underlying.symbol, error=str(exc)[:120])
+            return None
+        ctx = {"front": front, "bars30": rows30, "rows1d": rows1d}
+        self._fut_cache[underlying.symbol] = (bucket, ctx)
+        return ctx
 
     def _pivot_points(self, symbol: str) -> list[PivotPoint]:
         """The equity's classic levels for today — daily from the previous session, weekly and
@@ -1360,20 +1425,12 @@ class Engine:
             out["equity"] = (s_t, s_t1)
         if underlying.segment is not Segment.NSE_EQ or not eq:
             return out
-        front = self.catalogue_loader.catalogue.front_future(underlying.symbol, on=ist_today())
-        if front is None:
+        ctx = await self._fut_context(underlying)
+        if ctx is None:
             return out
         trigger = to_ist(eq[-1].ts).strftime("%Y-%m-%dT%H:%M")
-        try:
-            day = ist_today()
-            rows = await self.rest.candles(
-                front, DECISION_TF, self.calendar.previous_trading_day(day).isoformat(), day.isoformat()
-            )
-        except Exception as exc:  # noqa: BLE001 — an entry gate must never fail the fill path
-            log.warning("rt_twin.volume_unknown", symbol=underlying.symbol, error=str(exc)[:120])
-            return out
         # bars up to and including the trigger bar; the partial bar after it is not a reading
-        vols = [float(r["v"]) for r in rows if str(r["dt"])[:16] <= trigger]
+        vols = [float(r["v"]) for r in ctx["bars30"] if str(r["dt"])[:16] <= trigger]
         f_t, f_t1, _ = volume_surges(vols, window=6, floor=1000.0)
         if f_t is not None and f_t1 is not None:
             out["future"] = (f_t, f_t1)

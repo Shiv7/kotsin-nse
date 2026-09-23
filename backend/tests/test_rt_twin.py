@@ -241,7 +241,7 @@ async def test_a_dry_front_future_skips_even_when_the_equity_bar_is_live(setting
         e.rest.candles = candles  # type: ignore[method-assign]
         pos, opt = _reliance_fill(e, time.time())
         await e._open_rt_twin(pos, opt, _fill(time.time()))
-        assert asked == [("68781", "30m")]
+        assert asked == [("68781", "30m"), ("68781", "1d")], "one context fetch per trigger: the 30m bars and the daily levels"
         books = sorted(p.strategy for p in e.positions.values() if p.strategy.startswith("FUDKII_RT"))
         assert books == ["FUDKII_RT_N"]
 
@@ -250,6 +250,7 @@ async def test_a_dry_front_future_skips_even_when_the_equity_bar_is_live(setting
             raise RuntimeError("historical endpoint down")
 
         e.rest.candles = broken  # type: ignore[method-assign]
+        e._fut_cache.clear()  # the context is fetched once per trigger bar; a new bar asks again
         e.positions.clear()
         pos, opt = _reliance_fill(e, time.time())
         await e._open_rt_twin(pos, opt, _fill(time.time()))
