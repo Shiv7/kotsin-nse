@@ -352,6 +352,16 @@ class AlertEngine:
                 a.card = card
                 return
 
+    def mark_skipped(self, signal_id: str, *, book: str, reason: str) -> None:
+        """A twin declined the mirror (dried volume): say so on the ENTRY card, per book, so an RT
+        book with no trade reads as "skipped, because" rather than "missed"."""
+        for a in self.alerts.get("FUDKII_RT", ()):
+            if a.kind == "ENTRY" and (a.evidence or {}).get("signalId") == signal_id:
+                card = a.card if a.card is not None else {}
+                card.setdefault("skipped", []).append({"book": book, "reason": reason})
+                a.card = card
+                return
+
     # -- the bar path -----------------------------------------------------------------------------
 
     def on_bar(self, bar: UnifiedBar) -> None:

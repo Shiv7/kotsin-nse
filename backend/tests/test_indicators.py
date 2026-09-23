@@ -149,3 +149,14 @@ def test_close_position_in_range():
     assert close_position_in_range(bar(0, 10, 20, 10, 20)) == 1.0
     assert close_position_in_range(bar(0, 10, 20, 10, 10)) == 0.0
     assert close_position_in_range(bar(0, 10, 10, 10, 10)) is None
+
+
+def test_dried_volume_is_both_bars_under_v_and_never_from_missing_data():
+    """SBILIFE 2026-09-23: FUT surgeT 0.79 / T-1 0.51 into its daily S1 — the reference router's
+    R1. One live bar is enough to trade; a missing or zero bar is absent, not dried."""
+    from kotsin_nse.bars.indicators import dried_volume
+
+    assert dried_volume(0.79, 0.51, v=0.85)
+    assert not dried_volume(1.48, 0.51, v=0.85)
+    assert not dried_volume(None, 0.5, v=0.85) and not dried_volume(0.5, None, v=0.85)
+    assert not dried_volume(0.0, 0.5, v=0.85) and not dried_volume(0.5, 0.0, v=0.85)

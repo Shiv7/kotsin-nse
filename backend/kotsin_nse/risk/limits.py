@@ -104,6 +104,11 @@ class RiskLimits:
     band_exit: str = "through"
     #: the stepped rung SL also needs sustain_s continuous breach rather than one read
     post_arm_sustain: bool = False
+    #: entry gate on the twin (None = off): the mirror is skipped when the underlying's — or its
+    #: front future's — trigger 30m bar and the one before are both under this × the T-2…T-7
+    #: volume baseline (the reference router's dried-volume SKIP; NSE 0.85). SBILIFE 2026-09-23:
+    #: FUT 0.79 / 0.51 into its daily S1, −5.9k.
+    dried_volume_v: float | None = None
 
     def position_budget(self, balance: float) -> float:
         return min(balance * self.max_position_pct / 100, self.max_position_inr)
@@ -126,6 +131,7 @@ RT_X_LIMITS = RiskLimits(
     peak_arm_after_s=90.0,
     own_ladder=True,
     reproject_stop_s=10.0,
+    dried_volume_v=0.85,
 )
 
 #: The policy that ran on 2026-09-23 and took +10.8k on GRASIM: the contract's own daily R1–R4,
@@ -170,4 +176,5 @@ RT_Y_LIMITS = RiskLimits(
     giveback_move_frac=0.25,
     band_exit="sustain",
     post_arm_sustain=True,
+    dried_volume_v=0.85,
 )

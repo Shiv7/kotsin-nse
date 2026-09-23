@@ -213,6 +213,13 @@ def volume_surges(
     return volumes[-1] / base, volumes[-2] / base, base
 
 
+def dried_volume(surge_t: float | None, surge_t1: float | None, *, v: float) -> bool:
+    """The reference RT router's R1: the trigger bar *and* the one before it both under ``v`` ×
+    the baseline (NSE 0.85). A missing or non-positive surge reads as *absent*, never as dried —
+    a bar the feed did not fill must not manufacture a skip."""
+    return surge_t is not None and surge_t1 is not None and 0 < surge_t < v and 0 < surge_t1 < v
+
+
 def volume_surge_median(volumes: Sequence[float], window: int) -> float | None:
     """CAN2's shape: current volume over the **median** of the prior ``window`` bars, current bar
     excluded. Kept distinct from the mean form because the two are not interchangeable — the median

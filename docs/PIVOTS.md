@@ -116,6 +116,14 @@ Expected daily move (`market/iv.py::expected_move_frac`) = spot × IV(name) × �
 the option's own volatility unit, 60–200 % of premium on 2026-09-23 — which is why a 2–3 % band
 scratched every runner in the replays.
 
+**Entry gate — RT-X and RT-Y only** (`RiskLimits.dried_volume_v = 0.85`): the mirror is skipped
+when the trigger 30m bar *and* the one before it are both under 0.85 × the T-2…T-7 volume baseline
+(floor 1000, `bars/indicators.py::dried_volume` — the reference RT router's R1) on the underlying
+**or** on its front future (`Engine._volume_surges`; the future's candles come from the broker at
+twin time, a leg without data is absent, never dried). RT-N takes every fill as the control. The skip
+is written on the ENTRY alert card (`card.skipped`). Nothing in this engine classifies a signal as
+counter-trend: every twin mirrors the parent's direction.
+
 **Per-name implied vol (the stock's own VIX).** The option ladder's merge tolerance is
 `k(name) × ATR30(parent) × δ / premium` (`market/iv.py`), where `k(name)` bands today's ATM implied
 vol of the front expiry against the name's **own** median IV (≥ 10 sessions; India VIX until then).

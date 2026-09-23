@@ -31,7 +31,7 @@ from .alerts.engine import AlertEngine
 from .bars.aggregator import Aggregator
 from .bars.daily import MIN_DAILY_BARS, REPAIR_BATCH, DailyCache, is_official, previous_session
 from .bars.daily import audit as audit_daily
-from .bars.indicators import atr
+from .bars.indicators import atr, dried_volume, volume_surges
 from .bars.micro import MicroAggregator
 from .bars.periods import monthly, previous_complete, weekly
 from .bars.pivots import (
@@ -1204,8 +1204,21 @@ class Engine:
         )
         cost = pos.entry * pos.qty * inst.multiplier
         opened = 0
+        vol = (
+            await self._volume_surges(pos.underlying)
+            if any(self._exits_by_strategy[k.value].limits.dried_volume_v for k in keys)
+            else None
+        )
         for twin_key in keys:
             engine_for = self._exits_by_strategy[twin_key.value]
+            lim_v = engine_for.limits.dried_volume_v
+            if lim_v and vol:
+                dry = [leg for leg, (s_t, s_t1) in vol.items() if dried_volume(s_t, s_t1, v=lim_v)]
+                if dry:
+                    why = "dried volume " + ", ".join(f"{leg} {vol[leg][0]:.2f}/{vol[leg][1]:.2f}" for leg in dry) + f" < {lim_v}"
+                    log.info("rt_twin.skipped", book=twin_key.value, symbol=pos.underlying.symbol, reason=why)
+                    self.alerts.mark_skipped(pos.signal_id, book=twin_key.value, reason=why)
+                    continue
             twin_wallet = self.wallets.get(twin_key.value)
             if twin_wallet is None or twin_wallet.halted:
                 continue
@@ -1271,6 +1284,40 @@ class Engine:
             opened += 1
         if opened:
             self.alerts.mark_entered(pos.signal_id, ts=result.fill.ts, price=pos.entry, qty=pos.qty)
+
+    async def _volume_surges(self, underlying: Instrument) -> dict[str, tuple[float, float]]:
+        """``surge_T`` / ``surge_T-1`` of the last two closed 30m bars against the T-2…T-7 baseline
+        (``volume_surges``, floor 1000) — for the underlying from the store, and for its front
+        future from the broker's candles, since the engine holds no futures bars. A leg the data
+        cannot answer for is left out: absent, not dried. Read at twin time only, so the parent's
+        fill path never waits on it."""
+        from .market.session import to_ist
+
+        out: dict[str, tuple[float, float]] = {}
+        eq = self.store.bars(underlying.symbol, DECISION_TF, 12)
+        s_t, s_t1, _ = volume_surges([b.volume for b in eq], window=6, floor=1000.0)
+        if s_t is not None and s_t1 is not None:
+            out["equity"] = (s_t, s_t1)
+        if underlying.segment is not Segment.NSE_EQ or not eq:
+            return out
+        front = self.catalogue_loader.catalogue.front_future(underlying.symbol, on=ist_today())
+        if front is None:
+            return out
+        trigger = to_ist(eq[-1].ts).strftime("%Y-%m-%dT%H:%M")
+        try:
+            day = ist_today()
+            rows = await self.rest.candles(
+                front, DECISION_TF, self.calendar.previous_trading_day(day).isoformat(), day.isoformat()
+            )
+        except Exception as exc:  # noqa: BLE001 — an entry gate must never fail the fill path
+            log.warning("rt_twin.volume_unknown", symbol=underlying.symbol, error=str(exc)[:120])
+            return out
+        # bars up to and including the trigger bar; the partial bar after it is not a reading
+        vols = [float(r["v"]) for r in rows if str(r["dt"])[:16] <= trigger]
+        f_t, f_t1, _ = volume_surges(vols, window=6, floor=1000.0)
+        if f_t is not None and f_t1 is not None:
+            out["future"] = (f_t, f_t1)
+        return out
 
     def expected_move(self, symbol: str, inst: Instrument, premium: float) -> float:
         """One day's expected move of the parent (its own IV, or its median) through delta, as a
