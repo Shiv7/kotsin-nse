@@ -176,3 +176,59 @@ def test_the_parents_thirtieth_fill_is_allowed_and_the_thirty_first_is_not(equit
     for p in twins:
         p.strategy = "FUDKII_RT_X"
     assert book.check(positions=twins, **args).allowed, "books are independent"
+
+
+# -- the money the count no longer bounds -------------------------------------------------------
+
+
+def test_a_fill_above_the_quote_is_deployed_rather_than_dropped():
+    """The sizer budgets on the quoted premium; the wallet is charged the fill. On the last
+    entries of a nearly-full book the difference overdraws, and the entry path used to call
+    `reserve` and discard its False — the position opened and the money was never marked spent,
+    so the next entry sized against it. Three slots hid this; thirty do not."""
+    from kotsin_nse.risk.wallet import Wallet
+
+    w = Wallet.new("FUDKII", 100_000.0)
+    assert w.reserve(99_000.0, 1.0) is True and w.available == 1_000.0
+    # the next fill lands above the quote the sizer used
+    assert w.reserve(1_200.0, 2.0) is False, "the old path: refused, and silently not deployed"
+    assert w.deployed == 99_000.0, "which is exactly the lie — the money IS spent"
+
+    w2 = Wallet.new("FUDKII", 100_000.0)
+    w2.reserve(99_000.0, 1.0)
+    over = w2.commit(1_200.0, 2.0)
+    assert over == pytest.approx(200.0) and w2.deployed == pytest.approx(100_200.0)
+    assert w2.available == 0.0, "overstating what is left is what let the next entry through"
+    assert w2.commit(500.0, 3.0) == pytest.approx(500.0), "already dry: all of it is overdraw"
+    # within the book's means it is an ordinary deployment and says so
+    w3 = Wallet.new("FUDKII", 100_000.0)
+    assert w3.commit(40_000.0, 1.0) == 0.0 and w3.available == 60_000.0
+
+
+def test_the_trigger_card_page_asks_for_the_session_not_the_old_ring_size():
+    """A living signal emits a keepalive a minute for up to 35 minutes, so a session's FUDKII_RT
+    ring runs to hundreds. The hardcoded 500 was the old RING; past it an early ENTRY's card
+    vanished from the page while its ledger row stayed, which reads as a trigger never carded."""
+    import inspect
+
+    from kotsin_nse.engine import Engine
+
+    src = inspect.getsource(Engine.book_cards)
+    assert 'feed("FUDKII_RT")' in src and 'feed("FUDKII_RT", 500)' not in src
+
+    a = AlertEngine(engine=None)
+    for i in range(700):
+        al = _alert("FUDKII_RT", 1_000_000 + i)
+        al.kind = "ENTRY"
+        al.evidence = {"signalId": f"s{i}"}
+        a._emit(al)
+    seen = {(x.get("evidence") or {}).get("signalId") for x in a.feed("FUDKII_RT") if x["kind"] == "ENTRY"}
+    assert len(seen) == 700 and "s0" in seen, "the first trigger of the day is still carded"
+
+
+def test_the_reset_slot_is_validated_like_the_other_wall_clock_settings():
+    with pytest.raises(ValueError, match="HH:MM"):
+        Settings(_env_file=None, alerts_reset_ist="halfpast")
+    with pytest.raises(ValueError, match="HH:MM"):
+        Settings(_env_file=None, alerts_reset_ist="24:00")
+    assert Settings(_env_file=None, alerts_reset_ist="01:15").alerts_reset_ist == "01:15"

@@ -94,11 +94,30 @@ class Wallet:
         return True
 
     def reserve(self, amount: float, now: float) -> bool:
+        """Ask whether this much can be deployed, and deploy it if so. A question asked BEFORE
+        an order. For money already spent, use ``commit``."""
         if amount > self.available:
             return False
         self.deployed += amount
         self.updated_ts = now
         return True
+
+    def commit(self, amount: float, now: float) -> float:
+        """Record what a fill actually cost, whatever was available. Returns the overdraw, 0.0
+        when there was none.
+
+        The sizer budgets against the *quoted* premium (``sizing.py``: ``budget = min(position
+        budget, available)``) but the wallet is charged the *fill* price, and a fill lands at or
+        above the quote — the paper matcher walks the ask, and a live fill slips. So on the last
+        entries of a nearly-full wallet the cost exceeds ``available`` by the slippage, and the
+        entry path was calling ``reserve`` and discarding its ``False``: the position opened, the
+        money was never marked deployed, ``available`` stayed overstated, and the NEXT entry sized
+        against money already spent. Harmless at three positions a book; not at thirty.
+        """
+        over = max(0.0, amount - self.available)
+        self.deployed += amount
+        self.updated_ts = now
+        return over
 
     def release(self, amount: float, now: float) -> None:
         self.deployed = max(0.0, self.deployed - amount)

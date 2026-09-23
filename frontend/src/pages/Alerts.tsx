@@ -748,19 +748,20 @@ export function Alerts() {
         </div>
       </div>
 
-      {Object.entries(data.capReached ?? {}).some(([, hit]) => hit) && (
+      {(Object.entries(data.capReached ?? {}).some(([, hit]) => hit) ||
+        Object.entries(data.suppressedByCap ?? {}).some(([, n]) => n > 0)) && (
         <div className="mb-3 rounded border border-amber-500/30 bg-amber-500/10 p-2 text-[11px] text-amber-300">
-          {Object.entries(data.capReached)
-            .filter(([, hit]) => hit)
-            .map(([b]) => `${LABEL[b] ?? b} has hit its deployed daily cap`)
-            .join('; ')}
-          {' — '}
           {Object.entries(data.suppressedByCap ?? {})
             .filter(([, n]) => n > 0)
-            .map(([b, n]) => `${n} further ${LABEL[b] ?? b} firings suppressed`)
+            .map(([b, n]) => `${n} ${LABEL[b] ?? b} firings suppressed by its per-scrip cadence`)
             .join('; ')}
-          . All 216 underlyings close the same 30m bar at once, so the cap is consumed in arrival
-          order: what you see are the earliest that qualified, not the strongest.
+          {Object.entries(data.capReached ?? {}).some(([, hit]) => hit) &&
+            ` — ${Object.entries(data.capReached)
+              .filter(([, hit]) => hit)
+              .map(([b]) => `${LABEL[b] ?? b} has hit a daily cap`)
+              .join('; ')}`}
+          . No book has a global daily cap: the page shows every signal of the session. What is
+          counted here is one symbol declining to repeat itself within its cooldown.
         </div>
       )}
 

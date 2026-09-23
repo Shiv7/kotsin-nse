@@ -258,7 +258,7 @@ class Settings(BaseSettings):
                 raise ValueError(f"unknown segment {n!r} — known: {', '.join(Segment.__members__)}")
         return ",".join(names)
 
-    @field_validator("live_entry_cutoff_ist", "committee_autopilot_ist")
+    @field_validator("live_entry_cutoff_ist", "committee_autopilot_ist", "alerts_reset_ist")
     @classmethod
     def _hhmm(cls, v: str) -> str:
         hh, _, mm = v.partition(":")

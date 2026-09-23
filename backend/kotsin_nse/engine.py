@@ -1075,7 +1075,7 @@ class Engine:
         if book is not None and book_limits.own_ladder:
             self._stamp_own_ladder(pos, inst, book_limits, sig.symbol)
         self.positions[pos.id] = pos
-        wallet.reserve(pos.entry * pos.qty * inst.multiplier, result.fill.ts)
+        self._commit_outlay(wallet, pos.entry * pos.qty * inst.multiplier, result.fill.ts, pos)
         wallet.apply_charges(result.fill.charges, result.fill.ts)
         await self.ledger.upsert_position(_position_json(pos))
         await self.ledger.upsert_wallet(wallet.strategy, wallet.to_json())
@@ -1296,7 +1296,7 @@ class Engine:
             if lim.own_ladder:
                 self._stamp_own_ladder(twin, inst, lim, pos.underlying.symbol)
             self.positions[twin.id] = twin
-            twin_wallet.reserve(cost, result.fill.ts)
+            self._commit_outlay(twin_wallet, cost, result.fill.ts, twin)
             twin_wallet.apply_charges(result.fill.charges, result.fill.ts)
             await self.ledger.upsert_position(_position_json(twin))
             await self.ledger.upsert_wallet(twin_wallet.strategy, twin_wallet.to_json())
@@ -1347,7 +1347,10 @@ class Engine:
                 ev_by_sig.setdefault(e["signal_id"], []).append(e)
         alert_cards = {
             (a.get("evidence") or {}).get("signalId"): a.get("card")
-            for a in self.alerts.feed("FUDKII_RT", 500)
+            # No limit: 500 was the old ring size, and a session's keepalives (one a minute per
+            # living signal) can push an early ENTRY past it — the card would vanish from the page
+            # while its ledger row stayed, which reads as a trigger that was never carded.
+            for a in self.alerts.feed("FUDKII_RT")
             if a.get("kind") == "ENTRY"
         }
         counter_books = {StrategyKey.FUDKII_CT_X.value, StrategyKey.FUDKII_CT_Y.value}
@@ -1914,6 +1917,25 @@ class Engine:
         return self.gateway.submit(intent)
 
     # -- exit path -----------------------------------------------------------------------------------
+
+    def _commit_outlay(self, wallet: Wallet, cost: float, now: float, pos: Position) -> None:
+        """Deploy what the fill cost, and say so if it came to more than the book had left."""
+        over = wallet.commit(cost, now)
+        if over > 0:
+            log.warning(
+                "wallet.overdrawn",
+                strategy=wallet.strategy,
+                symbol=pos.underlying.symbol,
+                cost=round(cost, 2),
+                over=round(over, 2),
+                deployed=round(wallet.deployed, 2),
+                balance=round(wallet.balance, 2),
+            )
+            self.telegram.fire_and_forget(
+                f"⚠️ {wallet.strategy} {pos.underlying.symbol}: fill cost ₹{cost:,.0f} was "
+                f"₹{over:,.0f} more than the book had left — the slippage is deployed, not dropped",
+                key=f"overdrawn:{wallet.strategy}",
+            )
 
     async def _manage_positions(self) -> None:
         now = time.time()
