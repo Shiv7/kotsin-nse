@@ -23,6 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..domain import Direction, ExitDecision, ExitReason, Position
+from ..instrument.select import estimate_delta
 from .limits import RiskLimits
 
 
@@ -72,6 +73,8 @@ class ExitEngine:
 
     def __init__(self, limits: RiskLimits) -> None:
         self.limits = limits
+        #: per position: (minute bucket, last option print in it) — the option's own 1m close
+        self._minute: dict[str, tuple[int, float]] = {}
 
     def evaluate(self, pos: Position, view: MarketView) -> ExitDecision | None:
         if pos.status != "OPEN" or pos.qty_remaining <= 0:
@@ -82,6 +85,7 @@ class ExitEngine:
             self._track(pos, ltp)
 
         mid = view.option_mid if view.option_mid and view.option_mid > 0 else ltp
+        self._reproject_stop(pos, view)
         self._mark(pos, view, mid)
 
         # 0. hard floor below the stop — path-independent, so a feed gap cannot hide it -----------
@@ -155,7 +159,10 @@ class ExitEngine:
                 )
 
         # 3. targets ------------------------------------------------------------------------------
-        if ltp > 0 and pos.targets_hit < len(pos.option_targets):
+        if lim.own_ladder:
+            if (own := self._own_ladder(pos, view, ltp)) is not None:
+                return own
+        elif ltp > 0 and pos.targets_hit < len(pos.option_targets):
             nxt = pos.option_targets[pos.targets_hit]
             if nxt > 0 and ltp >= nxt:
                 share = (
@@ -176,7 +183,8 @@ class ExitEngine:
         # 4. trail ---------------------------------------------------------------------------------
         if (rt := self._peak_ratchet(pos, view, mid)) is not None:
             return rt
-        self._trail(pos, ltp)
+        if not lim.own_ladder:
+            self._trail(pos, ltp)  # the RT policy's ratchet supersedes the legacy 3%/40% trail
 
         # 5. backstops ------------------------------------------------------------------------------
         if view.halted:
@@ -280,12 +288,95 @@ class ExitEngine:
             f"(≥ {lim.sustain_s:.0f}s) with the underlying unconfirmed",
         )
 
+    def _reproject_stop(self, pos: Position, view: MarketView) -> None:
+        """The option-side stop is the equity stop expressed through delta — and delta moves.
+
+        Re-derived every ``reproject_stop_s`` from the underlying's live price, so the level is
+        where the equity stop *is* on the premium now, not where it was at entry. Never below
+        ``ratchet_sl``: once the ratchet has claimed ground, a falling delta may not give it back.
+        """
+        lim = self.limits
+        if lim.reproject_stop_s is None or view.underlying_ltp is None or pos.equity_sl <= 0:
+            return
+        if view.now - pos.last_reproject_ts < lim.reproject_stop_s:
+            return
+        pos.last_reproject_ts = view.now
+        delta = abs(
+            estimate_delta(
+                spot=view.underlying_ltp,
+                strike=pos.instrument.strike,
+                option_type=pos.instrument.option_type,
+            )
+        )
+        projected = max(0.05, pos.entry - abs(pos.equity_entry - pos.equity_sl) * delta)
+        pos.option_sl = round(max(projected, pos.ratchet_sl), 2)
+
+    def _arm(self, pos: Position, view: MarketView, mid: float, by: str, why: str) -> ExitDecision:
+        pos.armed_by = by
+        pos.armed_ts = view.now
+        pos.peak_mid = max(pos.peak_mid, mid)
+        pos.trail_dwell = 0
+        # Breakeven on the rest: the live re-projection may not take the stop back under entry.
+        pos.ratchet_sl = max(pos.ratchet_sl, pos.entry)
+        pos.option_sl = round(max(pos.option_sl, pos.ratchet_sl), 2)
+        return ExitDecision(
+            pos.id, ExitReason.TARGET, view.option_ltp, self._tranche(pos),
+            f"armed by {by}: {why} — one lot out",
+        )
+
+    def _tranche(self, pos: Position) -> int:
+        lot = max(1, pos.instrument.lot_size) * max(1, self.limits.arm_tranche_lots)
+        return pos.qty_remaining if pos.qty_remaining <= lot else min(lot, pos.qty_remaining)
+
+    def _own_ladder(self, pos: Position, view: MarketView, ltp: float) -> ExitDecision | None:
+        """Arm on the underlying touching its own T1, or on the option's 1-minute close reaching
+        its own R1; then one lot per rung of the option's own R2/R3/R4, the last rung taking the
+        rest. ``targets_hit`` counts rungs: arming is rung 1 whichever trigger fired."""
+        bucket = int(view.now // 60)
+        prev = self._minute.get(pos.id)
+        minute_close = prev[1] if prev is not None and prev[0] != bucket else None
+        if ltp > 0:
+            self._minute[pos.id] = (bucket, ltp)
+        if not pos.armed_by:
+            if view.underlying_ltp is not None and pos.equity_targets:
+                t1 = pos.equity_targets[0]
+                hit = (
+                    view.underlying_ltp >= t1
+                    if pos.direction is Direction.BULLISH
+                    else view.underlying_ltp <= t1
+                )
+                if hit:
+                    return self._arm(
+                        pos, view, ltp, "equity",
+                        f"underlying {view.underlying_ltp:.2f} reached its T1 {t1:.2f}",
+                    )
+            if pos.option_t1 > 0 and minute_close is not None and minute_close >= pos.option_t1:
+                return self._arm(
+                    pos, view, ltp, "option",
+                    f"option 1m close {minute_close:.2f} ≥ its own R1 {pos.option_t1:.2f}",
+                )
+            return None
+        if ltp > 0 and pos.targets_hit < len(pos.option_targets):
+            nxt = pos.option_targets[pos.targets_hit]
+            if nxt > 0 and ltp >= nxt:
+                last = pos.targets_hit == len(pos.option_targets) - 1
+                qty = pos.qty_remaining if last else self._tranche(pos)
+                return ExitDecision(
+                    pos.id, ExitReason.TARGET, ltp, qty,
+                    f"own R{pos.targets_hit + 1} {nxt:.2f} hit — {'the rest' if last else 'one lot'} out",
+                )
+        return None
+
     def _mark(self, pos: Position, view: MarketView, mid: float) -> None:
-        """Peak watermark on the mid, armed only after the entry noise has passed."""
+        """Peak watermark on the mid, armed only after the entry noise has passed — or, under the
+        own-ladder policy, only once a trigger has armed the ratchet."""
         lim = self.limits
         if lim.peak_giveback_pct is None or not view.quote_ok or mid <= 0:
             return
-        if view.now - pos.opened_ts < lim.peak_arm_after_s:
+        if lim.own_ladder:
+            if not pos.armed_by:
+                return
+        elif view.now - pos.opened_ts < lim.peak_arm_after_s:
             return
         if mid > pos.peak_mid:
             pos.peak_mid = mid
@@ -303,8 +394,8 @@ class ExitEngine:
         lim = self.limits
         if lim.peak_giveback_pct is None or not view.quote_ok or pos.peak_mid <= 0 or mid <= 0:
             return None
-        if pos.targets_hit < 1:
-            return None  # the ratchet arms only once T1 has paid
+        if (not pos.armed_by) if lim.own_ladder else (pos.targets_hit < 1):
+            return None  # the ratchet arms only once T1 has paid (or a trigger armed it)
         give = lim.peak_giveback_pct / 100
         if view.spread_pct:
             give = max(give, view.spread_pct * lim.peak_giveback_spread_mult)

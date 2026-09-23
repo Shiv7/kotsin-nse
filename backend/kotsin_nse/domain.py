@@ -246,6 +246,14 @@ class Position:
     trail_dwell: int = 0
     grade: str = ""
     note: str = ""
+    #: -- own-ladder policy (RT books) --
+    #: the option's own classic R1; 0 when the contract had no usable ladder (equity trigger only)
+    option_t1: float = 0.0
+    armed_by: str = ""  # "" | "equity" | "option"
+    armed_ts: float | None = None
+    #: a floor the live re-projection may never take the option stop below (entry, once armed)
+    ratchet_sl: float = 0.0
+    last_reproject_ts: float = 0.0
 
     def __post_init__(self) -> None:
         if self.qty_remaining == 0:

@@ -78,6 +78,16 @@ class RiskLimits:
     trail_arm_pct: float = 3.0
     #: a hard floor under the option premium: never let a win become a loss beyond this
     hard_floor_pct: float = 50.0
+    #: The option carries its OWN classic ladder (R1–R4 from its previous session); nothing is
+    #: delta-projected onto it. The ratchet arms when the underlying touches its own T1 or the
+    #: option's 1-minute close reaches its own R1; one lot leaves on arming, the rest trail the
+    #: peak and step the option's own R2/R3/R4. Operator's design, 2026-09-23.
+    own_ladder: bool = False
+    #: Re-derive the option-side stop from live delta this often. None keeps the entry projection
+    #: (the base book) — a level computed off a delta that stopped being true at entry.
+    reproject_stop_s: float | None = None
+    #: Lots that leave when the ratchet arms.
+    arm_tranche_lots: int = 1
 
     def position_budget(self, balance: float) -> float:
         return min(balance * self.max_position_pct / 100, self.max_position_inr)
@@ -98,4 +108,6 @@ RT_X_LIMITS = RiskLimits(
     peak_giveback_pct=2.0,          # floored at 1.5x the live spread
     trail_dwell_samples=3,
     peak_arm_after_s=90.0,
+    own_ladder=True,
+    reproject_stop_s=10.0,
 )

@@ -20,7 +20,9 @@ def _pos(**kw):
     inst = Instrument(
         scrip_code="1", symbol="X", segment=Segment.NSE_FO,
         kind=InstrumentKind.OPTION, name="X CE", lot_size=100, tick_size=0.05, multiplier=1,
-        expiry="2026-09-29", strike=100.0, option_type=OptionType.CE, underlying="X",
+        # 1025 against a 1000 underlying: δ ≈ 0.30, so the live re-projection of the equity stop
+        # (1000 → 990) lands on exactly the 17.00 these fixtures were written with.
+        expiry="2026-09-29", strike=1025.0, option_type=OptionType.CE, underlying="X",
     )
     base = dict(
         id="p1", strategy="FUDKII_RT_X", instrument=inst, underlying=inst, side=PosSide.LONG,
@@ -110,7 +112,7 @@ def test_the_hard_floor_beats_the_sustain_window():
 
 def test_the_peak_ratchet_arms_only_after_t1_and_needs_consecutive_reads():
     e = ExitEngine(RT_X_LIMITS)
-    pos = _pos(targets_hit=1, peak_mid=30.0)
+    pos = _pos(targets_hit=1, peak_mid=30.0, armed_by="equity")  # own-ladder: a trigger arms it
     # give-back floor is max(2%, 1.5 x spread). spread 0.5% -> 2% of 30.00 = 0.60 -> level 29.40
     v = dict(option_ltp=29.0, option_mid=29.0, now=2000.0)
     assert e.evaluate(pos, _view(**v)) is None and pos.trail_dwell == 1
@@ -205,3 +207,94 @@ def test_the_two_books_take_different_exits_from_identical_state():
 
     assert base.evaluate(a, v) is not None, "the base book exits on the touch"
     assert rt.evaluate(b, v) is None, "the RT book waits for the breach to hold"
+
+
+# -- own classic ladder (operator's design, 2026-09-23) -----------------------------------------
+
+
+def _own(**kw):
+    """An RT-X twin on a 4-lot position whose option carries its own classic ladder."""
+    from kotsin_nse.config import Segment
+    from kotsin_nse.domain import Instrument, InstrumentKind, OptionType
+
+    inst = Instrument(
+        scrip_code="1", symbol="X", segment=Segment.NSE_FO, kind=InstrumentKind.OPTION, name="X CE",
+        lot_size=100, tick_size=0.05, multiplier=1, expiry="2026-09-29", strike=1010.0,
+        option_type=OptionType.CE, underlying="X",
+    )
+    base = dict(instrument=inst, qty=400, option_t1=24.0, option_targets=(24.0, 28.0, 32.0, 36.0))
+    base.update(kw)
+    return _pos(**base)
+
+
+def test_own_ladder_arms_on_the_underlying_touching_its_t1_and_takes_one_lot():
+    e = ExitEngine(RT_X_LIMITS)
+    pos = _own()
+    assert e.evaluate(pos, _view(underlying_ltp=1019.0)) is None
+    d = e.evaluate(pos, _view(underlying_ltp=1020.0))
+    assert d is not None and d.qty == 100 and "armed by equity" in d.note
+    assert pos.armed_by == "equity" and pos.option_sl >= pos.entry, "breakeven on the rest"
+
+
+def test_own_ladder_arms_on_the_options_own_r1_only_on_a_one_minute_close():
+    e = ExitEngine(RT_X_LIMITS)
+    pos = _own()
+    # a print above R1 inside the minute is a touch, not a close
+    assert e.evaluate(pos, _view(option_ltp=25.0, option_mid=25.0, now=2000.0)) is None
+    assert e.evaluate(pos, _view(option_ltp=23.0, option_mid=23.0, now=2030.0)) is None
+    # the minute closed at 23: below R1, nothing arms
+    assert e.evaluate(pos, _view(option_ltp=25.0, option_mid=25.0, now=2065.0)) is None
+    # this minute closes at 25 ≥ 24: armed on the next read past the boundary
+    d = e.evaluate(pos, _view(option_ltp=25.0, option_mid=25.0, now=2125.0))
+    assert d is not None and d.qty == 100 and "armed by option" in d.note and pos.armed_by == "option"
+
+
+def test_after_arming_one_lot_leaves_at_each_own_rung_and_the_last_takes_the_rest():
+    from kotsin_nse.risk.exits import apply_exit
+
+    e = ExitEngine(RT_X_LIMITS)
+    pos = _own()
+    d = e.evaluate(pos, _view(underlying_ltp=1020.0))
+    apply_exit(pos, d, fill_price=20.0, charges=0, now=2000.0)
+    assert (pos.targets_hit, pos.qty_remaining) == (1, 300)
+    for ltp, want_qty, rung in ((28.0, 100, "R2"), (32.0, 100, "R3"), (36.0, 100, "R4")):
+        d = e.evaluate(pos, _view(option_ltp=ltp, option_mid=ltp, underlying_ltp=1020.0, now=2000.0 + ltp))
+        assert d is not None and d.qty == want_qty and rung in d.note, (ltp, d)
+        apply_exit(pos, d, fill_price=ltp, charges=0, now=2000.0 + ltp)
+    assert pos.qty_remaining == 0 and pos.status == "CLOSED"
+
+
+def test_the_option_stop_follows_live_delta_every_10s_but_never_falls_below_the_ratchet():
+    e = ExitEngine(RT_X_LIMITS)
+    pos = _own(option_sl=17.0)
+    # δ(1000 vs 1010 CE) ≈ 0.42 → 20 − 10 × 0.42 = 15.8: re-projected on the first read
+    assert e.evaluate(pos, _view(underlying_ltp=1000.0, now=2000.0)) is None
+    assert pos.option_sl == 15.8
+    # 5 s later the underlying is in the money; too soon to re-project
+    assert e.evaluate(pos, _view(underlying_ltp=1015.0, now=2005.0)) is None and pos.option_sl == 15.8
+    # 10 s: δ ≈ 0.53 → 14.7 — looser, because the stop is the equity stop through live delta
+    assert e.evaluate(pos, _view(underlying_ltp=1015.0, now=2010.0)) is None and pos.option_sl == 14.7
+    # armed → breakeven floor; a later re-projection may not undo it
+    d = e.evaluate(pos, _view(underlying_ltp=1020.0, now=2020.0))
+    assert d is not None and pos.option_sl == 20.0
+    assert e.evaluate(pos, _view(underlying_ltp=1020.0, now=2040.0)) is None and pos.option_sl == 20.0
+
+
+def test_a_contract_without_its_own_ladder_arms_on_the_equity_trigger_only():
+    e = ExitEngine(RT_X_LIMITS)
+    pos = _own(option_t1=0.0, option_targets=())
+    assert e.evaluate(pos, _view(option_ltp=30.0, option_mid=30.0, now=2000.0)) is None
+    assert e.evaluate(pos, _view(option_ltp=30.0, option_mid=30.0, now=2065.0)) is None, "no R1 to close above"
+    d = e.evaluate(pos, _view(option_ltp=30.0, option_mid=30.0, underlying_ltp=1020.0, now=2070.0))
+    assert d is not None and pos.armed_by == "equity"
+    # no rungs afterwards: only the peak ratchet manages the rest
+    assert e.evaluate(pos, _view(option_ltp=40.0, option_mid=40.0, underlying_ltp=1020.0, now=2080.0)) is None
+
+
+def test_the_base_book_never_arms_on_the_underlying_and_keeps_its_share_ladder():
+    e = ExitEngine(RiskLimits())
+    pos = _own(strategy="FUDKII")
+    assert e.evaluate(pos, _view(underlying_ltp=1020.0)) is None, "equity T1 means nothing to the base book"
+    d = e.evaluate(pos, _view(option_ltp=24.0, option_mid=24.0))
+    assert d is not None and d.qty == 100 and "40%" in d.note, "the legacy share ladder (40%, lot-rounded), untouched"
+    assert pos.armed_by == ""

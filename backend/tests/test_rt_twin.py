@@ -69,3 +69,48 @@ async def test_a_commodity_fill_goes_to_the_mcx_purse_and_other_books_are_ignore
         assert sum(1 for p in e.positions.values() if p.strategy.startswith("FUDKII_RT")) == 1, "only FUDKII is twinned"
     finally:
         await e.stop()
+
+
+@pytest.mark.asyncio
+async def test_the_twin_carries_the_options_own_classic_ladder_when_it_has_one(settings):
+    from kotsin_nse.bars.pivots import classic_pivots
+    from kotsin_nse.instrument.legs import LegPivots
+
+    e = Engine(settings)
+    await e.start()
+    try:
+        opt = Instrument("45678", "RELIANCE", Segment.NSE_FO, InstrumentKind.OPTION,
+                         lot_size=250, strike=1500.0, option_type=OptionType.CE, underlying="RELIANCE")
+        und = Instrument("2885", "RELIANCE", Segment.NSE_EQ, InstrumentKind.EQUITY, underlying="RELIANCE")
+        lv = classic_pivots(60.0, 40.0, 50.0)  # own R1 60, R2 70, R3 90, R4 110
+        e.leg_pivots.by_code[opt.scrip_code] = LegPivots(
+            scrip_code=opt.scrip_code, symbol="RELIANCE 29 SEP 2026 CE 1500", root="RELIANCE", kind="CE",
+            strike=1500.0, levels=lv, session="2026-09-22", close=50.0, volume=10_000,
+        )
+        now = time.time()
+        pos = Position(id="p1", strategy="FUDKII", instrument=opt, underlying=und, side=PosSide.LONG,
+                       qty=250, entry=50.0, opened_ts=now, signal_id="s1", direction=Direction.BULLISH,
+                       equity_entry=1500.0, equity_sl=1450.0, equity_targets=(1550.0,),
+                       option_sl=40.0, option_targets=(70.0,))
+        e.positions[pos.id] = pos
+        await e._open_rt_twin(pos, opt, _fill(now))
+        twin = next(p for p in e.positions.values() if p.strategy == "FUDKII_RT_X")
+        assert twin.option_t1 == 60.0 and twin.option_targets == (60.0, 70.0, 90.0, 110.0)
+        assert twin.targets_hit == 0 and "own classic ladder" in twin.note
+        assert pos.option_targets == (70.0,), "the parent keeps its delta-projected ladder"
+
+        # a contract with no ladder: equity trigger only. A different underlying, because the RT
+        # book allows one position per underlying and the first twin already holds RELIANCE.
+        e.leg_pivots.by_code.clear()
+        opt2 = Instrument("55555", "TCS", Segment.NSE_FO, InstrumentKind.OPTION, lot_size=175,
+                          strike=3000.0, option_type=OptionType.CE, underlying="TCS")
+        und2 = Instrument("11536", "TCS", Segment.NSE_EQ, InstrumentKind.EQUITY, underlying="TCS")
+        pos2 = Position(id="p2", strategy="FUDKII", instrument=opt2, underlying=und2, side=PosSide.LONG,
+                        qty=175, entry=50.0, opened_ts=now, signal_id="s2", direction=Direction.BULLISH,
+                        equity_entry=3000.0, equity_sl=2950.0, equity_targets=(3100.0,), option_sl=40.0)
+        e.positions[pos2.id] = pos2
+        await e._open_rt_twin(pos2, opt2, _fill(now))
+        twin2 = next(p for p in e.positions.values() if p.strategy == "FUDKII_RT_X" and p.signal_id == "s2")
+        assert twin2.option_t1 == 0.0 and twin2.option_targets == () and "equity trigger only" in twin2.note
+    finally:
+        await e.stop()

@@ -1087,6 +1087,15 @@ class Engine:
             strategy=twin_key.value,
             note=f"{pos.note} · RT exit policy, twin of {pos.id}",
         )
+        if self.exits_rt.limits.own_ladder:
+            # Nothing delta-projected: the contract's own classic R1–R4 from its previous session
+            # (LegPivotLoader, thin-bar and zero-range guarded). No ladder → the equity trigger only.
+            own = self.leg_pivots.for_code(inst.scrip_code)
+            lv = own.levels if own is not None else None
+            twin.option_t1 = lv.r1 if lv else 0.0
+            twin.option_targets = (lv.r1, lv.r2, lv.r3, lv.r4) if lv else ()
+            twin.targets_hit = 0
+            twin.note += " · own classic ladder" if lv else " · no own ladder, equity trigger only"
         self.positions[twin.id] = twin
         twin_wallet.reserve(cost, result.fill.ts)
         twin_wallet.apply_charges(result.fill.charges, result.fill.ts)
@@ -1226,6 +1235,8 @@ class Engine:
                 "breach_since": pos.breach_since,
                 "peak_mid": pos.peak_mid,
                 "trail_dwell": pos.trail_dwell,
+                "armed_by": pos.armed_by,
+                "option_t1": pos.option_t1,
                 "ts": now,
             }
             engine_for = self._exits_by_strategy.get(pos.strategy, self.exits)
@@ -1653,6 +1664,10 @@ def _position_json(p: Position) -> dict[str, Any]:
         "exit_reason": p.exit_reason,
         "grade": p.grade,
         "note": p.note,
+        "option_t1": p.option_t1,
+        "armed_by": p.armed_by,
+        "armed_ts": p.armed_ts,
+        "ratchet_sl": p.ratchet_sl,
     }
 
 
@@ -1685,6 +1700,10 @@ def _position_from_json(d: dict[str, Any]) -> Position:
         bars_held=int(d.get("bars_held", 0)),
         grade=d.get("grade", ""),
         note=d.get("note", ""),
+        option_t1=float(d.get("option_t1", 0)),
+        armed_by=str(d.get("armed_by", "")),
+        armed_ts=d.get("armed_ts"),
+        ratchet_sl=float(d.get("ratchet_sl", 0)),
     )
 
 

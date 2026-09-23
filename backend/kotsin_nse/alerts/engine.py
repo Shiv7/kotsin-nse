@@ -110,6 +110,25 @@ class AlertEngine:
         if tp and a.book == "FUDKII_RT":
             a.card = self._rt_card(a, bar, history, tp)
 
+    def _own_r1(self, listed: dict[str, Any]) -> float | None:
+        own = self.engine.leg_pivots.for_code(str(listed.get("scripCode") or ""))
+        return round(own.levels.r1, 2) if own is not None else None
+
+    def _own_option_ladder(self, listed: dict[str, Any], opt_ltp: float | None) -> list[dict[str, Any]]:
+        own = self.engine.leg_pivots.for_code(str(listed.get("scripCode") or ""))
+        if own is None:
+            return []
+        lv = own.levels
+        return [
+            {
+                "n": i,
+                "option": round(r, 2),
+                "optionGainPct": round((r - opt_ltp) / opt_ltp * 100, 1) if opt_ltp else None,
+                "source": f"option's own classic R{i} ({own.session})",
+            }
+            for i, r in enumerate((lv.r1, lv.r2, lv.r3, lv.r4), start=1)
+        ]
+
     def _rt_card(self, a: Alert, bar: UnifiedBar, history: list[UnifiedBar], tp: Any) -> dict[str, Any]:
         """Walls on both sides, the dual-trigger stop, the option ladder and the odds."""
         from ..bars.indicators import atr as _atr
@@ -168,12 +187,17 @@ class AlertEngine:
                 delta=delta,
                 basis="pivot",
             ) if stop else None,
-            "optionLadder": rtcard.option_ladder(
+            # The RT books trade the contract's OWN classic ladder (R1–R4 from its previous
+            # session) and arm on the underlying's T1 or the option's 1m close over its R1; the
+            # delta-projected ladder is shown only when the contract has no ladder of its own.
+            "optionLadder": self._own_option_ladder(listed, opt_ltp) or (rtcard.option_ladder(
                 option_entry=opt_ltp,
                 equity_entry=price,
                 targets=list(tp.targets) if (tp and tp.targets) else ([target] if target else []),
                 delta=delta,
-            ) if (opt_ltp and (target or (tp and tp.targets))) else [],
+            ) if (opt_ltp and (target or (tp and tp.targets))) else []),
+            "armOn": {"equityT1": target or None, "optionR1": self._own_r1(listed),
+                      "rule": "underlying touches its T1, or the option's 1-minute close ≥ its own R1"},
             "volumeBaseline": rtcard.same_slot_volume(history, bar) if history else None,
             "greeks": {
                 "delta": round(delta, 3),

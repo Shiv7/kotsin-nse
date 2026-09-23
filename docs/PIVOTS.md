@@ -79,3 +79,17 @@ is in the failed state after retries. A listed contract with no candles at all (
 MCX indices) is `dormant`: reported in `detail`, asked once per session, never a fault. `detail` carries the audit summary
 (`N/M names on the official previous session; k missing; …`) and the leg counts. `/api/leg-pivots`
 reports `loaded / failed / refused`.
+
+## 6. How FUDKII-RT exits use the ladders (operator's design, 2026-09-23)
+
+`RT_X_LIMITS.own_ladder = True`, `reproject_stop_s = 10`:
+
+- **Stop** = the equity stop expressed through **live** delta, re-derived every 10 s
+  (`ExitEngine._reproject_stop`), never below `ratchet_sl` once armed; plus the equity SL, the 75 s
+  sustain and the 9% hard floor as before. The base book keeps its entry-delta projection.
+- **No delta-projected targets.** The twin carries the contract's **own** classic R1–R4
+  (`LegPivotLoader`, thin-bar and zero-range guarded). No ladder → equity trigger only.
+- **Arm** on either: the underlying touches its own T1, or the option's **1-minute close ≥ its own
+  R1**. On arming one lot leaves and the stop floors at breakeven.
+- **After arming:** the 2%-from-peak ratchet (spread-floored, 3 consecutive reads) manages the rest,
+  and one lot leaves at each of the option's own R2 / R3 / R4, the last rung taking the remainder.
