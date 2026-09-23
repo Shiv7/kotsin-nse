@@ -21,7 +21,7 @@ import asyncio
 import time
 from collections.abc import MutableMapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -50,6 +50,7 @@ from .committee.service import CommitteeService
 from .config import Segment, Settings
 from .domain import (
     Direction,
+    ExitDecision,
     ExitReason,
     Instrument,
     InstrumentKind,
@@ -91,6 +92,7 @@ from .market.iv import (
     years_to_expiry,
 )
 from .market.session import (
+    IST,
     TF_SECONDS,
     TradingCalendar,
     bucket_start,
@@ -120,7 +122,7 @@ from .risk.limits import CT_X_LIMITS, CT_Y_LIMITS, RT_N_LIMITS, RT_X_LIMITS, RT_
 from .risk.sizing import size_position
 from .risk.wallet import Wallet
 from .strategy.base import Outcome, Signal
-from .strategy.counter import Leg, counter_route, flipped_signal
+from .strategy.counter import NO_WALL, CounterDecision, Leg, counter_route, flipped_signal
 from .strategy.fudkii import Fudkii, FudkiiConfig
 from .strategy.fukaa import Fukaa, FukaaConfig, select
 from .strategy.keys import ALL_KEYS, INITIAL_INR, StrategyKey
@@ -269,6 +271,8 @@ class Engine:
         self._zone_cache: dict[str, tuple[str, list[Zone]]] = {}
         #: the front future's candles per symbol for the current trigger bar (see _fut_context)
         self._fut_cache: dict[str, tuple[int, dict[str, Any] | None]] = {}
+        #: every signal handled today, by id — what an operator take re-enters from
+        self._signals_today: dict[str, Signal] = {}
         #: every symbol decides in its own task, so a 09:45 burst of sixteen signals would be
         #: thirty-two concurrent historical calls; the broker client has no limiter of its own
         self._fut_sem = asyncio.Semaphore(4)
@@ -929,7 +933,8 @@ class Engine:
             except Exception as exc:
                 log.exception("counter.failed", symbol=sig.symbol, error=str(exc))
 
-    async def _handle_signal(self, sig: Signal, bar: UnifiedBar) -> None:
+    async def _handle_signal(self, sig: Signal, bar: UnifiedBar | None) -> None:
+        self._signals_today[sig.signal_id] = sig
         await self.bus.publish(Topic.SIGNAL, sig)
         self.alerts.adopt_signal(sig.to_json(), bar)
         underlying = self.underlyings.get(sig.symbol)
@@ -1229,12 +1234,14 @@ class Engine:
                     why = "dried volume " + ", ".join(f"{leg} {vol[leg][0]:.2f}/{vol[leg][1]:.2f}" for leg in dry) + f" < {lim_v}"
                     log.info("rt_twin.skipped", book=twin_key.value, symbol=pos.underlying.symbol, reason=why)
                     self.alerts.mark_skipped(pos.signal_id, book=twin_key.value, reason=why)
+                    await self.ledger.event("rt_twin.skipped", {"book": twin_key.value, "signal_id": pos.signal_id, "symbol": pos.underlying.symbol, "reason": why})
                     continue
             twin_wallet = self.wallets.get(twin_key.value)
             if twin_wallet is None or twin_wallet.halted:
                 continue
             if twin_wallet.available < cost:
                 log.info("rt_twin.skipped", book=twin_key.value, symbol=pos.underlying.symbol, reason="wallet")
+                await self.ledger.event("rt_twin.skipped", {"book": twin_key.value, "signal_id": pos.signal_id, "symbol": pos.underlying.symbol, "reason": f"wallet: {twin_wallet.available:,.0f} available < {cost:,.0f}"})
                 continue
             verdict = self._exposure_by_strategy[twin_key.value].check(
                 strategy=twin_key.value,
@@ -1245,6 +1252,7 @@ class Engine:
             )
             if not verdict.allowed:
                 log.info("rt_twin.skipped", book=twin_key.value, symbol=pos.underlying.symbol, reason=verdict.reason)
+                await self.ledger.event("rt_twin.skipped", {"book": twin_key.value, "signal_id": pos.signal_id, "symbol": pos.underlying.symbol, "reason": f"exposure: {verdict.reason}"})
                 continue
             twin = replace(
                 pos,
@@ -1275,6 +1283,174 @@ class Engine:
             opened += 1
         if opened:
             self.alerts.mark_entered(pos.signal_id, ts=result.fill.ts, price=pos.entry, qty=pos.qty)
+
+    # -- the trigger-card page ----------------------------------------------------------------------
+
+    async def book_cards(self, book: str, day: date | None = None) -> dict[str, Any]:
+        """One card per FUDKII trigger of the session, read for one book: the trigger's own
+        numbers (the same for every book), then what THIS book did with it — mirrored, skipped and
+        why, faded, or nothing to mirror — with the position live or closed. Assembled from the
+        ledger (so a restart loses nothing) plus the live marks for open positions."""
+        key = StrategyKey(book)
+        day = day or ist_today()
+        start = datetime(day.year, day.month, day.day, tzinfo=IST).timestamp()
+        end = start + 86_400
+        signals = await self.ledger.rows_between("signals", start, end)
+        positions = await self.ledger.rows_between("positions", start, end)
+        trades = await self.ledger.rows_between("trades", start, end)
+        orders = await self.ledger.rows_between("orders", start, end)
+        events = await self.ledger.rows_between("events", start, end)
+        latest: dict[str, dict[str, Any]] = {}
+        for sgn in signals:  # a take re-enters the same id: the last row is the decision that stands
+            latest[sgn["signal_id"]] = sgn
+        parents = sorted((sgn for sgn in latest.values() if sgn["strategy"] == StrategyKey.FUDKII.value), key=lambda x: x["ts"])
+        by_source = {sgn["source_signal_id"]: sgn for sgn in latest.values() if sgn.get("source_signal_id") and sgn["strategy"] == StrategyKey.FUDKII_CT_X.value}
+        pos_by_key = {(ps["strategy"], ps["signal_id"]): ps for ps in positions}
+        trades_by_pos = {t["position_id"]: t for t in trades}
+        exits_by_pos: dict[str, list[dict[str, Any]]] = {}
+        for o in orders:
+            if o.get("purpose") == "EXIT" and o.get("status") == "FILLED":
+                exits_by_pos.setdefault(str(o.get("position_id")), []).append(o)
+        ev_by_sig: dict[str, list[dict[str, Any]]] = {}
+        for e in events:
+            if e.get("signal_id"):
+                ev_by_sig.setdefault(e["signal_id"], []).append(e)
+        alert_cards = {
+            (a.get("evidence") or {}).get("signalId"): a.get("card")
+            for a in self.alerts.feed("FUDKII_RT", 500)
+            if a.get("kind") == "ENTRY"
+        }
+        counter_books = {StrategyKey.FUDKII_CT_X.value, StrategyKey.FUDKII_CT_Y.value}
+        cards = []
+        for sgn in parents:
+            sid = sgn["signal_id"]
+            evs = ev_by_sig.get(sid, [])
+            route = next((e for e in reversed(evs) if e.get("kind") == "counter.route"), None)
+            fade = by_source.get(sid)
+            fade_evs = ev_by_sig.get(fade["signal_id"], []) if fade else []
+            skip = next((e for e in reversed(evs + fade_evs) if e.get("kind") == "rt_twin.skipped" and e.get("book") == book), None)
+            operator = [e for e in evs + fade_evs if str(e.get("kind", "")).startswith("operator.") and e.get("book") == book]
+            entry_sig = fade if key.value in counter_books else sgn
+            ps = pos_by_key.get((book, entry_sig["signal_id"])) if entry_sig else None
+            live = None
+            if ps and ps.get("status") == "OPEN" and ps["id"] in self.positions:
+                lp = self.positions[ps["id"]]
+                mk = self.position_marks.get(lp.id, {})
+                mid = mk.get("mid") or self.ltps.get(lp.instrument.scrip_code) or 0.0
+                realised = sum((float(o.get("avg_price") or 0) - lp.entry) * float(o.get("filled") or 0) for o in exits_by_pos.get(lp.id, []))
+                live = {
+                    "mid": mid, "quoteOk": mk.get("quote_ok"), "peak": lp.peak_mid, "line": lp.ratchet_sl, "optionSl": lp.option_sl,
+                    "armedBy": lp.armed_by, "armedTs": lp.armed_ts, "targetsHit": lp.targets_hit, "qtyRemaining": lp.qty_remaining,
+                    "qty": lp.qty, "ladder": list(lp.option_targets), "edm": lp.option_edm, "underlying": self.ltps.get(lp.underlying.scrip_code),
+                    "unrealised": round((mid - lp.entry) * lp.qty_remaining * lp.instrument.multiplier, 2) if mid else None,
+                    "realised": round(realised * lp.instrument.multiplier, 2),
+                }
+            if ps:
+                state = "OPEN" if ps.get("status") == "OPEN" else "TRADED"
+            elif key is StrategyKey.FUDKII:
+                state = sgn.get("decision") or "UNKNOWN"
+            elif key.value in counter_books:
+                if route is None:
+                    state = "NO_ROUTE"
+                elif route.get("route") != "COUNTER":
+                    state = "IN_TREND"
+                elif fade is None:
+                    state = "COUNTER_NO_PLAN"
+                else:
+                    state = fade.get("decision") or "UNKNOWN"
+            elif skip is not None:
+                state = "SKIPPED"
+            elif str(sgn.get("decision", "")).endswith("FILLED"):
+                state = "NOT_MIRRORED"
+            else:
+                state = "NO_FILL"
+            # the trigger bar and the underlying's path since, for the sparkline
+            bars30 = self.store.bars(sgn["symbol"], DECISION_TF, 80)
+            candle = next(({"o": b.open, "h": b.high, "l": b.low, "c": b.close, "v": b.volume} for b in bars30 if int(b.ts) == int(sgn["ts"])), None)
+            s_t, s_t1, base = volume_surges([b.volume for b in bars30 if b.ts <= sgn["ts"]], window=6, floor=1000.0)
+            m1 = [b for b in self.store.bars(sgn["symbol"], "1m", 400) if b.ts >= sgn["ts"] - 1800]
+            step = max(1, len(m1) // 120)
+            spark = [[int(b.ts), b.close] for b in m1[::step]]
+            ctx = sgn.get("context") or {}
+            conf = ctx.get("confluence") or {}
+            pros, cons = [], []
+            if s_t and s_t >= 2.5:
+                pros.append(f"volume surge {s_t:.1f}×")
+            reads = (route or {}).get("reads") or []
+            if any(r.get("volume") == "dried" for r in reads):
+                cons.append("dried volume on " + "/".join(r["leg"] for r in reads if r.get("volume") == "dried"))
+            if route and route.get("route") == "COUNTER":
+                cons.append("routed COUNTER: " + str(route.get("summary") or ""))
+            elif route and not ((route.get("wall") or {}).get("members")):
+                pros.append("no wall ahead")
+            room = float(conf.get("room_ratio") or 0)
+            if room >= 2:
+                pros.append(f"room {room:.1f} ATR")
+            elif 0 < room < 0.5:
+                cons.append(f"no room ({room:.2f} ATR)")
+            stop_pct = abs(float(sgn["entry"]) - float(sgn["stop"])) / float(sgn["entry"]) * 100 if sgn.get("stop") else 0
+            if 0 < stop_pct < 0.2:
+                cons.append(f"stop {stop_pct:.2f}% away — inside one bar's noise")
+            if float(conf.get("fortress") or 0) >= 9:
+                cons.append(f"T1 is a {float(conf['fortress']):.1f} wall")
+            cards.append({
+                "signalId": sid, "symbol": sgn["symbol"], "direction": sgn["direction"], "ts": sgn["ts"], "grade": sgn.get("grade"),
+                "rr": sgn.get("rr"), "reason": sgn.get("reason"), "entry": sgn["entry"], "stop": sgn["stop"], "targets": sgn.get("targets"),
+                "stopPct": round(stop_pct, 2), "confluence": conf, "evidence": sgn.get("evidence") or {}, "gates": sgn.get("gates") or [],
+                "parentDecision": sgn.get("decision"), "parentReason": sgn.get("decision_reason"),
+                "candle": candle, "surgeT": s_t, "surgeT1": s_t1, "baseline": base, "spark": spark,
+                "route": route, "skip": skip, "operator": operator, "fade": fade, "state": state,
+                "position": ps, "trade": trades_by_pos.get(ps["id"]) if ps else None, "exits": exits_by_pos.get(ps["id"], []) if ps else [],
+                "live": live, "rtCard": alert_cards.get(sid), "pros": pros, "cons": cons,
+            })
+        counts: dict[str, int] = {}
+        for c in cards:
+            counts[c["state"]] = counts.get(c["state"], 0) + 1
+        return {"book": book, "day": day.isoformat(), "wallet": self.wallets[book].to_json() if book in self.wallets else None, "counts": counts, "cards": cards, "nowTs": time.time()}
+
+    async def operator_take(self, book: str, signal_id: str) -> dict[str, Any]:
+        """The operator's override: enter THIS book on a trigger it declined or never reached — the
+        same entry path as an automatic fill (selection at the current market, sizing under the
+        book's limits), the fade plan for a counter book. Audited before it is attempted."""
+        key = StrategyKey(book)
+        sig = self._signals_today.get(signal_id)
+        if sig is None:
+            raise KeyError(f"no signal {signal_id} in today's book")
+        if any(p.status == "OPEN" and p.strategy == book and p.underlying.symbol == sig.symbol for p in self.positions.values()):
+            raise RuntimeError(f"{book} already holds {sig.symbol}")
+        if key in (StrategyKey.FUDKII_CT_X, StrategyKey.FUDKII_CT_Y):
+            und = self.underlyings.get(sig.symbol)
+            dec = CounterDecision("COUNTER", "operator take", NO_WALL)
+            entry = flipped_signal(sig, key=key, zones=self.zones_for(sig.symbol), atr=atr(self.store.bars(sig.symbol, DECISION_TF, 60), 14) or 0.0,
+                                   tick_size=(und.tick_size if und else 0.05) or 0.05, decision=dec)
+            if entry is None:
+                raise RuntimeError("no wall on the flipped side — nothing to aim the fade at")
+        else:
+            entry = replace(sig, strategy=key, reason=f"operator take · {sig.reason}")
+        await self.ledger.event("operator.take", {"book": book, "signal_id": signal_id, "entry_signal_id": entry.signal_id, "symbol": sig.symbol})
+        log.info("operator.take", book=book, symbol=sig.symbol, signal=signal_id)
+        await self._handle_signal(entry, None)
+        pos = next((p for p in self.positions.values() if p.strategy == book and p.signal_id == entry.signal_id), None)
+        return {"book": book, "signalId": signal_id, "entered": pos is not None, "position": _position_json(pos) if pos else None}
+
+    async def operator_skip(self, book: str, signal_id: str) -> dict[str, Any]:
+        """The operator's other override: close THIS book's open position on a trigger now, at the
+        market, reason MANUAL — through the ordinary exit path so the trade, the wallet and the
+        card all see the same fill."""
+        pos = next(
+            (p for p in self.positions.values() if p.status == "OPEN" and p.strategy == book
+             and (p.signal_id == signal_id or (self._signals_today.get(p.signal_id, None) is not None and self._signals_today[p.signal_id].source_signal_id == signal_id))),
+            None,
+        )
+        if pos is None:
+            raise KeyError(f"{book} holds nothing on {signal_id}")
+        mk = self.position_marks.get(pos.id, {})
+        ref = mk.get("mid") or self.ltps.get(pos.instrument.scrip_code) or pos.entry
+        await self.ledger.event("operator.skip", {"book": book, "signal_id": signal_id, "position_id": pos.id, "symbol": pos.underlying.symbol, "ref_price": ref})
+        self.alerts.mark_skipped(signal_id, book=book, reason="operator skip")
+        log.info("operator.skip", book=book, symbol=pos.underlying.symbol, position=pos.id)
+        await self._exit(pos, ExitDecision(pos.id, ExitReason.MANUAL, ref, pos.qty_remaining, "operator skip"), time.time())
+        return {"book": book, "signalId": signal_id, "positionId": pos.id, "closed": pos.status != "OPEN", "ref": ref}
 
     async def reset_wallet(self, strategy: str, initial: float | None = None) -> Wallet:
         """Start a book's purse over — the operator's reset between experiments. Refused while the
@@ -1332,6 +1508,7 @@ class Engine:
         atr_v = legs[0].atr if legs else 0.0
         dec = counter_route(legs, bullish=sig.direction is Direction.BULLISH, st_flipped="ST flip" in sig.reason)
         self.alerts.mark_route(sig.signal_id, decision=dec.to_json())
+        await self.ledger.event("counter.route", {"signal_id": sig.signal_id, "symbol": sig.symbol, **dec.to_json()})
         log.info("counter.route", symbol=sig.symbol, route=dec.route, reason=dec.reason)
         if dec.route != "COUNTER":
             return

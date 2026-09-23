@@ -347,6 +347,29 @@ class Ledger:
             rows = (await conn.execute(stmt)).all()
         return [json.loads(r[0]) for r in rows]
 
+    async def rows_between(self, name: str, start: float, end: float) -> list[dict[str, Any]]:
+        """Every row of one table whose timestamp falls in ``[start, end)``, oldest first, as its
+        JSON with the columns the JSON does not carry merged in (a signal's decision, an event's
+        kind and time). The trigger-card page reads a whole session this way."""
+        table, col, extra = {
+            "signals": (signals, "ts", ("decision", "decision_reason")),
+            "positions": (positions, "opened_ts", ("status", "closed_ts")),
+            "trades": (trades, "closed_ts", ()),
+            "orders": (orders, "ts", ("purpose", "status")),
+            "events": (events, "ts", ("kind", "ts")),
+        }[name]
+        cols = [table.c.json, *(table.c[c] for c in extra)]
+        stmt = sa.select(*cols).where(table.c[col] >= start, table.c[col] < end).order_by(table.c[col], table.c.id)
+        async with self.engine.begin() as conn:
+            rows = (await conn.execute(stmt)).all()
+        out = []
+        for r in rows:
+            d = json.loads(r[0])
+            for i, c in enumerate(extra, start=1):
+                d.setdefault(c, r[i])
+            out.append(d)
+        return out
+
     async def gate_histogram(self, strategy: str | None = None) -> list[dict[str, Any]]:
         """Which gate is binding, as a number. The question ``NSE_BB_30`` could never answer."""
         stmt = sa.select(

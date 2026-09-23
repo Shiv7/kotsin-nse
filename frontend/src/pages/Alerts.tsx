@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { BOOK_TABS, BookCards } from '../components/BookCards'
 import { usePoll } from '../lib/usePoll'
 
 // Realtime firings, one tab per book. Polls every 3s while the market is open.
@@ -695,6 +696,7 @@ function Row({ a }: { a: Alert }) {
 
 export function Alerts() {
   const [book, setBook] = useState<string>('ALL')
+  const [bookView, setBookView] = useState<string | null>(null)
   const path = book === 'ALL' ? '/api/alerts?limit=200' : `/api/alerts?book=${book}&limit=200`
   const { data, error } = usePoll<Resp>(path, 3000)
 
@@ -783,7 +785,22 @@ export function Alerts() {
         })}
       </div>
 
-      {data.alerts.length === 0 ? (
+      <div className="mb-4 flex flex-wrap items-center gap-1 border-b border-slate-800 pb-2">
+        <span className="mr-1 text-[10px] uppercase tracking-wide text-slate-500">trigger cards · per book</span>
+        {BOOK_TABS.map(([k, label]) => (
+          <button
+            key={k}
+            onClick={() => setBookView(bookView === k ? null : k)}
+            className={`rounded px-2.5 py-1 text-xs ${bookView === k ? 'bg-indigo-500/20 text-indigo-100' : 'text-slate-400 hover:text-white'}`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {bookView ? (
+        <BookCards book={bookView} />
+      ) : data.alerts.length === 0 ? (
         <div className="rounded border border-slate-700/40 bg-slate-900/40 p-4 text-sm text-slate-500">
           {book === 'ALL' ? (
             <>

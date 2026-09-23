@@ -52,6 +52,10 @@ class WalletResetRequest(BaseModel):
     initial: float | None = None
 
 
+class BookActionRequest(BaseModel):
+    signal_id: str
+
+
 class ReviewSignalRequest(BaseModel):
     signal_id: str
 
@@ -290,6 +294,33 @@ def build_app(engine: Engine) -> FastAPI:
     @api.get("/committee/hypotheses")
     async def committee_hypotheses() -> list[dict[str, Any]]:
         return engine.committee.log.hypotheses()[::-1]
+
+    @api.get("/books/{book}/cards")
+    async def book_cards(book: str, day: str | None = None) -> dict[str, Any]:
+        """One card per FUDKII trigger of the session, as this book saw it."""
+        try:
+            d = date.fromisoformat(day) if day else None
+            return await engine.book_cards(book.upper(), d)
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @api.post("/books/{book}/take")
+    async def book_take(book: str, req: BookActionRequest) -> dict[str, Any]:
+        try:
+            return await engine.operator_take(book.upper(), req.signal_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @api.post("/books/{book}/skip")
+    async def book_skip(book: str, req: BookActionRequest) -> dict[str, Any]:
+        try:
+            return await engine.operator_skip(book.upper(), req.signal_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @api.post("/wallets/{strategy}/reset")
     async def wallet_reset(strategy: str, req: WalletResetRequest | None = None) -> dict[str, Any]:

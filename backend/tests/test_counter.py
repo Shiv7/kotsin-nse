@@ -146,6 +146,7 @@ async def test_a_counter_route_enters_ct_x_through_the_ordinary_entry_path(setti
     from kotsin_nse.engine import Engine
 
     e = Engine(settings)
+    await e.start()  # the route is written to the ledger's event log
     und = Instrument("2885", "RELIANCE", Segment.NSE_EQ, InstrumentKind.EQUITY, underlying="RELIANCE", tick_size=0.05)
     e.underlyings["RELIANCE"] = und
     e._pivot_points = lambda symbol: [_pt(100.6, "1d.R1"), _pt(100.9, "1wk.R1")]  # type: ignore[method-assign]
@@ -172,6 +173,9 @@ async def test_a_counter_route_enters_ct_x_through_the_ordinary_entry_path(setti
     e._pivot_points = lambda symbol: [_pt(100.6, "1d.R1")]  # type: ignore[method-assign]
     await e._handle_counter(_sig(), bar)
     assert len(handled) == 1 and routes[-1][1] == "IN_TREND"
+    kinds = [r["kind"] for r in await e.ledger.rows_between("events", time.time() - 60, time.time() + 1)]
+    assert kinds.count("counter.route") == 2, "every route is on the ledger, so a restart loses nothing"
+    await e.stop()
 
 
 @pytest.mark.asyncio
