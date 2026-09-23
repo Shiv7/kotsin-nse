@@ -469,6 +469,10 @@ class Engine:
                 close=r["c"],
                 volume=r["v"],
                 complete=True,
+                # The broker's own daily candle (it matches NSE bhavcopy to the paisa), never a
+                # roll-up of intraday bars: 5paisa's intraday candles stop at 15:15, and a daily
+                # built from them carries the wrong close and misses any late-session high or low.
+                source=BarSource.REST,
             )
             for r in rows
         ]
