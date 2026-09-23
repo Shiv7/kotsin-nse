@@ -49,7 +49,7 @@ from ..bars.unified import BarSource, UnifiedBar
 from ..config import Segment, Settings
 from ..domain import Direction, ExitReason, Instrument, InstrumentKind, OrderSide
 from ..instrument.select import estimate_delta, map_levels_to_option
-from ..market.session import ist_day, ist_hm, past_force_flat, spec
+from ..market.session import TF_SECONDS, ist_day, ist_hm, past_force_flat, spec
 from ..risk.costs import CostModel
 from ..risk.limits import RiskLimits
 from ..strategy.base import Outcome, Signal
@@ -551,9 +551,16 @@ class Backtester:
             if (trailed > t.stop) if sign > 0 else (trailed < t.stop):
                 t.stop = trailed
 
-        if self.p.decision_tf != "1d" and past_force_flat(self.p.segment, bar.ts):
+        # A bar is stamped with its START; the session's force-flat (15:20 NSE, 23:20 MCX) falls
+        # INSIDE the last bar, so testing the start let every position carry overnight — 12 EOD
+        # exits in 4,358 trades, and "TIME_STOP" winners that were really overnight gaps. The bar
+        # that contains the force-flat closes the trade at its close (the live engine flattens a
+        # few minutes earlier, at the then price).
+        if self.p.decision_tf != "1d" and past_force_flat(
+            self.p.segment, bar.ts + TF_SECONDS.get(self.p.decision_tf, 1800) - 1
+        ):
             return self._close(t, bar, bar.close, ExitReason.EOD, inst)
-        if t.bars_held >= self.p.limits.time_stop_bars:
+        if self.p.limits.time_stop_bars is not None and t.bars_held >= self.p.limits.time_stop_bars:
             return self._close(t, bar, bar.close, ExitReason.TIME_STOP, inst)
         return None
 

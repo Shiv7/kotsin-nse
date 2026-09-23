@@ -714,6 +714,21 @@ def build_app(engine: Engine) -> FastAPI:
         except KeyError as exc:
             raise HTTPException(404, str(exc)) from exc
 
+    @api.get("/rl/runs")
+    async def rl_runs(limit: int = Query(25, le=100)) -> list[dict[str, Any]]:
+        from ..research.rl.exit_policy import list_runs
+
+        return list_runs(engine.s.data_dir / "rl", limit)
+
+    @api.get("/rl/runs/{name}")
+    async def rl_run(name: str) -> dict[str, Any]:
+        from ..research.rl.exit_policy import load_run as load_rl_run
+
+        try:
+            return load_rl_run(engine.s.data_dir / "rl", name)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
     @api.get("/history")
     async def history_coverage() -> list[dict[str, Any]]:
         from ..research.history import HistoryStore

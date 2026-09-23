@@ -17,6 +17,7 @@ import random
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,3 +132,50 @@ def profit_factor(pnls: Sequence[float]) -> float | None:
     wins = sum(p for p in pnls if p > 0)
     losses = -sum(p for p in pnls if p < 0)
     return None if losses == 0 else wins / losses
+
+
+@dataclass(frozen=True, slots=True)
+class Fold:
+    index: int
+    train_start: int
+    train_end: int  # exclusive, unix s
+    test_start: int
+    test_end: int
+
+    def in_train(self, ts: float) -> bool:
+        return self.train_start <= ts < self.train_end
+
+    def in_test(self, ts: float) -> bool:
+        return self.test_start <= ts < self.test_end
+
+
+def walk_forward_folds(start: int, end: int, n_folds: int = 4, min_train_blocks: int = 2) -> list[Fold]:
+    """Expanding-window folds: the range is cut into ``n_folds + min_train_blocks`` equal blocks;
+    fold k trains on blocks [0, k + min_train_blocks) and tests on the next block. Later folds
+    train on more data; that is the point, and the caveat."""
+    n_blocks = n_folds + min_train_blocks
+    edges = [start + (end - start) * i // n_blocks for i in range(n_blocks + 1)]
+    return [
+        Fold(k, edges[0], edges[k + min_train_blocks], edges[k + min_train_blocks], edges[k + min_train_blocks + 1])
+        for k in range(n_folds)
+    ]
+
+
+def sign_flip_test(
+    values: Sequence[float], days: Sequence[str], *, n_perm: int = 4000, seed: int = 0
+) -> dict[str, Any]:
+    """H0: mean = 0. Day-blocked sign flips — all of a day's values flip together, so the test
+    respects within-day clustering. Two-sided. For paired comparisons (A − B per episode)."""
+    if len(values) < 2:
+        return {"n": len(values), "n_days": len(set(days)), "statistic": (sum(values) / len(values)) if values else None, "p_value": None}
+    rng = random.Random(seed)
+    uniq = sorted(set(days))
+    idx = {d: i for i, d in enumerate(uniq)}
+    stat = sum(values) / len(values)
+    hits = 0
+    for _ in range(n_perm):
+        flips = [rng.choice((-1.0, 1.0)) for _ in uniq]
+        m = sum(v * flips[idx[d]] for v, d in zip(values, days, strict=True)) / len(values)
+        if abs(m) >= abs(stat) - 1e-15:
+            hits += 1
+    return {"n": len(values), "n_days": len(uniq), "statistic": stat, "p_value": (hits + 1) / (n_perm + 1)}

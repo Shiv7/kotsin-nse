@@ -278,7 +278,41 @@ def build_parser() -> argparse.ArgumentParser:
     ce.add_argument("--segment", default="NSE_EQ", choices=[s.name for s in Segment])
     ce.add_argument("--holdout", type=float, default=None, help="holdout fraction (default: KN_COMMITTEE_HOLDOUT_FRAC)")
     ce.add_argument("--no-stress", dest="no_stress", action="store_true", help="skip the cost-stress runs")
+    r = sub.add_parser("rl", help="offline RL for exits on the backtester's own trades (one symbol at a time)")
+    rs = r.add_subparsers(dest="action")
+    re_ = rs.add_parser("exit-policy", help="episodes → behaviour rollouts → Fitted Q-Iteration → walk-forward vs the hand rules")
+    re_.add_argument("--symbols", default="", help="comma-separated; default: the first 8 cached symbols")
+    re_.add_argument("--folds", type=int, default=4)
+    re_.add_argument("--seed", type=int, default=0)
+    re_.add_argument("--max-bars", dest="max_bars", type=int, default=None, help="time stop in bars (default: RiskLimits.time_stop_bars)")
+    re_.add_argument("--segment", default="NSE_EQ", choices=[s.name for s in Segment])
     return p
+
+
+def run_rl_cli(settings: Settings, args: argparse.Namespace) -> None:
+    from .research.backtest import BacktestParams
+    from .research.history import HistoryStore
+    from .research.rl.exit_policy import experiment
+
+    if args.action != "exit-policy":
+        print("usage: kotsin-nse rl exit-policy [--symbols A,B] [--folds 4]", file=sys.stderr)
+        raise SystemExit(2)
+    store = HistoryStore(settings.data_dir / "history")
+    symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()] or store.symbols("30m")[:8]
+    if not symbols:
+        print("no cached history — run `kotsin-nse fetch-history --symbols …` first", file=sys.stderr)
+        raise SystemExit(1)
+    art = experiment(
+        settings,
+        symbols,
+        out_dir=settings.data_dir / "rl",
+        n_folds=args.folds,
+        seed=args.seed,
+        params=BacktestParams(segment=Segment[args.segment]),
+        max_bars=args.max_bars,
+    )
+    print(json.dumps({"name": art["name"], "summary": art["summary"], "folds": art["folds"]}, indent=1, default=str))
+    print(f"\nsaved {settings.data_dir / 'rl' / (art['name'] + '.json')}")
 
 
 def cli() -> None:
@@ -300,6 +334,8 @@ def cli() -> None:
         run_backtest(settings, args)
     elif command == "committee":
         run_committee_cli(settings, args)
+    elif command == "rl":
+        run_rl_cli(settings, args)
     else:  # pragma: no cover - argparse rejects anything else
         raise SystemExit(f"unknown command {command}")
 
