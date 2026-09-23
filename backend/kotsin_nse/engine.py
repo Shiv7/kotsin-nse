@@ -36,6 +36,7 @@ from .bars.micro import MicroAggregator
 from .bars.periods import monthly, previous_complete, weekly
 from .bars.pivots import (
     ZONE_TOLERANCE_PCT,
+    PivotPoint,
     Zone,
     classic_pivots,
     cluster_zones,
@@ -115,10 +116,11 @@ from .ops.telegram import Telegram
 from .risk.costs import CostModel
 from .risk.exits import ExitEngine, MarketView, apply_exit
 from .risk.exposure import ExposureBook
-from .risk.limits import RT_N_LIMITS, RT_X_LIMITS, RT_Y_LIMITS, RiskLimits
+from .risk.limits import CT_X_LIMITS, CT_Y_LIMITS, RT_N_LIMITS, RT_X_LIMITS, RT_Y_LIMITS, RiskLimits
 from .risk.sizing import size_position
 from .risk.wallet import Wallet
 from .strategy.base import Outcome, Signal
+from .strategy.counter import counter_route, flipped_signal
 from .strategy.fudkii import Fudkii, FudkiiConfig
 from .strategy.fukaa import Fukaa, FukaaConfig, select
 from .strategy.keys import ALL_KEYS, INITIAL_INR, StrategyKey
@@ -178,6 +180,8 @@ class Engine:
             StrategyKey.FUDKII_RT_MCX.value: self.exits_rt,
             StrategyKey.FUDKII_RT_N.value: ExitEngine(RT_N_LIMITS),
             StrategyKey.FUDKII_RT_Y.value: ExitEngine(RT_Y_LIMITS),
+            StrategyKey.FUDKII_CT_X.value: ExitEngine(CT_X_LIMITS),
+            StrategyKey.FUDKII_CT_Y.value: ExitEngine(CT_Y_LIMITS),
         }
         #: Each twin is checked against its own pool — 30 slots, its own lot cap — rather than
         #: skipping the check entirely, which is what it did when first written.
@@ -762,19 +766,7 @@ class Engine:
         prev = previous_session(dailies, today)
         if len(dailies) < MIN_DAILY_BARS or prev is None or not is_official(prev):
             return []
-        points = []
-        prev_day = [b for b in dailies if ist_day(b.ts) < today]
-        if prev_day:
-            d = prev_day[-1]
-            lv = classic_pivots(d.high, d.low, d.close)
-            if lv:
-                points += pivot_points(lv, "1d")
-        for tf, periods in (("1wk", weekly(list(dailies))), ("1mo", monthly(list(dailies)))):
-            p = previous_complete(periods, today)
-            if p:
-                lv = classic_pivots(p.high, p.low, p.close)
-                if lv:
-                    points += pivot_points(lv, tf)
+        points = self._pivot_points(symbol)
         atr_v = atr(self.store.bars(symbol, DECISION_TF, 60), 14)
         px = self.ltps.get(
             getattr(self.underlyings.get(symbol), 'scrip_code', '')
@@ -925,6 +917,12 @@ class Engine:
 
         for sig in (*base_out.signals, *admitted):
             await self._handle_signal(sig, bar)
+        for sig in base_out.signals:
+            # the fade is strictly additive: it may never cost the in-trend books their entry
+            try:
+                await self._handle_counter(sig, bar)
+            except Exception as exc:
+                log.exception("counter.failed", symbol=sig.symbol, error=str(exc))
 
     async def _handle_signal(self, sig: Signal, bar: UnifiedBar) -> None:
         await self.bus.publish(Topic.SIGNAL, sig)
@@ -964,6 +962,11 @@ class Engine:
         if wallet.halted:
             await self.ledger.insert_signal(sig.to_json(), "WALLET_HALTED", wallet.halt_reason)
             return
+        # an RT/CT book entered directly (the counter-trend fade) sizes and pools under its own
+        # limits; the base books keep theirs
+        book = self._exits_by_strategy.get(sig.strategy.value)
+        book_limits = book.limits if book is not None else self.limits
+        exposure = self._exposure_by_strategy.get(sig.strategy.value, self.exposure)
 
         sizing = size_position(
             instrument=inst,
@@ -972,7 +975,7 @@ class Engine:
             option_target1=option_targets[0] if option_targets else None,
             balance=wallet.balance,
             available=wallet.available,
-            limits=self.limits,
+            limits=book_limits,
             costs=self.costs,
         )
         if not sizing.ok:
@@ -980,7 +983,7 @@ class Engine:
             log.info("signal.not_sized", symbol=sig.symbol, reason=sizing.reason)
             return
 
-        verdict = self.exposure.check(
+        verdict = exposure.check(
             strategy=sig.strategy.value,
             underlying=sig.symbol,
             outlay=sizing.outlay,
@@ -1029,6 +1032,8 @@ class Engine:
             grade=sig.grade,
             note=f"delta≈{delta:.2f} (estimated)",
         )
+        if book is not None and book_limits.own_ladder:
+            self._stamp_own_ladder(pos, inst, book_limits, sig.symbol)
         self.positions[pos.id] = pos
         wallet.reserve(pos.entry * pos.qty * inst.multiplier, result.fill.ts)
         wallet.apply_charges(result.fill.charges, result.fill.ts)
@@ -1192,16 +1197,17 @@ class Engine:
         answer. The fill is *copied*, not re-matched: re-running the matcher would walk the ask
         ladder a second time and produce a different price for a trade that never happened twice.
         """
-        if pos.strategy != StrategyKey.FUDKII.value:
-            return
         # Commodities and equities keep separate purses: one CRUDEOIL lot is a different size of
         # bet from one BLUESTARCO lot, and a shared wallet would let whichever fired first decide
-        # what the other could afford. NSE fills are mirrored into all three RT books.
-        keys = (
-            [StrategyKey.FUDKII_RT_MCX]
-            if pos.underlying.segment is Segment.MCX_FO
-            else [StrategyKey.FUDKII_RT_X, StrategyKey.FUDKII_RT_N, StrategyKey.FUDKII_RT_Y]
-        )
+        # what the other could afford. NSE fills are mirrored into all three RT books; a
+        # counter-trend fade entered by CT-X is mirrored into CT-Y.
+        mcx = pos.underlying.segment is Segment.MCX_FO
+        keys = {
+            StrategyKey.FUDKII.value: [StrategyKey.FUDKII_RT_MCX] if mcx else [StrategyKey.FUDKII_RT_X, StrategyKey.FUDKII_RT_N, StrategyKey.FUDKII_RT_Y],
+            StrategyKey.FUDKII_CT_X.value: [] if mcx else [StrategyKey.FUDKII_CT_Y],
+        }.get(pos.strategy, [])
+        if not keys:
+            return
         cost = pos.entry * pos.qty * inst.multiplier
         opened = 0
         vol = (
@@ -1245,27 +1251,7 @@ class Engine:
             )
             lim = engine_for.limits
             if lim.own_ladder:
-                # Nothing delta-projected: the contract's own levels from its previous session(s)
-                # (LegPivotLoader, thin-bar and zero-range guarded). No ladder → the equity trigger only.
-                own = self.leg_pivots.for_code(inst.scrip_code)
-                tol, reg = self.option_ladder_tolerance(pos.underlying.symbol, inst.strike, inst.option_type, twin.entry)
-                twin.option_edm = self.expected_move(pos.underlying.symbol, inst, twin.entry)
-                if own is None:
-                    rungs: list[float] = []
-                elif lim.ladder_mode == "daily_r":
-                    rungs = [r for r in (own.levels.r1, own.levels.r2, own.levels.r3, own.levels.r4) if r > twin.entry]
-                else:
-                    rungs = [r["price"] for r in own.rungs_above(twin.entry, tolerance_pct=tol)]
-                    if lim.arm_min_move and twin.option_edm > 0:
-                        rungs = [r for r in rungs if r >= twin.entry * (1 + lim.arm_min_move * twin.option_edm)]
-                twin.option_targets = tuple(rungs[:4])
-                twin.option_t1 = twin.option_targets[0] if twin.option_targets else 0.0
-                twin.note += (
-                    f" · own {lim.ladder_mode} ladder, tol {tol:.1f}% (k {reg.k:.2f} {reg.band.value}, {reg.source}), "
-                    f"expected move {twin.option_edm * 100:.0f}%"
-                    if twin.option_targets
-                    else " · no own ladder, equity trigger only"
-                )
+                self._stamp_own_ladder(twin, inst, lim, pos.underlying.symbol)
             self.positions[twin.id] = twin
             twin_wallet.reserve(cost, result.fill.ts)
             twin_wallet.apply_charges(result.fill.charges, result.fill.ts)
@@ -1284,6 +1270,80 @@ class Engine:
             opened += 1
         if opened:
             self.alerts.mark_entered(pos.signal_id, ts=result.fill.ts, price=pos.entry, qty=pos.qty)
+
+    def _stamp_own_ladder(self, pos: Position, inst: Instrument, lim: RiskLimits, symbol: str) -> None:
+        """The RT/CT books' targets: nothing delta-projected — the contract's own levels from its
+        previous session(s) (LegPivotLoader, thin-bar and zero-range guarded), per the book's
+        ladder mode. No ladder → the equity trigger only."""
+        own = self.leg_pivots.for_code(inst.scrip_code)
+        tol, reg = self.option_ladder_tolerance(symbol, inst.strike, inst.option_type, pos.entry)
+        pos.option_edm = self.expected_move(symbol, inst, pos.entry)
+        if own is None:
+            rungs: list[float] = []
+        elif lim.ladder_mode == "daily_r":
+            rungs = [r for r in (own.levels.r1, own.levels.r2, own.levels.r3, own.levels.r4) if r > pos.entry]
+        else:
+            rungs = [r["price"] for r in own.rungs_above(pos.entry, tolerance_pct=tol)]
+            if lim.arm_min_move and pos.option_edm > 0:
+                rungs = [r for r in rungs if r >= pos.entry * (1 + lim.arm_min_move * pos.option_edm)]
+        pos.option_targets = tuple(rungs[:4])
+        pos.option_t1 = pos.option_targets[0] if pos.option_targets else 0.0
+        pos.note += (
+            f" · own {lim.ladder_mode} ladder, tol {tol:.1f}% (k {reg.k:.2f} {reg.band.value}, {reg.source}), "
+            f"expected move {pos.option_edm * 100:.0f}%"
+            if pos.option_targets
+            else " · no own ladder, equity trigger only"
+        )
+
+    async def _handle_counter(self, sig: Signal, bar: UnifiedBar) -> None:
+        """The counter-trend route on a FUDKII trigger (strategy/counter.py). COUNTER → the fade is
+        entered by CT-X through the ordinary entry path — the opposite OTM from the same selector,
+        its own confluence plan, its own wallet — and mirrored into CT-Y. Every route is stamped on
+        the ENTRY card so an in-trend trade shows the wall it ran into."""
+        if sig.strategy is not StrategyKey.FUDKII:
+            return
+        underlying = self.underlyings.get(sig.symbol)
+        if underlying is None or underlying.segment is Segment.MCX_FO:
+            return
+        points = self._pivot_points(sig.symbol)
+        atr_v = atr(self.store.bars(sig.symbol, DECISION_TF, 60), 14) or 0.0
+        dec = counter_route(
+            points, bullish=sig.direction is Direction.BULLISH, close=bar.close, high=bar.high, low=bar.low,
+            atr=atr_v, st_flipped="ST flip" in sig.reason,
+        )
+        self.alerts.mark_route(sig.signal_id, decision=dec.to_json())
+        log.info("counter.route", symbol=sig.symbol, route=dec.route, reason=dec.reason)
+        if dec.route != "COUNTER":
+            return
+        fade = flipped_signal(
+            sig, key=StrategyKey.FUDKII_CT_X, zones=self.zones_for(sig.symbol), atr=atr_v,
+            tick_size=underlying.tick_size or 0.05, decision=dec,
+        )
+        if fade is None:
+            log.info("counter.no_plan", symbol=sig.symbol, reason="no wall on the flipped side")
+            await self.ledger.insert_signal(sig.to_json(), "COUNTER_NO_PLAN", dec.reason)
+            return
+        await self._handle_signal(fade, bar)
+
+    def _pivot_points(self, symbol: str) -> list[PivotPoint]:
+        """The equity's classic levels for today — daily from the previous session, weekly and
+        monthly from the previous completed periods — with their timeframe weights."""
+        today = ist_today()
+        dailies = self.store.bars(symbol, "1d")
+        prev = previous_session(dailies, today)
+        if len(dailies) < MIN_DAILY_BARS or prev is None or not is_official(prev):
+            return []
+        points: list[PivotPoint] = []
+        lv = classic_pivots(prev.high, prev.low, prev.close)
+        if lv:
+            points += pivot_points(lv, "1d")
+        for tf, periods in (("1wk", weekly(list(dailies))), ("1mo", monthly(list(dailies)))):
+            p = previous_complete(periods, today)
+            if p:
+                lv = classic_pivots(p.high, p.low, p.close)
+                if lv:
+                    points += pivot_points(lv, tf)
+        return points
 
     async def _volume_surges(self, underlying: Instrument) -> dict[str, tuple[float, float]]:
         """``surge_T`` / ``surge_T-1`` of the last two closed 30m bars against the T-2…T-7 baseline

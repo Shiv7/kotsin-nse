@@ -233,7 +233,7 @@ async def test_a_dry_front_future_skips_even_when_the_equity_bar_is_live(setting
         async def candles(inst, tf, start, end):
             asked.append((inst.scrip_code, tf))
             rows = [{"dt": to_ist(b.ts).strftime("%Y-%m-%dT%H:%M:00"), "o": 1, "h": 1, "l": 1, "c": 1, "v": v}
-                    for b, v in zip(eq, [10_000.0] * 6 + [5_100.0, 7_900.0])]
+                    for b, v in zip(eq, [10_000.0] * 6 + [5_100.0, 7_900.0], strict=True)]
             # the partial bar after the trigger, which must not be read as T
             rows.append({"dt": to_ist(eq[-1].ts + 1800).strftime("%Y-%m-%dT%H:%M:00"), "o": 1, "h": 1, "l": 1, "c": 1, "v": 90_000.0})
             return rows

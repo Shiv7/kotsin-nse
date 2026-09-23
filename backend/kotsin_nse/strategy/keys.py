@@ -34,6 +34,10 @@ class StrategyKey(StrEnum):
     #: the immediate-arming 2 % dwell book that ran on 2026-09-23, Y the third vertical.
     FUDKII_RT_N = "FUDKII_RT_N"
     FUDKII_RT_Y = "FUDKII_RT_Y"
+    #: The counter-trend pair (strategy/counter.py): when a FUDKII trigger runs into a ≥ 5.2 wall the
+    #: fade is traded with the opposite OTM — CT-X under RT-X's exits, CT-Y under RT-Y's.
+    FUDKII_CT_X = "FUDKII_CT_X"
+    FUDKII_CT_Y = "FUDKII_CT_Y"
 
     @property
     def display_name(self) -> str:
@@ -44,6 +48,8 @@ class StrategyKey(StrEnum):
             StrategyKey.FUDKII_RT_MCX: "FUDKII-RT-MCX",
             StrategyKey.FUDKII_RT_N: "FUDKII-RT-N",
             StrategyKey.FUDKII_RT_Y: "FUDKII-RT-Y",
+            StrategyKey.FUDKII_CT_X: "FUDKII-CT-X",
+            StrategyKey.FUDKII_CT_Y: "FUDKII-CT-Y",
         }[self]
 
     @property

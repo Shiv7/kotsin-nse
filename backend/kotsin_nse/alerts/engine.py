@@ -352,6 +352,16 @@ class AlertEngine:
                 a.card = card
                 return
 
+    def mark_route(self, signal_id: str, *, decision: dict[str, Any]) -> None:
+        """The counter-trend route on the trigger (COUNTER / IN_TREND, the wall behind it) — on the
+        ENTRY card, so an in-trend trade shows the wall it ran into and a fade shows why."""
+        for a in self.alerts.get("FUDKII_RT", ()):
+            if a.kind == "ENTRY" and (a.evidence or {}).get("signalId") == signal_id:
+                card = a.card if a.card is not None else {}
+                card["route"] = decision
+                a.card = card
+                return
+
     def mark_skipped(self, signal_id: str, *, book: str, reason: str) -> None:
         """A twin declined the mirror (dried volume): say so on the ENTRY card, per book, so an RT
         book with no trade reads as "skipped, because" rather than "missed"."""

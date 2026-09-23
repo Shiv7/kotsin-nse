@@ -8,7 +8,7 @@ neither code nor document named an authority.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,3 +178,8 @@ RT_Y_LIMITS = RiskLimits(
     post_arm_sustain=True,
     dried_volume_v=0.85,
 )
+
+#: The counter-trend books: RT-X's and RT-Y's exits on the fade. No dried-volume gate — the wall
+#: rule (strategy/counter.py) is the fade's own filter, as in the reference stack.
+CT_X_LIMITS = replace(RT_X_LIMITS, dried_volume_v=None)
+CT_Y_LIMITS = replace(RT_Y_LIMITS, dried_volume_v=None)

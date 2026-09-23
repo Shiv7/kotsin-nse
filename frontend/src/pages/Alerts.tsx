@@ -50,6 +50,8 @@ type RtCard = {
   /** the twin's actual fill (mark_entered) and the books that declined the mirror (mark_skipped) */
   entered?: { ts: number; ist: string; price: number; qty: number; lagFromFiredS: number | null } | null
   skipped?: { book: string; reason: string }[]
+  /** the counter-trend route on the trigger (mark_route): COUNTER = CT-X/CT-Y faded it */
+  route?: { route: string; reason: string; wall: { strength: number; members: string[]; timeframes: string; distAtr: number | null; grade: string } } | null
   greeks: { delta: number; deltaSource: string; dte: number | null; gamma: null; theta: null; iv: null; unavailable: string }
   sizing: {
     lots: number; qty: number; capital: number; costPerLot: number; binding: string
@@ -419,6 +421,15 @@ function RtPanel({ c }: { c: RtCard }) {
         {c.entered && (
           <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] tabular-nums text-emerald-300" title="the twin's actual fill">
             filled {c.entered.ist} @ {c.entered.price} × {c.entered.qty}
+          </span>
+        )}
+        {c.route && (
+          <span
+            className={`rounded border px-1.5 py-0.5 text-[10px] ${c.route.route === 'COUNTER' ? 'border-fuchsia-500/50 bg-fuchsia-500/10 text-fuchsia-200' : 'border-slate-600/60 bg-slate-800/60 text-slate-400'}`}
+            title={c.route.reason}
+          >
+            {c.route.route === 'COUNTER' ? 'COUNTER · faded by CT-X/CT-Y' : 'IN_TREND'} · wall {c.route.wall.strength.toFixed(1)}
+            {c.route.wall.timeframes ? ` (${c.route.wall.timeframes})` : ''}
           </span>
         )}
         {(c.skipped ?? []).map(s => (

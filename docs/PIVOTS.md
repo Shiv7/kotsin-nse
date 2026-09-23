@@ -121,8 +121,19 @@ when the trigger 30m bar *and* the one before it are both under 0.85 × the T-2�
 (floor 1000, `bars/indicators.py::dried_volume` — the reference RT router's R1) on the underlying
 **or** on its front future (`Engine._volume_surges`; the future's candles come from the broker at
 twin time, a leg without data is absent, never dried). RT-N takes every fill as the control. The skip
-is written on the ENTRY alert card (`card.skipped`). Nothing in this engine classifies a signal as
-counter-trend: every twin mirrors the parent's direction.
+is written on the ENTRY alert card (`card.skipped`).
+
+**Counter-trend books — CT-X and CT-Y** (`strategy/counter.py`, 2026-09-23 evening; the reference
+stack's wall-strength COUNTER, live there since 2026-09-11). On every FUDKII trigger the wall ahead
+of the close is scored: every daily/weekly/monthly classic level inside the trigger candle on the
+signal's side or within 0.5 × ATR30m past its extreme, weighted 1d 4.0 / 1wk 3.2 / 1mo 2.0 × nearness
+rank (1.0 / 0.8 / 0.6 / 0.4), clustered within 0.25 × ATR30m. A genuine ST flip into a wall ≥ 5.2 is
+**COUNTER**: the fade is entered by CT-X — the opposite OTM from the same selector, stop and targets
+from `compute_confluence` for the flipped direction, sized under RT-X's limits, exits under RT-X's
+policy — and mirrored into CT-Y (RT-Y's exits). Anything else is IN_TREND and CT-X/CT-Y stay flat.
+The route and the wall are stamped on the ENTRY card (`card.route`); a COUNTER with no wall on the
+flipped side is recorded as `COUNTER_NO_PLAN`. The in-trend mirrors (RT-X/N/Y) trade regardless of
+the route — the fade is beside them, not instead of them.
 
 **Per-name implied vol (the stock's own VIX).** The option ladder's merge tolerance is
 `k(name) × ATR30(parent) × δ / premium` (`market/iv.py`), where `k(name)` bands today's ATM implied

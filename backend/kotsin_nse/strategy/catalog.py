@@ -216,6 +216,42 @@ BOOKS: tuple[Book, ...] = (
         ),
     ),
     Book(
+        key="FUDKII_CT_X",
+        label="FUDKII-CT-X",
+        tf="30m entry, 1s exit",
+        summary=(
+            "The counter-trend fade: when a FUDKII trigger runs into a multi-timeframe pivot wall "
+            "(strength >= 5.2, nearness-clustered within 0.25 ATR, reached within 0.5 ATR of the "
+            "candle's extreme) on a genuine ST flip, the opposite OTM is bought with the confluence "
+            "plan recomputed for the flipped direction — under RT-X's exits."
+        ),
+        status="live",
+        params={
+            "counter_wall_min": "5.2 (daily 4.0 / weekly 3.2 / monthly 2.0 x nearness rank 1.0/0.8/0.6/0.4)",
+            "cluster_atr": "0.25", "reach_atr": "0.5", "require_st_flip": "true",
+            "lots": "one lot out per target (own ladder)",
+        },
+        have=("30m/1m bars on the session grid", "MTF pivot zones + confluence stop/targets"),
+        source="kotsin_nse/strategy/counter.py; streamingcandle FudkiiSignalTrigger wall-counter (live 2026-09-11)",
+        note=(
+            "Its own books beside the in-trend mirrors, not instead of them: the same signals, the "
+            "opposite direction, so the fade is measured against RT-X on identical triggers. The old "
+            "geometry fade and the F14 flip were both retired by the reference stack as net-losing; "
+            "this is the rule it kept."
+        ),
+    ),
+    Book(
+        key="FUDKII_CT_Y",
+        label="FUDKII-CT-Y",
+        tf="30m entry, 1s exit",
+        summary="The same counter-trend fade as CT-X, under RT-Y's exits (late arming, SL one rung behind, band in expected-move units).",
+        status="live",
+        params={"counter_wall_min": "5.2", "exits": "RT-Y policy"},
+        have=("30m/1m bars on the session grid", "MTF pivot zones + confluence stop/targets", "per-name ATM implied vol (market/iv.py)"),
+        source="kotsin_nse/strategy/counter.py; kotsin_nse/risk/exits.py (own-ladder branch)",
+        note="Mirrored from CT-X's fill at the same price and instant, so only the exit differs.",
+    ),
+    Book(
         key="FUDKII_RT",
         label="FUDKII-RT",
         tf="1m on a 30m signal",
