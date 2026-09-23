@@ -269,6 +269,9 @@ class Engine:
         self._zone_cache: dict[str, tuple[str, list[Zone]]] = {}
         #: the front future's candles per symbol for the current trigger bar (see _fut_context)
         self._fut_cache: dict[str, tuple[int, dict[str, Any] | None]] = {}
+        #: every symbol decides in its own task, so a 09:45 burst of sixteen signals would be
+        #: thirty-two concurrent historical calls; the broker client has no limiter of its own
+        self._fut_sem = asyncio.Semaphore(4)
         # -- the pivot data plane (docs/PIVOTS.md) --
         self.daily_cache = DailyCache(settings.data_dir / "daily")
         self._daily_failed: set[str] = set()  # 1d fetch raised; the repair loop retries every pass
@@ -1381,8 +1384,9 @@ class Engine:
         today = ist_today()
         start30 = self.calendar.previous_trading_day(self.calendar.previous_trading_day(today))
         try:
-            rows30 = await self.rest.candles(front, DECISION_TF, start30.isoformat(), today.isoformat())
-            rows1d = await self.rest.candles(front, "1d", (today - timedelta(days=35)).isoformat(), today.isoformat())
+            async with self._fut_sem:
+                rows30 = await self.rest.candles(front, DECISION_TF, start30.isoformat(), today.isoformat())
+                rows1d = await self.rest.candles(front, "1d", (today - timedelta(days=35)).isoformat(), today.isoformat())
         except Exception as exc:  # noqa: BLE001 — a route input must never fail the fill path
             log.warning("fut.context_unknown", symbol=underlying.symbol, error=str(exc)[:120])
             return None
