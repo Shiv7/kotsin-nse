@@ -202,6 +202,18 @@ NOISE_STOP_ATR = 1.0
 def cta(plan: TradePlan | None, score: float, kind: str) -> dict[str, str]:
     if kind == "EXPIRED":
         return {"action": "STAND_DOWN", "text": "Signal retired — no longer actionable."}
+    if kind == "ENTRY":
+        if plan is None:
+            return {"action": "ENTER", "text": "Parent FUDKII signal fired — mirrored into the RT book at its fill."}
+        return {
+            "action": "ENTER",
+            "text": (
+                f"{plan.contract} · stop {plan.stop:.2f} · T1 {plan.targets[0]:.2f} — mirrored into "
+                f"the RT book at the parent's fill."
+                if plan.targets and plan.stop is not None
+                else "Parent FUDKII signal fired — mirrored into the RT book at its fill."
+            ),
+        }
     if kind == "KEEPALIVE":
         # Not an entry. The entry happened when the parent signal fired at its 30m boundary; this
         # is the re-check that says the trade is still the trade. Reading a keep-alive as a fresh

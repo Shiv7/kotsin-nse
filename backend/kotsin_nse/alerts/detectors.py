@@ -65,7 +65,7 @@ class Alert:
     reason: str
     price: float
     evidence: dict[str, Any] = field(default_factory=dict)
-    kind: str = "TRIGGER"  # TRIGGER | KEEPALIVE | EXPIRED
+    kind: str = "TRIGGER"  # TRIGGER | ENTRY | KEEPALIVE | EXPIRED
     #: The stop/target ladder and OTM contract this alert implies. Attached after the detector
     #: returns, because geometry needs zones and the chain, and a detector stays pure.
     plan: dict[str, Any] | None = None
@@ -490,11 +490,16 @@ class FudkiiRtDetector:
         self.cfg = cfg or FudkiiRtConfig()
         self.living: dict[str, LivingSignal] = {}
 
-    def adopt(self, sig: dict[str, Any], ts: float) -> None:
+    def adopt(self, sig: dict[str, Any], ts: float, bar: UnifiedBar | None = None) -> Alert | None:
+        """Take a FUDKII signal into the living book. With the decision bar in hand this also
+        returns the ENTRY alert — the row the tab shows at the instant the parent fired, not
+        five minutes later when the first keep-alive re-check happens to land on a 1m close.
+        (Measured 2026-09-23: every RT row stamped :52/:22, seven minutes after the boundary,
+        while the parent had filled at :45:07.)"""
         targets = sig.get("targets") or []
         if not targets:
-            return
-        self.living[sig["signal_id"]] = LivingSignal(
+            return None
+        s = self.living[sig["signal_id"]] = LivingSignal(
             signal_id=sig["signal_id"],
             symbol=sig["symbol"],
             scrip_code=str(sig.get("scrip_code") or ""),
@@ -506,6 +511,9 @@ class FudkiiRtDetector:
             last_reeval_ts=ts,
             grade=str(sig.get("grade") or ""),
         )
+        if bar is None:
+            return None
+        return self._alert(s, bar, "ENTRY", "parent FUDKII signal fired — entry now", s.rr(bar.close))
 
     def on_bar(self, bar: UnifiedBar) -> list[Alert]:
         """1m close. Returns keep-alive and expiry alerts."""

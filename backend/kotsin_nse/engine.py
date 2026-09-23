@@ -878,7 +878,7 @@ class Engine:
 
     async def _handle_signal(self, sig: Signal, bar: UnifiedBar) -> None:
         await self.bus.publish(Topic.SIGNAL, sig)
-        self.alerts.adopt_signal(sig.to_json())
+        self.alerts.adopt_signal(sig.to_json(), bar)
         underlying = self.underlyings.get(sig.symbol)
         if underlying is None:
             await self.ledger.insert_signal(sig.to_json(), "NO_UNDERLYING", "not in the universe")
@@ -1098,6 +1098,7 @@ class Engine:
             qty=twin.qty,
             entry=twin.entry,
         )
+        self.alerts.mark_entered(pos.signal_id, ts=result.fill.ts, price=twin.entry, qty=twin.qty)
 
     async def _select_instrument(self, underlying: Instrument, sig: Signal) -> Any:
         cat = self.catalogue_loader.catalogue

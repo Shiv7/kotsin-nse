@@ -17,7 +17,7 @@ type Alert = {
   score: number
   reason: string
   price: number
-  kind: 'TRIGGER' | 'KEEPALIVE' | 'EXPIRED'
+  kind: 'TRIGGER' | 'ENTRY' | 'KEEPALIVE' | 'EXPIRED'
   evidence: Record<string, unknown>
   company: string
   exchange: string
@@ -162,6 +162,7 @@ function dirTone(d: Alert['direction']) {
 
 function kindTone(k: Alert['kind']) {
   if (k === 'TRIGGER') return 'border-sky-500/40 bg-sky-500/10 text-sky-300'
+  if (k === 'ENTRY') return 'border-amber-500/40 bg-amber-500/10 text-amber-300'
   if (k === 'KEEPALIVE') return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
   return 'border-slate-600/40 bg-slate-800 text-slate-400'
 }

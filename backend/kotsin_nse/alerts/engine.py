@@ -20,7 +20,7 @@ import structlog
 from ..bars.indicators import atr
 from ..bars.pivots import PivotLevels, classic_pivots
 from ..bars.unified import UnifiedBar
-from ..market.session import TF_SECONDS
+from ..market.session import TF_SECONDS, to_ist
 from . import entry as entry_model
 from . import plan as planner
 from . import rtcard
@@ -290,9 +290,34 @@ class AlertEngine:
             self._cpr_avg[symbol] = cached
         return levels, cached or None
 
-    def adopt_signal(self, sig: dict[str, Any]) -> None:
-        """A FUDKII signal just fired — hand it to the living-signal book."""
-        self.rt.adopt(sig, time.time())
+    def adopt_signal(self, sig: dict[str, Any], bar: UnifiedBar | None = None) -> None:
+        """A FUDKII signal just fired — hand it to the living-signal book, and publish the ENTRY
+        row now. ``fired_at`` is stamped here, in the same call that goes on to place the parent's
+        order, so the tab's timestamp is the entry instant to the second."""
+        a = self.rt.adopt(sig, time.time(), bar)
+        if a is None or bar is None:
+            return
+        try:
+            self._enrich(a, bar, self.engine.store.bars(bar.symbol, "30m", LOOKBACK))
+            self._emit(a)
+        except Exception as exc:  # noqa: BLE001 - an advisory row may not stall the entry
+            log.warning("alerts.failed", book="FUDKII_RT", symbol=bar.symbol, tf=bar.tf, error=str(exc))
+
+    def mark_entered(self, signal_id: str, *, ts: float, price: float, qty: int) -> None:
+        """The twin filled: put the actual fill — time to the millisecond, price, quantity — on
+        the ENTRY row's card. What was modelled at fire time becomes what happened."""
+        for a in self.alerts.get("FUDKII_RT", ()):
+            if a.kind == "ENTRY" and (a.evidence or {}).get("signalId") == signal_id:
+                card = a.card if a.card is not None else {}
+                card["entered"] = {
+                    "ts": ts,
+                    "ist": to_ist(ts).strftime("%H:%M:%S.%f")[:-3],
+                    "price": price,
+                    "qty": qty,
+                    "lagFromFiredS": round(ts - a.fired_at, 3) if a.fired_at else None,
+                }
+                a.card = card
+                return
 
     # -- the bar path -----------------------------------------------------------------------------
 

@@ -408,3 +408,24 @@ def test_a_stale_bid_book_falls_back_to_the_touch_and_says_so():
         lot_size=500, lots=1, now=now,
     )
     assert out.fill == 9.8 and "no live depth" in out.source
+
+
+def test_adoption_with_the_decision_bar_returns_the_entry_row_at_that_instant():
+    """The tab's first row for a living signal must be the entry, at the parent's fire time —
+    not the first keep-alive five minutes later (2026-09-23: every RT row stamped :52/:22)."""
+    det = FudkiiRtDetector()
+    t0 = 1_700_000_000
+    sig = {"signal_id": "s1", "symbol": "RELIANCE", "scrip_code": "2885", "direction": "BULLISH",
+           "entry": 100.0, "stop": 98.0, "targets": [110.0], "grade": "A"}
+    a = det.adopt(sig, t0, _bar(t0, 100.0, tf="30m"))
+    assert a is not None and a.kind == "ENTRY" and a.ts == t0 and a.tf == "30m"
+    assert a.evidence["signalId"] == "s1" and a.evidence["rrLeft"] == 5.0
+    assert det.on_bar(_bar(t0 + 60, 101.0, tf="1m")) == [], "no keep-alive inside the re-eval window"
+    assert [x.kind for x in det.on_bar(_bar(t0 + 300, 101.0, tf="1m"))] == ["KEEPALIVE"]
+
+
+def test_adoption_without_a_bar_registers_silently_as_before():
+    det = FudkiiRtDetector()
+    assert det.adopt({"signal_id": "s2", "symbol": "X", "scrip_code": "1", "direction": "BULLISH",
+                      "entry": 10.0, "stop": 9.0, "targets": [12.0]}, 1_700_000_000) is None
+    assert "s2" in det.living
