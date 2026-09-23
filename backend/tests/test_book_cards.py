@@ -42,6 +42,10 @@ async def test_a_trigger_reads_differently_in_every_book(settings):
 
         x = await e.book_cards("FUDKII_RT_X", ist_today())
         assert x["counts"] == {"OPEN": 1} and x["cards"][0]["state"] == "OPEN" and x["cards"][0]["live"]["qtyRemaining"] == 250
+        ep = x["cards"][0]["exitPlan"]
+        assert ep["policy"].startswith("RT-X") and [r["kind"] for r in ep["rows"]][-2:] == ["trail", "time"]
+        assert any(r["kind"] == "stop" and r["qty"] == 250 for r in ep["rows"])
+        assert x["cards"][0]["routeLabel"] == "IN TREND" and x["cards"][0]["plan"] is None, "a held trigger needs no preview"
         y = await e.book_cards("FUDKII_RT_Y", ist_today())
         assert y["cards"][0]["state"] == "SKIPPED" and "dried volume" in y["cards"][0]["skip"]["reason"]
         assert "dried volume on future" in y["cards"][0]["cons"] and "room 2.4 ATR" in y["cards"][0]["pros"]
@@ -56,6 +60,10 @@ async def test_a_trigger_reads_differently_in_every_book(settings):
         await e.ledger.insert_signal(s2.to_json(), "NO_INSTRUMENT", "no tradeable strike")
         x = await e.book_cards("FUDKII_RT_X", ist_today())
         assert [c["state"] for c in x["cards"]] == ["OPEN", "NO_FILL"] and x["cards"][1]["parentReason"] == "no tradeable strike"
+        assert x["cards"][1]["plan"] is None, "TCS is not in this offline universe: no preview, no crash"
+        e.underlyings["TCS"] = Instrument("11536", "TCS", Segment.NSE_EQ, InstrumentKind.EQUITY, underlying="TCS")
+        x = await e.book_cards("FUDKII_RT_X", ist_today())
+        assert x["cards"][1]["plan"] == {"ok": False, "reason": x["cards"][1]["plan"]["reason"]} and x["cards"][1]["plan"]["reason"]
     finally:
         await e.stop()
 

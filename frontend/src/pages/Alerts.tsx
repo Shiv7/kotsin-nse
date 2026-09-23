@@ -754,9 +754,9 @@ export function Alerts() {
         </div>
       )}
 
-      <div className="mb-4 flex flex-wrap gap-1 border-b border-slate-800 pb-2">
+      <div className="mb-4 flex items-center gap-1 overflow-x-auto whitespace-nowrap border-b border-slate-800 pb-2">
         <button
-          onClick={() => setBook('ALL')}
+          onClick={() => { setBook('ALL'); setBookView(null) }}
           className={`rounded px-2.5 py-1 text-xs ${
             book === 'ALL' ? 'bg-slate-800 text-white' : 'text-slate-400 hover:text-white'
           }`}
@@ -769,7 +769,7 @@ export function Alerts() {
           return (
             <button
               key={k}
-              onClick={() => setBook(k)}
+              onClick={() => { setBook(k); setBookView(null) }}
               title={`${seen} bars evaluated`}
               className={`rounded px-2.5 py-1 text-xs ${
                 book === k
@@ -783,10 +783,8 @@ export function Alerts() {
             </button>
           )
         })}
-      </div>
-
-      <div className="mb-4 flex flex-wrap items-center gap-1 border-b border-slate-800 pb-2">
-        <span className="mr-1 text-[10px] uppercase tracking-wide text-slate-500">trigger cards · per book</span>
+        <span className="mx-2 inline-block h-4 w-px flex-none bg-slate-700" aria-hidden="true" />
+        <span className="mr-1 flex-none text-[10px] uppercase tracking-wide text-slate-500">trigger cards</span>
         {BOOK_TABS.map(([k, label]) => (
           <button
             key={k}

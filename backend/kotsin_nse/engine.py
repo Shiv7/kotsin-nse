@@ -1393,7 +1393,37 @@ class Engine:
                 cons.append(f"stop {stop_pct:.2f}% away — inside one bar's noise")
             if float(conf.get("fortress") or 0) >= 9:
                 cons.append(f"T1 is a {float(conf['fortress']):.1f} wall")
+            ev = sgn.get("evidence") or {}
+            bull = sgn["direction"] == "BULLISH"
+            zones = ctx.get("zones") or []
+            clusters = sorted(
+                ({"price": z["price"], "strength": z["strength"], "members": z["members"], "wall": z.get("wall", False),
+                  "side": "ahead" if (z["price"] > float(sgn["entry"])) == bull else "behind"}
+                 for z in zones if abs(z["price"] - float(sgn["entry"])) / float(sgn["entry"]) <= 0.03),
+                key=lambda z: z["price"], reverse=not bull,
+            )
+            und = self.underlyings.get(sgn["symbol"])
+            plan = None
+            if ps is None and und is not None and (state not in ("IN_TREND", "NO_ROUTE") or key is StrategyKey.FUDKII):
+                plan_sig = entry_sig if entry_sig is not None else sgn
+                try:
+                    plan = await self._plan_preview(key, plan_sig, und)
+                except Exception as exc:  # noqa: BLE001 — a preview must never fail the page
+                    plan = {"ok": False, "reason": f"preview failed: {exc}"[:120]}
+            exit_plan = None
+            if ps is not None:
+                p_inst = Instrument(**ps["instrument"]) if isinstance(ps.get("instrument"), dict) else None
+                if p_inst is not None:
+                    exit_plan = self._exit_plan(key, p_inst, int(ps["qty"]), tuple(ps.get("option_targets") or ()), float(ps.get("option_sl") or 0), float(ps.get("equity_sl") or 0), und.segment if und else Segment.NSE_EQ)
+            if skip is not None:
+                route_label = "SKIP"
+            elif route is not None:
+                route_label = "COUNTER-TREND" if route.get("route") == "COUNTER" else "IN TREND"
+            else:
+                route_label = None
             cards.append({
+                "atr": ev.get("atr"), "oi": ev.get("oi"), "oiChangePct": ev.get("oi_change_pct"), "clusters": clusters[:8],
+                "futLevels": self._fut_levels(route, bull), "plan": plan, "exitPlan": exit_plan, "routeLabel": route_label,
                 "signalId": sid, "symbol": sgn["symbol"], "direction": sgn["direction"], "ts": sgn["ts"], "grade": sgn.get("grade"),
                 "rr": sgn.get("rr"), "reason": sgn.get("reason"), "entry": sgn["entry"], "stop": sgn["stop"], "targets": sgn.get("targets"),
                 "stopPct": round(stop_pct, 2), "confluence": conf, "evidence": sgn.get("evidence") or {}, "gates": sgn.get("gates") or [],
@@ -1407,6 +1437,106 @@ class Engine:
         for c in cards:
             counts[c["state"]] = counts.get(c["state"], 0) + 1
         return {"book": book, "day": day.isoformat(), "wallet": self.wallets[book].to_json() if book in self.wallets else None, "counts": counts, "cards": cards, "nowTs": time.time()}
+
+    def _exit_plan(self, key: StrategyKey, inst: Instrument, qty: int, ladder: tuple[float, ...], option_sl: float, equity_stop: float, segment: Segment) -> dict[str, Any]:
+        """What leaves at which threshold, for this book — the card's "what happens next"."""
+        lim = self._exits_by_strategy[key.value].limits if key.value in self._exits_by_strategy else self.limits
+        lot = max(1, inst.lot_size)
+        rows: list[dict[str, Any]] = []
+        rungs = list(ladder[:4])
+        if lim.own_ladder:
+            for i, r in enumerate(rungs):
+                last = i == len(rungs) - 1
+                out = max(0, qty - i * lot) if last else min(lot, qty)
+                rows.append({"kind": "target", "at": f"T{i + 1} {r:.2f}", "action": "the rest" if last else "1 lot", "qty": out})
+        else:
+            left = qty
+            for i, r in enumerate(rungs):
+                share = lim.target_ladder[i] if i < len(lim.target_ladder) else 0.0
+                out = min(left, (int(qty * share) // lot) * lot) if i < len(rungs) - 1 else left
+                left -= out
+                rows.append({"kind": "target", "at": f"T{i + 1} {r:.2f}", "action": f"{share:.0%}", "qty": out})
+        if option_sl > 0:
+            sus = f", {lim.sustain_s:.0f} s sustain" if lim.sustain_s else ""
+            rows.append({"kind": "stop", "at": f"option stop {option_sl:.2f} (equity stop through δ{sus})", "action": "all", "qty": qty})
+            if lim.sustain_s:
+                rows.append({"kind": "stop", "at": f"hard floor {option_sl * (1 - lim.hard_floor_below_stop_pct / 100):.2f} — {lim.hard_floor_below_stop_pct:.0f}% through the stop, no sustain", "action": "all", "qty": qty})
+        if equity_stop > 0:
+            rows.append({"kind": "stop", "at": f"underlying {equity_stop:.2f} confirmed", "action": "all", "qty": qty})
+        if lim.own_ladder:
+            if lim.arm_mode == "immediate":
+                trail = f"armed at once by the equity T1 or a 1m close over own R1: peak − {lim.peak_giveback_pct:.0f}% ({lim.trail_dwell_samples} reads)"
+            elif lim.arm_min_move:
+                trail = f"armed once T1 (≥ {lim.arm_min_move:g}× expected move) is sustained: SL one rung behind, band max({lim.peak_giveback_pct:.0f}%, {lim.giveback_move_frac:g}× expected move), {lim.sustain_s:.0f} s sustain"
+            else:
+                trail = f"after T1 is sustained ({lim.sustain_s:.0f} s + a 1m close): SL steps to the rung below, line at peak − {lim.peak_giveback_pct:.0f}%, one read through"
+        else:
+            trail = f"trail arms at +{lim.trail_arm_pct:.0f}%: stop = peak − {lim.trail_giveback_pct:.0f}% of the gain; breakeven after T1"
+        rows.append({"kind": "trail", "at": trail, "action": "all remaining", "qty": None})
+        rows.append({"kind": "time", "at": "force-flat " + ("23:20" if segment is Segment.MCX_FO else "15:20") + " IST", "action": "all remaining", "qty": None})
+        policy = {
+            "FUDKII": "legacy: share ladder 40/30/20/10, trail 3%/40%",
+            "FUDKII_RT_X": "RT-X: own MTF ladder · touch pays a lot, sustain steps the SL · 3% line",
+            "FUDKII_RT_N": "RT-N: daily R1–R4 · immediate arm · 2% line, 3 reads",
+            "FUDKII_RT_Y": "RT-Y: arm at 0.5× expected move · SL one rung behind · band in expected-move units",
+            "FUDKII_CT_X": "CT-X: the fade under RT-X's exits",
+            "FUDKII_CT_Y": "CT-Y: the fade under RT-Y's exits",
+            "FUDKII_RT_MCX": "RT-MCX: RT-X's exits on commodities",
+        }.get(key.value, key.value)
+        return {"policy": policy, "rows": rows}
+
+    async def _plan_preview(self, key: StrategyKey, sgn: dict[str, Any], underlying: Instrument) -> dict[str, Any]:
+        """What THIS book would buy on the trigger right now: the contract the selector picks at
+        the live market, the size under the book's limits and wallet, the δ-projected stop and
+        the book's ladder. A preview, not an order — and honest about why there is none."""
+        sig = Signal(
+            strategy=key, symbol=sgn["symbol"], direction=Direction(sgn["direction"]), ts=int(sgn["ts"]),
+            entry=float(sgn["entry"]), stop=float(sgn["stop"]), targets=tuple(float(t) for t in (sgn.get("targets") or ())),
+        )
+        sel = await self._select_instrument(underlying, sig)
+        if not sel.ok or sel.instrument is None:
+            return {"ok": False, "reason": sel.reason}
+        inst = sel.instrument
+        delta = estimate_delta(spot=sig.entry, strike=inst.strike, option_type=inst.option_type) if inst.is_option else 1.0
+        option_sl, option_targets = map_levels_to_option(
+            equity_entry=sig.entry, equity_stop=sig.stop, equity_targets=sig.targets, option_premium=sel.premium, delta=delta
+        )
+        book = self._exits_by_strategy.get(key.value)
+        lim = book.limits if book is not None else self.limits
+        wallet = self.wallets.get(key.value)
+        sizing = size_position(
+            instrument=inst, premium=sel.premium, option_stop=option_sl, option_target1=option_targets[0] if option_targets else None,
+            balance=wallet.balance if wallet else 0.0, available=wallet.available if wallet else 0.0, limits=lim, costs=self.costs,
+        )
+        ladder, edm, note = (self._own_ladder_for(sig.symbol, inst, sel.premium, lim) if lim.own_ladder else (option_targets, 0.0, "δ-projected"))
+        q = self.quotes.get(inst.scrip_code)
+        return {
+            "ok": sizing.ok, "reason": sizing.reason, "contract": inst.name or inst.scrip_code, "scripCode": inst.scrip_code,
+            "strike": inst.strike, "type": inst.option_type.value if inst.option_type else None, "premium": sel.premium,
+            "bid": q.bid if q else None, "ask": q.ask if q else None, "spreadPct": round(q.spread_pct * 100, 2) if q and q.spread_pct is not None else None,
+            "oi": getattr(q, "oi", None) if q else None, "delta": round(abs(delta), 2), "lots": sizing.lots, "qty": sizing.qty, "outlay": round(sizing.outlay, 0),
+            "lotSize": inst.lot_size, "optionSl": option_sl, "ladder": list(ladder), "edm": edm, "ladderNote": note,
+            "exitPlan": self._exit_plan(key, inst, sizing.qty, tuple(ladder), option_sl, sig.stop, underlying.segment) if sizing.ok else None,
+        }
+
+    @staticmethod
+    def _fut_levels(route: dict[str, Any] | None, bullish: bool) -> dict[str, Any] | None:
+        """The future's side of the levels table: its trigger close, the nearest key level behind
+        (the stop side) and the next two ahead, from the route event's leg summary."""
+        leg = next((lg for lg in (route or {}).get("legs", []) if lg.get("name") == "future"), None)
+        if not leg:
+            return None
+        close = float(leg["close"])
+        lv = [(k, float(v)) for k, v in (leg.get("levels") or {}).items() if v]
+        behind = [x for x in lv if (x[1] < close) == bullish]
+        ahead = [x for x in lv if (x[1] > close) == bullish]
+        behind.sort(key=lambda x: abs(close - x[1]))
+        ahead.sort(key=lambda x: abs(x[1] - close))
+        return {
+            "close": close, "atr": leg.get("atr"), "surgeT": leg.get("surgeT"), "surgeT1": leg.get("surgeT1"), "volume": leg.get("volume"),
+            "behind": {"label": behind[0][0], "price": behind[0][1]} if behind else None,
+            "ahead": [{"label": a[0], "price": a[1]} for a in ahead[:3]],
+        }
 
     async def operator_take(self, book: str, signal_id: str) -> dict[str, Any]:
         """The operator's override: enter THIS book on a trigger it declined or never reached — the
@@ -1470,29 +1600,35 @@ class Engine:
         log.info("wallet.reset", strategy=strategy, initial=amount, previous_balance=round(old.balance, 2))
         return fresh
 
-    def _stamp_own_ladder(self, pos: Position, inst: Instrument, lim: RiskLimits, symbol: str) -> None:
+    def _own_ladder_for(self, symbol: str, inst: Instrument, entry: float, lim: RiskLimits) -> tuple[tuple[float, ...], float, str]:
         """The RT/CT books' targets: nothing delta-projected — the contract's own levels from its
         previous session(s) (LegPivotLoader, thin-bar and zero-range guarded), per the book's
-        ladder mode. No ladder → the equity trigger only."""
+        ladder mode. No ladder → the equity trigger only. Returns (rungs, expected move, note)."""
         own = self.leg_pivots.for_code(inst.scrip_code)
-        tol, reg = self.option_ladder_tolerance(symbol, inst.strike, inst.option_type, pos.entry)
-        pos.option_edm = self.expected_move(symbol, inst, pos.entry)
+        tol, reg = self.option_ladder_tolerance(symbol, inst.strike, inst.option_type, entry)
+        edm = self.expected_move(symbol, inst, entry)
         if own is None:
             rungs: list[float] = []
         elif lim.ladder_mode == "daily_r":
-            rungs = [r for r in (own.levels.r1, own.levels.r2, own.levels.r3, own.levels.r4) if r > pos.entry]
+            rungs = [r for r in (own.levels.r1, own.levels.r2, own.levels.r3, own.levels.r4) if r > entry]
         else:
-            rungs = [r["price"] for r in own.rungs_above(pos.entry, tolerance_pct=tol)]
-            if lim.arm_min_move and pos.option_edm > 0:
-                rungs = [r for r in rungs if r >= pos.entry * (1 + lim.arm_min_move * pos.option_edm)]
-        pos.option_targets = tuple(rungs[:4])
-        pos.option_t1 = pos.option_targets[0] if pos.option_targets else 0.0
-        pos.note += (
-            f" · own {lim.ladder_mode} ladder, tol {tol:.1f}% (k {reg.k:.2f} {reg.band.value}, {reg.source}), "
-            f"expected move {pos.option_edm * 100:.0f}%"
-            if pos.option_targets
-            else " · no own ladder, equity trigger only"
+            rungs = [r["price"] for r in own.rungs_above(entry, tolerance_pct=tol)]
+            if lim.arm_min_move and edm > 0:
+                rungs = [r for r in rungs if r >= entry * (1 + lim.arm_min_move * edm)]
+        targets = tuple(rungs[:4])
+        note = (
+            f"own {lim.ladder_mode} ladder, tol {tol:.1f}% (k {reg.k:.2f} {reg.band.value}, {reg.source}), expected move {edm * 100:.0f}%"
+            if targets
+            else "no own ladder, equity trigger only"
         )
+        return targets, edm, note
+
+    def _stamp_own_ladder(self, pos: Position, inst: Instrument, lim: RiskLimits, symbol: str) -> None:
+        targets, edm, note = self._own_ladder_for(symbol, inst, pos.entry, lim)
+        pos.option_targets = targets
+        pos.option_t1 = targets[0] if targets else 0.0
+        pos.option_edm = edm
+        pos.note += " · " + note
 
     async def _handle_counter(self, sig: Signal, bar: UnifiedBar) -> None:
         """The counter-trend route on a FUDKII trigger (strategy/counter.py). COUNTER → the fade is
@@ -1508,7 +1644,15 @@ class Engine:
         atr_v = legs[0].atr if legs else 0.0
         dec = counter_route(legs, bullish=sig.direction is Direction.BULLISH, st_flipped="ST flip" in sig.reason)
         self.alerts.mark_route(sig.signal_id, decision=dec.to_json())
-        await self.ledger.event("counter.route", {"signal_id": sig.signal_id, "symbol": sig.symbol, **dec.to_json()})
+        legs_json = [
+            {
+                "name": leg.name, "open": leg.open, "high": leg.high, "low": leg.low, "close": leg.close, "atr": round(leg.atr, 2),
+                "surgeT": leg.surge_t, "surgeT1": leg.surge_t1, "volume": leg.volume,
+                "levels": {p.label: round(p.price, 2) for p in leg.points},
+            }
+            for leg in legs
+        ]
+        await self.ledger.event("counter.route", {"signal_id": sig.signal_id, "symbol": sig.symbol, "legs": legs_json, **dec.to_json()})
         log.info("counter.route", symbol=sig.symbol, route=dec.route, reason=dec.reason)
         if dec.route != "COUNTER":
             return
