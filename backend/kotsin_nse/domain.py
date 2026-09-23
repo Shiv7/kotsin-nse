@@ -260,6 +260,10 @@ class Position:
     t_close_ok: bool = False
     #: index of the last rung whose sustain completed (-1: none; 0 = T1 → armed)
     sustained_idx: int = -1
+    #: one day's expected move of the parent through delta, as a fraction of the premium (RT-Y)
+    option_edm: float = 0.0
+    #: sustain clock for a post-arm line breach (RT-Y)
+    line_breach_since: float | None = None
 
     def __post_init__(self) -> None:
         if self.qty_remaining == 0:

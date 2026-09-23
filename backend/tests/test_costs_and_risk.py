@@ -380,8 +380,8 @@ def test_the_rt_pool_is_thirty_slots_and_the_base_book_keeps_its_own():
     assert RT_X_LIMITS.max_positions_per_strategy == 30
     assert RT_X_LIMITS.max_lots == 4
     # The all-books ceiling counts FUDKII's positions too, so the base book's 6 would have stopped
-    # the twins at three pairs.
-    assert RT_X_LIMITS.max_positions_all_books == 60
+    # the twins at three pairs; with three RT books off every fill it has to seat 4 × a fill.
+    assert RT_X_LIMITS.max_positions_all_books == 90
     assert RiskLimits().max_lots is None
     assert RiskLimits().max_positions_per_strategy == 3
 

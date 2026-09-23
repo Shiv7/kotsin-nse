@@ -289,9 +289,10 @@ def test_t2_touch_takes_a_lot_keeps_the_sl_at_t1_and_t2_sustain_steps_it():
     d = e.evaluate(pos, _view(option_ltp=28.0, option_mid=28.0, now=2100.0))
     assert d is not None and d.qty == 100 and "T2 28.00 touched" in d.note
     apply_exit(pos, d, fill_price=28.0, charges=0, now=2100.0)
-    # the stepped component stays at T1 until T2 is sustained; the peak component (28 × 0.97)
-    # already lifts the single rising line above it — max(stepped SL, peak − 3 %)
-    assert pos.sustained_idx == 0 and pos.ratchet_sl == 27.16
+    # the stepped component stays at T1 until T2 is sustained; the band (28 × 0.97 = 27.16) is read
+    # live and is what the single rising line becomes — max(stepped SL, peak − 3 %) — never folded in
+    assert pos.sustained_idx == 0 and pos.ratchet_sl == 24.0
+    assert e._band_level(pos, _view(now=2100.0)) == 27.16
     for t in (2130.0, 2165.0):
         assert e.evaluate(pos, _view(option_ltp=28.5, option_mid=28.5, now=t)) is None
     assert e.evaluate(pos, _view(option_ltp=28.5, option_mid=28.5, now=2176.0)) is None
@@ -315,9 +316,10 @@ def test_after_arming_the_stop_is_max_of_the_stepped_sl_and_peak_minus_3pct_and_
     e = ExitEngine(RT_X_LIMITS)
     pos = _own(option_targets=(24.0, 100.0))  # a far T2, so 40 tests the line, not a rung
     _sustain_t1(e, pos)
-    # the peak lifts the line: 40 × (1 − 3 %) = 38.80 (spread 0.5 % × 1.5 = 0.75 % < 3 %)
+    # the peak lifts the line: 40 × (1 − 3 %) = 38.80 (spread 0.5 % × 1.5 = 0.75 % < 3 %); the
+    # stepped SL stays at T1 — the band is read live, never folded into it
     assert e.evaluate(pos, _view(option_ltp=40.0, option_mid=40.0, now=2100.0)) is None
-    assert pos.ratchet_sl == 38.8 and pos.option_sl == 38.8
+    assert pos.ratchet_sl == 24.0 and e._band_level(pos, _view(now=2100.0)) == 38.8
     # trading through it ends the trade at once — no 75 s grace on the rising stop
     d = e.evaluate(pos, _view(option_ltp=38.5, option_mid=38.5, now=2101.0))
     assert d is not None and d.qty == pos.qty_remaining and "hard SL 38.80" in d.note
@@ -349,3 +351,103 @@ def test_the_base_book_never_arms_on_the_underlying_and_keeps_its_share_ladder()
     d = e.evaluate(pos, _view(option_ltp=24.0, option_mid=24.0))
     assert d is not None and d.qty == 100 and "40%" in d.note, "the legacy share ladder (40%, lot-rounded), untouched"
     assert pos.armed_by == "" and pos.ratchet_sl == 0.0
+
+
+# -- RT-N and RT-Y: the same fills, a different arming and give-back ------------------------------
+
+
+def test_rt_n_arms_the_instant_the_underlying_touches_its_t1_and_the_band_needs_three_reads():
+    """The policy that ran on 2026-09-23: one lot out at the equity trigger and the 2 % band live at
+    once — no 75 s sustain in front of it — but a breach of the band is three consecutive reads, so
+    one crossed print cannot end the trade."""
+    from kotsin_nse.risk.exits import apply_exit
+    from kotsin_nse.risk.limits import RT_N_LIMITS
+
+    e = ExitEngine(RT_N_LIMITS)
+    pos = _own(strategy="FUDKII_RT_N")
+    d = e.evaluate(pos, _view(option_ltp=22.0, option_mid=22.0, underlying_ltp=1020.0, now=2000.0))
+    assert d is not None and d.qty == 100 and pos.armed_by == "equity"
+    apply_exit(pos, d, fill_price=22.0, charges=0, now=2000.0)
+    assert pos.armed_ts == 2000.0 and pos.ratchet_sl == 20.0 and pos.peak_mid == 22.0
+    # 23.50 is under the next rung (its own R1 at 24.00 follows the 22.00 equity-made T1)
+    assert e.evaluate(pos, _view(option_ltp=23.5, option_mid=23.5, now=2010.0)) is None
+    assert e._band_level(pos, _view(now=2010.0)) == 23.03, "2 % off the 23.50 peak"
+    for t in (2011.0, 2012.0):
+        assert e.evaluate(pos, _view(option_ltp=23.0, option_mid=23.0, now=t)) is None
+    d = e.evaluate(pos, _view(option_ltp=23.0, option_mid=23.0, now=2013.0))
+    assert d is not None and d.reason.value == "TRAIL" and "[dwell]" in d.note and d.qty == pos.qty_remaining
+
+
+def test_rt_n_arms_on_a_minute_close_over_its_own_r1_not_on_a_touch():
+    from kotsin_nse.risk.limits import RT_N_LIMITS
+
+    e = ExitEngine(RT_N_LIMITS)
+    pos = _own(strategy="FUDKII_RT_N")
+    assert e.evaluate(pos, _view(option_ltp=24.5, option_mid=24.5, now=2000.0)) is None, "a touch of R1 is not a close"
+    assert pos.armed_by == ""
+    d = e.evaluate(pos, _view(option_ltp=24.5, option_mid=24.5, now=2065.0))
+    assert d is not None and d.qty == 100 and "1m close 24.50" in d.note
+    assert pos.armed_ts == 2065.0 and pos.ratchet_sl == 20.0
+
+
+def test_rt_y_does_not_arm_until_the_option_has_made_half_a_days_expected_move():
+    """KEI and GRASIM armed at breakeven and were retested through it: arming waits for the option
+    to have moved 0.5 × its expected daily move, on the equity trigger and on its own rungs alike."""
+    from kotsin_nse.risk.limits import RT_Y_LIMITS
+
+    e = ExitEngine(RT_Y_LIMITS)
+    pos = _own(strategy="FUDKII_RT_Y", option_edm=1.0)  # a day's move = 100 % of premium → arm at 30.00
+    assert e.evaluate(pos, _view(option_ltp=22.0, option_mid=22.0, underlying_ltp=1020.0, now=2000.0)) is None
+    assert e.evaluate(pos, _view(option_ltp=24.5, option_mid=24.5, now=2001.0)) is None, "its own T1 at 24 is under the threshold"
+    assert pos.armed_by == ""
+    d = e.evaluate(pos, _view(option_ltp=30.0, option_mid=30.0, underlying_ltp=1020.0, now=2010.0))
+    assert d is not None and pos.option_targets == (30.0, 32.0, 36.0) and pos.ratchet_sl == 20.0
+
+
+def test_rt_y_keeps_the_sl_one_rung_behind_and_every_post_arm_stop_needs_the_sustain():
+    """T1 sustained arms the band but leaves the SL at breakeven (one rung behind), and a breach
+    of the line must hold 75 s: KEI's breakeven fired on a one-minute wick at 10:31 with the
+    underlying up, two hours before a +143 % move."""
+    from kotsin_nse.risk.limits import RT_Y_LIMITS
+
+    e = ExitEngine(RT_Y_LIMITS)
+    pos = _own(strategy="FUDKII_RT_Y", option_edm=0.4)  # threshold 24.00 = T1
+    _sustain_t1(e, pos)
+    assert pos.sustained_idx == 0 and pos.armed_ts == 2076.0 and pos.ratchet_sl == 20.0, "armed, SL still at breakeven"
+    # band = max(10 %, 0.25 × 40 %) = 10 % off the 24.50 peak → 22.05, above the 20.00 rung SL
+    assert e._band_level(pos, _view(now=2076.0)) == 22.05
+    assert e.evaluate(pos, _view(option_ltp=21.5, option_mid=21.5, now=2100.0)) is None, "one read through the band is not an exit"
+    assert pos.line_breach_since == 2100.0
+    assert e.evaluate(pos, _view(option_ltp=22.5, option_mid=22.5, now=2130.0)) is None
+    assert pos.line_breach_since is None, "back over the line: the clock resets"
+    assert e.evaluate(pos, _view(option_ltp=21.5, option_mid=21.5, now=2140.0)) is None
+    assert e.evaluate(pos, _view(option_ltp=21.5, option_mid=21.5, now=2214.0)) is None, "74 s is not 75"
+    d = e.evaluate(pos, _view(option_ltp=21.5, option_mid=21.5, now=2216.0))
+    assert d is not None and d.reason.value == "TRAIL" and "[sustain]" in d.note and d.qty == pos.qty_remaining
+
+
+def test_rt_y_t2_touch_steps_the_sl_to_t1_and_t2_sustained_leaves_it_there():
+    from kotsin_nse.risk.exits import apply_exit
+    from kotsin_nse.risk.limits import RT_Y_LIMITS
+
+    e = ExitEngine(RT_Y_LIMITS)
+    pos = _own(strategy="FUDKII_RT_Y", option_edm=0.4)
+    _sustain_t1(e, pos)
+    d = e.evaluate(pos, _view(option_ltp=28.0, option_mid=28.0, now=2100.0))
+    assert d is not None and "T2 28.00 touched" in d.note
+    apply_exit(pos, d, fill_price=28.0, charges=0, now=2100.0)
+    assert pos.ratchet_sl == 24.0
+    for t in (2130.0, 2165.0, 2176.0):
+        assert e.evaluate(pos, _view(option_ltp=28.5, option_mid=28.5, now=t)) is None
+    assert pos.sustained_idx == 1 and pos.ratchet_sl == 24.0, "one rung behind: T2 sustained leaves the SL at T1"
+
+
+def test_the_legacy_half_of_peak_floor_is_the_base_books_not_the_rt_books():
+    """Entry 20, stop 17, peak 24.5 (1.5R), back to 21.5: the base book gives up half the peak
+    and leaves; an own-ladder book has its own line and this rule must not pre-empt it."""
+    base, rt = ExitEngine(RiskLimits()), ExitEngine(RT_X_LIMITS)
+    a, b = _own(strategy="FUDKII", option_targets=(40.0,)), _own(option_targets=(40.0,), option_t1=40.0)
+    for e, p in ((base, a), (rt, b)):
+        assert e.evaluate(p, _view(option_ltp=24.5, option_mid=24.5, now=2000.0)) is None
+    assert base.evaluate(a, _view(option_ltp=21.5, option_mid=21.5, now=2010.0)) is not None
+    assert rt.evaluate(b, _view(option_ltp=21.5, option_mid=21.5, now=2010.0)) is None

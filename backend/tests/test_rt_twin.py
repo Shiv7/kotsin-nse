@@ -37,12 +37,12 @@ async def test_a_fudkii_fill_is_mirrored_into_the_rt_book_at_the_same_price(sett
 
         await e._open_rt_twin(pos, opt, _fill(now))
 
-        twins = [p for p in e.positions.values() if p.strategy == "FUDKII_RT_X"]
-        assert len(twins) == 1
-        t = twins[0]
-        assert (t.instrument, t.qty, t.entry, t.opened_ts) == (opt, 250, 50.0, now), "copied, not re-matched"
-        assert t.id != pos.id and "twin of p1" in t.note
-        assert e.wallets["FUDKII_RT_X"].available == pytest.approx(before - 50.0 * 250 - 12.5)
+        twins = {p.strategy: p for p in e.positions.values() if p.strategy.startswith("FUDKII_RT")}
+        assert set(twins) == {"FUDKII_RT_X", "FUDKII_RT_N", "FUDKII_RT_Y"}, "one twin per NSE exit policy"
+        for t in twins.values():
+            assert (t.instrument, t.qty, t.entry, t.opened_ts) == (opt, 250, 50.0, now), "copied, not re-matched"
+            assert t.id != pos.id and "twin of p1" in t.note
+            assert e.wallets[t.strategy].available == pytest.approx(before - 50.0 * 250 - 12.5), "each book pays its own purse"
         assert e.wallets["FUDKII_RT_MCX"].available == e.wallets["FUDKII_RT_MCX"].balance, "NSE never touches the MCX purse"
     finally:
         await e.stop()
@@ -96,7 +96,11 @@ async def test_the_twin_carries_the_options_own_classic_ladder_when_it_has_one(s
         await e._open_rt_twin(pos, opt, _fill(now))
         twin = next(p for p in e.positions.values() if p.strategy == "FUDKII_RT_X")
         assert twin.option_t1 == 60.0 and twin.option_targets == (60.0, 70.0, 90.0, 110.0)
-        assert twin.targets_hit == 0 and "own classic ladder" in twin.note
+        assert twin.targets_hit == 0 and "own mtf ladder" in twin.note
+        n = next(p for p in e.positions.values() if p.strategy == "FUDKII_RT_N")
+        assert n.option_targets == (60.0, 70.0, 90.0, 110.0) and "own daily_r ladder" in n.note
+        y = next(p for p in e.positions.values() if p.strategy == "FUDKII_RT_Y")
+        assert y.option_targets == (60.0, 70.0, 90.0, 110.0), "no IV history → no expected move → every rung above entry"
         assert pos.option_targets == (70.0,), "the parent keeps its delta-projected ladder"
 
         # a contract with no ladder: equity trigger only. A different underlying, because the RT

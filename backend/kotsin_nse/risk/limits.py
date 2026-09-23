@@ -88,6 +88,22 @@ class RiskLimits:
     reproject_stop_s: float | None = None
     #: Lots that leave when the ratchet arms.
     arm_tranche_lots: int = 1
+    #: -- the knobs that tell the three RT books apart (docs/PIVOTS.md §6) --
+    #: "mtf": the contract's own daily+weekly rungs above entry | "daily_r": its daily R1–R4 above entry
+    ladder_mode: str = "mtf"
+    #: "touch": T1 touch pays a lot, its sustain steps the SL and arms the band |
+    #: "immediate": arming (equity T1 touch or own-R1 1m close) pays a lot and starts the band at once
+    arm_mode: str = "touch"
+    #: a rung must sit this many expected daily option moves above entry to be a target (0 = every rung)
+    arm_min_move: float = 0.0
+    #: the stepped SL trails one rung BEHIND the last touch (breakeven until T2 is touched)
+    sl_lag: bool = False
+    #: band = max(peak_giveback_pct, giveback_move_frac × expected daily option move), spread-floored
+    giveback_move_frac: float = 0.0
+    #: how the band exits: "through" (one read), "dwell" (trail_dwell_samples reads), "sustain" (sustain_s)
+    band_exit: str = "through"
+    #: the stepped rung SL also needs sustain_s continuous breach rather than one read
+    post_arm_sustain: bool = False
 
     def position_budget(self, balance: float) -> float:
         return min(balance * self.max_position_pct / 100, self.max_position_inr)
@@ -101,7 +117,7 @@ RT_X_LIMITS = RiskLimits(
     #: The all-books ceiling counts every live position, FUDKII's included, so the base book's
     #: 6 would stop the twins at three pairs. Raised only for the guard the twin is checked
     #: against; FUDKII keeps its own conservative ceiling.
-    max_positions_all_books=60,
+    max_positions_all_books=90,
     time_stop_bars=None,            # exits on targets, ratchet, stop or the close — never a clock
     sustain_s=75.0,                 # continuous option-side breach before it counts
     hard_floor_below_stop_pct=9.0,  # path-independent escape hatch
@@ -110,4 +126,48 @@ RT_X_LIMITS = RiskLimits(
     peak_arm_after_s=90.0,
     own_ladder=True,
     reproject_stop_s=10.0,
+)
+
+#: The policy that ran on 2026-09-23 and took +10.8k on GRASIM: the contract's own daily R1–R4,
+#: armed the moment the underlying touches its T1 or the option closes a minute over its R1, one
+#: lot out at breakeven, then a 2 % give-back that needs three consecutive reads.
+RT_N_LIMITS = RiskLimits(
+    max_lots=4,
+    max_positions_per_strategy=30,
+    max_positions_all_books=90,
+    time_stop_bars=None,
+    sustain_s=75.0,
+    hard_floor_below_stop_pct=9.0,
+    peak_giveback_pct=2.0,
+    trail_dwell_samples=3,
+    peak_arm_after_s=90.0,
+    own_ladder=True,
+    reproject_stop_s=10.0,
+    ladder_mode="daily_r",
+    arm_mode="immediate",
+    band_exit="dwell",
+)
+
+#: The third vertical, replayed to +19.7k on the same day: arm only once the option has made half
+#: a day's expected move, the SL one rung behind, a wide band in the option's own volatility
+#: units, and every post-arm stop needing the 75 s sustain.
+RT_Y_LIMITS = RiskLimits(
+    max_lots=4,
+    max_positions_per_strategy=30,
+    max_positions_all_books=90,
+    time_stop_bars=None,
+    sustain_s=75.0,
+    hard_floor_below_stop_pct=9.0,
+    peak_giveback_pct=10.0,
+    trail_dwell_samples=3,
+    peak_arm_after_s=90.0,
+    own_ladder=True,
+    reproject_stop_s=10.0,
+    ladder_mode="mtf",
+    arm_mode="touch",
+    arm_min_move=0.5,
+    sl_lag=True,
+    giveback_move_frac=0.25,
+    band_exit="sustain",
+    post_arm_sustain=True,
 )

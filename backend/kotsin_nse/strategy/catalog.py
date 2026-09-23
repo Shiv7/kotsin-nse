@@ -122,7 +122,8 @@ BOOKS: tuple[Book, ...] = (
         params={
             "sustain_s": "75 (continuous breach)",
             "hard_floor_below_stop_pct": "9.0",
-            "peak_giveback_pct": "2.0 (floored at 1.5x the live spread)",
+            "own_ladder": "the option's own daily+weekly classic rungs above entry; T1 touch pays a lot, T1 sustained arms",
+            "peak_giveback_pct": "3.0 (floored at 1.5x the live spread), one read through it exits",
             "trail_dwell_samples": "3",
             "peak_arm_after_s": "90",
             "time_stop_bars": "None (off)",
@@ -156,6 +157,60 @@ BOOKS: tuple[Book, ...] = (
             "Separate from the NSE book on purpose: one CRUDEOIL lot is a different size of bet "
             "from one equity lot, and a shared wallet would let whichever fired first decide what "
             "the other could afford. Bands on the contract's own realised vol, not India VIX."
+        ),
+    ),
+    Book(
+        key="FUDKII_RT_N",
+        label="FUDKII-RT-N",
+        tf="30m entry, 1s exit",
+        summary=(
+            "FUDKII's entries under the immediate-arming RT policy: the option's own daily R1-R4, "
+            "armed the moment the underlying touches its T1 or the option closes a minute over its "
+            "R1, one lot out, then a 2% give-back that needs three consecutive reads."
+        ),
+        status="live",
+        params={
+            "ladder_mode": "daily_r",
+            "arm_mode": "immediate",
+            "peak_giveback_pct": "2.0 (floored at 1.5x the live spread)",
+            "band_exit": "dwell (3 consecutive reads)",
+            "sustain_s": "75 (the option stop before arming)",
+        },
+        have=("30m/1m bars on the session grid", "MTF pivot zones + confluence stop/targets"),
+        source="kotsin_nse/risk/exits.py (own-ladder branch)",
+        note=(
+            "The policy that ran on 2026-09-23 (+10.8k on GRASIM). Same fills as RT-X and RT-Y, "
+            "its own wallet, so the three curves differ only in the exit."
+        ),
+    ),
+    Book(
+        key="FUDKII_RT_Y",
+        label="FUDKII-RT-Y",
+        tf="30m entry, 1s exit",
+        summary=(
+            "FUDKII's entries under the third RT vertical: arm only once the option has made half "
+            "a day's expected move, the SL one rung behind, a give-back in the option's own "
+            "volatility units, and every post-arm stop needing the 75 s sustain."
+        ),
+        status="live",
+        params={
+            "ladder_mode": "mtf (rungs at least 0.5x the expected daily move above entry)",
+            "arm_min_move": "0.5 x expected daily move",
+            "sl_lag": "true (breakeven until T2 touches, then T1, ...)",
+            "peak_giveback_pct": "max(10.0, 0.25 x expected daily move)",
+            "band_exit": "sustain (75 s continuous breach)",
+            "post_arm_sustain": "true (the rung SL needs the 75 s too)",
+        },
+        have=(
+            "30m/1m bars on the session grid",
+            "MTF pivot zones + confluence stop/targets",
+            "per-name ATM implied vol (market/iv.py)",
+        ),
+        source="kotsin_nse/risk/exits.py (own-ladder branch); market/iv.py expected_move_frac",
+        note=(
+            "Replayed to +19.7k gross on 2026-09-23's sixteen signals against RT-X's -14.9k: nine "
+            "of the sixteen die at entry under every policy; the lever is arming late enough that "
+            "the KEI/GRASIM retest does not stop the trade at breakeven. Paper, beside the other two."
         ),
     ),
     Book(

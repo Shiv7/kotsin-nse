@@ -30,6 +30,10 @@ class StrategyKey(StrEnum):
     #: holding both would have its equity curve driven by whichever happened to fire first. Sized at
     #: Rs 30,00,000 so its thirty slots are reachable — the NSE book's Rs 10,00,000 binds at ten.
     FUDKII_RT_MCX = "FUDKII_RT_MCX"
+    #: The two other RT exit policies, twinned off the same FUDKII fills (docs/PIVOTS.md §6): N is
+    #: the immediate-arming 2 % dwell book that ran on 2026-09-23, Y the third vertical.
+    FUDKII_RT_N = "FUDKII_RT_N"
+    FUDKII_RT_Y = "FUDKII_RT_Y"
 
     @property
     def display_name(self) -> str:
@@ -38,6 +42,8 @@ class StrategyKey(StrEnum):
             StrategyKey.FUKAA: "FUKAA",
             StrategyKey.FUDKII_RT_X: "FUDKII-RT-X",
             StrategyKey.FUDKII_RT_MCX: "FUDKII-RT-MCX",
+            StrategyKey.FUDKII_RT_N: "FUDKII-RT-N",
+            StrategyKey.FUDKII_RT_Y: "FUDKII-RT-Y",
         }[self]
 
     @property

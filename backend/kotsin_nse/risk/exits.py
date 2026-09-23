@@ -148,7 +148,10 @@ class ExitEngine:
                 )
 
         # 2. hard floor ---------------------------------------------------------------------------
-        if pos.peak_r > 0 and ltp > 0:
+        # The base book's 50 %-of-peak give-back. Not for the own-ladder books: their exits are the
+        # rung SL, the band and the force-flat, by design (docs/PIVOTS.md §6) — this rule would
+        # have overridden RT-Y's wide band on the first pullback.
+        if not lim.own_ladder and pos.peak_r > 0 and ltp > 0:
             peak_price = pos.entry + pos.peak_r * pos.r_unit
             floor_price = pos.entry + (peak_price - pos.entry) * (1 - lim.hard_floor_pct / 100)
             if peak_price > pos.entry and ltp <= floor_price <= peak_price and pos.peak_r >= 1.0:
@@ -317,20 +320,60 @@ class ExitEngine:
         lot = max(1, pos.instrument.lot_size) * max(1, self.limits.arm_tranche_lots)
         return pos.qty_remaining if pos.qty_remaining <= lot else min(lot, pos.qty_remaining)
 
+    def _band_level(self, pos: Position, view: MarketView) -> float:
+        """The peak give-back line, once armed: max(peak_giveback_pct, giveback_move_frac × the
+        option's expected daily move), floored at a multiple of the live spread."""
+        lim = self.limits
+        if pos.armed_ts is None or pos.peak_mid <= 0 or lim.peak_giveback_pct is None:
+            return 0.0
+        give = lim.peak_giveback_pct / 100
+        if lim.giveback_move_frac and pos.option_edm > 0:
+            give = max(give, lim.giveback_move_frac * pos.option_edm)
+        if view.spread_pct:
+            give = max(give, view.spread_pct * lim.peak_giveback_spread_mult)
+        return round(pos.peak_mid * (1 - give), 2)
+
     def _own_hard_stop(self, pos: Position, view: MarketView, mid: float) -> ExitDecision | None:
-        """The rising stop — breakeven at the T1 touch, the last sustained rung, or the peak less
-        the give-back, whichever is highest — is *hard*: trading through it ends the trade."""
-        if pos.ratchet_sl <= 0 or not view.quote_ok or mid <= 0 or mid > pos.ratchet_sl:
+        """The rising line: the stepped rung SL or the peak give-back, whichever is higher. How a
+        breach ends the trade is the book's choice — RT-X: one read through it; RT-N: the band
+        needs ``trail_dwell_samples`` consecutive reads; RT-Y: rung SL and band alike need
+        ``sustain_s`` of continuous breach, because KEI's breakeven line fired on a one-minute
+        wick at 10:31 with the underlying up, two hours before a +143 % move."""
+        lim = self.limits
+        if not view.quote_ok or mid <= 0:
             return None
+        band = self._band_level(pos, view)
+        line = max(pos.ratchet_sl, band)
+        if line <= 0 or mid > line:
+            pos.line_breach_since = None
+            pos.trail_dwell = 0
+            return None
+        by_band = band > pos.ratchet_sl
+        mode = lim.band_exit if by_band else ("sustain" if lim.post_arm_sustain else "through")
+        if mode == "dwell":
+            pos.trail_dwell += 1
+            if pos.trail_dwell < lim.trail_dwell_samples:
+                return None
+        elif mode == "sustain":
+            if pos.line_breach_since is None:
+                pos.line_breach_since = view.now
+                return None
+            if view.now - pos.line_breach_since < (lim.sustain_s or 0):
+                return None
+        what = (
+            f"give-back line {band:.2f} off the {pos.peak_mid:.2f} peak"
+            if by_band
+            else (f"rung SL {pos.ratchet_sl:.2f}" if pos.ratchet_sl > pos.entry else f"breakeven {pos.ratchet_sl:.2f}")
+        )
         return ExitDecision(
-            pos.id, ExitReason.SL_OP, view.option_ltp, pos.qty_remaining,
-            f"hard SL {pos.ratchet_sl:.2f} traded through at {mid:.2f} "
-            f"({'peak − give-back' if pos.armed_ts else 'breakeven'}; {pos.targets_hit} lot(s) already out)",
+            pos.id, ExitReason.TRAIL if by_band else ExitReason.SL_OP, view.option_ltp, pos.qty_remaining,
+            f"hard SL {line:.2f}: {what} traded through at {mid:.2f} [{mode}]; {pos.targets_hit} lot(s) already out",
         )
 
     def _touch(self, pos: Position, view: MarketView, mid: float, by: str, why: str) -> ExitDecision:
         """A rung touched: one lot out (the last rung takes the rest), the hard SL steps to the
-        rung below (breakeven for T1), and the sustain clock for this rung starts."""
+        rung below (breakeven for T1), the sustain clock for this rung starts. Under the
+        immediate policy the first touch is the arming itself."""
         i = pos.targets_hit
         last = i >= len(pos.option_targets) - 1
         floor = pos.entry if i == 0 else pos.option_targets[i - 1]
@@ -338,6 +381,10 @@ class ExitEngine:
         pos.option_sl = round(max(pos.option_sl, pos.ratchet_sl), 2)
         if i == 0:
             pos.armed_by = by
+            if self.limits.arm_mode == "immediate":
+                pos.armed_ts = view.now
+                pos.peak_mid = max(pos.peak_mid, mid)
+                pos.trail_dwell = 0
         pos.t_touch_ts = view.now if mid >= pos.option_targets[i] else None
         pos.t_close_ok = False
         qty = pos.qty_remaining if last else self._tranche(pos)
@@ -349,7 +396,9 @@ class ExitEngine:
 
     def _sustain(self, pos: Position, view: MarketView, mid: float, minute_close: float | None) -> None:
         """Sustained = continuously at or above the rung for ``sustain_s`` AND a 1-minute close at
-        or above it since the touch. Completing it steps the hard SL to the rung; for T1 it arms."""
+        or above it since the touch. Completing it arms T1's band; it steps the hard SL to the rung
+        unless the book trails one rung behind (``sl_lag``)."""
+        lim = self.limits
         k = pos.targets_hit - 1
         if k < 0 or k <= pos.sustained_idx or k >= len(pos.option_targets) or not view.quote_ok:
             return
@@ -363,21 +412,24 @@ class ExitEngine:
         if minute_close is not None and minute_close >= rung:
             pos.t_close_ok = True
         held = view.now - pos.t_touch_ts
-        if held >= (self.limits.sustain_s or 0) and pos.t_close_ok:
+        if held >= (lim.sustain_s or 0) and pos.t_close_ok:
             pos.sustained_idx = k
-            pos.ratchet_sl = round(max(pos.ratchet_sl, rung), 2)
-            pos.option_sl = round(max(pos.option_sl, pos.ratchet_sl), 2)
-            if k == 0:
+            if not lim.sl_lag:
+                pos.ratchet_sl = round(max(pos.ratchet_sl, rung), 2)
+                pos.option_sl = round(max(pos.option_sl, pos.ratchet_sl), 2)
+            if k == 0 and pos.armed_ts is None:
                 pos.armed_ts = view.now
                 pos.peak_mid = max(pos.peak_mid, mid)
                 pos.trail_dwell = 0
 
     def _own_ladder(self, pos: Position, view: MarketView, ltp: float, mid: float) -> ExitDecision | None:
-        """The RT book's ladder: T1–T4 are the premium's own daily+weekly classic levels above
-        the entry. Touch → a lot out and the hard SL steps to the rung below; sustained (75 s and
-        a 1-minute close) → the hard SL steps to the rung itself, and for T1 that arms the
-        peak give-back. If the underlying reaches its own T1 first, the option's price at that
-        instant *is* T1 and the higher own rungs follow it."""
+        """The RT books' ladder. T1–T4 are the contract's own levels (which ones is the book's
+        ``ladder_mode``). Touch → a lot out and the hard SL steps to the rung below; sustained → the
+        SL steps to the rung (or stays behind, ``sl_lag``) and T1's sustain arms the band. Under
+        ``arm_mode="immediate"`` the underlying touching its T1, or the option's 1-minute close over
+        its own R1, arms at once. If the underlying reaches its own T1 first, the option's price at
+        that instant is T1 and the higher own rungs follow it — subject to ``arm_min_move``."""
+        lim = self.limits
         bucket = int(view.now // 60)
         prev = self._minute.get(pos.id)
         minute_close = prev[1] if prev is not None and prev[0] != bucket else None
@@ -385,14 +437,23 @@ class ExitEngine:
             self._minute[pos.id] = (bucket, ltp)
         self._sustain(pos, view, mid, minute_close)
         i = pos.targets_hit
+        threshold = pos.entry * (1 + lim.arm_min_move * pos.option_edm) if (lim.arm_min_move and pos.option_edm) else 0.0
         if i == 0 and not pos.armed_by and view.underlying_ltp is not None and pos.equity_targets and ltp > 0:
             t1 = pos.equity_targets[0]
             hit = view.underlying_ltp >= t1 if pos.direction is Direction.BULLISH else view.underlying_ltp <= t1
-            if hit:
+            if hit and ltp >= threshold:
                 pos.option_targets = (ltp, *[r for r in pos.option_targets if r > ltp])[:4]
                 pos.option_t1 = ltp
-                return self._touch(pos, view, mid, "equity", f"underlying {view.underlying_ltp:.2f} reached its T1 {t1:.2f}, option at {ltp:.2f}")
-        if ltp > 0 and i < len(pos.option_targets) and ltp >= pos.option_targets[i]:
+                return self._touch(
+                    pos, view, mid, "equity",
+                    f"underlying {view.underlying_ltp:.2f} reached its T1 {t1:.2f}, option at {ltp:.2f}",
+                )
+        if lim.arm_mode == "immediate" and i == 0 and not pos.armed_by:
+            # a touch of R1 is not a close: the option must close a minute at or over it
+            if pos.option_t1 > 0 and minute_close is not None and minute_close >= pos.option_t1:
+                return self._touch(pos, view, mid, "option", f"1m close {minute_close:.2f} ≥ its own R1 {pos.option_t1:.2f}")
+            return None
+        if ltp > 0 and i < len(pos.option_targets) and ltp >= pos.option_targets[i] and (i > 0 or ltp >= threshold):
             return self._touch(pos, view, mid, "option", f"option {ltp:.2f} ≥ its own rung")
         return None
 
@@ -403,17 +464,10 @@ class ExitEngine:
         if lim.peak_giveback_pct is None or not view.quote_ok or mid <= 0:
             return
         if lim.own_ladder:
-            if pos.armed_ts is None:
-                return
-            if mid > pos.peak_mid:
+            # The band is not folded into ratchet_sl: it is computed live (_band_level), so the
+            # rung SL keeps its own exit rule and the band keeps its own.
+            if pos.armed_ts is not None and mid > pos.peak_mid:
                 pos.peak_mid = mid
-            give = lim.peak_giveback_pct / 100
-            if view.spread_pct:
-                give = max(give, view.spread_pct * lim.peak_giveback_spread_mult)
-            lifted = round(pos.peak_mid * (1 - give), 2)
-            if lifted > pos.ratchet_sl:
-                pos.ratchet_sl = lifted
-                pos.option_sl = round(max(pos.option_sl, pos.ratchet_sl), 2)
             return
         if view.now - pos.opened_ts < lim.peak_arm_after_s:
             return

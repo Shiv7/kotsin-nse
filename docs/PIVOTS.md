@@ -98,6 +98,24 @@ reports `loaded / failed / refused`.
   stop through **live** delta (re-projected every 10 s), with the 75 s sustain and the 9 % hard floor.
 - No bar time-stop; NSE positions flatten at 15:20 IST, MCX at 23:20.
 
+**Three RT books off the same fill** (`risk/limits.py`, since 2026-09-23 evening). Every FUDKII
+NSE fill is mirrored into RT-X, RT-N and RT-Y, each on its own wallet; only the exit differs.
+The give-back band is read live (`ExitEngine._band_level`), never folded into the stepped SL, so
+the rung SL and the band keep their own exit rules:
+
+| | RT-X | RT-N | RT-Y |
+|---|---|---|---|
+| ladder | own daily+weekly rungs above entry | own daily R1–R4 above entry | own daily+weekly rungs ≥ 0.5 × expected daily move above entry |
+| arming | T1 touch pays a lot; T1 sustained (75 s + 1m close) arms | equity T1 touch, or a 1m close over own R1, pays a lot and arms at once | as X, on the higher first rung |
+| stepped SL | breakeven at T1 touch → T1 on sustain → T2 … | breakeven at arming → rung on sustain | one rung behind (`sl_lag`): breakeven until T2 touches, then T1 … |
+| band | peak − 3 % | peak − 2 % | peak − max(10 %, 0.25 × expected daily move) |
+| band exit | one read through | three consecutive reads | 75 s continuous breach |
+| rung SL exit | one read through | one read through | 75 s continuous breach (`post_arm_sustain`) |
+
+Expected daily move (`market/iv.py::expected_move_frac`) = spot × IV(name) × √(1/252) × δ / premium:
+the option's own volatility unit, 60–200 % of premium on 2026-09-23 — which is why a 2–3 % band
+scratched every runner in the replays.
+
 **Per-name implied vol (the stock's own VIX).** The option ladder's merge tolerance is
 `k(name) × ATR30(parent) × δ / premium` (`market/iv.py`), where `k(name)` bands today's ATM implied
 vol of the front expiry against the name's **own** median IV (≥ 10 sessions; India VIX until then).

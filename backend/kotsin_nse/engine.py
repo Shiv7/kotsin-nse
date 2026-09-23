@@ -82,6 +82,7 @@ from .market.iv import (
     MIN_HISTORY,
     IvHistory,
     atm_iv,
+    expected_move_frac,
     ladder_tolerance_pct,
     merge_points,
     regime_for_name,
@@ -114,7 +115,7 @@ from .ops.telegram import Telegram
 from .risk.costs import CostModel
 from .risk.exits import ExitEngine, MarketView, apply_exit
 from .risk.exposure import ExposureBook
-from .risk.limits import RT_X_LIMITS, RiskLimits
+from .risk.limits import RT_N_LIMITS, RT_X_LIMITS, RT_Y_LIMITS, RiskLimits
 from .risk.sizing import size_position
 from .risk.wallet import Wallet
 from .strategy.base import Outcome, Signal
@@ -169,13 +170,19 @@ class Engine:
         # engine rather than a flag inside the shared one — the two must never be able to drift
         # into each other, and a second RiskLimits makes that structural.
         self.exits_rt = ExitEngine(RT_X_LIMITS)
+        # Three RT exit policies twinned off the same FUDKII fills (docs/PIVOTS.md §6): X is the
+        # touch/sustain ladder with a single 3 % line, N the immediate-arming 2 % dwell book that
+        # ran on 2026-09-23, Y the third vertical. MCX rides X's policy in its own purse.
         self._exits_by_strategy = {
             StrategyKey.FUDKII_RT_X.value: self.exits_rt,
             StrategyKey.FUDKII_RT_MCX.value: self.exits_rt,
+            StrategyKey.FUDKII_RT_N.value: ExitEngine(RT_N_LIMITS),
+            StrategyKey.FUDKII_RT_Y.value: ExitEngine(RT_Y_LIMITS),
         }
-        #: The twin is checked against its own pool — 30 slots, its own lot cap — rather than
+        #: Each twin is checked against its own pool — 30 slots, its own lot cap — rather than
         #: skipping the check entirely, which is what it did when first written.
         self.exposure_rt = ExposureBook(RT_X_LIMITS)
+        self._exposure_by_strategy = {k: ExposureBook(e.limits) for k, e in self._exits_by_strategy.items()}
         #: Published by the exit loop each tick, read by the API. One computation, so the card
         #: and the decision can never disagree.
         self.position_marks: dict[str, dict[str, Any]] = {}
@@ -1189,65 +1196,94 @@ class Engine:
             return
         # Commodities and equities keep separate purses: one CRUDEOIL lot is a different size of
         # bet from one BLUESTARCO lot, and a shared wallet would let whichever fired first decide
-        # what the other could afford.
-        twin_key = (
-            StrategyKey.FUDKII_RT_MCX
+        # what the other could afford. NSE fills are mirrored into all three RT books.
+        keys = (
+            [StrategyKey.FUDKII_RT_MCX]
             if pos.underlying.segment is Segment.MCX_FO
-            else StrategyKey.FUDKII_RT_X
+            else [StrategyKey.FUDKII_RT_X, StrategyKey.FUDKII_RT_N, StrategyKey.FUDKII_RT_Y]
         )
-        twin_wallet = self.wallets.get(twin_key.value)
-        if twin_wallet is None or twin_wallet.halted:
-            return
         cost = pos.entry * pos.qty * inst.multiplier
-        if twin_wallet.available < cost:
-            log.info("rt_twin.skipped", symbol=pos.underlying.symbol, reason="wallet")
-            return
-        verdict = self.exposure_rt.check(
-            strategy=twin_key.value,
-            underlying=pos.underlying.symbol,
-            outlay=cost,
-            positions=list(self.positions.values()),
-            total_capital=sum(w.balance for w in self.wallets.values()),
-        )
-        if not verdict.allowed:
-            log.info("rt_twin.skipped", symbol=pos.underlying.symbol, reason=verdict.reason)
-            return
-        twin = replace(
-            pos,
-            id=new_id("pos"),
-            strategy=twin_key.value,
-            note=f"{pos.note} · RT exit policy, twin of {pos.id}",
-        )
-        if self.exits_rt.limits.own_ladder:
-            # Nothing delta-projected: the contract's own classic R1–R4 from its previous session
-            # (LegPivotLoader, thin-bar and zero-range guarded). No ladder → the equity trigger only.
-            own = self.leg_pivots.for_code(inst.scrip_code)
-            tol, reg = self.option_ladder_tolerance(pos.underlying.symbol, inst.strike, inst.option_type, twin.entry)
-            rungs = own.rungs_above(twin.entry, tolerance_pct=tol) if own is not None else []
-            twin.option_targets = tuple(r["price"] for r in rungs[:4])
-            twin.option_t1 = twin.option_targets[0] if twin.option_targets else 0.0
-            twin.targets_hit = 0
-            twin.ratchet_sl = 0.0
-            twin.armed_by = ""
-            twin.note += (
-                f" · own classic ladder, tol {tol:.1f}% (k {reg.k:.2f} {reg.band.value}, {reg.source})"
-                if twin.option_targets
-                else " · no own ladder, equity trigger only"
+        opened = 0
+        for twin_key in keys:
+            engine_for = self._exits_by_strategy[twin_key.value]
+            twin_wallet = self.wallets.get(twin_key.value)
+            if twin_wallet is None or twin_wallet.halted:
+                continue
+            if twin_wallet.available < cost:
+                log.info("rt_twin.skipped", book=twin_key.value, symbol=pos.underlying.symbol, reason="wallet")
+                continue
+            verdict = self._exposure_by_strategy[twin_key.value].check(
+                strategy=twin_key.value,
+                underlying=pos.underlying.symbol,
+                outlay=cost,
+                positions=list(self.positions.values()),
+                total_capital=sum(w.balance for w in self.wallets.values()),
             )
-        self.positions[twin.id] = twin
-        twin_wallet.reserve(cost, result.fill.ts)
-        twin_wallet.apply_charges(result.fill.charges, result.fill.ts)
-        await self.ledger.upsert_position(_position_json(twin))
-        await self.ledger.upsert_wallet(twin_wallet.strategy, twin_wallet.to_json())
-        log.info(
-            "rt_twin.open",
-            twin=twin.id,
-            of=pos.id,
-            symbol=pos.underlying.symbol,
-            qty=twin.qty,
-            entry=twin.entry,
-        )
-        self.alerts.mark_entered(pos.signal_id, ts=result.fill.ts, price=twin.entry, qty=twin.qty)
+            if not verdict.allowed:
+                log.info("rt_twin.skipped", book=twin_key.value, symbol=pos.underlying.symbol, reason=verdict.reason)
+                continue
+            twin = replace(
+                pos,
+                id=new_id("pos"),
+                strategy=twin_key.value,
+                note=f"{pos.note} · RT exit policy, twin of {pos.id}",
+                targets_hit=0, ratchet_sl=0.0, armed_by="", armed_ts=None, sustained_idx=-1,
+                t_touch_ts=None, t_close_ok=False, line_breach_since=None, peak_mid=0.0, trail_dwell=0,
+            )
+            lim = engine_for.limits
+            if lim.own_ladder:
+                # Nothing delta-projected: the contract's own levels from its previous session(s)
+                # (LegPivotLoader, thin-bar and zero-range guarded). No ladder → the equity trigger only.
+                own = self.leg_pivots.for_code(inst.scrip_code)
+                tol, reg = self.option_ladder_tolerance(pos.underlying.symbol, inst.strike, inst.option_type, twin.entry)
+                twin.option_edm = self.expected_move(pos.underlying.symbol, inst, twin.entry)
+                if own is None:
+                    rungs: list[float] = []
+                elif lim.ladder_mode == "daily_r":
+                    rungs = [r for r in (own.levels.r1, own.levels.r2, own.levels.r3, own.levels.r4) if r > twin.entry]
+                else:
+                    rungs = [r["price"] for r in own.rungs_above(twin.entry, tolerance_pct=tol)]
+                    if lim.arm_min_move and twin.option_edm > 0:
+                        rungs = [r for r in rungs if r >= twin.entry * (1 + lim.arm_min_move * twin.option_edm)]
+                twin.option_targets = tuple(rungs[:4])
+                twin.option_t1 = twin.option_targets[0] if twin.option_targets else 0.0
+                twin.note += (
+                    f" · own {lim.ladder_mode} ladder, tol {tol:.1f}% (k {reg.k:.2f} {reg.band.value}, {reg.source}), "
+                    f"expected move {twin.option_edm * 100:.0f}%"
+                    if twin.option_targets
+                    else " · no own ladder, equity trigger only"
+                )
+            self.positions[twin.id] = twin
+            twin_wallet.reserve(cost, result.fill.ts)
+            twin_wallet.apply_charges(result.fill.charges, result.fill.ts)
+            await self.ledger.upsert_position(_position_json(twin))
+            await self.ledger.upsert_wallet(twin_wallet.strategy, twin_wallet.to_json())
+            log.info(
+                "rt_twin.open",
+                book=twin_key.value,
+                twin=twin.id,
+                of=pos.id,
+                symbol=pos.underlying.symbol,
+                qty=twin.qty,
+                entry=twin.entry,
+                targets=list(twin.option_targets),
+            )
+            opened += 1
+        if opened:
+            self.alerts.mark_entered(pos.signal_id, ts=result.fill.ts, price=pos.entry, qty=pos.qty)
+
+    def expected_move(self, symbol: str, inst: Instrument, premium: float) -> float:
+        """One day's expected move of the parent (its own IV, or its median) through delta, as a
+        fraction of the premium — the unit RT-Y arms and gives back in."""
+        from .instrument.select import estimate_delta
+
+        iv = self.stock_iv.get(symbol)
+        iv_v = iv[0] if iv else self.iv_history.median_before(symbol, ist_today())[0]
+        spot = self.ltps.get(getattr(self.underlyings.get(symbol), "scrip_code", "")) or 0.0
+        if not spot or not iv_v:
+            return 0.0
+        delta = abs(estimate_delta(spot=spot, strike=inst.strike, option_type=inst.option_type))
+        return expected_move_frac(spot, iv_v, delta, premium)
 
     async def _select_instrument(self, underlying: Instrument, sig: Signal) -> Any:
         cat = self.catalogue_loader.catalogue
@@ -1837,6 +1873,8 @@ def _position_json(p: Position) -> dict[str, Any]:
         "t_touch_ts": p.t_touch_ts,
         "t_close_ok": p.t_close_ok,
         "sustained_idx": p.sustained_idx,
+        "option_edm": p.option_edm,
+        "line_breach_since": p.line_breach_since,
     }
 
 
@@ -1876,6 +1914,8 @@ def _position_from_json(d: dict[str, Any]) -> Position:
         t_touch_ts=d.get("t_touch_ts"),
         t_close_ok=bool(d.get("t_close_ok", False)),
         sustained_idx=int(d.get("sustained_idx", -1)),
+        option_edm=float(d.get("option_edm", 0)),
+        line_breach_since=d.get("line_breach_since"),
     )
 
 

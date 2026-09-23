@@ -98,6 +98,15 @@ def atm_iv(
     return sum(ivs) / len(ivs) if ivs else None
 
 
+def expected_move_frac(spot: float, iv: float | None, delta: float, premium: float) -> float:
+    """One day's expected move of the parent — spot × IV × √(1/252) — carried onto the option
+    through delta, as a fraction of the premium. The scale of the swings an option exit lives
+    inside: 60–200 % of premium on 2026-09-23, which is why a 3 % band was noise."""
+    if premium <= 0 or spot <= 0 or not iv or iv <= 0:
+        return 0.0
+    return spot * iv * (1 / 252) ** 0.5 * abs(delta) / premium
+
+
 def ladder_tolerance_pct(k: float, atr30: float, delta: float, premium: float) -> float:
     """The option ladder's merge tolerance, in percent of the premium: the parent's expected noise
     (k × its ATR) carried onto the option through delta. Not the option's own ATR — that is
