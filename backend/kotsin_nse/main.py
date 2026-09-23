@@ -11,6 +11,7 @@ Subcommands:
 * ``serve`` (default) — the engine and the UI
 * ``fetch-history`` — fill the Parquet cache from the broker's historical endpoint
 * ``backtest`` — replay the cache through the live strategy and risk code
+* ``pivots`` — the ladders in force on a date, rebuilt from the broker's daily candles
 """
 
 from __future__ import annotations
@@ -125,6 +126,27 @@ async def fetch_history(settings: Settings, args: argparse.Namespace) -> None:
     for key, n in sorted(counts.items()):
         print(f"{key:<24} {n:>7} bars")
     _ = InstrumentKind  # imported for the type union above
+
+
+async def show_pivots(settings: Settings, args: argparse.Namespace) -> None:
+    """The ladders in force on a date, from the broker's own daily candles. Needs credentials for
+    the candle calls and today's cached scrip master; nothing else — no engine, no feed, no store."""
+    import httpx
+
+    from .instrument.catalogue import CatalogueLoader
+    from .research.pivot_report import build, render
+    from .venue.fivepaisa.auth import Authenticator
+    from .venue.fivepaisa.rest import FivePaisaREST
+
+    if not settings.has_credentials:
+        print("5paisa credentials required — set KN_FP_* in backend/.env", file=sys.stderr)
+        raise SystemExit(2)
+    async with httpx.AsyncClient(timeout=60) as http:
+        auth = Authenticator(settings, http)
+        rest = FivePaisaREST(settings, http, auth)
+        catalogue = await CatalogueLoader(settings, rest.scrip_master_csv).ensure()
+        rep = await build(args.symbol, date.fromisoformat(args.for_date), catalogue=catalogue, rest=rest, per_side=args.otm)
+    print(render(rep))
 
 
 def run_backtest(settings: Settings, args: argparse.Namespace) -> None:
@@ -286,6 +308,11 @@ def build_parser() -> argparse.ArgumentParser:
     re_.add_argument("--seed", type=int, default=0)
     re_.add_argument("--max-bars", dest="max_bars", type=int, default=None, help="time stop in bars (default: RiskLimits.time_stop_bars)")
     re_.add_argument("--segment", default="NSE_EQ", choices=[s.name for s in Segment])
+
+    pv = sub.add_parser("pivots", help="the pivot ladders in force on a date, rebuilt from the broker's daily candles (no engine needed)")
+    pv.add_argument("symbol", help="underlying root, e.g. RELIANCE or CRUDEOIL")
+    pv.add_argument("--for", dest="for_date", default=date.today().isoformat(), help="the session the levels were in force on (default: today)")
+    pv.add_argument("--otm", type=int, default=4, help="OTM strikes per side to ladder (default: 4, the book's own)")
     return p
 
 
@@ -336,6 +363,8 @@ def cli() -> None:
         run_committee_cli(settings, args)
     elif command == "rl":
         run_rl_cli(settings, args)
+    elif command == "pivots":
+        asyncio.run(show_pivots(settings, args))
     else:  # pragma: no cover - argparse rejects anything else
         raise SystemExit(f"unknown command {command}")
 
