@@ -106,6 +106,7 @@ def build_app(engine: Engine) -> FastAPI:
             },
             "bus": engine.bus.stats(),
             "health": engine.health_snapshot(),
+            "regime": engine.regime_snapshot(),
             "counts": await engine.ledger.counts(),
         }
 

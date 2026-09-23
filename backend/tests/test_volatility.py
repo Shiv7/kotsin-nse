@@ -80,3 +80,15 @@ def test_the_cluster_width_in_rupees_widens_with_both_atr_and_the_band():
     wild = regime_for_equity(32.0).k * wild_atr
     assert wild / calm > 4.0, "ATR doubles and k rises 2.5x -> the zone is ~5x wider in rupees"
     assert calm / calm_px * 100 < 0.15, "a calm tape clusters tightly in percentage terms"
+
+
+def test_the_engine_exposes_the_regime_it_clusters_at(settings):
+    from kotsin_nse.engine import Engine
+    from kotsin_nse.market.volatility import INDIA_VIX_SCRIP
+
+    e = Engine(settings)
+    snap = e.regime_snapshot()
+    assert snap["vixPrint"] is None and snap["nse"]["source"] == "fallback" and snap["nse"]["clusterK"] == 0.30
+    e.ltps[INDIA_VIX_SCRIP] = 10.27  # 2026-09-23 14:20 IST
+    snap = e.regime_snapshot()
+    assert snap["vixPrint"] == 10.27 and snap["nse"]["band"] == "COMPLACENT" and snap["nse"]["clusterK"] == 0.20

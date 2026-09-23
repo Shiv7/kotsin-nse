@@ -760,6 +760,13 @@ class Engine:
         """Last India VIX print. None when it is not subscribed or has not ticked."""
         return self.ltps.get(INDIA_VIX_SCRIP)
 
+    def regime_snapshot(self) -> dict[str, Any]:
+        """The volatility regime in force — the ``k`` every NSE zone is clustered at, and the VIX
+        print it came from. ``vixPrint`` None means the feed has not delivered the index tick and
+        the fallback ``k`` is in use; a number nobody can see is a number nobody can question."""
+        vix = self.india_vix()
+        return {"vixPrint": vix, "nse": regime_for_equity(vix).to_json()}
+
     def _atr_pct_history(self, symbol: str) -> list[float]:
         """Daily ATR as a percent of close, one per session — the commodity vol baseline."""
         dailies = self.store.bars(symbol, '1d', 40)
