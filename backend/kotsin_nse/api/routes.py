@@ -663,6 +663,7 @@ def build_app(engine: Engine) -> FastAPI:
             "expiries": exps,
             "rows": [by_strike[k] for k in sorted(by_strike)],
             "selection": selection,
+            "stockIv": engine.stock_iv_snapshot(sym),
             "policy": {
                 "min_days_to_expiry": SELECTION_POLICY.min_days_to_expiry,
                 "min_premium": SELECTION_POLICY.min_premium,

@@ -97,3 +97,11 @@ reports `loaded / failed / refused`.
   trading through it ends the trade at once. Before the T1 touch the option-side stop is the equity
   stop through **live** delta (re-projected every 10 s), with the 75 s sustain and the 9 % hard floor.
 - No bar time-stop; NSE positions flatten at 15:20 IST, MCX at 23:20.
+
+**Per-name implied vol (the stock's own VIX).** The option ladder's merge tolerance is
+`k(name) × ATR30(parent) × δ / premium` (`market/iv.py`), where `k(name)` bands today's ATM implied
+vol of the front expiry against the name's **own** median IV (≥ 10 sessions; India VIX until then).
+Not IV/realised — a single stock's IV always sits above its realised. History is seeded from the
+option candles the legs fetch and replaced by live once-a-minute points, persisted under
+`data/iv/<SYMBOL>.json`. The equity zones stay on the India VIX band. `/api/chain/{symbol}.stockIv`
+shows the IV, the median, the band and the `k` in force.

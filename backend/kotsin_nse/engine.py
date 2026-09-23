@@ -66,7 +66,7 @@ from .exec.live import LiveExecutor
 from .exec.paper import BookSnapshot, PaperMatcher
 from .exec.reconcile import Reconciler
 from .instrument.catalogue import CatalogueLoader
-from .instrument.legs import LegPivotLoader, otm_legs
+from .instrument.legs import OPTION_CLUSTER_TOL_PCT, LegPivotLoader, otm_legs
 from .instrument.select import (
     Quote,
     SelectionPolicy,
@@ -78,6 +78,16 @@ from .instrument.select import (
 )
 from .instrument.universe import ScripGroup, UniverseBuilder, UniversePolicy
 from .ledger.db import Ledger
+from .market.iv import (
+    MIN_HISTORY,
+    IvHistory,
+    atm_iv,
+    ladder_tolerance_pct,
+    merge_points,
+    regime_for_name,
+    seed_points,
+    years_to_expiry,
+)
 from .market.session import (
     TF_SECONDS,
     TradingCalendar,
@@ -255,6 +265,10 @@ class Engine:
         self._daily_refresh_done: set[str] = set()  # "YYYY-MM-DD HH:MM" slots already run
         self._pivot_repair_task: asyncio.Task[Any] | None = None
         self._last_pivot_repair = 0.0
+        # -- each name's own implied vol (docs/PIVOTS.md §6): its VIX, for the option ladder --
+        self.iv_history = IvHistory(settings.data_dir / "iv")
+        self.stock_iv: dict[str, tuple[float, float]] = {}  # symbol -> (ATM IV, ts)
+        self._last_iv_refresh = 0.0
         self._future_to_underlying: dict[str, str] = {}
         self._stale_positions: set[str] = set()
         self._shadow_exits: set[str] = set()
@@ -765,7 +779,7 @@ class Engine:
         print it came from. ``vixPrint`` None means the feed has not delivered the index tick and
         the fallback ``k`` is in use; a number nobody can see is a number nobody can question."""
         vix = self.india_vix()
-        return {"vixPrint": vix, "nse": regime_for_equity(vix).to_json()}
+        return {"vixPrint": vix, "nse": regime_for_equity(vix).to_json(), "stockIvNames": len(self.stock_iv)}
 
     def _atr_pct_history(self, symbol: str) -> list[float]:
         """Daily ATR as a percent of close, one per session — the commodity vol baseline."""
@@ -1028,8 +1042,98 @@ class Engine:
             legs = self._expected_legs(groups)
             if legs:
                 await self.leg_pivots.load(legs, ist_today())
+                self._seed_iv_history()
         except Exception as exc:  # noqa: BLE001 - advisory levels never stall the engine
             log.warning("legs.load_failed", error=str(exc))
+
+    def _seed_iv_history(self) -> None:
+        """A name's IV history from the candles the legs already fetched: the nearest call and
+        put of the front expiry, each past session's close against the parent's close that day.
+        Approximate — the strike was not at the money every day — and only for names with fewer
+        than MIN_HISTORY live sessions, which the live points then replace."""
+        today = ist_today()
+        seeded = 0
+        for g in self.groups.values():
+            if not g.option_expiry or g.equity is None:
+                continue
+            _, n = self.iv_history.median_before(g.root, today)
+            if n >= MIN_HISTORY:
+                continue
+            spots = {ist_day(b.ts).isoformat(): b.close for b in self.store.bars(g.root, "1d") if is_official(b)}
+            spot_now = self.ltps.get(g.equity.scrip_code) or g.close or 0.0
+            series = []
+            for kind in ("CE", "PE"):
+                same = [lp for lp in self.leg_pivots.for_root(g.root) if lp.kind == kind and lp.closes]
+                if not same:
+                    continue
+                near = min(same, key=lambda lp: abs(lp.strike - spot_now))
+                rows = [{"dt": d, "c": c} for d, c in sorted(near.closes.items())]
+                series.append(seed_points(rows, spots, strike=near.strike, call=kind == "CE", expiry=g.option_expiry))
+            pts = merge_points(*series) if series else []
+            if pts and self.iv_history.seed(g.root, pts):
+                seeded += 1
+        if seeded:
+            self.iv_history.save_all()
+        log.info("iv.seeded", names=seeded)
+
+    def _refresh_stock_iv(self) -> None:
+        """Every name's ATM implied vol from the quotes in hand — its own VIX, once a minute."""
+        now = time.time()
+        today = ist_today()
+        for g in self.groups.values():
+            if not g.option_expiry or g.equity is None or not g.options:
+                continue
+            spot = self.ltps.get(g.equity.scrip_code)
+            if not spot:
+                continue
+            strike = min({o.strike for o in g.options}, key=lambda k: abs(k - spot))
+            mids: dict[OptionType, float] = {}
+            for o in g.options:
+                if o.strike != strike:
+                    continue
+                q = self.quotes.get(o.scrip_code)
+                if q is None or now - q.ts > 120 or q.mid <= 0:
+                    continue
+                mids[o.option_type] = q.mid
+            iv = atm_iv(spot, strike, years_to_expiry(g.option_expiry, today), mids.get(OptionType.CE), mids.get(OptionType.PE))
+            if iv is None:
+                continue
+            self.stock_iv[g.root] = (iv, now)
+            self.iv_history.record(g.root, today, iv)
+
+    def name_regime(self, symbol: str) -> Any:
+        """The name's own implied regime — today's ATM IV against its own median — or India VIX's
+        regime while it has too little history to be banded against itself."""
+        iv = self.stock_iv.get(symbol)
+        med, n = self.iv_history.median_before(symbol, ist_today())
+        return regime_for_name(iv[0] if iv else None, med, n, fallback=regime_for_equity(self.india_vix()))
+
+    def option_ladder_tolerance(self, symbol: str, strike: float, option_type: OptionType, premium: float) -> tuple[float, Any]:
+        """The option ladder's merge tolerance: the parent's k × ATR30 through delta, over the
+        premium. Falls back to the flat percent when the parent has no ATR yet."""
+        from .instrument.select import estimate_delta
+
+        reg = self.name_regime(symbol)
+        atr_v = atr(self.store.bars(symbol, DECISION_TF, 60), 14) or 0.0
+        spot = self.ltps.get(getattr(self.underlyings.get(symbol), "scrip_code", "")) or 0.0
+        delta = abs(estimate_delta(spot=spot, strike=strike, option_type=option_type)) if spot else 0.5
+        tol = ladder_tolerance_pct(reg.k, atr_v, delta, premium)
+        return (tol if tol > 0 else OPTION_CLUSTER_TOL_PCT), reg
+
+    def stock_iv_snapshot(self, symbol: str) -> dict[str, Any]:
+        iv = self.stock_iv.get(symbol)
+        med, n = self.iv_history.median_before(symbol, ist_today())
+        reg = self.name_regime(symbol)
+        return {
+            "atmIv": round(iv[0], 4) if iv else None,
+            "ts": iv[1] if iv else None,
+            "medianIv": round(med, 4) if med else None,
+            "sessions": n,
+            "band": reg.band.value,
+            "clusterK": reg.k,
+            "source": reg.source,
+            "detail": reg.detail,
+        }
 
     def _expected_legs(self, groups: Any) -> list[Instrument]:
         """The front future and the eight OTM strikes of every F&O name — the ladders the book reads."""
@@ -1098,13 +1202,18 @@ class Engine:
             # Nothing delta-projected: the contract's own classic R1–R4 from its previous session
             # (LegPivotLoader, thin-bar and zero-range guarded). No ladder → the equity trigger only.
             own = self.leg_pivots.for_code(inst.scrip_code)
-            rungs = own.rungs_above(twin.entry) if own is not None else []
+            tol, reg = self.option_ladder_tolerance(pos.underlying.symbol, inst.strike, inst.option_type, twin.entry)
+            rungs = own.rungs_above(twin.entry, tolerance_pct=tol) if own is not None else []
             twin.option_targets = tuple(r["price"] for r in rungs[:4])
             twin.option_t1 = twin.option_targets[0] if twin.option_targets else 0.0
             twin.targets_hit = 0
             twin.ratchet_sl = 0.0
             twin.armed_by = ""
-            twin.note += " · own classic ladder" if twin.option_targets else " · no own ladder, equity trigger only"
+            twin.note += (
+                f" · own classic ladder, tol {tol:.1f}% (k {reg.k:.2f} {reg.band.value}, {reg.source})"
+                if twin.option_targets
+                else " · no own ladder, equity trigger only"
+            )
         self.positions[twin.id] = twin
         twin_wallet.reserve(cost, result.fill.ts)
         twin_wallet.apply_charges(result.fill.charges, result.fill.ts)
@@ -1416,6 +1525,10 @@ class Engine:
                     self._intraday_rebuild_day = day
                     self._decision_tasks.add(asyncio.create_task(self._intraday_universe_rebuild()))
 
+                # Each name's own VIX, once a minute, from the quotes already in hand.
+                if self.reconciler_ready and self.groups and now - self._last_iv_refresh >= 60:
+                    self._last_iv_refresh = now
+                    self._refresh_stock_iv()
                 # The pivot data plane (docs/PIVOTS.md §3): refresh slots, then the periodic audit.
                 hm = ist_hm(now)
                 for slot in self.s.daily_refresh_hm:
@@ -1439,6 +1552,7 @@ class Engine:
                     last_snapshot = now
                     await self._persist_wallets()
                     await self.ledger.insert_health(self.health_snapshot())
+                    await asyncio.to_thread(self.iv_history.save_all)
             except Exception as exc:
                 log.exception("housekeeping.failed", error=str(exc))
             await asyncio.sleep(5.0)

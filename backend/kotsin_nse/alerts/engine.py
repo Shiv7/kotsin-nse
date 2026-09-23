@@ -118,6 +118,14 @@ class AlertEngine:
         own = self.engine.leg_pivots.for_code(str(listed.get("scripCode") or ""))
         if own is None:
             return []
+        from ..domain import OptionType as _OT
+
+        tol = None
+        if opt_ltp:
+            tol, _ = self.engine.option_ladder_tolerance(
+                own.root, float(listed.get("strike") or own.strike), _OT(str(listed.get("type") or own.kind)), float(opt_ltp)
+            )
+        rungs = own.rungs_above(opt_ltp or 0.0, tolerance_pct=tol) if tol else own.rungs_above(opt_ltp or 0.0)
         return [
             {
                 "n": i,
@@ -127,7 +135,7 @@ class AlertEngine:
                 "source": f"option's own {','.join(r['members'])} ({own.session}"
                           f"{' / ' + own.weekly_session if own.weekly_session else ''})",
             }
-            for i, r in enumerate(own.rungs_above(opt_ltp or 0.0)[:4], start=1)
+            for i, r in enumerate(rungs[:4], start=1)
         ]
 
     def _rt_card(self, a: Alert, bar: UnifiedBar, history: list[UnifiedBar], tp: Any) -> dict[str, Any]:

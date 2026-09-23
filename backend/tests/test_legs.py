@@ -199,3 +199,13 @@ def test_the_weekly_ladder_comes_from_the_same_candles_and_needs_three_sessions(
     thin = LegPivotLoader(Rest(["2026-09-18", "2026-09-21", "2026-09-22"]))  # one session in the week
     asyncio.run(thin.load([_leg("9")], date(2026, 9, 23)))
     assert thin.for_code("9") is not None and thin.for_code("9").weekly is None
+
+
+def test_the_ladder_tolerance_is_a_parameter_and_a_narrow_cpr_merges_into_one_rung():
+    from kotsin_nse.bars.pivots import classic_pivots
+    from kotsin_nse.instrument.legs import mtf_rungs
+
+    daily = classic_pivots(1.20, 0.50, 0.82)  # BC 0.83 / P 0.84 / TC 0.85: a 2.4 % wide CPR
+    tight = [r for r in mtf_rungs(daily, None, above=0.5, tolerance_pct=1.0) if r["price"] < 0.9]
+    merged = [r for r in mtf_rungs(daily, None, above=0.5, tolerance_pct=4.0) if r["price"] < 0.9]
+    assert len(tight) == 3 and len(merged) == 1 and merged[0]["strength"] == 12.0

@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any
 
@@ -89,10 +89,12 @@ class LegPivots:
     #: the previous completed Mon–Fri on the same premium; None when the contract is too young
     weekly: PivotLevels | None = None
     weekly_session: str = ""
+    #: session date -> close, for the parent's implied-vol history (market/iv.py)
+    closes: dict[str, float] = field(default_factory=dict)
 
-    def rungs_above(self, price: float) -> list[dict[str, Any]]:
+    def rungs_above(self, price: float, *, tolerance_pct: float = OPTION_CLUSTER_TOL_PCT) -> list[dict[str, Any]]:
         """The MTF ladder the RT book trades: every daily+weekly classic level above ``price``."""
-        return mtf_rungs(self.levels, self.weekly, above=price)
+        return mtf_rungs(self.levels, self.weekly, above=price, tolerance_pct=tolerance_pct)
 
     def to_json(self) -> dict[str, Any]:
         lv = self.levels
@@ -122,7 +124,9 @@ class LegPivots:
         }
 
 
-def mtf_rungs(daily: PivotLevels, weekly_lv: PivotLevels | None, *, above: float) -> list[dict[str, Any]]:
+def mtf_rungs(
+    daily: PivotLevels, weekly_lv: PivotLevels | None, *, above: float, tolerance_pct: float = OPTION_CLUSTER_TOL_PCT
+) -> list[dict[str, Any]]:
     """The premium's own daily+weekly classic levels above ``above``, merged and sorted.
 
     Every level is a rung: a lone daily R2 is a target on a premium, not only a confluence — the
@@ -132,7 +136,7 @@ def mtf_rungs(daily: PivotLevels, weekly_lv: PivotLevels | None, *, above: float
     points = pivot_points(daily, "1d")
     if weekly_lv is not None:
         points += pivot_points(weekly_lv, "1wk")
-    zones = cluster_zones(points, tolerance_pct=OPTION_CLUSTER_TOL_PCT)
+    zones = cluster_zones(points, tolerance_pct=tolerance_pct)
     return [
         {"price": round(z.price, 2), "strength": round(z.strength, 2), "members": list(z.members)}
         for z in sorted(zones, key=lambda z: z.price)
@@ -274,6 +278,7 @@ class LegPivotLoader:
             volume=vol,
             weekly=wk[0] if wk else None,
             weekly_session=wk[1] if wk else "",
+            closes={str(r["dt"])[:10]: float(r["c"]) for r in rows if str(r["dt"])[:10] < today.isoformat()},
         )
         self.loaded += 1
 
