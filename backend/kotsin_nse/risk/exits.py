@@ -314,6 +314,10 @@ class ExitEngine:
             )
         )
         projected = max(0.05, pos.entry - abs(pos.equity_entry - pos.equity_sl) * delta)
+        if lim.min_stop_ticks:
+            # never nearer than the floor: on a cheap contract the projection is a tick or two
+            tick = pos.instrument.tick_size or 0.05
+            projected = min(projected, max(tick, pos.entry - lim.min_stop_ticks * tick))
         pos.option_sl = round(max(projected, pos.ratchet_sl), 2)
 
     def _tranche(self, pos: Position) -> int:

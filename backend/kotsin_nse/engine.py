@@ -134,6 +134,15 @@ log = structlog.get_logger(__name__)
 
 DECISION_TF = "30m"
 SELECTION_POLICY = SelectionPolicy()
+#: The FUDKII family selects without the ₹5 premium floor (operator, 2026-09-23 evening): the
+#: parent picks the contract, the RT twins copy its fill, the CT books fade it — one floor for all
+#: of them or none. FUKAA keeps the shared policy. The cheap contracts this admits carry an
+#: option stop floored at MIN_STOP_TICKS below entry instead of the one-tick δ projection.
+NO_PREMIUM_FLOOR = frozenset({
+    StrategyKey.FUDKII, StrategyKey.FUDKII_RT_X, StrategyKey.FUDKII_RT_N, StrategyKey.FUDKII_RT_Y,
+    StrategyKey.FUDKII_CT_X, StrategyKey.FUDKII_CT_Y,
+})
+MIN_STOP_TICKS = 8
 
 
 @dataclass
@@ -967,6 +976,8 @@ class Engine:
             option_premium=selection.premium,
             delta=delta,
         )
+        if inst.is_option:
+            option_sl = self.floored_option_stop(sig.strategy, selection.premium, option_sl, inst.tick_size)
 
         wallet = self.wallets[sig.strategy.value]
         if wallet.halted:
@@ -1501,6 +1512,8 @@ class Engine:
         option_sl, option_targets = map_levels_to_option(
             equity_entry=sig.entry, equity_stop=sig.stop, equity_targets=sig.targets, option_premium=sel.premium, delta=delta
         )
+        if inst.is_option:
+            option_sl = self.floored_option_stop(key, sel.premium, option_sl, inst.tick_size)
         book = self._exits_by_strategy.get(key.value)
         lim = book.limits if book is not None else self.limits
         wallet = self.wallets.get(key.value)
@@ -1792,14 +1805,30 @@ class Engine:
         delta = abs(estimate_delta(spot=spot, strike=inst.strike, option_type=inst.option_type))
         return expected_move_frac(spot, iv_v, delta, premium)
 
+    @staticmethod
+    def selection_policy_for(key: StrategyKey) -> SelectionPolicy:
+        """The selector's policy for a book: the shared one, minus the premium floor for the
+        FUDKII family."""
+        return replace(SELECTION_POLICY, min_premium=0.0) if key in NO_PREMIUM_FLOOR else SELECTION_POLICY
+
+    @staticmethod
+    def floored_option_stop(key: StrategyKey, premium: float, option_sl: float, tick: float) -> float:
+        """The δ-projected option stop, never nearer than MIN_STOP_TICKS below the premium for the
+        books that trade cheap contracts."""
+        if key not in NO_PREMIUM_FLOOR or premium <= 0:
+            return option_sl
+        tick = tick or 0.05
+        return round(min(option_sl, max(tick, premium - MIN_STOP_TICKS * tick)), 2)
+
     async def _select_instrument(self, underlying: Instrument, sig: Signal) -> Any:
         cat = self.catalogue_loader.catalogue
         now = time.time()
+        pol = self.selection_policy_for(sig.strategy)
         if underlying.segment is Segment.MCX_FO:
             front = cat.front_future(sig.symbol)
             q = self.quotes.get(front.scrip_code) if front else None
             return select_future(front=front, quote=q, now=now)
-        expiry = choose_expiry(cat.expiries(sig.symbol), ist_today(), SELECTION_POLICY)
+        expiry = choose_expiry(cat.expiries(sig.symbol), ist_today(), pol)
         if expiry is None:
             return select_option(
                 chain=[], quotes={}, spot=sig.entry, target1=None, direction=sig.direction, now=now
@@ -1813,6 +1842,7 @@ class Engine:
             target1=sig.targets[0] if sig.targets else None,
             direction=sig.direction,
             now=now,
+            policy=pol,
         )
 
     async def _ensure_quotes(self, chain: list[Instrument], spot: float) -> None:

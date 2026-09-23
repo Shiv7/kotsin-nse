@@ -104,6 +104,10 @@ class RiskLimits:
     band_exit: str = "through"
     #: the stepped rung SL also needs sustain_s continuous breach rather than one read
     post_arm_sustain: bool = False
+    #: the option-side stop is never nearer than this many ticks below the entry premium (0 = off).
+    #: A δ-projected stop on a ₹1.60 contract is one tick; the 2026-09-23 replay of the sub-₹5
+    #: rejections through these engines used 8 ticks, and that is the setting that was validated.
+    min_stop_ticks: int = 0
     #: entry gate on the twin (None = off): the mirror is skipped when the underlying's — or its
     #: front future's — trigger 30m bar and the one before are both under this × the T-2…T-7
     #: volume baseline (the reference router's dried-volume SKIP; NSE 0.85). SBILIFE 2026-09-23:
@@ -132,6 +136,7 @@ RT_X_LIMITS = RiskLimits(
     own_ladder=True,
     reproject_stop_s=10.0,
     dried_volume_v=0.85,
+    min_stop_ticks=8,
 )
 
 #: The policy that ran on 2026-09-23 and took +10.8k on GRASIM: the contract's own daily R1–R4,
@@ -152,6 +157,7 @@ RT_N_LIMITS = RiskLimits(
     ladder_mode="daily_r",
     arm_mode="immediate",
     band_exit="dwell",
+    min_stop_ticks=8,
 )
 
 #: The third vertical, replayed to +19.7k on the same day: arm only once the option has made half
@@ -177,6 +183,7 @@ RT_Y_LIMITS = RiskLimits(
     band_exit="sustain",
     post_arm_sustain=True,
     dried_volume_v=0.85,
+    min_stop_ticks=8,
 )
 
 #: The counter-trend books: RT-X's and RT-Y's exits on the fade. No dried-volume gate — the wall

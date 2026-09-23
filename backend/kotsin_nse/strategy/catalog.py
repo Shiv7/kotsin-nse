@@ -128,6 +128,7 @@ BOOKS: tuple[Book, ...] = (
             "peak_arm_after_s": "90",
             "time_stop_bars": "None (off)",
             "dried_volume_skip": "no mirror when surgeT and surgeT-1 are both < 0.85x the T-2..T-7 volume baseline, on the equity or its front future",
+            "premium_floor": "none (the FUDKII family selects without the Rs 5 floor; FUKAA keeps it); option stop never nearer than 8 ticks",
         },
         have=("30m/1m bars on the session grid", "MTF pivot zones + confluence stop/targets"),
         source="kotsin_nse/risk/exits.py (RT policy branch)",

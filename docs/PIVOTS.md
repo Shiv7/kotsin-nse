@@ -123,6 +123,14 @@ when the trigger 30m bar *and* the one before it are both under 0.85 × the T-2�
 twin time, a leg without data is absent, never dried). RT-N takes every fill as the control. The skip
 is written on the ENTRY alert card (`card.skipped`).
 
+**No premium floor for the FUDKII family** (operator, 2026-09-23 evening): the parent, the RT
+twins and the CT fades select without the shared ₹5 floor (`Engine.selection_policy_for`); FUKAA
+keeps it. On the cheap contracts this admits the δ-projected option stop is a tick or two, so the
+stop is floored at `MIN_STOP_TICKS` = 8 ticks below the premium at entry (`floored_option_stop`)
+and in the RT engines' re-projection (`RiskLimits.min_stop_ticks`) — the setting the replay of the
+23-Sep sub-₹5 rejections was run with (RT-X −31.6k, RT-N −23.3k, RT-Y +13.0k gross on ten
+contracts; the operator chose to trade them).
+
 **Counter-trend books — CT-X and CT-Y** (`strategy/counter.py`, 2026-09-23 evening; the reference
 stack's wall-strength COUNTER, live there since 2026-09-11). On every FUDKII trigger the wall ahead
 of the close is scored: every daily/weekly/monthly classic level inside the trigger candle on the
