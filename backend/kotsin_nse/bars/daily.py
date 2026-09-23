@@ -63,6 +63,9 @@ class DailyAudit:
     unofficial: list[str] = field(default_factory=list)  # previous bar built from ticks, not REST
     stale: list[str] = field(default_factory=list)  # previous bar older than expected_prev
     short: list[str] = field(default_factory=list)  # fewer than MIN_DAILY_BARS
+    #: no candle of any kind at the broker — a listed contract nobody trades (COTTON, KAPAS,
+    #: MCXBULLDEX…). Reported, never a fault: there is no session to be missing from.
+    dormant: list[str] = field(default_factory=list)
 
     @property
     def holiday_suspected(self) -> bool:
@@ -92,6 +95,8 @@ class DailyAudit:
     def summary(self) -> str:
         total = len(self.ok) + len(self.missing) + len(self.unofficial) + len(self.stale) + len(self.short)
         parts = [f"{len(self.ok)}/{total} names on the official previous session"]
+        if self.dormant:
+            parts.append(f"{len(self.dormant)} dormant (no candles at the broker)")
         if self.missing:
             parts.append(f"{len(self.missing)} missing")
         if self.unofficial:
@@ -116,7 +121,9 @@ def audit(
     out = DailyAudit(today=today, expected_prev=expected, consensus_prev=consensus)
     for sym, bars in series.items():
         prev = prevs[sym]
-        if prev is None:
+        if not bars:
+            out.dormant.append(sym)
+        elif prev is None:
             out.missing.append(sym)
         elif not is_official(prev):
             out.unofficial.append(sym)

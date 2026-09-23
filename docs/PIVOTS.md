@@ -69,7 +69,9 @@ last known official series.
 
 ## 5. Observability
 
-Health check `pivots_ready`: `ok` when every underlying holds an official previous-session bar with
-≥ 25 daily bars, and no leg is in the failed state after retries. `detail` carries the audit summary
+Health check `pivots_ready`: `ok` when every underlying that has any candles at the broker holds an
+official previous-session bar with ≥ 25 daily bars, no daily fetch is in the failed state, and no leg
+is in the failed state after retries. A listed contract with no candles at all (COTTON, KAPAS, the
+MCX indices) is `dormant`: reported in `detail`, asked once per session, never a fault. `detail` carries the audit summary
 (`N/M names on the official previous session; k missing; …`) and the leg counts. `/api/leg-pivots`
 reports `loaded / failed / refused`.

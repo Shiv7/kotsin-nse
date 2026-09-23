@@ -88,3 +88,11 @@ def test_cache_round_trips_official_bars_only_and_survives_corruption(tmp_path):
     assert cache.load("RELIANCE", "2885") == []
     assert cache.load("NEVER", "0") == []
     assert cache.save("EMPTY", [_bar(TODAY, source=BarSource.LIVE)]) == 0
+
+
+def test_a_contract_with_no_candles_at_all_is_dormant_not_missing():
+    """COTTON, KAPAS, MCXBULLDEX…: listed, never traded, nothing at the broker. There is no
+    session to be missing from, so it is reported and left alone rather than kept red all day."""
+    a = audit({"OK": _series(date(2026, 9, 22)), "COTTON": []}, TODAY, CAL)
+    assert a.dormant == ["COTTON"] and a.missing == [] and a.ok == ["OK"]
+    assert a.ready and a.needs_refresh == [] and "1 dormant" in a.summary()

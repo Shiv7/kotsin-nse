@@ -560,10 +560,12 @@ class Engine:
                 self._daily_due = False
                 await self._refetch_daily(list(self.underlyings))
             a = self.daily_audit()
-            wanted = [
-                sym for sym in a.needs_refresh
-                if sym in self._daily_failed or self._daily_confirmed.get(sym) != a.expected_prev
-            ]
+            # A call that raised is retried every pass whatever the audit calls the name; a
+            # dormant name (nothing at the broker) is asked once per session and left alone.
+            wanted = sorted(
+                {sym for sym in a.needs_refresh if self._daily_confirmed.get(sym) != a.expected_prev}
+                | {sym for sym in self._daily_failed if sym in self.underlyings}
+            )
             for sym in wanted:
                 if a.expected_prev is not None:
                     self._daily_confirmed[sym] = a.expected_prev
@@ -1507,7 +1509,9 @@ class Engine:
             ),
             Check(
                 "pivots_ready",
-                (daily.ready and not self.leg_pivots.failed_codes) if self.underlyings else True,
+                (daily.ready and not self._daily_failed and not self.leg_pivots.failed_codes)
+                if self.underlyings
+                else True,
                 detail=(
                     f"{daily.summary()}; legs {self.leg_pivots.loaded} loaded, "
                     f"{self.leg_pivots.failed} failed, {self.leg_pivots.refused} refused"
