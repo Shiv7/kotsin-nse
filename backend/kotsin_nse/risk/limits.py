@@ -33,9 +33,12 @@ class RiskLimits:
     #: excised 2026-06-24); what it lacked was a view of the aggregate, which is the next field.
     max_positions_per_strategy: int = 3
     max_positions_per_underlying: int = 1  # per book
-    #: ...and MONEY IS AGGREGATE. This is the P15 guard: one trigger fanning out into several
-    #: funded positions is fine, as long as the total premium at risk in that underlying is capped
-    #: across every book. Counting positions per book without this would just move the problem.
+    #: ...and since 2026-09-23 the MONEY IS PER BOOK TOO: every book — the parent, its RT twins, the
+    #: CT fades — is checked against its own positions and its own wallet. The cross-book
+    #: aggregate stayed visible on the risk page but stopped gating anything the evening the
+    #: 21–23 Sep replay showed the parent's ceiling (which counted its own twins, four positions a
+    #: fill) turning the 09:45 burst into a lottery over two names. This field is now a per-book
+    #: ceiling that sits above ``max_positions_per_strategy``; it never binds first.
     max_positions_all_books: int = 6
     max_underlying_exposure_pct: float = 20.0
     daily_loss_limit_pct: float = 3.0
@@ -123,9 +126,7 @@ class RiskLimits:
 RT_X_LIMITS = RiskLimits(
     max_lots=4,                     # Rs 1,00,000 or 4 lots, whichever binds lower
     max_positions_per_strategy=30,  # its own pool of slots
-    #: The all-books ceiling counts every live position, FUDKII's included, so the base book's
-    #: 6 would stop the twins at three pairs. Raised only for the guard the twin is checked
-    #: against; FUDKII keeps its own conservative ceiling.
+    #: a per-book ceiling above the pool (every book counts only its own positions since 2026-09-23)
     max_positions_all_books=90,
     time_stop_bars=None,            # exits on targets, ratchet, stop or the close — never a clock
     sustain_s=75.0,                 # continuous option-side breach before it counts

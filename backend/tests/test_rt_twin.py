@@ -258,3 +258,31 @@ async def test_a_dry_front_future_skips_even_when_the_equity_bar_is_live(setting
         assert books == ["FUDKII_RT_N", "FUDKII_RT_X", "FUDKII_RT_Y"]
     finally:
         await e.stop()
+
+
+@pytest.mark.asyncio
+async def test_each_twin_is_checked_against_its_own_wallet_and_positions(settings):
+    """Every book is independent (2026-09-23): the twin's exposure check sees its own purse, not
+    the sum of every wallet, and the parent's positions do not count against it."""
+    e = Engine(settings)
+    await e.start()
+    try:
+        seen = []
+        book = e._exposure_by_strategy["FUDKII_RT_X"]
+        real = book.check
+
+        def spy(**kw):
+            seen.append(kw)
+            return real(**kw)
+
+        book.check = spy  # type: ignore[method-assign]
+        pos, opt = _reliance_fill(e, time.time())
+        for i in range(7):  # seven parent positions already open across the books
+            p2 = Position(id=f"o{i}", strategy="FUDKII", instrument=opt, underlying=pos.underlying, side=PosSide.LONG, qty=250,
+                          entry=50.0, opened_ts=1.0, signal_id=f"s{i}", direction=Direction.BULLISH)
+            e.positions[p2.id] = p2
+        await e._open_rt_twin(pos, opt, _fill(time.time()))
+        assert seen and seen[0]["total_capital"] == 1_000_000.0 != sum(w.balance for w in e.wallets.values()), "its own purse, at check time"
+        assert any(p.strategy == "FUDKII_RT_X" for p in e.positions.values()), "seven parent positions do not block the twin"
+    finally:
+        await e.stop()

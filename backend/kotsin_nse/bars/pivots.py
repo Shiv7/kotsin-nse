@@ -259,6 +259,12 @@ class GradePolicy:
     #: EXPLORATORY — only a wall (strength ≥ WALL_MIN_STRENGTH) may be the stop zone; a lone
     #: line 0.2% below price is not a structural level.
     stop_requires_wall: bool = False
+    #: A *filter*, not a widening: a signal whose stop sits nearer than this many ATR from the
+    #: close is graded F ("inside one bar's noise") and never trades. 0 = off. Built 2026-09-23
+    #: and left OFF on the evidence of that week's 51 regenerated triggers: RT-Y trades with stops
+    #: under 0.3 ATR made +5.8k / +6.0k / −12.7k across three fill orderings while stops over
+    #: 0.3 ATR lost in every ordering, and two of the six RT-Y winners had 0.11-ATR stops.
+    min_stop_atr_filter: float = 0.0
 
 
 def compute_confluence(
@@ -304,6 +310,11 @@ def compute_confluence(
     risk = abs(close - stop)
     if risk <= 0:
         return Confluence(stop, (), "F", 0.0, 0.0, 0.0, len(zones), stop_label, (), "zero risk")
+    if pol.min_stop_atr_filter > 0 and atr_value > 0 and risk < pol.min_stop_atr_filter * atr_value:
+        return Confluence(
+            stop, (), "F", 0.0, 0.0, 0.0, len(zones), stop_label, (),
+            f"stop {risk / atr_value:.2f} ATR from close — inside one bar's noise (filter {pol.min_stop_atr_filter:g})",
+        )
 
     walls = [z for z in ahead if z.is_wall][: pol.max_targets]
     targets = tuple(tick(round_figure_snap(z.price, up=bullish, anchor=close)) for z in walls)

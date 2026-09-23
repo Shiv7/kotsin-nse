@@ -21,6 +21,7 @@ from ..bars.indicators import atr
 from ..bars.pivots import PivotLevels, classic_pivots
 from ..bars.unified import UnifiedBar
 from ..market.session import TF_SECONDS, to_ist
+from ..strategy.keys import StrategyKey
 from . import entry as entry_model
 from . import plan as planner
 from . import rtcard
@@ -224,8 +225,10 @@ class AlertEngine:
                 spot=eq_ltp or price,
                 direction=a.direction,
                 quote_of=self.engine.quotes.get,
+                # the RT book's own slots: every book counts only its own positions (2026-09-23)
                 open_trades=sum(
-                    1 for pos in self.engine.positions.values() if pos.status == "OPEN"
+                    1 for pos in self.engine.positions.values()
+                    if pos.status == "OPEN" and pos.strategy == StrategyKey.FUDKII_RT_X.value
                 ),
             ),
             "atr30m": round(atr_v, 2) if atr_v else None,

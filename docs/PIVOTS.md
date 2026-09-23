@@ -131,6 +131,15 @@ and in the RT engines' re-projection (`RiskLimits.min_stop_ticks`) — the setti
 23-Sep sub-₹5 rejections was run with (RT-X −31.6k, RT-N −23.3k, RT-Y +13.0k gross on ten
 contracts; the operator chose to trade them).
 
+**Every book is independent** (operator, 2026-09-23 evening): the position counts and the money a
+book's entry is checked against are its own (`risk/exposure.py`, `total_capital` = the book's
+wallet). A parent fill spawns RT-X/RT-N/RT-Y (and CT-X/CT-Y on a COUNTER); none of them count
+against the parent's caps, nor the parent against theirs. Before this the parent's
+`max_positions_all_books=6` counted the twins, so the parent stopped entering after two fills and
+a 09:45 burst was a lottery over which two names got the slots. `GradePolicy.min_stop_atr_filter`
+(a filter, off by default; the evidence is on the field) can grade a signal whose stop is inside one
+bar's noise as F.
+
 **Counter-trend books — CT-X and CT-Y** (`strategy/counter.py`, 2026-09-23 evening; the reference
 stack's wall-strength COUNTER, live there since 2026-09-11). On every FUDKII trigger the wall ahead
 of the close is scored: every daily/weekly/monthly classic level inside the trigger candle on the

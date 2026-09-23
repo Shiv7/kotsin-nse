@@ -1009,7 +1009,7 @@ class Engine:
             underlying=sig.symbol,
             outlay=sizing.outlay,
             positions=list(self.positions.values()),
-            total_capital=sum(w.balance for w in self.wallets.values()),
+            total_capital=wallet.balance,  # each book is checked against its own purse
         )
         if not verdict.allowed:
             await self.ledger.insert_signal(sig.to_json(), "EXPOSURE", verdict.reason)
@@ -1259,7 +1259,7 @@ class Engine:
                 underlying=pos.underlying.symbol,
                 outlay=cost,
                 positions=list(self.positions.values()),
-                total_capital=sum(w.balance for w in self.wallets.values()),
+                total_capital=twin_wallet.balance,  # each book is checked against its own purse
             )
             if not verdict.allowed:
                 log.info("rt_twin.skipped", book=twin_key.value, symbol=pos.underlying.symbol, reason=verdict.reason)
@@ -1565,7 +1565,7 @@ class Engine:
             und = self.underlyings.get(sig.symbol)
             dec = CounterDecision("COUNTER", "operator take", NO_WALL)
             entry = flipped_signal(sig, key=key, zones=self.zones_for(sig.symbol), atr=atr(self.store.bars(sig.symbol, DECISION_TF, 60), 14) or 0.0,
-                                   tick_size=(und.tick_size if und else 0.05) or 0.05, decision=dec)
+                                   tick_size=(und.tick_size if und else 0.05) or 0.05, decision=dec, policy=self.fudkii.cfg.grade_policy)
             if entry is None:
                 raise RuntimeError("no wall on the flipped side — nothing to aim the fade at")
         else:
@@ -1671,7 +1671,7 @@ class Engine:
             return
         fade = flipped_signal(
             sig, key=StrategyKey.FUDKII_CT_X, zones=self.zones_for(sig.symbol), atr=atr_v,
-            tick_size=underlying.tick_size or 0.05, decision=dec,
+            tick_size=underlying.tick_size or 0.05, decision=dec, policy=self.fudkii.cfg.grade_policy,
         )
         if fade is None:
             log.info("counter.no_plan", symbol=sig.symbol, reason="no wall on the flipped side")

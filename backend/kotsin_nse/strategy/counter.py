@@ -34,7 +34,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
-from ..bars.pivots import PivotPoint, Zone, compute_confluence
+from ..bars.pivots import GradePolicy, PivotPoint, Zone, compute_confluence
 from ..domain import Direction
 from .base import Signal
 from .keys import StrategyKey
@@ -314,15 +314,16 @@ def flipped_signal(
     atr: float,
     tick_size: float,
     decision: CounterDecision,
+    policy: GradePolicy | None = None,
 ) -> Signal | None:
     """The fade: the same trigger, the opposite direction, its own confluence plan (the nearest zone
     behind the close on the flipped side is the stop, the walls ahead the targets). ``None`` when
     the flipped side has no wall to aim at — a fade with nowhere to go is not a trade."""
     flipped = Direction.BEARISH if sig.direction is Direction.BULLISH else Direction.BULLISH
     conf = compute_confluence(
-        close=sig.entry, bullish=flipped is Direction.BULLISH, zones=zones, atr_value=atr, tick_size=tick_size
+        close=sig.entry, bullish=flipped is Direction.BULLISH, zones=zones, atr_value=atr, tick_size=tick_size, policy=policy
     )
-    if not conf.targets or conf.stop <= 0:
+    if not conf.targets or conf.stop <= 0 or conf.blocked:  # no wall to aim at, or graded F: not a trade
         return None
     return replace(
         sig,

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import replace
 from itertools import pairwise
 
 from kotsin_nse.config import Segment, Settings
@@ -297,29 +296,37 @@ def test_a_derived_book_is_not_locked_out_by_its_own_parent(option):
     assert v.allowed, v.reason
 
 
-def test_money_is_still_capped_across_books(option):
-    """Counting per book must not reopen P15: one trigger fanning into several funded positions
-    is fine only while the total premium at risk in that underlying is capped."""
-    book = ExposureBook(RiskLimits(max_underlying_exposure_pct=5.0))
+def test_money_is_capped_within_the_book_not_across_books(option):
+    """Each book is independent (2026-09-23): another book's position in the same underlying no
+    longer counts against this book's exposure; the book's own premium at risk still does."""
+    book = ExposureBook(RiskLimits(max_underlying_exposure_pct=5.0, max_positions_per_underlying=2))
     held = _position(option)
     held.strategy = "FUDKII"
     v = book.check(strategy="FUKAA", underlying="RELIANCE", outlay=40_000,
                    positions=[held], total_capital=1_000_000)
-    assert not v.allowed and "exposure" in v.reason
+    assert v.allowed, "FUDKII's RELIANCE premium is FUDKII's, not FUKAA's"
+    v = book.check(strategy="FUDKII", underlying="RELIANCE", outlay=40_000,
+                   positions=[held], total_capital=1_000_000)
+    assert not v.allowed and "exposure" in v.reason, "the book's own money in the name is capped"
 
+def test_a_books_ceiling_counts_only_its_own_positions(option):
+    """Each book is independent (2026-09-23): the parent's ceiling never counts the twins its own
+    fills spawn, and a twin's never counts the parent — before this, one parent fill put four
+    positions against the parent's cap of six and the third trigger of a burst was refused."""
+    from dataclasses import replace
 
-def test_the_all_books_position_count_still_binds(option):
-    book = ExposureBook(RiskLimits(max_positions_all_books=2))
-    live = []
-    for i, sym in enumerate(("A", "B")):
+    def held(strategy, sym):
         p = _position(option)
-        p.id, p.strategy = f"p{i}", "FUDKII"
+        p.id, p.strategy = f"{strategy}-{sym}", strategy
         p.underlying = replace(option, symbol=sym, underlying=sym)
-        live.append(p)
-    v = book.check(strategy="FUKAA", underlying="C", outlay=1_000,
-                   positions=live, total_capital=1_000_000)
-    assert not v.allowed and "across all books" in v.reason
-
+        return p
+    book = ExposureBook(RiskLimits(max_positions_all_books=2, max_positions_per_strategy=5))
+    others = [held("FUDKII_RT_X", "A"), held("FUDKII_RT_N", "B"), held("FUDKII_RT_Y", "C"), held("FUDKII_CT_X", "D")]
+    v = book.check(strategy="FUDKII", underlying="E", outlay=1.0, positions=others, total_capital=1e6)
+    assert v.allowed, "four twins open elsewhere do not count against the parent"
+    mine = [held("FUDKII", "A"), held("FUDKII", "B")]
+    v = book.check(strategy="FUDKII", underlying="E", outlay=1.0, positions=others + mine, total_capital=1e6)
+    assert not v.allowed and "its ceiling" in v.reason
 
 def test_exposure_snapshot_buckets_by_symbol(option):
     book = ExposureBook(RiskLimits())
@@ -379,9 +386,8 @@ def test_the_rt_pool_is_thirty_slots_and_the_base_book_keeps_its_own():
 
     assert RT_X_LIMITS.max_positions_per_strategy == 30
     assert RT_X_LIMITS.max_lots == 4
-    # The all-books ceiling counts FUDKII's positions too, so the base book's 6 would have stopped
-    # the twins at three pairs; with three RT books off every fill it has to seat 4 × a fill.
-    assert RT_X_LIMITS.max_positions_all_books == 90
+    # a per-book ceiling above the 30-slot pool: every book counts only its own positions
+    assert RT_X_LIMITS.max_positions_all_books == 90 > RT_X_LIMITS.max_positions_per_strategy
     assert RiskLimits().max_lots is None
     assert RiskLimits().max_positions_per_strategy == 3
 

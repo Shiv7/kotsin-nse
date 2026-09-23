@@ -6,8 +6,15 @@ RELIANCE can therefore open a FUDKII position and a FUKAA position in the *same*
 neither book's own sizing can see the other. The old stack had exactly this and the aggregate was
 not visible anywhere.
 
-So exposure is measured here, across every strategy, bucketed by the underlying symbol, and the
-gateway consults it before an entry.
+So exposure is measured here, bucketed by the underlying symbol, and the gateway consults it
+before an entry.
+
+**Every book is independent** (operator, 2026-09-23 evening): the counts and the money a book is
+checked against are its own — a parent's cap never counts its RT/CT twins, and a twin's cap never
+counts the parent. Before this, the parent's ``max_positions_all_books=6`` counted the three
+twins each fill spawned, so the parent stopped entering after two fills and the 09:45 burst became
+a lottery over which two names got the slots (measured on the 21–23 Sep replay). The cross-book
+aggregate is still visible in ``snapshot`` for the risk page; it no longer gates anything.
 """
 
 from __future__ import annotations
@@ -49,7 +56,7 @@ class ExposureBook:
         positions: list[Position],
         total_capital: float,
     ) -> ExposureVerdict:
-        """Counts are per book; money is across all of them.
+        """Counts are per book, and so is the money: ``total_capital`` is this book's wallet.
 
         Scoping the counts to one book is what keeps a derived strategy tradeable: FUKAA fires on
         the same underlying as FUDKII in the same batch, so a shared per-underlying count meant
@@ -57,11 +64,11 @@ class ExposureBook:
         seeded session: 10 of 10 FUKAA signals rejected with "1 already open".
         """
         lim = self.limits
-        live = [p for p in positions if p.status == "OPEN"]
-        mine = [p for p in live if p.strategy == strategy]
-        if len(live) >= lim.max_positions_all_books:
+        live = [p for p in positions if p.status == "OPEN" and p.strategy == strategy]
+        mine = live
+        if len(mine) >= lim.max_positions_all_books:
             return ExposureVerdict(
-                False, f"{len(live)} open across all books ≥ cap {lim.max_positions_all_books}"
+                False, f"{strategy} holds {len(mine)} ≥ its ceiling {lim.max_positions_all_books}"
             )
         if len(mine) >= lim.max_positions_per_strategy:
             return ExposureVerdict(
