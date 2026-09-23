@@ -41,6 +41,7 @@ are deleted after each flush, so a crash mid-session can never touch an older da
 from __future__ import annotations
 
 import re
+import threading
 import time
 from collections import defaultdict
 from collections.abc import Mapping
@@ -99,6 +100,10 @@ class DailyArchive:
         self.errors = 0
         self.last_error = ""
         self.last_flush_ts: float | None = None
+        #: ``flush`` is dispatched to a worker thread from two places — the housekeeping loop and
+        #: ``Engine.stop`` — and ``stop`` does not cancel housekeeping before its final flush, so
+        #: the two can run at once. They share the buffer and ``_write``'s per-day temp path.
+        self._lock = threading.Lock()
 
     # -- record ----------------------------------------------------------------------------------
 
@@ -214,6 +219,10 @@ class DailyArchive:
         it from a worker thread."""
         if not self.enabled:
             return 0
+        with self._lock:
+            return self._flush(final=final)
+
+    def _flush(self, *, final: bool) -> int:
         written = 0
         for kind, by_day in self._rows.items():
             for day in list(by_day):
@@ -305,9 +314,13 @@ class DailyArchive:
                 (self.root / kind / f"{day}.parquet").unlink(missing_ok=True)
                 removed[kind] = removed.get(kind, 0) + 1
                 self.files_pruned += 1
+            # Only temp files for days that are themselves gone: a live ``_write`` uses a fixed
+            # temp path per stream and day, and sweeping the newest one out from under it turns
+            # that flush's rows into a re-buffer that a shutdown never retries.
             d = self.root / kind
-            if d.exists():
-                for tmp in d.glob("*.tmp.parquet"):
+            newest = days[-1] if days else ""
+            for tmp in d.glob("*.tmp.parquet") if d.exists() else ():
+                if tmp.name.removesuffix(".tmp.parquet") < newest:
                     tmp.unlink(missing_ok=True)
         if removed:
             log.info("archive.pruned", files=removed, keep_tape=self.keep_sessions)
@@ -323,11 +336,17 @@ class DailyArchive:
         except (OSError, ValueError) as exc:
             log.warning("archive.set_aside_unreadable", kind=kind, day=day, error=str(exc)[:120])
             return False
-        if "held" not in df.columns:
+        if "held" not in df.columns or "scrip_code" not in df.columns:
             return True
-        rows = df[df["held"].astype(bool)]
-        if rows.empty:
+        # Every row of every code that was held at ANY point in the day, not only the rows stamped
+        # held. The tape is change-compressed and the reader forward-fills, so the row in force at
+        # the entry second is usually the one written before the position existed; keeping only the
+        # stamped rows would leave the start of the hold — and an illiquid contract's whole hold —
+        # with nothing to forward-fill from once the day left the tape's own window.
+        held_codes = set(df.loc[df["held"].astype(bool), "scrip_code"])
+        if not held_codes:
             return True
+        rows = df[df["scrip_code"].isin(held_codes)]
         try:
             self._write(aside, day, rows.to_dict("records"))
         except Exception as exc:  # noqa: BLE001 - a failed move must not become a deletion

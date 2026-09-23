@@ -42,6 +42,7 @@ over do" with silence.
 from __future__ import annotations
 
 import math
+import time
 from bisect import bisect_right
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -81,11 +82,14 @@ class Watch:
     role: str
     #: wall-clock second after which the watch lapses; ``inf`` while the contract is held
     until: float
-    #: the contract is, or was until the grace runs out, an open position's
-    held: bool = False
-    #: wall-clock second the held flag lapses; ``inf`` while the contract is open. Separate from
-    #: ``until`` because a candidate follow may keep the watch alive long past the grace.
-    held_until: float = math.inf
+    #: rows are flagged held while ``now <= held_until``; ``inf`` while the position is open.
+    #: Separate from ``until`` on purpose: a trigger card renewing the watch every second would
+    #: otherwise keep extending the 300 s post-close grace and flag rows held for half an hour
+    #: after the exit.
+    held_until: float = 0.0
+
+    def is_held(self, now: float) -> bool:
+        return now <= self.held_until
 
 
 class Tape:
@@ -151,20 +155,19 @@ class Tape:
             held_symbols.add(symbol)
             w = self._watch.get(code)
             if w is None:
-                self._watch[code] = Watch(symbol=symbol, role=role, until=math.inf, held=True)
+                self._watch[code] = Watch(symbol=symbol, role=role, until=math.inf, held_until=math.inf)
             else:
-                w.until, w.role, w.held, w.held_until = math.inf, role, True, math.inf
+                w.until, w.role, w.held_until = math.inf, role, math.inf
         # a contract that was held and is not any more gets the grace, once; a lapsed watch goes
         for code, w in list(self._watch.items()):
-            if code not in open_codes and w.until == math.inf:
-                w.until = w.held_until = now + AFTER_CLOSE_S
+            if code not in open_codes and w.held_until == math.inf:
+                w.until = max(w.until if w.until != math.inf else 0.0, now + AFTER_CLOSE_S)
+                w.held_until = now + AFTER_CLOSE_S
             if w.until < now:
                 self._watch.pop(code, None)
                 self._last.pop(code, None)
                 continue
-            if w.held and now > w.held_until:
-                w.held = False
-            if w.held:
+            if w.is_held(now):
                 held_symbols.add(w.symbol)
         # the legs of every symbol on tape, resolved each second: the front future can change
         # at a roll and the resolver is the engine's own (cached there)
@@ -205,9 +208,14 @@ class Tape:
         self.last_sample_ts = now
         return written
 
-    def watched(self) -> dict[str, dict[str, Any]]:
+    def watched(self, now: float = 0.0) -> dict[str, dict[str, Any]]:
         return {
-            code: {"symbol": w.symbol, "role": w.role, "held": w.held, "open": w.until == math.inf}
+            code: {
+                "symbol": w.symbol,
+                "role": w.role,
+                "held": w.is_held(now or time.time()),
+                "open": w.held_until == math.inf,
+            }
             for code, w in self._watch.items()
         }
 
@@ -215,7 +223,7 @@ class Tape:
         return {
             "enabled": self.enabled,
             "watched": len(self._watch),
-            "held": sum(1 for w in self._watch.values() if w.until == math.inf),
+            "held": sum(1 for w in self._watch.values() if w.held_until == math.inf),
             "rows": self.rows,
             "samples": self.samples,
             "dropped": self.dropped,

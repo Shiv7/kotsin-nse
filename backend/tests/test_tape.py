@@ -375,3 +375,75 @@ def test_the_end_of_tape_flatten_is_stamped_where_the_quote_actually_was(option,
                          start_ts=t0, end_ts=t0 + 4000, quote_max_age_s=1e9)
     ev = rep.events[-1]
     assert ev.reason == "EOD" and ev.ts == t0 + 9 and "3991s after the last quote" in ev.note
+
+
+def test_the_post_close_grace_is_not_extended_by_a_card_that_keeps_renewing(tmp_path):
+    """The trigger card renews its follow every second. That may keep the contract on tape; it
+    must not keep flagging its rows held for half an hour after the position closed."""
+    a = DailyArchive(tmp_path / "archive")
+    t = Tape(a)
+    now = ist_ts(DAY, "10:00")
+    px = 10.0
+    t.sample(now, {"45678": q(now, px)}, held=[("45678", "RELIANCE", "option")])
+    assert t.watched(now)["45678"]["held"]
+    closed = now + 1
+    t.sample(closed, {"45678": q(closed, px)}, held=[])
+    for i in range(1, 5):  # the card goes on renewing through and past the grace
+        at = closed + i * 100
+        t.follow("RELIANCE", ["45678"], now=at)
+        t.sample(at, {"45678": q(at, px)}, held=[])
+    assert "45678" in t.watched(), "still on tape: the card is still live"
+    assert not t.watched(closed + 400)["45678"]["held"], "but no longer flagged held"
+    a.flush()
+    df = read_day(tmp_path / "archive", DAY)
+    held_ts = sorted(int(r.ts) for r in df.itertuples() if r.held)
+    # open, then exactly AFTER_CLOSE_S of grace from the close — and not a second more, however
+    # long the card goes on renewing the watch
+    assert held_ts == [int(now), int(closed), int(closed) + 100, int(closed) + 200, int(closed) + 300]
+    assert int(closed) + 300 == int(closed + AFTER_CLOSE_S)
+    assert sorted(int(r.ts) for r in df.itertuples() if not r.held) == [int(closed) + 400]
+
+
+def test_set_aside_keeps_the_whole_of_a_traded_contract_not_only_its_held_rows(tmp_path):
+    """The tape is change-compressed and the reader forward-fills, so the row in force at entry is
+    usually one written before the position existed. Dropping it would leave the start of the hold
+    with nothing to forward-fill from once the day left the tape's own window."""
+    a = DailyArchive(tmp_path / "archive", keep_sessions=1, keep_held_sessions=9)
+    old = int(ist_ts("2026-09-01", "10:00"))
+    a.quote("45678", old, symbol="RELIANCE", role="option", ltp=9, bid=8.95, ask=9.05, quote_ts=old, held=False)
+    a.quote("45678", old + 60, symbol="RELIANCE", role="option", ltp=10, bid=9.95, ask=10.05, quote_ts=old + 60, held=True)
+    a.quote("2885", old, symbol="RELIANCE", role="equity", ltp=1300, bid=1299, ask=1301, quote_ts=old, held=False)
+    a.quote("99999", old, symbol="TCS", role="option", ltp=5, bid=4.95, ask=5.05, quote_ts=old, held=False)
+    a.quote("1", int(ist_ts("2026-09-02", "10:00")), symbol="X", role="option", ltp=1, bid=1, ask=1,
+            quote_ts=int(ist_ts("2026-09-02", "10:00")), held=False)
+    a.flush()
+    kept = read_day(tmp_path / "archive", "2026-09-01")
+    assert sorted(set(kept.scrip_code)) == ["45678"], "the traded contract, both its rows"
+    assert sorted(int(t) for t in kept.ts) == [old, old + 60]
+    assert tp.series(kept, "45678").at(old + 30).ltp == 9.0, "the pre-entry row still forward-fills"
+
+
+def test_a_flush_in_flight_does_not_lose_its_day_to_another_thread(tmp_path):
+    """`Engine.stop` flushes while the housekeeping loop may still be inside its own flush, and
+    both share the buffer and `_write`'s per-day temp path."""
+    import threading
+
+    a = DailyArchive(tmp_path / "archive", keep_sessions=5, keep_held_sessions=5, keep_research_sessions=5)
+    ts = int(ist_ts(DAY, "10:00"))
+    for i in range(400):
+        a.quote(str(i), ts + i, symbol="X", role="option", ltp=1, bid=1, ask=1, quote_ts=ts, held=True)
+    out: list[int] = []
+    threads = [threading.Thread(target=lambda: out.append(a.flush())) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sum(out) == 400 and a.errors == 0 and a.rows_buffered == 0
+    assert len(read_day(tmp_path / "archive", DAY)) == 400
+    # the sweep leaves a temp file for the newest day alone — it may be a live _write
+    live = tmp_path / "archive" / "quotes" / f"{DAY}.tmp.parquet"
+    stale = tmp_path / "archive" / "quotes" / "2020-01-01.tmp.parquet"
+    live.write_bytes(b"in flight")
+    stale.write_bytes(b"orphan")
+    a.prune()
+    assert live.exists() and not stale.exists()
