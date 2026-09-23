@@ -1045,12 +1045,28 @@ class Engine:
             reason=sig.reason,
             ref_price=selection.premium,
         )
-        result = await self._submit(intent, verdict_ok=verdict.allowed, verdict_reason=verdict.reason)
-        await self.ledger.insert_order(_order_json(result.order), result.decision.value)
-        await self.ledger.insert_signal(
-            sig.to_json(), result.decision.value, result.order.note or sig.reason
-        )
+        # Take the money BEFORE the first await. The sizer read `wallet.available` and the
+        # exposure check read the open positions in this same synchronous block, but placing the
+        # order and writing the ledger suspend the task — and every symbol's 30m bar closes at the
+        # same instant, each in its own decision task. Left until after the fill, two entries on
+        # one boundary both sized against the same rupees and the book deployed each of them. The
+        # hold is provisional: released if nothing fills, and replaced by the fill's real cost.
+        if not wallet.reserve(sizing.outlay, time.time()):
+            why = f"₹{sizing.outlay:,.0f} outlay > ₹{wallet.available:,.0f} left in the book"
+            await self.ledger.insert_signal(sig.to_json(), "WALLET", why)
+            log.info("signal.wallet_taken", symbol=sig.symbol, strategy=sig.strategy.value, reason=why)
+            return
+        try:
+            result = await self._submit(intent, verdict_ok=verdict.allowed, verdict_reason=verdict.reason)
+            await self.ledger.insert_order(_order_json(result.order), result.decision.value)
+            await self.ledger.insert_signal(
+                sig.to_json(), result.decision.value, result.order.note or sig.reason
+            )
+        except Exception:
+            wallet.release(sizing.outlay, time.time())  # a hold must not outlive its order
+            raise
         if result.fill is None:
+            wallet.release(sizing.outlay, time.time())
             return
 
         pos = Position(
@@ -1075,6 +1091,8 @@ class Engine:
         if book is not None and book_limits.own_ladder:
             self._stamp_own_ladder(pos, inst, book_limits, sig.symbol)
         self.positions[pos.id] = pos
+        # swap the provisional hold for what the fill actually cost
+        wallet.release(sizing.outlay, result.fill.ts)
         self._commit_outlay(wallet, pos.entry * pos.qty * inst.multiplier, result.fill.ts, pos)
         wallet.apply_charges(result.fill.charges, result.fill.ts)
         await self.ledger.upsert_position(_position_json(pos))

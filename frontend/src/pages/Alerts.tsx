@@ -828,8 +828,8 @@ export function Alerts() {
         </div>
       ) : (
         <div className="space-y-2">
-          {data.alerts.map((a, i) => (
-            <Row key={`${a.book}-${a.symbol}-${a.ts}-${i}`} a={a} />
+          {data.alerts.map((a) => (
+            <Row key={`${a.book}-${a.kind}-${a.firedAt}-${a.symbol}`} a={a} />
           ))}
         </div>
       )}

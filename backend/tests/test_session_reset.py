@@ -232,3 +232,37 @@ def test_the_reset_slot_is_validated_like_the_other_wall_clock_settings():
     with pytest.raises(ValueError, match="HH:MM"):
         Settings(_env_file=None, alerts_reset_ist="24:00")
     assert Settings(_env_file=None, alerts_reset_ist="01:15").alerts_reset_ist == "01:15"
+
+
+@pytest.mark.asyncio
+async def test_two_entries_on_one_bar_boundary_cannot_spend_the_same_rupees(settings, monkeypatch):
+    """Every symbol's 30m bar closes at the same instant, each in its own decision task, and
+    placing the order suspends the task. The money is taken before that await, so the second
+    entry sees a book that is already short — it used to size against the same balance."""
+    import asyncio
+
+    e = Engine(settings)
+    w = e.wallets.setdefault("FUDKII", __import__("kotsin_nse.risk.wallet", fromlist=["Wallet"]).Wallet.new("FUDKII", 100_000.0))
+    w.balance = w.day_start_balance = w.peak = 100_000.0
+    w.deployed = 0.0
+
+    async def entry(outlay: float) -> bool:
+        """The shape of _handle_signal: size against `available`, then await, then commit."""
+        if not w.reserve(outlay, time.time()):
+            return False
+        await asyncio.sleep(0)  # the order and the two ledger writes
+        w.release(outlay, time.time())
+        w.commit(outlay, time.time())
+        return True
+
+    took = await asyncio.gather(entry(60_000.0), entry(60_000.0))
+    assert took == [True, False], "the second is refused, not funded from the first's money"
+    assert w.deployed == 60_000.0 and w.available == 40_000.0
+
+
+def test_the_alert_rows_are_keyed_on_their_own_identity_not_their_position():
+    """The feed is newest-first, so one new firing shifts every index. Keyed on the index, React
+    unmounts and remounts every row and an expanded 'why it fired' panel snaps shut."""
+    tsx = (__import__("pathlib").Path(__file__).resolve().parents[2] / "frontend/src/pages/Alerts.tsx").read_text()
+    assert "key={`${a.book}-${a.kind}-${a.firedAt}-${a.symbol}`}" in tsx
+    assert "${a.ts}-${i}" not in tsx and "map((a, i)" not in tsx
