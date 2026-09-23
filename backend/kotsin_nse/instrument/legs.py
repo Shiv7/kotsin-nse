@@ -43,6 +43,9 @@ STRIKES_PER_SIDE = 4
 #: Concurrent REST calls. The historical endpoint is the same one the boot backfill uses, so this
 #: stays modest to avoid competing with it.
 CONCURRENCY = 6
+#: Back-off between attempts on a failed candle call. Three tries covers a rate-limit blip and a
+#: dropped connection; a leg that fails all three is left to the engine's repair loop.
+RETRY_DELAYS_S: tuple[float, ...] = (0.5, 2.0)
 #: Calendar days of history requested. Only the previous completed session is used; the rest is
 #: slack for holidays and for a contract that listed recently.
 LOOKBACK_DAYS = 12
@@ -151,7 +154,12 @@ class LegPivotLoader:
         self.by_code: dict[str, LegPivots] = {}
         self.day: str = ""
         self.loaded = 0
+        #: REST failures after retries — the repair loop's work list
         self.failed = 0
+        self.failed_codes: set[str] = set()
+        #: guard refusals (thin or zero-range previous session) — correct outcomes, never retried
+        self.refused = 0
+        self.refused_codes: set[str] = set()
         self.running = False
         self._sem = asyncio.Semaphore(CONCURRENCY)
 
@@ -164,16 +172,25 @@ class LegPivotLoader:
 
     async def _one(self, inst: Instrument, today: date) -> None:
         start = (today - timedelta(days=LOOKBACK_DAYS)).isoformat()
+        rows: list[dict[str, Any]] | None = None
         async with self._sem:
-            try:
-                rows = await self.rest.candles(inst, "1d", start, today.isoformat())
-            except Exception as exc:  # noqa: BLE001 - one missing leg must not stop the rest
-                self.failed += 1
-                log.debug("legs.failed", scrip=inst.scrip_code, error=str(exc)[:80])
-                return
+            for attempt, delay in enumerate((*RETRY_DELAYS_S, None)):
+                try:
+                    rows = await self.rest.candles(inst, "1d", start, today.isoformat())
+                    break
+                except Exception as exc:  # noqa: BLE001 - one missing leg must not stop the rest
+                    log.debug("legs.attempt_failed", scrip=inst.scrip_code, attempt=attempt, error=str(exc)[:80])
+                    if delay is not None:
+                        await asyncio.sleep(delay)
+        if rows is None:
+            self.failed += 1
+            self.failed_codes.add(inst.scrip_code)
+            return
+        self.failed_codes.discard(inst.scrip_code)
         got = levels_from_candles(rows, today)
         if got is None:
-            self.failed += 1
+            self.refused += 1
+            self.refused_codes.add(inst.scrip_code)
             return
         levels, session, close, vol = got
         kind = (
@@ -198,8 +215,10 @@ class LegPivotLoader:
         """Load every leg's ladder. Safe to call again: a fresh day clears the previous one."""
         if self.day != today.isoformat():
             self.by_code.clear()
+            self.failed_codes.clear()
+            self.refused_codes.clear()
             self.day = today.isoformat()
-            self.loaded = self.failed = 0
+            self.loaded = self.failed = self.refused = 0
         self.running = True
         began = time.time()
         try:
@@ -215,6 +234,10 @@ class LegPivotLoader:
         )
         return self.loaded
 
+    def missing(self, legs: list[Instrument]) -> list[Instrument]:
+        """Legs with no ladder that were not refused by a guard — what a repair pass refetches."""
+        return [i for i in legs if i.scrip_code not in self.by_code and i.scrip_code not in self.refused_codes]
+
     def stats(self) -> dict[str, Any]:
         kinds: dict[str, int] = {}
         for v in self.by_code.values():
@@ -223,6 +246,7 @@ class LegPivotLoader:
             "day": self.day,
             "loaded": self.loaded,
             "failed": self.failed,
+            "refused": self.refused,
             "running": self.running,
             "byKind": kinds,
             "strikesPerSide": STRIKES_PER_SIDE,

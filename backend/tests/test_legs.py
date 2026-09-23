@@ -6,7 +6,7 @@ from datetime import date
 
 from kotsin_nse.config import Segment
 from kotsin_nse.domain import Instrument, InstrumentKind, OptionType
-from kotsin_nse.instrument.legs import levels_from_candles, otm_legs
+from kotsin_nse.instrument.legs import LegPivotLoader, levels_from_candles, otm_legs
 
 
 def _opt(strike: float, ot: OptionType) -> Instrument:
@@ -113,3 +113,49 @@ def test_a_session_that_printed_at_one_price_gets_no_ladder():
     options, 2026-09-23 (SILVERM 238000 PE, one contract traded)."""
     flat = [{"dt": "2026-09-22T09:15:00", "o": 238.0, "h": 238.0, "l": 238.0, "c": 238.0, "v": 5000}]
     assert levels_from_candles(flat, date(2026, 9, 23)) is None, "high volume does not rescue it"
+
+
+class _FlakyRest:
+    """Fails the first ``fail`` calls per scrip, then serves a healthy previous session."""
+
+    def __init__(self, fail: int):
+        self.fail, self.calls = fail, {}
+
+    async def candles(self, inst, interval, start, end):
+        n = self.calls[inst.scrip_code] = self.calls.get(inst.scrip_code, 0) + 1
+        if n <= self.fail:
+            raise RuntimeError("429")
+        return [{"dt": "2026-09-22T09:15:00", "o": 10, "h": 12, "l": 8, "c": 11, "v": 5000}]
+
+
+def _leg(code: str) -> Instrument:
+    return Instrument(scrip_code=code, symbol="X", segment=Segment.NSE_FO, kind=InstrumentKind.OPTION,
+                      strike=100.0, option_type=OptionType.CE, expiry="2026-09-29", underlying="X")
+
+
+def test_a_blip_is_retried_and_a_persistent_failure_is_left_for_the_repair_loop(monkeypatch):
+    import asyncio
+
+    import kotsin_nse.instrument.legs as legs_mod
+
+    monkeypatch.setattr(legs_mod, "RETRY_DELAYS_S", (0.0, 0.0))
+    ok = LegPivotLoader(_FlakyRest(fail=2))
+    asyncio.run(ok.load([_leg("1")], date(2026, 9, 23)))
+    assert ok.loaded == 1 and ok.failed == 0 and ok.missing([_leg("1")]) == []
+
+    dead = LegPivotLoader(_FlakyRest(fail=99))
+    asyncio.run(dead.load([_leg("2")], date(2026, 9, 23)))
+    assert dead.failed == 1 and dead.failed_codes == {"2"} and [i.scrip_code for i in dead.missing([_leg("2")])] == ["2"]
+
+
+def test_a_guard_refusal_is_not_a_failure_and_is_never_retried():
+    import asyncio
+
+    class ThinRest:
+        async def candles(self, inst, interval, start, end):
+            return [{"dt": "2026-09-22T09:15:00", "o": 5, "h": 9, "l": 4, "c": 6, "v": 5}]
+
+    ld = LegPivotLoader(ThinRest())
+    asyncio.run(ld.load([_leg("3")], date(2026, 9, 23)))
+    assert ld.refused == 1 and ld.failed == 0 and ld.missing([_leg("3")]) == []
+    assert ld.stats()["refused"] == 1

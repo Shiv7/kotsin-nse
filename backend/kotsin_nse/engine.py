@@ -29,6 +29,8 @@ import structlog
 
 from .alerts.engine import AlertEngine
 from .bars.aggregator import Aggregator
+from .bars.daily import MIN_DAILY_BARS, REPAIR_BATCH, DailyCache, is_official, previous_session
+from .bars.daily import audit as audit_daily
 from .bars.indicators import atr
 from .bars.micro import MicroAggregator
 from .bars.periods import monthly, previous_complete, weekly
@@ -84,6 +86,7 @@ from .market.session import (
     ist_day,
     ist_hm,
     ist_naive_to_ts,
+    ist_today,
     past_force_flat,
 )
 from .market.session import (
@@ -243,6 +246,15 @@ class Engine:
         self.quotes: dict[str, Quote] = {}
         self.ltps: dict[str, float] = {}
         self._zone_cache: dict[str, tuple[str, list[Zone]]] = {}
+        # -- the pivot data plane (docs/PIVOTS.md) --
+        self.daily_cache = DailyCache(settings.data_dir / "daily")
+        self._daily_failed: set[str] = set()  # 1d fetch raised; the repair loop retries every pass
+        self._daily_confirmed: dict[str, date] = {}  # asked once for this expected session already
+        self._daily_due = False  # a full refetch is owed: day roll or a refresh slot
+        self._legs_due = False  # a full leg reload is owed: day roll
+        self._daily_refresh_done: set[str] = set()  # "YYYY-MM-DD HH:MM" slots already run
+        self._pivot_repair_task: asyncio.Task[Any] | None = None
+        self._last_pivot_repair = 0.0
         self._future_to_underlying: dict[str, str] = {}
         self._stale_positions: set[str] = set()
         self._shadow_exits: set[str] = set()
@@ -295,6 +307,8 @@ class Engine:
             await asyncio.to_thread(self.archive.flush, final=True)
         except Exception as exc:  # noqa: BLE001 - shutting down; the archive must not block it
             log.warning("archive.final_flush_failed", error=str(exc))
+        if self._pivot_repair_task is not None and not self._pivot_repair_task.done():
+            self._pivot_repair_task.cancel()
         for t in self._tasks:
             t.cancel()
         for t in self._tasks:
@@ -346,7 +360,7 @@ class Engine:
             ),
         )
         groups = self._apply_universe_filters(
-            self.universe_builder.build_underlyings(self.s.segment_list, date.today())
+            self.universe_builder.build_underlyings(self.s.segment_list, ist_today())
         )
         self.groups = groups
         self.underlyings = {g.root: g.underlying for g in groups.values()}
@@ -361,10 +375,16 @@ class Engine:
         )
         for inst in universe:
             self.aggregator.track(inst)
+        self._seed_daily_from_cache(universe)
         await self._backfill(universe)
+        self._daily_refresh_done = {
+            f"{ist_today().isoformat()} {slot}"
+            for slot in self.s.daily_refresh_hm
+            if ist_hm(time.time()) >= slot
+        }
 
         # Pass 2 — which strikes, now that the previous close is known from the daily backfill.
-        n_opts = self.universe_builder.select_all(groups, self._prev_close, date.today())
+        n_opts = self.universe_builder.select_all(groups, self._prev_close, ist_today())
         for g in groups.values():
             for o in g.options:
                 self._segment_by_code[o.scrip_code] = o.segment
@@ -402,7 +422,7 @@ class Engine:
 
     def _prev_close(self, symbol: str) -> float | None:
         bars = self.store.bars(symbol, "1d")
-        prior = [b for b in bars if ist_day(b.ts) < date.today()]
+        prior = [b for b in bars if ist_day(b.ts) < ist_today()]
         return prior[-1].close if prior else (bars[-1].close if bars else None)
 
     def _apply_universe_filters(self, groups: dict[str, ScripGroup]) -> dict[str, ScripGroup]:
@@ -430,7 +450,7 @@ class Engine:
         Sequential and rate-limit friendly: the broker's historical endpoint is the slowest thing
         we touch, and hammering it at boot is how the old stack earned its retry storms.
         """
-        end = date.today()
+        end = ist_today()
         start_intraday = end - timedelta(days=max(7, self.s.backfill_days // 2))
         start_daily = end - timedelta(days=400)  # a year of dailies for monthly pivots
         ok = failed = 0
@@ -442,9 +462,13 @@ class Engine:
                     )
                 except Exception as exc:  # noqa: BLE001
                     failed += 1
+                    if tf == "1d":
+                        self._daily_failed.add(inst.symbol)
                     log.warning("backfill.failed", symbol=inst.symbol, tf=tf, error=str(exc))
                     continue
                 if not rows:
+                    if tf == "1d":
+                        self._daily_failed.add(inst.symbol)
                     continue
                 if tf == "1d":
                     self._seed_daily(inst, rows)
@@ -477,6 +501,83 @@ class Engine:
             for r in rows
         ]
         self.store.seed(inst.symbol, "1d", bars)
+        # The official series is what the pivots read, so anything computed on the old one is void;
+        # and the cache holds the last known official candles for a boot the broker cannot serve.
+        self._zone_cache.pop(inst.symbol, None)
+        self._daily_failed.discard(inst.symbol)
+        self.daily_cache.save(inst.symbol, self.store.bars(inst.symbol, "1d"))
+
+    def _seed_daily_from_cache(self, universe: list[Instrument]) -> None:
+        """The last known official candles, before REST is asked. A boot while the broker's
+        historical endpoint is down then resumes on real levels; ``store.seed`` lets the REST
+        refetch win over these the moment it answers."""
+        hit = 0
+        for inst in universe:
+            bars = self.daily_cache.load(inst.symbol, inst.scrip_code)
+            if bars:
+                self.store.seed(inst.symbol, "1d", bars)
+                hit += 1
+        log.info("daily.cache_seeded", names=hit, of=len(universe))
+
+    async def _refetch_daily(self, symbols: list[str]) -> int:
+        """Refetch the official daily series for ``symbols``. A call that raises stays in
+        ``_daily_failed`` and is retried every pass; an empty answer is an answer."""
+        end = ist_today()
+        start = end - timedelta(days=400)
+        ok = 0
+        for sym in symbols:
+            inst = self.underlyings.get(sym)
+            if inst is None:
+                continue
+            try:
+                rows = await self.rest.candles(inst, "1d", start.isoformat(), end.isoformat())
+            except Exception as exc:  # noqa: BLE001 - the loop comes back for it
+                self._daily_failed.add(sym)
+                log.debug("daily.refetch_failed", symbol=sym, error=str(exc)[:80])
+                continue
+            self._daily_failed.discard(sym)
+            if rows:
+                self._seed_daily(inst, rows)
+                ok += 1
+            await asyncio.sleep(0.15)
+        return ok
+
+    def daily_audit(self) -> Any:
+        """Every underlying's daily series, classified by whether it can carry today's pivots."""
+        return audit_daily(
+            {sym: self.store.bars(sym, "1d") for sym in self.underlyings}, ist_today(), self.calendar
+        )
+
+    async def _pivot_repair(self) -> None:
+        """docs/PIVOTS.md §3–4: refetch what the audit flags, reload what the ladders lack.
+
+        A name is asked about once per expected session unless the call itself failed: if the
+        broker has nothing newer for it, asking again every two minutes would not change the
+        answer, and two hundred names asking would be the retry storm the backfill avoids.
+        """
+        try:
+            if self._daily_due:
+                self._daily_due = False
+                await self._refetch_daily(list(self.underlyings))
+            a = self.daily_audit()
+            wanted = [
+                sym for sym in a.needs_refresh
+                if sym in self._daily_failed or self._daily_confirmed.get(sym) != a.expected_prev
+            ]
+            for sym in wanted:
+                if a.expected_prev is not None:
+                    self._daily_confirmed[sym] = a.expected_prev
+            if wanted:
+                n = await self._refetch_daily(wanted[:REPAIR_BATCH])
+                log.info("daily.repaired", refetched=n, asked=len(wanted), audit=a.summary())
+            if self._legs_due or self.leg_pivots.failed_codes:
+                legs = self._expected_legs(self.groups.values())
+                todo = legs if self._legs_due else self.leg_pivots.missing(legs)
+                self._legs_due = False
+                if todo:
+                    await self.leg_pivots.load(todo, ist_today())
+        except Exception as exc:  # noqa: BLE001 - advisory levels never stall the engine
+            log.warning("pivot_repair.failed", error=str(exc))
 
     # -- control -----------------------------------------------------------------------------------
 
@@ -604,15 +705,19 @@ class Engine:
         An open position is unaffected by a band change: its stop was stamped onto the position
         at entry and never moves. Only *new* signals see the new width.
         """
-        today = date.today()
+        today = ist_today()
         regime = self.volatility_regime(symbol)
         key = f"{today.isoformat()}:{regime.band.value}"
         hit = self._zone_cache.get(symbol)
         if hit and hit[0] == key:
             return hit[1]
         dailies = self.store.bars(symbol, "1d")
-        if len(dailies) < 25:
-            self._zone_cache[symbol] = (key, [])
+        # Deliberately not cached, and deliberately empty: a name whose previous session is still
+        # the tick-built bar (its close is the last print, not the exchange's) gets no levels
+        # rather than wrong ones, and gets real ones the moment the repair loop lands the official
+        # candle — not at the next band change.
+        prev = previous_session(dailies, today)
+        if len(dailies) < MIN_DAILY_BARS or prev is None or not is_official(prev):
             return []
         points = []
         prev_day = [b for b in dailies if ist_day(b.ts) < today]
@@ -733,7 +838,7 @@ class Engine:
             cat = await self.catalogue_loader.ensure(force=True)
             self.universe_builder.cat = cat
             before = {o.scrip_code for g in self.groups.values() for o in g.options}
-            self.universe_builder.select_all(self.groups, self._prev_close, date.today())
+            self.universe_builder.select_all(self.groups, self._prev_close, ist_today())
             fresh = [o for g in self.groups.values() for o in g.options if o.scrip_code not in before]
             for o in fresh:
                 self._segment_by_code[o.scrip_code] = o.segment
@@ -911,28 +1016,32 @@ class Engine:
         land rather than when the last one does.
         """
         try:
-            today = ist_day(time.time())
-            legs: list[Instrument] = []
-            cat = self.catalogue_loader.catalogue
-            for g in groups:
-                if g.futures:
-                    legs.append(g.futures[0])
-                if not g.option_expiry:
-                    continue
-                spot = (self.ltps.get(g.equity.scrip_code) if g.equity else None) or g.close or 0.0
-                # The FULL chain, not g.options: that is the subscribed shortlist — five strikes a
-                # side around spot, so half of it is in the money and the OTM filter leaves fewer
-                # than eight. The catalogue has every listed strike.
-                chain = [
-                    o
-                    for ot in (OptionType.CE, OptionType.PE)
-                    for o in cat.chain(g.root, g.option_expiry, ot)
-                ]
-                legs.extend(otm_legs(chain=chain, spot=spot))
+            legs = self._expected_legs(groups)
             if legs:
-                await self.leg_pivots.load(legs, today)
+                await self.leg_pivots.load(legs, ist_today())
         except Exception as exc:  # noqa: BLE001 - advisory levels never stall the engine
             log.warning("legs.load_failed", error=str(exc))
+
+    def _expected_legs(self, groups: Any) -> list[Instrument]:
+        """The front future and the eight OTM strikes of every F&O name — the ladders the book reads."""
+        legs: list[Instrument] = []
+        cat = self.catalogue_loader.catalogue
+        for g in groups:
+            if g.futures:
+                legs.append(g.futures[0])
+            if not g.option_expiry:
+                continue
+            spot = (self.ltps.get(g.equity.scrip_code) if g.equity else None) or g.close or 0.0
+            # The FULL chain, not g.options: that is the subscribed shortlist — five strikes a
+            # side around spot, so half of it is in the money and the OTM filter leaves fewer
+            # than eight. The catalogue has every listed strike.
+            chain = [
+                o
+                for ot in (OptionType.CE, OptionType.PE)
+                for o in cat.chain(g.root, g.option_expiry, ot)
+            ]
+            legs.extend(otm_legs(chain=chain, spot=spot))
+        return legs
 
     async def _open_rt_twin(self, pos: Position, inst: Instrument, result: Any) -> None:
         """Mirror a FUDKII entry into FUDKII_RT_X so only the exit policy differs.
@@ -997,7 +1106,7 @@ class Engine:
             front = cat.front_future(sig.symbol)
             q = self.quotes.get(front.scrip_code) if front else None
             return select_future(front=front, quote=q, now=now)
-        expiry = choose_expiry(cat.expiries(sig.symbol), date.today(), SELECTION_POLICY)
+        expiry = choose_expiry(cat.expiries(sig.symbol), ist_today(), SELECTION_POLICY)
         if expiry is None:
             return select_option(
                 chain=[], quotes={}, spot=sig.entry, target1=None, direction=sig.direction, now=now
@@ -1237,6 +1346,8 @@ class Engine:
                 if day != last_day:
                     last_day = day
                     self._zone_cache.clear()
+                    self._daily_due = self._legs_due = True
+                    self._daily_refresh_done.clear()
                     for w in self.wallets.values():
                         w.rollover(now)
                     if self.s.has_credentials and self.s.engine_enabled:
@@ -1282,6 +1393,25 @@ class Engine:
                     self._intraday_rebuild_day = day
                     self._decision_tasks.add(asyncio.create_task(self._intraday_universe_rebuild()))
 
+                # The pivot data plane (docs/PIVOTS.md §3): refresh slots, then the periodic audit.
+                hm = ist_hm(now)
+                for slot in self.s.daily_refresh_hm:
+                    stamp = f"{day} {slot}"
+                    if hm >= slot and stamp not in self._daily_refresh_done:
+                        self._daily_refresh_done.add(stamp)
+                        self._daily_due = True
+                if (
+                    self.reconciler_ready
+                    and self.underlyings
+                    and (self._pivot_repair_task is None or self._pivot_repair_task.done())
+                    and (
+                        self._daily_due
+                        or self._legs_due
+                        or now - self._last_pivot_repair > self.s.pivot_repair_interval_s
+                    )
+                ):
+                    self._last_pivot_repair = now
+                    self._pivot_repair_task = asyncio.create_task(self._pivot_repair())
                 if now - last_snapshot > 300:
                     last_snapshot = now
                     await self._persist_wallets()
@@ -1339,6 +1469,7 @@ class Engine:
         # feed and session checks are informational until a segment is open. The broker's token
         # dies at 23:59:59 IST every day; `usable` is what a call actually needs.
         sess = self.auth.session
+        daily = self.daily_audit()
         checks = [
             Check(
                 "feed_connected",
@@ -1372,6 +1503,14 @@ class Engine:
                 if self.underlyings
                 else True,
                 detail="fewer than half the universe has 21+ decision bars",
+            ),
+            Check(
+                "pivots_ready",
+                (daily.ready and not self.leg_pivots.failed_codes) if self.underlyings else True,
+                detail=(
+                    f"{daily.summary()}; legs {self.leg_pivots.loaded} loaded, "
+                    f"{self.leg_pivots.failed} failed, {self.leg_pivots.refused} refused"
+                ),
             ),
         ]
         return {

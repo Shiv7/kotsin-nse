@@ -137,6 +137,13 @@ class Settings(BaseSettings):
     #: Periodic REST sweep of the finer frames (fidelity metric + chart accuracy). One call per
     #: symbol per swept timeframe per interval.
     bar_sweep_interval_s: float = 300.0
+    #: How often the pivot data plane audits the daily series and the leg ladders and refetches
+    #: whatever is missing, unofficial or stale (docs/PIVOTS.md). One REST call per bad name.
+    pivot_repair_interval_s: float = 120.0
+    #: IST wall-clock slots at which the daily series is refetched regardless of the audit: after
+    #: the NSE close, so the official closing price lands the same evening, and before the MCX
+    #: open, so a process that stayed up overnight starts the day on official candles.
+    daily_refresh_hm: tuple[str, ...] = ("08:30", "15:45")
     #: scripFinder's strike shortlist: ±band around the previous close, N per side, nearest expiry
     universe_band_pct: float = 12.0
     universe_strikes_per_side: int = 5

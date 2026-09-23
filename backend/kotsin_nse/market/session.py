@@ -123,6 +123,12 @@ def ist_day(ts: float) -> date:
     return to_ist(ts).date()
 
 
+def ist_today() -> date:
+    """Today in Kolkata. ``date.today()`` is the machine's date, and a UTC box is a day behind
+    between 00:00 and 05:30 IST — which is when a pre-open boot picks its previous session."""
+    return datetime.now(IST).date()
+
+
 def ist_hm(ts: float) -> str:
     return to_ist(ts).strftime("%H:%M")
 
