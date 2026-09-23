@@ -32,7 +32,7 @@ from ..hotstocks.service import HotStocksService
 from ..ledger.db import events, rejections, signals, trades
 from ..market.session import TF_SECONDS, ist_hm, to_ist
 from ..strategy.catalog import BOOKS, LIVE_KEYS
-from ..strategy.keys import ALL_KEYS
+from ..strategy.keys import ALL_KEYS, StrategyKey
 from .ws import Hub, handle, pump
 
 
@@ -651,7 +651,7 @@ def build_app(engine: Engine) -> FastAPI:
                 f"broker session (see boot notes)",
             )
         chosen_expiry = expiry if expiry in exps else (
-            choose_expiry(exps, date.today(), SELECTION_POLICY) or exps[0]
+            choose_expiry(exps, date.today(), Engine.selection_policy_for(StrategyKey.FUDKII)) or exps[0]
         )
         underlying = engine.underlyings.get(sym)
         spot = engine.ltps.get(underlying.scrip_code) if underlying else None
@@ -689,7 +689,7 @@ def build_app(engine: Engine) -> FastAPI:
                     target1=None,
                     direction=direction,
                     now=time.time(),
-                    policy=SELECTION_POLICY,
+                    policy=Engine.selection_policy_for(StrategyKey.FUDKII),
                 )
                 selection[direction.value] = {
                     "ok": sel.ok,
@@ -703,6 +703,7 @@ def build_app(engine: Engine) -> FastAPI:
                 }
             _ = bars
 
+        fam = Engine.selection_policy_for(StrategyKey.FUDKII)
         return {
             "symbol": sym,
             "spot": spot,
@@ -711,12 +712,14 @@ def build_app(engine: Engine) -> FastAPI:
             "rows": [by_strike[k] for k in sorted(by_strike)],
             "selection": selection,
             "stockIv": engine.stock_iv_snapshot(sym),
+            # the FUDKII family's policy (no premium floor); FUKAA keeps the shared one
             "policy": {
-                "min_days_to_expiry": SELECTION_POLICY.min_days_to_expiry,
-                "min_premium": SELECTION_POLICY.min_premium,
-                "max_premium": SELECTION_POLICY.max_premium,
-                "max_spread_pct": SELECTION_POLICY.max_spread_pct,
-                "max_quote_age_s": SELECTION_POLICY.max_quote_age_s,
+                "min_days_to_expiry": fam.min_days_to_expiry,
+                "min_premium": fam.min_premium,
+                "max_premium": fam.max_premium,
+                "max_spread_pct": fam.max_spread_pct,
+                "max_quote_age_s": fam.max_quote_age_s,
+                "shared_min_premium": SELECTION_POLICY.min_premium,
             },
         }
 
