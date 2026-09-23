@@ -1076,7 +1076,7 @@ class Engine:
             positions=list(self.positions.values()),
             total_capital=sum(w.balance for w in self.wallets.values()),
         )
-        if not verdict.ok:
+        if not verdict.allowed:
             log.info("rt_twin.skipped", symbol=pos.underlying.symbol, reason=verdict.reason)
             return
         twin = replace(
