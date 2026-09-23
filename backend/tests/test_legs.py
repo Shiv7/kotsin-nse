@@ -159,3 +159,43 @@ def test_a_guard_refusal_is_not_a_failure_and_is_never_retried():
     asyncio.run(ld.load([_leg("3")], date(2026, 9, 23)))
     assert ld.refused == 1 and ld.failed == 0 and ld.missing([_leg("3")]) == []
     assert ld.stats()["refused"] == 1
+
+
+def test_the_mtf_rungs_drop_levels_the_contract_gapped_over_and_merge_the_rest():
+    """CANBK CE125, 2026-09-23: yesterday's daily R1 1.47 sat below the 1.56 entry — a level
+    already passed, not a target. The first rung above entry is T1."""
+    from kotsin_nse.bars.pivots import classic_pivots
+    from kotsin_nse.instrument.legs import mtf_rungs
+
+    daily = classic_pivots(1.20, 0.50, 0.82)   # P 0.84: R1 1.18, R2 1.54 (both passed), R3 2.24
+    weekly_lv = classic_pivots(2.00, 0.60, 1.00)  # P 1.20, R1 1.80, R2 2.60 ...
+    rungs = mtf_rungs(daily, weekly_lv, above=1.56)
+    prices = [r["price"] for r in rungs]
+    assert prices == sorted(prices) and prices[0] > 1.56 and 1.18 not in prices and 1.54 not in prices
+    assert any("1wk" in m for r in rungs for m in r["members"]), "weekly levels are on the ladder"
+    assert mtf_rungs(daily, None, above=1.56)[0]["price"] == 2.24
+
+
+def test_the_weekly_ladder_comes_from_the_same_candles_and_needs_three_sessions():
+    import asyncio
+
+    from kotsin_nse.instrument.legs import LegPivotLoader
+
+    def rows(days):
+        return [{"dt": f"{d}T09:15:00", "o": 10 + i, "h": 12 + i, "l": 8 + i, "c": 11 + i, "v": 5000}
+                for i, d in enumerate(days)]
+
+    class Rest:
+        def __init__(self, days): self.days = days
+        async def candles(self, inst, interval, start, end): return rows(self.days)
+
+    full = ["2026-09-15", "2026-09-16", "2026-09-17", "2026-09-18", "2026-09-21", "2026-09-22"]
+    ld = LegPivotLoader(Rest(full))
+    asyncio.run(ld.load([_leg("9")], date(2026, 9, 23)))
+    lp = ld.for_code("9")
+    assert lp is not None and lp.weekly is not None and lp.weekly_session == "2026-09-15..2026-09-18"
+    assert lp.weekly.r1 > lp.weekly.pivot and lp.to_json()["weekly"]["session"] == lp.weekly_session
+
+    thin = LegPivotLoader(Rest(["2026-09-18", "2026-09-21", "2026-09-22"]))  # one session in the week
+    asyncio.run(thin.load([_leg("9")], date(2026, 9, 23)))
+    assert thin.for_code("9") is not None and thin.for_code("9").weekly is None

@@ -104,6 +104,8 @@ class ExitEngine:
         # 1. stops --------------------------------------------------------------------------------
         # An equity breach is checked FIRST when a sustain policy is active: if the underlying has
         # confirmed, the option-side breach is not noise and gets no grace.
+        if lim.own_ladder and (hard := self._own_hard_stop(pos, view, mid)) is not None:
+            return hard
         if lim.sustain_s is not None and self._equity_breached(pos, view):
             return ExitDecision(
                 pos.id,
@@ -160,7 +162,7 @@ class ExitEngine:
 
         # 3. targets ------------------------------------------------------------------------------
         if lim.own_ladder:
-            if (own := self._own_ladder(pos, view, ltp)) is not None:
+            if (own := self._own_ladder(pos, view, ltp, mid)) is not None:
                 return own
         elif ltp > 0 and pos.targets_hit < len(pos.option_targets):
             nxt = pos.option_targets[pos.targets_hit]
@@ -311,60 +313,87 @@ class ExitEngine:
         projected = max(0.05, pos.entry - abs(pos.equity_entry - pos.equity_sl) * delta)
         pos.option_sl = round(max(projected, pos.ratchet_sl), 2)
 
-    def _arm(self, pos: Position, view: MarketView, mid: float, by: str, why: str) -> ExitDecision:
-        pos.armed_by = by
-        pos.armed_ts = view.now
-        pos.peak_mid = max(pos.peak_mid, mid)
-        pos.trail_dwell = 0
-        # Breakeven on the rest: the live re-projection may not take the stop back under entry.
-        pos.ratchet_sl = max(pos.ratchet_sl, pos.entry)
-        pos.option_sl = round(max(pos.option_sl, pos.ratchet_sl), 2)
-        return ExitDecision(
-            pos.id, ExitReason.TARGET, view.option_ltp, self._tranche(pos),
-            f"armed by {by}: {why} — one lot out",
-        )
-
     def _tranche(self, pos: Position) -> int:
         lot = max(1, pos.instrument.lot_size) * max(1, self.limits.arm_tranche_lots)
         return pos.qty_remaining if pos.qty_remaining <= lot else min(lot, pos.qty_remaining)
 
-    def _own_ladder(self, pos: Position, view: MarketView, ltp: float) -> ExitDecision | None:
-        """Arm on the underlying touching its own T1, or on the option's 1-minute close reaching
-        its own R1; then one lot per rung of the option's own R2/R3/R4, the last rung taking the
-        rest. ``targets_hit`` counts rungs: arming is rung 1 whichever trigger fired."""
+    def _own_hard_stop(self, pos: Position, view: MarketView, mid: float) -> ExitDecision | None:
+        """The rising stop — breakeven at the T1 touch, the last sustained rung, or the peak less
+        the give-back, whichever is highest — is *hard*: trading through it ends the trade."""
+        if pos.ratchet_sl <= 0 or not view.quote_ok or mid <= 0 or mid > pos.ratchet_sl:
+            return None
+        return ExitDecision(
+            pos.id, ExitReason.SL_OP, view.option_ltp, pos.qty_remaining,
+            f"hard SL {pos.ratchet_sl:.2f} traded through at {mid:.2f} "
+            f"({'peak − give-back' if pos.armed_ts else 'breakeven'}; {pos.targets_hit} lot(s) already out)",
+        )
+
+    def _touch(self, pos: Position, view: MarketView, mid: float, by: str, why: str) -> ExitDecision:
+        """A rung touched: one lot out (the last rung takes the rest), the hard SL steps to the
+        rung below (breakeven for T1), and the sustain clock for this rung starts."""
+        i = pos.targets_hit
+        last = i >= len(pos.option_targets) - 1
+        floor = pos.entry if i == 0 else pos.option_targets[i - 1]
+        pos.ratchet_sl = round(max(pos.ratchet_sl, floor), 2)
+        pos.option_sl = round(max(pos.option_sl, pos.ratchet_sl), 2)
+        if i == 0:
+            pos.armed_by = by
+        pos.t_touch_ts = view.now if mid >= pos.option_targets[i] else None
+        pos.t_close_ok = False
+        qty = pos.qty_remaining if last else self._tranche(pos)
+        return ExitDecision(
+            pos.id, ExitReason.TARGET, view.option_ltp, qty,
+            f"T{i + 1} {pos.option_targets[i]:.2f} touched by {by} ({why}) — {'the rest' if last else 'one lot'} out; "
+            f"hard SL {pos.ratchet_sl:.2f}",
+        )
+
+    def _sustain(self, pos: Position, view: MarketView, mid: float, minute_close: float | None) -> None:
+        """Sustained = continuously at or above the rung for ``sustain_s`` AND a 1-minute close at
+        or above it since the touch. Completing it steps the hard SL to the rung; for T1 it arms."""
+        k = pos.targets_hit - 1
+        if k < 0 or k <= pos.sustained_idx or k >= len(pos.option_targets) or not view.quote_ok:
+            return
+        rung = pos.option_targets[k]
+        if mid < rung:
+            pos.t_touch_ts = None
+            pos.t_close_ok = False
+            return
+        if pos.t_touch_ts is None:
+            pos.t_touch_ts = view.now
+        if minute_close is not None and minute_close >= rung:
+            pos.t_close_ok = True
+        held = view.now - pos.t_touch_ts
+        if held >= (self.limits.sustain_s or 0) and pos.t_close_ok:
+            pos.sustained_idx = k
+            pos.ratchet_sl = round(max(pos.ratchet_sl, rung), 2)
+            pos.option_sl = round(max(pos.option_sl, pos.ratchet_sl), 2)
+            if k == 0:
+                pos.armed_ts = view.now
+                pos.peak_mid = max(pos.peak_mid, mid)
+                pos.trail_dwell = 0
+
+    def _own_ladder(self, pos: Position, view: MarketView, ltp: float, mid: float) -> ExitDecision | None:
+        """The RT book's ladder: T1–T4 are the premium's own daily+weekly classic levels above
+        the entry. Touch → a lot out and the hard SL steps to the rung below; sustained (75 s and
+        a 1-minute close) → the hard SL steps to the rung itself, and for T1 that arms the
+        peak give-back. If the underlying reaches its own T1 first, the option's price at that
+        instant *is* T1 and the higher own rungs follow it."""
         bucket = int(view.now // 60)
         prev = self._minute.get(pos.id)
         minute_close = prev[1] if prev is not None and prev[0] != bucket else None
         if ltp > 0:
             self._minute[pos.id] = (bucket, ltp)
-        if not pos.armed_by:
-            if view.underlying_ltp is not None and pos.equity_targets:
-                t1 = pos.equity_targets[0]
-                hit = (
-                    view.underlying_ltp >= t1
-                    if pos.direction is Direction.BULLISH
-                    else view.underlying_ltp <= t1
-                )
-                if hit:
-                    return self._arm(
-                        pos, view, ltp, "equity",
-                        f"underlying {view.underlying_ltp:.2f} reached its T1 {t1:.2f}",
-                    )
-            if pos.option_t1 > 0 and minute_close is not None and minute_close >= pos.option_t1:
-                return self._arm(
-                    pos, view, ltp, "option",
-                    f"option 1m close {minute_close:.2f} ≥ its own R1 {pos.option_t1:.2f}",
-                )
-            return None
-        if ltp > 0 and pos.targets_hit < len(pos.option_targets):
-            nxt = pos.option_targets[pos.targets_hit]
-            if nxt > 0 and ltp >= nxt:
-                last = pos.targets_hit == len(pos.option_targets) - 1
-                qty = pos.qty_remaining if last else self._tranche(pos)
-                return ExitDecision(
-                    pos.id, ExitReason.TARGET, ltp, qty,
-                    f"own R{pos.targets_hit + 1} {nxt:.2f} hit — {'the rest' if last else 'one lot'} out",
-                )
+        self._sustain(pos, view, mid, minute_close)
+        i = pos.targets_hit
+        if i == 0 and not pos.armed_by and view.underlying_ltp is not None and pos.equity_targets and ltp > 0:
+            t1 = pos.equity_targets[0]
+            hit = view.underlying_ltp >= t1 if pos.direction is Direction.BULLISH else view.underlying_ltp <= t1
+            if hit:
+                pos.option_targets = (ltp, *[r for r in pos.option_targets if r > ltp])[:4]
+                pos.option_t1 = ltp
+                return self._touch(pos, view, mid, "equity", f"underlying {view.underlying_ltp:.2f} reached its T1 {t1:.2f}, option at {ltp:.2f}")
+        if ltp > 0 and i < len(pos.option_targets) and ltp >= pos.option_targets[i]:
+            return self._touch(pos, view, mid, "option", f"option {ltp:.2f} ≥ its own rung")
         return None
 
     def _mark(self, pos: Position, view: MarketView, mid: float) -> None:
@@ -374,9 +403,19 @@ class ExitEngine:
         if lim.peak_giveback_pct is None or not view.quote_ok or mid <= 0:
             return
         if lim.own_ladder:
-            if not pos.armed_by:
+            if pos.armed_ts is None:
                 return
-        elif view.now - pos.opened_ts < lim.peak_arm_after_s:
+            if mid > pos.peak_mid:
+                pos.peak_mid = mid
+            give = lim.peak_giveback_pct / 100
+            if view.spread_pct:
+                give = max(give, view.spread_pct * lim.peak_giveback_spread_mult)
+            lifted = round(pos.peak_mid * (1 - give), 2)
+            if lifted > pos.ratchet_sl:
+                pos.ratchet_sl = lifted
+                pos.option_sl = round(max(pos.option_sl, pos.ratchet_sl), 2)
+            return
+        if view.now - pos.opened_ts < lim.peak_arm_after_s:
             return
         if mid > pos.peak_mid:
             pos.peak_mid = mid
@@ -394,8 +433,10 @@ class ExitEngine:
         lim = self.limits
         if lim.peak_giveback_pct is None or not view.quote_ok or pos.peak_mid <= 0 or mid <= 0:
             return None
-        if (not pos.armed_by) if lim.own_ladder else (pos.targets_hit < 1):
-            return None  # the ratchet arms only once T1 has paid (or a trigger armed it)
+        if lim.own_ladder:
+            return None  # folded into the rising stop (_mark / _own_hard_stop)
+        if pos.targets_hit < 1:
+            return None  # the ratchet arms only once T1 has paid
         give = lim.peak_giveback_pct / 100
         if view.spread_pct:
             give = max(give, view.spread_pct * lim.peak_giveback_spread_mult)

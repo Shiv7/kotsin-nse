@@ -80,16 +80,20 @@ MCX indices) is `dormant`: reported in `detail`, asked once per session, never a
 (`N/M names on the official previous session; k missing; …`) and the leg counts. `/api/leg-pivots`
 reports `loaded / failed / refused`.
 
-## 6. How FUDKII-RT exits use the ladders (operator's design, 2026-09-23)
+## 6. How FUDKII-RT-X exits use the ladders (operator's design, 2026-09-23)
 
-`RT_X_LIMITS.own_ladder = True`, `reproject_stop_s = 10`:
+`RT_X_LIMITS.own_ladder = True`, `reproject_stop_s = 10`, `peak_giveback_pct = 3`, `sustain_s = 75`:
 
-- **Stop** = the equity stop expressed through **live** delta, re-derived every 10 s
-  (`ExitEngine._reproject_stop`), never below `ratchet_sl` once armed; plus the equity SL, the 75 s
-  sustain and the 9% hard floor as before. The base book keeps its entry-delta projection.
-- **No delta-projected targets.** The twin carries the contract's **own** classic R1–R4
-  (`LegPivotLoader`, thin-bar and zero-range guarded). No ladder → equity trigger only.
-- **Arm** on either: the underlying touches its own T1, or the option's **1-minute close ≥ its own
-  R1**. On arming one lot leaves and the stop floors at breakeven.
-- **After arming:** the 2%-from-peak ratchet (spread-floored, 3 consecutive reads) manages the rest,
-  and one lot leaves at each of the option's own R2 / R3 / R4, the last rung taking the remainder.
+- **Ladder:** the contract's **own** daily + weekly classic pivots (`LegPivotLoader`, weekly from the
+  same candles, ≥ 3 sessions), merged (`mtf_rungs`, 2 % tolerance) and sorted; **T1–T4 are the rungs
+  above the entry premium**. A rung the contract gapped over is not a target. Nothing is
+  delta-projected onto the option.
+- **Equity trigger:** if the underlying reaches its own T1 first, the option's price at that instant
+  *is* T1 and the higher own rungs follow it.
+- **Touch** of Tn → one lot out (the last rung takes the rest); the hard SL steps to T(n−1)
+  (breakeven for T1). **Sustained** — 75 s continuously at/above Tn *and* a 1-minute close at/above it
+  since the touch — → the hard SL steps to Tn; for T1 that arms the give-back.
+- **One rising stop:** `ratchet_sl = max(stepped rung SL, peak − 3 % [spread-floored])`, never lowered;
+  trading through it ends the trade at once. Before the T1 touch the option-side stop is the equity
+  stop through **live** delta (re-projected every 10 s), with the 75 s sustain and the 9 % hard floor.
+- No bar time-stop; NSE positions flatten at 15:20 IST, MCX at 23:20.

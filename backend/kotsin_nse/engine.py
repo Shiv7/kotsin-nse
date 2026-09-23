@@ -1091,11 +1091,13 @@ class Engine:
             # Nothing delta-projected: the contract's own classic R1–R4 from its previous session
             # (LegPivotLoader, thin-bar and zero-range guarded). No ladder → the equity trigger only.
             own = self.leg_pivots.for_code(inst.scrip_code)
-            lv = own.levels if own is not None else None
-            twin.option_t1 = lv.r1 if lv else 0.0
-            twin.option_targets = (lv.r1, lv.r2, lv.r3, lv.r4) if lv else ()
+            rungs = own.rungs_above(twin.entry) if own is not None else []
+            twin.option_targets = tuple(r["price"] for r in rungs[:4])
+            twin.option_t1 = twin.option_targets[0] if twin.option_targets else 0.0
             twin.targets_hit = 0
-            twin.note += " · own classic ladder" if lv else " · no own ladder, equity trigger only"
+            twin.ratchet_sl = 0.0
+            twin.armed_by = ""
+            twin.note += " · own classic ladder" if twin.option_targets else " · no own ladder, equity trigger only"
         self.positions[twin.id] = twin
         twin_wallet.reserve(cost, result.fill.ts)
         twin_wallet.apply_charges(result.fill.charges, result.fill.ts)
@@ -1668,6 +1670,9 @@ def _position_json(p: Position) -> dict[str, Any]:
         "armed_by": p.armed_by,
         "armed_ts": p.armed_ts,
         "ratchet_sl": p.ratchet_sl,
+        "t_touch_ts": p.t_touch_ts,
+        "t_close_ok": p.t_close_ok,
+        "sustained_idx": p.sustained_idx,
     }
 
 
@@ -1704,6 +1709,9 @@ def _position_from_json(d: dict[str, Any]) -> Position:
         armed_by=str(d.get("armed_by", "")),
         armed_ts=d.get("armed_ts"),
         ratchet_sl=float(d.get("ratchet_sl", 0)),
+        t_touch_ts=d.get("t_touch_ts"),
+        t_close_ok=bool(d.get("t_close_ok", False)),
+        sustained_idx=int(d.get("sustained_idx", -1)),
     )
 
 

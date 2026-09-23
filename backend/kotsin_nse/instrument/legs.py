@@ -32,8 +32,11 @@ from typing import Any
 
 import structlog
 
-from ..bars.pivots import PivotLevels, classic_pivots
+from ..bars.periods import previous_complete, weekly
+from ..bars.pivots import PivotLevels, classic_pivots, cluster_zones, pivot_points
+from ..bars.unified import UnifiedBar
 from ..domain import Instrument, OptionType
+from ..market.session import ist_day, ist_naive_to_ts
 
 log = structlog.get_logger(__name__)
 
@@ -48,7 +51,14 @@ CONCURRENCY = 6
 RETRY_DELAYS_S: tuple[float, ...] = (0.5, 2.0)
 #: Calendar days of history requested. Only the previous completed session is used; the rest is
 #: slack for holidays and for a contract that listed recently.
-LOOKBACK_DAYS = 12
+LOOKBACK_DAYS = 21
+#: A "week" rolled up from one or two sessions is a daily wearing a different label. Below this
+#: many sessions the weekly ladder is not built (the old stack's nightly builder used 5; three
+#: keeps holiday weeks and a Thursday listing honest without discarding them).
+MIN_WEEKLY_SESSIONS = 3
+#: Merge tolerance for a premium's own daily+weekly levels, in percent of the premium. Options
+#: are coarse instruments; two levels two percent apart are one level.
+OPTION_CLUSTER_TOL_PCT = 2.0
 #: A previous session thinner than this does not get a ladder. Measured on MCX crude options,
 #: 2026-09-23: the 22-Sep bars carried 46,418 and 18,553 lots and their wide ranges were real — a
 #: crude premium genuinely halved that day — but the 17- and 18-Sep bars on the same contracts
@@ -76,10 +86,25 @@ class LegPivots:
     #: that session's volume — the evidence the range is worth anything. ``None`` when the feed
     #: did not report it, which is unverified rather than thin.
     volume: float | None = None
+    #: the previous completed Mon–Fri on the same premium; None when the contract is too young
+    weekly: PivotLevels | None = None
+    weekly_session: str = ""
+
+    def rungs_above(self, price: float) -> list[dict[str, Any]]:
+        """The MTF ladder the RT book trades: every daily+weekly classic level above ``price``."""
+        return mtf_rungs(self.levels, self.weekly, above=price)
 
     def to_json(self) -> dict[str, Any]:
         lv = self.levels
+        wk = self.weekly
         return {
+            "weekly": None if wk is None else {
+                "session": self.weekly_session,
+                "pivot": round(wk.pivot, 2), "tc": round(wk.tc, 2), "bc": round(wk.bc, 2),
+                "r": [round(x, 2) for x in (wk.r1, wk.r2, wk.r3, wk.r4)],
+                "s": [round(x, 2) for x in (wk.s1, wk.s2, wk.s3, wk.s4)],
+            },
+            "ladderAbovePrevClose": self.rungs_above(self.close)[:6],
             "scripCode": self.scrip_code,
             "symbol": self.symbol,
             "root": self.root,
@@ -95,6 +120,44 @@ class LegPivots:
             "r": [round(x, 2) for x in (lv.r1, lv.r2, lv.r3, lv.r4)],
             "s": [round(x, 2) for x in (lv.s1, lv.s2, lv.s3, lv.s4)],
         }
+
+
+def mtf_rungs(daily: PivotLevels, weekly_lv: PivotLevels | None, *, above: float) -> list[dict[str, Any]]:
+    """The premium's own daily+weekly classic levels above ``above``, merged and sorted.
+
+    Every level is a rung: a lone daily R2 is a target on a premium, not only a confluence — the
+    wall grading is carried for the card, not used to drop rungs. A rung at or below ``above``
+    is a level already passed (the contract gapped over it overnight) and cannot be a target.
+    """
+    points = pivot_points(daily, "1d")
+    if weekly_lv is not None:
+        points += pivot_points(weekly_lv, "1wk")
+    zones = cluster_zones(points, tolerance_pct=OPTION_CLUSTER_TOL_PCT)
+    return [
+        {"price": round(z.price, 2), "strength": round(z.strength, 2), "members": list(z.members)}
+        for z in sorted(zones, key=lambda z: z.price)
+        if z.price > above
+    ]
+
+
+def weekly_from_rows(
+    inst: Instrument, rows: list[dict[str, Any]], today: date
+) -> tuple[PivotLevels, str] | None:
+    """Classic pivots of the previous completed Mon–Fri, from the same daily candles."""
+    bars = [
+        UnifiedBar(
+            symbol=inst.symbol, scrip_code=inst.scrip_code, tf="1d", ts=ist_naive_to_ts(str(r["dt"])),
+            open=float(r["o"]), high=float(r["h"]), low=float(r["l"]), close=float(r["c"]), volume=float(r.get("v") or 0),
+        )
+        for r in rows
+    ]
+    p = previous_complete(weekly(bars), today)
+    if p is None or p.high <= p.low:
+        return None
+    if sum(1 for b in bars if p.start <= ist_day(b.ts) <= p.end) < MIN_WEEKLY_SESSIONS:
+        return None
+    lv = classic_pivots(p.high, p.low, p.close)
+    return (lv, f"{p.start}..{p.end}") if lv is not None else None
 
 
 def otm_legs(
@@ -193,6 +256,7 @@ class LegPivotLoader:
             self.refused_codes.add(inst.scrip_code)
             return
         levels, session, close, vol = got
+        wk = weekly_from_rows(inst, rows, today)
         kind = (
             inst.option_type.value
             if inst.option_type in (OptionType.CE, OptionType.PE)
@@ -208,6 +272,8 @@ class LegPivotLoader:
             session=session,
             close=close,
             volume=vol,
+            weekly=wk[0] if wk else None,
+            weekly_session=wk[1] if wk else "",
         )
         self.loaded += 1
 

@@ -254,6 +254,12 @@ class Position:
     #: a floor the live re-projection may never take the option stop below (entry, once armed)
     ratchet_sl: float = 0.0
     last_reproject_ts: float = 0.0
+    #: sustain clock for the last touched rung: when the premium last came back above it
+    t_touch_ts: float | None = None
+    #: a 1-minute close at or above that rung has been seen since the touch
+    t_close_ok: bool = False
+    #: index of the last rung whose sustain completed (-1: none; 0 = T1 → armed)
+    sustained_idx: int = -1
 
     def __post_init__(self) -> None:
         if self.qty_remaining == 0:

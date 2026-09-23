@@ -118,15 +118,16 @@ class AlertEngine:
         own = self.engine.leg_pivots.for_code(str(listed.get("scripCode") or ""))
         if own is None:
             return []
-        lv = own.levels
         return [
             {
                 "n": i,
-                "option": round(r, 2),
-                "optionGainPct": round((r - opt_ltp) / opt_ltp * 100, 1) if opt_ltp else None,
-                "source": f"option's own classic R{i} ({own.session})",
+                "option": r["price"],
+                "optionGainPct": round((r["price"] - opt_ltp) / opt_ltp * 100, 1) if opt_ltp else None,
+                "strength": r["strength"],
+                "source": f"option's own {','.join(r['members'])} ({own.session}"
+                          f"{' / ' + own.weekly_session if own.weekly_session else ''})",
             }
-            for i, r in enumerate((lv.r1, lv.r2, lv.r3, lv.r4), start=1)
+            for i, r in enumerate(own.rungs_above(opt_ltp or 0.0)[:4], start=1)
         ]
 
     def _rt_card(self, a: Alert, bar: UnifiedBar, history: list[UnifiedBar], tp: Any) -> dict[str, Any]:

@@ -110,15 +110,12 @@ def test_the_hard_floor_beats_the_sustain_window():
     assert pos.breach_since is None, "the floor fires before the clock is even consulted"
 
 
-def test_the_peak_ratchet_arms_only_after_t1_and_needs_consecutive_reads():
+def test_the_rising_stop_lifts_to_peak_minus_3pct_once_armed_and_is_hard():
     e = ExitEngine(RT_X_LIMITS)
-    pos = _pos(targets_hit=1, peak_mid=30.0, armed_by="equity")  # own-ladder: a trigger arms it
-    # give-back floor is max(2%, 1.5 x spread). spread 0.5% -> 2% of 30.00 = 0.60 -> level 29.40
-    v = dict(option_ltp=29.0, option_mid=29.0, now=2000.0)
-    assert e.evaluate(pos, _view(**v)) is None and pos.trail_dwell == 1
-    assert e.evaluate(pos, _view(**v)) is None and pos.trail_dwell == 2
-    d = e.evaluate(pos, _view(**v))
-    assert d is not None and "gave back" in d.note
+    pos = _pos(targets_hit=1, peak_mid=30.0, armed_by="option", armed_ts=1900.0, sustained_idx=0, ratchet_sl=24.0)
+    # give-back is max(3%, 1.5 x spread) = 3% of 30.00 = 0.90 -> the line is 29.10; 29.0 is through it
+    d = e.evaluate(pos, _view(option_ltp=29.0, option_mid=29.0, now=2000.0))
+    assert d is not None and "hard SL 29.10" in d.note and d.qty == pos.qty_remaining
 
 
 def test_a_single_print_cannot_trip_the_ratchet():
@@ -209,11 +206,11 @@ def test_the_two_books_take_different_exits_from_identical_state():
     assert rt.evaluate(b, v) is None, "the RT book waits for the breach to hold"
 
 
-# -- own classic ladder (operator's design, 2026-09-23) -----------------------------------------
+# -- the RT-X ladder (operator's design, 2026-09-23) ------------------------------------------
 
 
 def _own(**kw):
-    """An RT-X twin on a 4-lot position whose option carries its own classic ladder."""
+    """An RT-X twin on a 4-lot position whose option carries its own ladder above entry."""
     from kotsin_nse.config import Segment
     from kotsin_nse.domain import Instrument, InstrumentKind, OptionType
 
@@ -227,68 +224,122 @@ def _own(**kw):
     return _pos(**base)
 
 
-def test_own_ladder_arms_on_the_underlying_touching_its_t1_and_takes_one_lot():
+def _sustain_t1(e, pos, *, t0=2000.0, level=24.5):
+    """Drive T1 through touch → 75 s above → a minute close → sustained. Returns the touch decision."""
+    from kotsin_nse.risk.exits import apply_exit
+
+    d = e.evaluate(pos, _view(option_ltp=level, option_mid=level, now=t0))
+    assert d is not None and d.reason.value == "TARGET"
+    apply_exit(pos, d, fill_price=level, charges=0, now=t0)
+    for t in (t0 + 30, t0 + 65, t0 + 74):  # +65 crosses a minute boundary → the close is seen
+        assert e.evaluate(pos, _view(option_ltp=level, option_mid=level, now=t)) is None
+    assert pos.armed_ts is None, "74 s is not 75"
+    assert e.evaluate(pos, _view(option_ltp=level, option_mid=level, now=t0 + 76)) is None
+    return d
+
+
+def test_t1_touch_takes_one_lot_and_floors_the_hard_sl_at_breakeven():
     e = ExitEngine(RT_X_LIMITS)
     pos = _own()
-    assert e.evaluate(pos, _view(underlying_ltp=1019.0)) is None
-    d = e.evaluate(pos, _view(underlying_ltp=1020.0))
-    assert d is not None and d.qty == 100 and "armed by equity" in d.note
-    assert pos.armed_by == "equity" and pos.option_sl >= pos.entry, "breakeven on the rest"
+    assert e.evaluate(pos, _view(option_ltp=23.9, option_mid=23.9)) is None
+    d = e.evaluate(pos, _view(option_ltp=24.0, option_mid=24.0))
+    assert d is not None and d.qty == 100 and "T1 24.00 touched" in d.note
+    assert pos.ratchet_sl == 20.0 and pos.armed_by == "option" and pos.armed_ts is None
 
 
-def test_own_ladder_arms_on_the_options_own_r1_only_on_a_one_minute_close():
+def test_t1_sustained_75s_with_a_minute_close_arms_and_steps_the_sl_to_t1():
     e = ExitEngine(RT_X_LIMITS)
     pos = _own()
-    # a print above R1 inside the minute is a touch, not a close
-    assert e.evaluate(pos, _view(option_ltp=25.0, option_mid=25.0, now=2000.0)) is None
-    assert e.evaluate(pos, _view(option_ltp=23.0, option_mid=23.0, now=2030.0)) is None
-    # the minute closed at 23: below R1, nothing arms
-    assert e.evaluate(pos, _view(option_ltp=25.0, option_mid=25.0, now=2065.0)) is None
-    # this minute closes at 25 ≥ 24: armed on the next read past the boundary
-    d = e.evaluate(pos, _view(option_ltp=25.0, option_mid=25.0, now=2125.0))
-    assert d is not None and d.qty == 100 and "armed by option" in d.note and pos.armed_by == "option"
+    _sustain_t1(e, pos)
+    assert pos.sustained_idx == 0 and pos.armed_ts == 2076.0 and pos.ratchet_sl == 24.0
 
 
-def test_after_arming_one_lot_leaves_at_each_own_rung_and_the_last_takes_the_rest():
+def test_a_dip_below_t1_resets_the_sustain_clock_and_the_close_flag():
     from kotsin_nse.risk.exits import apply_exit
 
     e = ExitEngine(RT_X_LIMITS)
     pos = _own()
-    d = e.evaluate(pos, _view(underlying_ltp=1020.0))
-    apply_exit(pos, d, fill_price=20.0, charges=0, now=2000.0)
-    assert (pos.targets_hit, pos.qty_remaining) == (1, 300)
-    for ltp, want_qty, rung in ((28.0, 100, "R2"), (32.0, 100, "R3"), (36.0, 100, "R4")):
-        d = e.evaluate(pos, _view(option_ltp=ltp, option_mid=ltp, underlying_ltp=1020.0, now=2000.0 + ltp))
-        assert d is not None and d.qty == want_qty and rung in d.note, (ltp, d)
-        apply_exit(pos, d, fill_price=ltp, charges=0, now=2000.0 + ltp)
-    assert pos.qty_remaining == 0 and pos.status == "CLOSED"
+    d = e.evaluate(pos, _view(option_ltp=24.5, option_mid=24.5, now=2000.0))
+    apply_exit(pos, d, fill_price=24.5, charges=0, now=2000.0)
+    assert e.evaluate(pos, _view(option_ltp=23.5, option_mid=23.5, now=2030.0)) is None
+    assert pos.t_touch_ts is None and not pos.t_close_ok, "below the rung: the clock stops"
+    assert e.evaluate(pos, _view(option_ltp=24.5, option_mid=24.5, now=2065.0)) is None
+    assert pos.t_touch_ts == 2065.0
+    assert e.evaluate(pos, _view(option_ltp=24.5, option_mid=24.5, now=2130.0)) is None
+    assert pos.armed_ts is None, "65 s since it came back above"
+    assert e.evaluate(pos, _view(option_ltp=24.5, option_mid=24.5, now=2141.0)) is None
+    assert pos.armed_ts == 2141.0 and pos.ratchet_sl == 24.0
 
 
-def test_the_option_stop_follows_live_delta_every_10s_but_never_falls_below_the_ratchet():
+def test_the_equity_trigger_makes_the_options_price_at_that_instant_t1():
     e = ExitEngine(RT_X_LIMITS)
-    pos = _own(option_sl=17.0)
-    # δ(1000 vs 1010 CE) ≈ 0.42 → 20 − 10 × 0.42 = 15.8: re-projected on the first read
-    assert e.evaluate(pos, _view(underlying_ltp=1000.0, now=2000.0)) is None
-    assert pos.option_sl == 15.8
-    # 5 s later the underlying is in the money; too soon to re-project
-    assert e.evaluate(pos, _view(underlying_ltp=1015.0, now=2005.0)) is None and pos.option_sl == 15.8
-    # 10 s: δ ≈ 0.53 → 14.7 — looser, because the stop is the equity stop through live delta
-    assert e.evaluate(pos, _view(underlying_ltp=1015.0, now=2010.0)) is None and pos.option_sl == 14.7
-    # armed → breakeven floor; a later re-projection may not undo it
-    d = e.evaluate(pos, _view(underlying_ltp=1020.0, now=2020.0))
-    assert d is not None and pos.option_sl == 20.0
-    assert e.evaluate(pos, _view(underlying_ltp=1020.0, now=2040.0)) is None and pos.option_sl == 20.0
+    pos = _own()
+    d = e.evaluate(pos, _view(option_ltp=22.0, option_mid=22.0, underlying_ltp=1020.0))
+    assert d is not None and d.qty == 100 and "equity" in d.note
+    assert pos.option_t1 == 22.0 and pos.option_targets == (22.0, 24.0, 28.0, 32.0)
+    assert pos.armed_by == "equity" and pos.ratchet_sl == 20.0
+
+
+def test_t2_touch_takes_a_lot_keeps_the_sl_at_t1_and_t2_sustain_steps_it():
+    from kotsin_nse.risk.exits import apply_exit
+
+    e = ExitEngine(RT_X_LIMITS)
+    pos = _own()
+    _sustain_t1(e, pos)
+    d = e.evaluate(pos, _view(option_ltp=28.0, option_mid=28.0, now=2100.0))
+    assert d is not None and d.qty == 100 and "T2 28.00 touched" in d.note
+    apply_exit(pos, d, fill_price=28.0, charges=0, now=2100.0)
+    # the stepped component stays at T1 until T2 is sustained; the peak component (28 × 0.97)
+    # already lifts the single rising line above it — max(stepped SL, peak − 3 %)
+    assert pos.sustained_idx == 0 and pos.ratchet_sl == 27.16
+    for t in (2130.0, 2165.0):
+        assert e.evaluate(pos, _view(option_ltp=28.5, option_mid=28.5, now=t)) is None
+    assert e.evaluate(pos, _view(option_ltp=28.5, option_mid=28.5, now=2176.0)) is None
+    assert pos.sustained_idx == 1 and pos.ratchet_sl == 28.0
+
+
+def test_the_last_rung_takes_the_rest():
+    from kotsin_nse.risk.exits import apply_exit
+
+    e = ExitEngine(RT_X_LIMITS)
+    pos = _own()
+    _sustain_t1(e, pos)
+    for ltp in (28.0, 32.0):
+        d = e.evaluate(pos, _view(option_ltp=ltp, option_mid=ltp, now=2100.0 + ltp))
+        apply_exit(pos, d, fill_price=ltp, charges=0, now=2100.0 + ltp)
+    d = e.evaluate(pos, _view(option_ltp=36.0, option_mid=36.0, now=2200.0))
+    assert d is not None and d.qty == 100 and "the rest" in d.note
+
+
+def test_after_arming_the_stop_is_max_of_the_stepped_sl_and_peak_minus_3pct_and_is_hard():
+    e = ExitEngine(RT_X_LIMITS)
+    pos = _own(option_targets=(24.0, 100.0))  # a far T2, so 40 tests the line, not a rung
+    _sustain_t1(e, pos)
+    # the peak lifts the line: 40 × (1 − 3 %) = 38.80 (spread 0.5 % × 1.5 = 0.75 % < 3 %)
+    assert e.evaluate(pos, _view(option_ltp=40.0, option_mid=40.0, now=2100.0)) is None
+    assert pos.ratchet_sl == 38.8 and pos.option_sl == 38.8
+    # trading through it ends the trade at once — no 75 s grace on the rising stop
+    d = e.evaluate(pos, _view(option_ltp=38.5, option_mid=38.5, now=2101.0))
+    assert d is not None and d.qty == pos.qty_remaining and "hard SL 38.80" in d.note
+
+
+def test_breakeven_is_hard_too_after_the_first_lot():
+    from kotsin_nse.risk.exits import apply_exit
+
+    e = ExitEngine(RT_X_LIMITS)
+    pos = _own()
+    d = e.evaluate(pos, _view(option_ltp=24.0, option_mid=24.0, now=2000.0))
+    apply_exit(pos, d, fill_price=24.0, charges=0, now=2000.0)
+    d = e.evaluate(pos, _view(option_ltp=19.9, option_mid=19.9, now=2010.0))
+    assert d is not None and d.qty == 300 and "hard SL 20.00" in d.note
 
 
 def test_a_contract_without_its_own_ladder_arms_on_the_equity_trigger_only():
     e = ExitEngine(RT_X_LIMITS)
     pos = _own(option_t1=0.0, option_targets=())
     assert e.evaluate(pos, _view(option_ltp=30.0, option_mid=30.0, now=2000.0)) is None
-    assert e.evaluate(pos, _view(option_ltp=30.0, option_mid=30.0, now=2065.0)) is None, "no R1 to close above"
     d = e.evaluate(pos, _view(option_ltp=30.0, option_mid=30.0, underlying_ltp=1020.0, now=2070.0))
-    assert d is not None and pos.armed_by == "equity"
-    # no rungs afterwards: only the peak ratchet manages the rest
-    assert e.evaluate(pos, _view(option_ltp=40.0, option_mid=40.0, underlying_ltp=1020.0, now=2080.0)) is None
+    assert d is not None and pos.option_targets == (30.0,) and pos.armed_by == "equity"
 
 
 def test_the_base_book_never_arms_on_the_underlying_and_keeps_its_share_ladder():
@@ -297,4 +348,4 @@ def test_the_base_book_never_arms_on_the_underlying_and_keeps_its_share_ladder()
     assert e.evaluate(pos, _view(underlying_ltp=1020.0)) is None, "equity T1 means nothing to the base book"
     d = e.evaluate(pos, _view(option_ltp=24.0, option_mid=24.0))
     assert d is not None and d.qty == 100 and "40%" in d.note, "the legacy share ladder (40%, lot-rounded), untouched"
-    assert pos.armed_by == ""
+    assert pos.armed_by == "" and pos.ratchet_sl == 0.0
