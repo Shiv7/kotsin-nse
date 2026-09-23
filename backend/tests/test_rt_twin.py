@@ -114,3 +114,22 @@ async def test_the_twin_carries_the_options_own_classic_ladder_when_it_has_one(s
         assert twin2.option_t1 == 0.0 and twin2.option_targets == () and "equity trigger only" in twin2.note
     finally:
         await e.stop()
+
+
+def test_a_twin_and_its_parent_never_share_an_exit_order_id():
+    """2026-09-23 14:35: the DIXON parent's SL-EQ exit and its twin's carried the same
+    client_order_id (both keyed on the shared signal id); the twin's was refused as a duplicate
+    every second while the underlying sat through the stop."""
+    from dataclasses import replace
+
+    from kotsin_nse.domain import ExitDecision, ExitReason
+    from kotsin_nse.engine import exit_client_order_id
+
+    opt = Instrument("45678", "DIXON", Segment.NSE_FO, InstrumentKind.OPTION, lot_size=50, strike=14000.0,
+                     option_type=OptionType.CE, underlying="DIXON")
+    parent = Position(id="pos-parent", strategy="FUDKII", instrument=opt, underlying=opt, side=PosSide.LONG,
+                      qty=350, entry=19.58, opened_ts=1.0, signal_id="FUDKII-DIXON-1-A", direction=Direction.BULLISH)
+    twin = replace(parent, id="pos-twin", strategy="FUDKII_RT_X")
+    d = ExitDecision(position_id="x", reason=ExitReason.SL_EQ, ref_price=17.5, qty=350)
+    assert exit_client_order_id(parent, d) != exit_client_order_id(twin, d)
+    assert exit_client_order_id(twin, d) == exit_client_order_id(twin, d), "a retry is the same order"

@@ -1371,7 +1371,7 @@ class Engine:
             qty=decision.qty,
             purpose=Purpose.EXIT,
             signal_id=pos.signal_id,
-            client_order_id=f"{pos.signal_id}|EXIT|{pos.targets_hit}|{decision.reason.value}",
+            client_order_id=exit_client_order_id(pos, decision),
             reason=decision.note,
             position_id=pos.id,
             ref_price=decision.ref_price,
@@ -1751,6 +1751,15 @@ def _order_json(o: Any) -> dict[str, Any]:
         "broker_order_id": o.broker_order_id,
         "note": o.note,
     }
+
+
+def exit_client_order_id(pos: Position, decision: Any) -> str:
+    """Idempotency key for an exit: the same position, rung and reason must always produce the
+    same id (a retry is the same order), and two positions must never share one. It was keyed on
+    the signal — and the RT twin carries its parent's signal id, so on 2026-09-23 14:35 the twin's
+    SL-EQ exit collided with the parent's and was refused as a duplicate, every second, 800 times,
+    while the underlying sat through the stop."""
+    return f"{pos.id}|EXIT|{pos.targets_hit}|{decision.reason.value}"
 
 
 def _position_json(p: Position) -> dict[str, Any]:
