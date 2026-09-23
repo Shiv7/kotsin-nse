@@ -15,10 +15,14 @@ R2 = P + (H − L)              S2 = P − (H − L)
 R3 = P + 2(H − L)             S3 = P − 2(H − L)
 R4 = P + 3(H − L)             S4 = P − 3(H − L)
 BC = (H + L) / 2              TC = 2P − BC       (sorted: TC is always the upper edge)
-Fib: P ± 0.382 / 0.618 / 1.000 × (H − L)        Camarilla: C ± 1.1(H − L) / 12, /6, /4, /2
 ```
 
-`P, R1/S1, R2/S2, CPR, Fibonacci, Camarilla` are identical across every platform. Only the outer
+**Classic only.** Fibonacci and Camarilla levels are still computed (`classic_pivots`) for display,
+but neither enters the confluence engine: `pivot_points` emits only the eleven classic levels, and
+every stop, target, wall, option-ladder rung and ratchet step is downstream of it (Camarilla off
+since 2026-04-13, Fibonacci off since 2026-09-23).
+
+`P, R1/S1, R2/S2, CPR` are identical across every platform. Only the outer
 rungs differ from the floor-trader form (`R3 = H + 2(P − L)`); the dashboard, Kite and this engine
 all use the Classic form. `kotsin-nse pivots SYMBOL --for DATE` prints both so a number from anywhere
 can be matched.

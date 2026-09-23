@@ -165,3 +165,14 @@ def test_room_ratio_caps_an_otherwise_good_grade_at_c():
     )
     assert c.grade == "C"
     assert "room" in c.note
+
+
+def test_only_classic_levels_enter_the_confluence_engine():
+    """2026-09-23: CANBK's stop was a lone 1wk.FIB_R1 0.19 ATR below the entry. Fibonacci joined
+    Camarilla as display-only; the eleven classic levels are the whole input to zones, stops,
+    targets, walls, the option ladder and the ratchet."""
+    p = classic_pivots(110, 90, 100)
+    assert p is not None and p.fib_r1 > 0 and p.cam_r1 > 0, "still computed, for display"
+    labels = [pt.label for pt in pivot_points(p, "1d")]
+    assert labels == ["1d.PIVOT", "1d.R1", "1d.R2", "1d.R3", "1d.R4", "1d.S1", "1d.S2", "1d.S3", "1d.S4", "1d.TC", "1d.BC"]
+    assert not any("FIB" in lab or "CAM" in lab for lab in labels)

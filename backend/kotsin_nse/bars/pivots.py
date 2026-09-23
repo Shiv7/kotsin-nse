@@ -121,28 +121,21 @@ class PivotPoint:
     weight: float
 
 
-#: Camarilla levels are populated for display but carry **zero** weight in the confluence engine —
-#: they were disabled on 2026-04-13 and never re-enabled. Keeping them at 0.0 rather than deleting
-#: them makes that an explicit, reversible decision instead of a silent omission.
+#: Classic pivots only: the pivot, R1–R4, S1–S4 and the CPR edges. Fibonacci and Camarilla are
+#: still computed by ``classic_pivots`` for display, but neither enters the confluence engine —
+#: Camarilla was disabled on 2026-04-13; Fibonacci on 2026-09-23 on the operator's instruction,
+#: after CANBK's stop landed on a lone ``1wk.FIB_R1`` 0.19 ATR below the entry. Every stop, target,
+#: wall, option ladder rung and ratchet step is downstream of this one function.
 STANDARD_LEVELS = ("pivot", "r1", "r2", "r3", "r4", "s1", "s2", "s3", "s4", "tc", "bc")
-FIB_LEVELS = ("fib_r1", "fib_r2", "fib_r3", "fib_s1", "fib_s2", "fib_s3")
-FIB_WEIGHT_FACTOR = 0.5
 
 
-def pivot_points(levels: PivotLevels, tf: str, *, include_fib: bool = True) -> list[PivotPoint]:
+def pivot_points(levels: PivotLevels, tf: str) -> list[PivotPoint]:
     w = TF_WEIGHT.get(tf, 1.0)
-    out = [
+    return [
         PivotPoint(getattr(levels, name), f"{tf}.{name.upper()}", tf, w)
         for name in STANDARD_LEVELS
         if getattr(levels, name) > 0
     ]
-    if include_fib:
-        out += [
-            PivotPoint(getattr(levels, name), f"{tf}.{name.upper()}", tf, w * FIB_WEIGHT_FACTOR)
-            for name in FIB_LEVELS
-            if getattr(levels, name) > 0
-        ]
-    return out
 
 
 @dataclass(slots=True)
@@ -263,7 +256,7 @@ class GradePolicy:
     #: floors the stop at N ATR from the close so 1R is a market distance, not a pivot-line
     #: distance. It is a hypothesis under test, not a validated parameter.
     min_stop_atr: float = 0.0
-    #: EXPLORATORY — only a wall (strength ≥ WALL_MIN_STRENGTH) may be the stop zone; a lone fib
+    #: EXPLORATORY — only a wall (strength ≥ WALL_MIN_STRENGTH) may be the stop zone; a lone
     #: line 0.2% below price is not a structural level.
     stop_requires_wall: bool = False
 
