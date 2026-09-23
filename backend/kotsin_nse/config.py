@@ -117,6 +117,22 @@ class Settings(BaseSettings):
     #: be tested without, went unrecorded.
     archive_enabled: bool = True
     archive_flush_s: float = 300.0
+    #: rolling window for the **tape** (``quotes``): day files kept after each flush (sessions,
+    #: not calendar days — a file exists only for a day something was recorded); 0 keeps
+    #: everything. Fifteen sessions is three weeks of second-by-second replays for ~120 MB
+    #: (operator, 2026-09-23).
+    archive_keep_sessions: int = 15
+    #: the tape rows of contracts that were actually held (and their legs) are moved to
+    #: ``quotes_held`` when their day leaves the window, and kept this many sessions (~ a year)
+    archive_keep_held_sessions: int = 250
+    #: window for the backtest inputs — ``bars``, ``oi``, ``micro``, ``option_quotes``. These are
+    #: NOT on the tape's window: FUKAA needs months of option OI and nothing else records it, so
+    #: 15 sessions here would delete the one input that book cannot be tested without. ~10 MB a
+    #: session for all four, so a year of them is ~2.5 GB.
+    archive_keep_research_sessions: int = 250
+    #: the tick tape (``ops/tape.py``): the top of book of every held, considered and carded
+    #: contract and of its equity and future legs, once a second on change, into ``quotes``
+    tape_enabled: bool = True
 
     # ---- service ------------------------------------------------------------------------------
     api_host: str = "127.0.0.1"

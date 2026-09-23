@@ -12,6 +12,7 @@ Subcommands:
 * ``fetch-history`` — fill the Parquet cache from the broker's historical endpoint
 * ``backtest`` — replay the cache through the live strategy and risk code
 * ``pivots`` — the ladders in force on a date, rebuilt from the broker's daily candles
+* ``tape`` — what the tick tape holds for a day, and one contract's seconds
 """
 
 from __future__ import annotations
@@ -147,6 +148,48 @@ async def show_pivots(settings: Settings, args: argparse.Namespace) -> None:
         catalogue = await CatalogueLoader(settings, rest.scrip_master_csv).ensure()
         rep = await build(args.symbol, date.fromisoformat(args.for_date), catalogue=catalogue, rest=rest, per_side=args.otm)
     print(render(rep))
+
+
+def show_tape(settings: Settings, args: argparse.Namespace) -> None:
+    """Read the tape straight from the archive files. Nothing else is needed."""
+    from datetime import datetime
+
+    from .market.session import IST
+    from .ops import tape
+
+    root = settings.data_dir / "archive"
+    if args.days:
+        for d in tape.days(root):
+            n = len(tape.read_day(root, d))
+            print(f"{d}  {n:>9,} rows")
+        return
+    df = tape.read_day(root, args.day)
+    if args.symbol:
+        df = df[df["symbol"].astype(str).str.upper() == args.symbol.upper()]
+    if df.empty:
+        print(f"nothing on tape for {args.day}" + (f" {args.symbol}" if args.symbol else ""))
+        return
+
+    def hms(ts: float) -> str:
+        return datetime.fromtimestamp(ts, IST).strftime("%H:%M:%S")
+
+    if args.code:
+        s = tape.series(df, args.code)
+        if not len(s):
+            print(f"{args.code} is not on tape for {args.day}")
+            return
+        print(f"{'time':>8}  {'ltp':>9}  {'bid':>9}  {'ask':>9}  {'age':>5}")
+        for t in s.ticks:
+            print(f"{hms(t.ts):>8}  {t.ltp:>9.2f}  {t.bid:>9.2f}  {t.ask:>9.2f}  {t.ts - t.quote_ts:>5.0f}")
+        print(f"{len(s)} rows, {hms(s.first_ts or 0)} → {hms(s.last_ts or 0)}")
+        return
+    print(f"{'symbol':<12} {'role':<7} {'code':<8} {'rows':>7}  {'first':>8}  {'last':>8}  held")
+    for r in tape.summary(df):
+        print(
+            f"{r['symbol']:<12} {r['role']:<7} {r['scrip_code']:<8} {r['rows']:>7,}  "
+            f"{hms(r['first_ts']):>8}  {hms(r['last_ts']):>8}  {'yes' if r['held'] else ''}"
+        )
+    print(f"{len(df):,} rows on {args.day}")
 
 
 def run_backtest(settings: Settings, args: argparse.Namespace) -> None:
@@ -313,6 +356,12 @@ def build_parser() -> argparse.ArgumentParser:
     pv.add_argument("symbol", help="underlying root, e.g. RELIANCE or CRUDEOIL")
     pv.add_argument("--for", dest="for_date", default=date.today().isoformat(), help="the session the levels were in force on (default: today)")
     pv.add_argument("--otm", type=int, default=4, help="OTM strikes per side to ladder (default: 4, the book's own)")
+
+    tp = sub.add_parser("tape", help="the tick tape: what was recorded on a day, or one contract second by second (no engine needed)")
+    tp.add_argument("--day", default=date.today().isoformat(), help="IST session (default: today)")
+    tp.add_argument("--symbol", default=None, help="only this underlying")
+    tp.add_argument("--code", default=None, help="print this scrip code's rows (every recorded change)")
+    tp.add_argument("--days", action="store_true", help="list the days on tape instead")
     return p
 
 
@@ -365,6 +414,8 @@ def cli() -> None:
         run_rl_cli(settings, args)
     elif command == "pivots":
         asyncio.run(show_pivots(settings, args))
+    elif command == "tape":
+        show_tape(settings, args)
     else:  # pragma: no cover - argparse rejects anything else
         raise SystemExit(f"unknown command {command}")
 

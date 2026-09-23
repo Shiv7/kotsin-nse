@@ -152,6 +152,14 @@ The route and the wall are stamped on the ENTRY card (`card.route`); a COUNTER w
 flipped side is recorded as `COUNTER_NO_PLAN`. The in-trend mirrors (RT-X/N/Y) trade regardless of
 the route — the fade is beside them, not instead of them.
 
+**The tick tape** (`ops/tape.py`, 2026-09-23 evening). Every rule in the table above is a
+wall-clock rule, and until now the only record of the prices they were evaluated against was the
+broker's 1-minute candle. The tape writes the top of book of every held contract (and its equity and
+front-future legs, and the strikes the selector passed over) once a second while it matters, so a
+stop that fired can be re-run second by second through the same `ExitEngine`
+(`research/tape_replay.py`, `kotsin-nse tape --day … --code …`). It rolls at 15 sessions; the rows of
+contracts that were actually traded are set aside and kept a year.
+
 **Per-name implied vol (the stock's own VIX).** The option ladder's merge tolerance is
 `k(name) × ATR30(parent) × δ / premium` (`market/iv.py`), where `k(name)` bands today's ATM implied
 vol of the front expiry against the name's **own** median IV (≥ 10 sessions; India VIX until then).

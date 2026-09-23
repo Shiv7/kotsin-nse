@@ -122,9 +122,26 @@ until `KN_ANTHROPIC_API_KEY`; forensics and experiments work without it.
 
 ## Live archive (`ops/archive.py`)
 
-Per-IST-day Parquet of every 1m bar, every OI frame and the 30m microstructure metrics. The only
-record of what the socket delivered; without it FUKAA can never be backtested. Flushed every 5
-minutes and at shutdown, in a worker thread.
+Per-IST-day Parquet of every 1m bar, every OI frame, the 30m microstructure metrics, the carded
+options' sampled quotes and the tick tape. The only record of what the socket delivered; without it
+FUKAA can never be backtested. Flushed every 5 minutes and at shutdown, in a worker thread.
+
+**Retention** is per stream, because the streams answer different questions: the tape (`quotes`)
+rolls at `KN_ARCHIVE_KEEP_SESSIONS` = 15 sessions, the traded-contract tape (`quotes_held`) and the
+backtest inputs (`bars`, `oi`, `micro`, `option_quotes`) at 250. A 15-session window on `oi` would
+delete the one input FUKAA cannot be tested without. The day file is the unit — the oldest files
+past a window are deleted after a flush, nothing is rewritten in place.
+
+## Tick tape (`ops/tape.py`)
+
+The RT exit policy is a state machine over wall-clock seconds (a 75 s sustain, a 10 s stop
+re-projection, a band read against the live mid) and the only record of the prices it saw used to be
+the broker's 1-minute candle — four prices and no order, so every replay guessed the path inside the
+minute. The tape removes the guess: once a second, on change, the top of book of every held
+contract (plus a 5-minute grace after it closes), every strike the selector considered, every
+trigger card fired in the last half hour, and each of their equity and front-future legs. Driven
+from `Engine._clock`, written through the archive, read back by `research/tape_replay.py` (the live
+`ExitEngine` re-run second by second) and by `kotsin-nse tape`.
 
 ## What is deliberately absent
 

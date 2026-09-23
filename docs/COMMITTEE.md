@@ -123,8 +123,11 @@ open. Cash equity on daily bars is the remaining candidate; see the first result
 OI, the one input FUKAA cannot be tested without, went unrecorded. Now, per IST day:
 `data/archive/bars/<day>.parquet` (every closed 1m bar of every tracked underlying),
 `oi/<day>.parquet` (every OI frame, futures and strikes), `micro/<day>.parquet` (the 30m
-microstructure metrics). Flushed every `KN_ARCHIVE_FLUSH_S` (300 s) and at shutdown; the System
-page's health carries its counters. Months of this are the only route to a FUKAA backtest.
+microstructure metrics), `option_quotes/<day>.parquet` (the carded contracts sampled with the spot
+and delta that priced them) and `quotes/<day>.parquet` (the tick tape, `ops/tape.py`). Flushed every
+`KN_ARCHIVE_FLUSH_S` (300 s) and at shutdown; the System page's health carries its counters. Months
+of this are the only route to a FUKAA backtest — which is why the retention window is per stream
+(`KN_ARCHIVE_KEEP_RESEARCH_SESSIONS` = 250 for these four; only the tape rolls at 15).
 
 ## First results (2026-09-22, 28 cached NSE symbols, 2025-09-22 → 2026-09-21)
 

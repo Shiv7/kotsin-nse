@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime
+from datetime import time as dtime
 
 import pytest
 
 from kotsin_nse.config import Segment
 from kotsin_nse.domain import Direction, Instrument, InstrumentKind, OptionType, Position, PosSide
 from kotsin_nse.engine import Engine, _position_json
-from kotsin_nse.market.session import ist_today
+from kotsin_nse.market.session import IST, ist_today
 from kotsin_nse.strategy.base import Signal
 from kotsin_nse.strategy.keys import StrategyKey
 
@@ -27,8 +29,12 @@ async def test_a_trigger_reads_differently_in_every_book(settings):
     e = Engine(settings)
     await e.start()
     try:
-        now = time.time()
-        ts = int(now) - 600
+        # Anchored to TODAY's session, not to the wall clock. `book_cards` reads the ledger for
+        # `ist_today()`, so a `now`-relative timestamp puts rows on the wrong side of midnight
+        # when the suite runs late: at 23:51 the second signal (+30 min) landed on tomorrow, and
+        # at 00:01 the first one (−10 min) landed on yesterday. Both were seen on 2026-09-23/24.
+        ts = int(datetime.combine(ist_today(), dtime(10, 0), tzinfo=IST).timestamp())
+        now = ts + 600
         sig = _sig(ts)
         await e.ledger.insert_signal(sig.to_json(), "PAPER_FILLED", sig.reason)
         opt = Instrument("45678", "RELIANCE", Segment.NSE_FO, InstrumentKind.OPTION, lot_size=250, strike=1500.0, option_type=OptionType.CE, underlying="RELIANCE")

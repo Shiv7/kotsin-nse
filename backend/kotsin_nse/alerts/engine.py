@@ -38,6 +38,9 @@ log = structlog.get_logger(__name__)
 
 #: Per book. A trading day across 216 underlyings does not come close, and the page pages anyway.
 RING = 500
+#: a carded contract stays on the tape (``ops/tape.py``) this long after the alert fired. The ring
+#: holds a whole day; the tape wants the window the card was live in, not every contract since 09:15.
+TAPE_CARD_TTL_S = 1800.0
 #: Bars of history a detector is handed. Enough for BB(20), SuperTrend(7) and a 20-bar volume
 #: median with room to warm.
 LOOKBACK = 120
@@ -535,6 +538,10 @@ class AlertEngine:
                 card["marksTs"] = now
                 # Sampled here because this is the one place that already holds the quote, the
                 # spot and the delta together — the three numbers the gamma residual needs.
+                # Time-boxed: the ring keeps 500 alerts a book all day, and renewing every one
+                # of them every second would pin every contract ever carded onto the tape.
+                if now - a.fired_at <= TAPE_CARD_TTL_S:
+                    self.engine.tape.follow(a.symbol, [code], now=now)
                 self.engine.archive.option_quote(
                     code,
                     now,

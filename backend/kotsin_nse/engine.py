@@ -114,6 +114,7 @@ from .market.volatility import (
 )
 from .ops.archive import DailyArchive
 from .ops.health import Check, HealthMonitor
+from .ops.tape import ROLE_EQUITY, ROLE_FUTURE, ROLE_INDEX, ROLE_OPTION, Tape
 from .ops.telegram import Telegram
 from .risk.costs import CostModel
 from .risk.exits import ExitEngine, MarketView, apply_exit
@@ -209,7 +210,16 @@ class Engine:
         )
         self.health = HealthMonitor()
         self.committee = CommitteeService(self, settings, decision_tf=DECISION_TF)
-        self.archive = DailyArchive(settings.data_dir / "archive", enabled=settings.archive_enabled)
+        self.archive = DailyArchive(
+            settings.data_dir / "archive",
+            enabled=settings.archive_enabled,
+            keep_sessions=settings.archive_keep_sessions,
+            keep_held_sessions=settings.archive_keep_held_sessions,
+            keep_research_sessions=settings.archive_keep_research_sessions,
+        )
+        #: the tick tape: every held, considered and carded contract and its legs, once a second
+        self.tape = Tape(self.archive, enabled=settings.tape_enabled, legs_for=self._tape_legs)
+        self._tape_legs_cache: dict[str, tuple[str, list[tuple[str, str]]]] = {}
         self._autopilot_day = ""
 
         self.http = httpx.AsyncClient(timeout=30)
@@ -1504,7 +1514,7 @@ class Engine:
             strategy=key, symbol=sgn["symbol"], direction=Direction(sgn["direction"]), ts=int(sgn["ts"]),
             entry=float(sgn["entry"]), stop=float(sgn["stop"]), targets=tuple(float(t) for t in (sgn.get("targets") or ())),
         )
-        sel = await self._select_instrument(underlying, sig)
+        sel = await self._select_instrument(underlying, sig, tape=False)
         if not sel.ok or sel.instrument is None:
             return {"ok": False, "reason": sel.reason}
         inst = sel.instrument
@@ -1820,13 +1830,19 @@ class Engine:
         tick = tick or 0.05
         return round(min(option_sl, max(tick, premium - MIN_STOP_TICKS * tick)), 2)
 
-    async def _select_instrument(self, underlying: Instrument, sig: Signal) -> Any:
+    async def _select_instrument(self, underlying: Instrument, sig: Signal, *, tape: bool = True) -> Any:
+        """The contract this signal buys. ``tape=False`` for a *preview*: the trigger-card page
+        asks this question for six books on every card it renders, and a read-only preview must
+        not put six strikes a book onto the tape (109 codes were watched on a boot that had
+        placed nothing — found 2026-09-23 on the first live boot of the tape)."""
         cat = self.catalogue_loader.catalogue
         now = time.time()
         pol = self.selection_policy_for(sig.strategy)
         if underlying.segment is Segment.MCX_FO:
             front = cat.front_future(sig.symbol)
             q = self.quotes.get(front.scrip_code) if front else None
+            if front is not None and tape:
+                self.tape.follow(sig.symbol, [front.scrip_code], role=ROLE_FUTURE, now=now)
             return select_future(front=front, quote=q, now=now)
         expiry = choose_expiry(cat.expiries(sig.symbol), ist_today(), pol)
         if expiry is None:
@@ -1835,6 +1851,10 @@ class Engine:
             )
         chain = cat.chain(sig.symbol, expiry, sig.direction.option_type)
         await self._ensure_quotes(chain, sig.entry)
+        if tape:
+            # the strikes the selector is choosing between go on tape, chosen or not
+            near = sorted(chain, key=lambda i: abs(i.strike - sig.entry))[:6]
+            self.tape.follow(sig.symbol, [i.scrip_code for i in near], now=now)
         return select_option(
             chain=chain,
             quotes=self.quotes,
@@ -2049,6 +2069,40 @@ class Engine:
 
     # -- background tasks -------------------------------------------------------------------------------
 
+    def _record_tape(self) -> None:
+        """One second of tape: the open positions pin their contracts; candidates and card
+        contracts were followed when they were looked at; the legs come from ``_tape_legs``."""
+        held = [
+            (
+                p.instrument.scrip_code,
+                p.underlying.symbol,
+                ROLE_OPTION if p.instrument.is_option else ROLE_FUTURE,
+            )
+            for p in self.positions.values()
+            if p.status == "OPEN"
+        ]
+        self.tape.sample(time.time(), self.quotes, held)
+
+    def _tape_legs(self, symbol: str) -> list[tuple[str, str]]:
+        """The underlying's own codes for the tape — the equity (or the MCX future the levels are
+        computed on) and, on NSE, the front future. Resolved once per symbol per day: the
+        catalogue's front future rolls at expiry."""
+        today = ist_today().isoformat()
+        hit = self._tape_legs_cache.get(symbol)
+        if hit is not None and hit[0] == today:
+            return hit[1]
+        legs: list[tuple[str, str]] = []
+        u = self.underlyings.get(symbol)
+        if u is not None:
+            role = {InstrumentKind.EQUITY: ROLE_EQUITY, InstrumentKind.FUTURE: ROLE_FUTURE}.get(u.kind, ROLE_INDEX)
+            legs.append((u.scrip_code, role))
+            if u.segment is Segment.NSE_EQ:
+                front = self.catalogue_loader.catalogue.front_future(symbol, on=ist_today())
+                if front is not None:
+                    legs.append((front.scrip_code, ROLE_FUTURE))
+        self._tape_legs_cache[symbol] = (today, legs)
+        return legs
+
     async def _clock(self) -> None:
         while not self._stop.is_set():
             try:
@@ -2057,6 +2111,8 @@ class Engine:
                 # Same tick as the exit evaluation, deliberately: the card must show the
                 # numbers the stop is being judged against, not a second computation of them.
                 self.alerts.refresh_live()
+                # Last, so the tape carries the quotes the exit loop and the cards just used.
+                self._record_tape()
             except Exception as exc:
                 log.exception("clock.failed", error=str(exc))
             await asyncio.sleep(1.0)
@@ -2283,6 +2339,7 @@ class Engine:
             "micro": self.micro.stats(),
             "option_oi_tracked": len(self.option_oi),
             "archive": self.archive.stats(),
+            "tape": self.tape.stats(),
             "telegram": self.telegram.stats(),
             "positions_open": len([p for p in self.positions.values() if p.status == "OPEN"]),
             "positions_stale_quote": len(self._stale_positions),
