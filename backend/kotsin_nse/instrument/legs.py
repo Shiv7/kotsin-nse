@@ -46,6 +46,17 @@ CONCURRENCY = 6
 #: Calendar days of history requested. Only the previous completed session is used; the rest is
 #: slack for holidays and for a contract that listed recently.
 LOOKBACK_DAYS = 12
+#: A previous session thinner than this does not get a ladder. Measured on MCX crude options,
+#: 2026-09-23: the 22-Sep bars carried 46,418 and 18,553 lots and their wide ranges were real — a
+#: crude premium genuinely halved that day — but the 17- and 18-Sep bars on the same contracts
+#: carried 11 and 5. A high and a low built from five contracts are not a range, and a pivot built
+#: on them is indistinguishable from a good one once it is a number on a card. Declined instead.
+#:
+#: A row with *no* volume field is a different case and is allowed through: a feed that does not
+#: report volume is an absence of evidence, not evidence of thinness, and silently dropping every
+#: ladder from such a source would be a worse failure than the one this guards against. Those
+#: publish ``prevVolume: null`` so the card can say the range is unverified.
+MIN_PREV_SESSION_VOLUME = 100.0
 
 
 @dataclass(slots=True)
@@ -59,6 +70,9 @@ class LegPivots:
     levels: PivotLevels
     session: str  # the completed day the levels came from
     close: float
+    #: that session's volume — the evidence the range is worth anything. ``None`` when the feed
+    #: did not report it, which is unverified rather than thin.
+    volume: float | None = None
 
     def to_json(self) -> dict[str, Any]:
         lv = self.levels
@@ -70,6 +84,7 @@ class LegPivots:
             "strike": self.strike,
             "session": self.session,
             "prevClose": round(self.close, 2),
+            "prevVolume": None if self.volume is None else round(self.volume),
             "pivot": round(lv.pivot, 2),
             "tc": round(lv.tc, 2),
             "bc": round(lv.bc, 2),
@@ -96,16 +111,36 @@ def otm_legs(
     return [*calls, *puts]
 
 
-def levels_from_candles(rows: list[dict[str, Any]], today: date) -> tuple[PivotLevels, str, float] | None:
-    """Classic pivots from the last completed session strictly before ``today``."""
+def levels_from_candles(
+    rows: list[dict[str, Any]], today: date, *, min_volume: float = MIN_PREV_SESSION_VOLUME
+) -> tuple[PivotLevels, str, float, float | None] | None:
+    """Classic pivots from the last completed session strictly before ``today``.
+
+    Declines a session too thin to have a meaningful high and low. An illiquid option prints a few
+    contracts at whatever price someone asked, and the resulting "range" is one counterparty's
+    opinion rather than the market's — but once it becomes a pivot on a card it looks exactly like
+    a level that thousands of lots agreed on.
+    """
     prior = [r for r in rows if str(r.get("dt", ""))[:10] < today.isoformat()]
     if not prior:
         return None
     last = prior[-1]
-    lv = classic_pivots(float(last["h"]), float(last["l"]), float(last["c"]))
+    raw = last.get("v")
+    vol = None if raw is None else float(raw)
+    if vol is not None and vol < min_volume:
+        return None
+    high, low = float(last["h"]), float(last["l"])
+    # A session that printed at one price has no range, and ``classic_pivots`` will happily return
+    # S3 == pivot == R3 == that price. That is not a degenerate ladder, it is an actively harmful
+    # one: every level sits on top of every other, so "price is at S1" and "price is at R3" become
+    # true at the same instant, and clustering merges nine coincident levels into a fortress wall
+    # made of nothing. Measured on MCX silver options, 2026-09-23 (SILVERM 238000 PE, one contract).
+    if high <= low:
+        return None
+    lv = classic_pivots(high, low, float(last["c"]))
     if lv is None:
         return None
-    return lv, str(last["dt"])[:10], float(last["c"])
+    return lv, str(last["dt"])[:10], float(last["c"]), vol
 
 
 class LegPivotLoader:
@@ -140,7 +175,7 @@ class LegPivotLoader:
         if got is None:
             self.failed += 1
             return
-        levels, session, close = got
+        levels, session, close, vol = got
         kind = (
             inst.option_type.value
             if inst.option_type in (OptionType.CE, OptionType.PE)
@@ -155,6 +190,7 @@ class LegPivotLoader:
             levels=levels,
             session=session,
             close=close,
+            volume=vol,
         )
         self.loaded += 1
 
@@ -190,6 +226,7 @@ class LegPivotLoader:
             "running": self.running,
             "byKind": kinds,
             "strikesPerSide": STRIKES_PER_SIDE,
+            "minPrevVolume": MIN_PREV_SESSION_VOLUME,
             "note": (
                 "daily pivots only — a weekly contract has days of history, so a weekly or monthly "
                 "level computed from it would be a number with a name it has not earned"
