@@ -422,6 +422,7 @@ class Engine:
         await self.feed.subscribe("mf", subs["mf"])
         await self.feed.subscribe("md", subs["md"])
         await self.feed.subscribe("oi", subs["oi"])
+        await self._subscribe_open_positions()
         self._leg_task = asyncio.create_task(self._load_leg_pivots(groups.values()))
         log.info(
             "engine.subscribed",
@@ -520,6 +521,25 @@ class Engine:
         self._zone_cache.pop(inst.symbol, None)
         self._daily_failed.discard(inst.symbol)
         self.daily_cache.save(inst.symbol, self.store.bars(inst.symbol, "1d"))
+
+    async def _subscribe_open_positions(self) -> list[Instrument]:
+        """A restored position's contract is subscribed whether or not today's strike shortlist
+        still contains it. The shortlist is picked around the current spot; a contract bought
+        yesterday six strikes away is not in it, and on 2026-09-23 the DIXON 14000 CE twin came
+        back from a restart with no quote, no evaluation and no exit — silently."""
+        held = {
+            p.instrument.scrip_code: p.instrument
+            for p in self.positions.values()
+            if p.status == "OPEN" and p.qty_remaining > 0
+        }
+        if not held:
+            return []
+        insts = list(held.values())
+        await self.feed.subscribe("mf", insts)
+        await self.feed.subscribe("md", insts)
+        await self.feed.subscribe("oi", [i for i in insts if i.kind is not InstrumentKind.EQUITY])
+        log.info("positions.resubscribed", instruments=[i.name or i.scrip_code for i in insts])
+        return insts
 
     def _seed_daily_from_cache(self, universe: list[Instrument]) -> None:
         """The last known official candles, before REST is asked. A boot while the broker's
@@ -1300,6 +1320,20 @@ class Engine:
                 continue
             ltp = self.ltps.get(pos.instrument.scrip_code)
             if ltp is None or ltp <= 0:
+                if pos.id not in self._stale_positions:
+                    # Was silent. A position whose contract never prints is not being managed at
+                    # all — no stop, no target, no force-flat — and nobody could tell.
+                    log.warning(
+                        "position.no_quote",
+                        position=pos.id,
+                        symbol=pos.underlying.symbol,
+                        instrument=pos.instrument.name or pos.instrument.scrip_code,
+                    )
+                    self.telegram.fire_and_forget(
+                        f"⚠️ {pos.strategy} {pos.underlying.symbol}: the contract has not printed "
+                        f"since boot — the position is not being evaluated",
+                        key=f"noquote:{pos.id}",
+                    )
                 self._stale_positions.add(pos.id)
                 continue
             wallet = self.wallets[pos.strategy]

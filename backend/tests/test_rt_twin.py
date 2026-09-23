@@ -133,3 +133,31 @@ def test_a_twin_and_its_parent_never_share_an_exit_order_id():
     d = ExitDecision(position_id="x", reason=ExitReason.SL_EQ, ref_price=17.5, qty=350)
     assert exit_client_order_id(parent, d) != exit_client_order_id(twin, d)
     assert exit_client_order_id(twin, d) == exit_client_order_id(twin, d), "a retry is the same order"
+
+
+@pytest.mark.asyncio
+async def test_a_restored_open_position_is_subscribed_even_when_off_the_shortlist(settings):
+    """2026-09-23: the DIXON 14000 CE twin came back from a restart six strikes off the shortlist,
+    with no quote, no evaluation and no exit — silently."""
+    from types import SimpleNamespace
+
+    e = Engine(settings)
+    calls: list[tuple[str, list[str]]] = []
+
+    async def recorder(channel, instruments):
+        calls.append((channel, [i.scrip_code for i in instruments]))
+
+    e.feed = SimpleNamespace(subscribe=recorder)
+    far = Instrument("100512", "DIXON", Segment.NSE_FO, InstrumentKind.OPTION, lot_size=50, strike=14000.0,
+                     option_type=OptionType.CE, underlying="DIXON")
+    und = Instrument("1", "DIXON", Segment.NSE_EQ, InstrumentKind.EQUITY, underlying="DIXON")
+    e.positions["open"] = Position(id="open", strategy="FUDKII_RT_X", instrument=far, underlying=und, side=PosSide.LONG,
+                                   qty=350, entry=19.58, opened_ts=1.0, signal_id="s", direction=Direction.BULLISH)
+    e.positions["closed"] = Position(id="closed", strategy="FUDKII", instrument=far, underlying=und, side=PosSide.LONG,
+                                     qty=350, entry=19.58, opened_ts=1.0, signal_id="s", direction=Direction.BULLISH,
+                                     status="CLOSED", qty_remaining=0)
+    got = await e._subscribe_open_positions()
+    assert [i.scrip_code for i in got] == ["100512"]
+    assert calls == [("mf", ["100512"]), ("md", ["100512"]), ("oi", ["100512"])]
+    e.positions.clear()
+    assert await e._subscribe_open_positions() == []
