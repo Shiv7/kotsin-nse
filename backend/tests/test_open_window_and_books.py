@@ -60,12 +60,12 @@ def test_the_depth_window_is_wide_through_the_opens_and_tight_after(settings):
     m = PaperMatcher(CostModel(settings))
     assert m.open_window_ist == ("09:00", "09:55")
     wide, tight = m.open_max_book_age_ms, m.max_book_age_ms
-    assert (wide, tight) == (25_000.0, 6_000.0)
+    assert (wide, tight) == (10_000.0, 6_000.0), "tightened once the backlog was measured out"
     for hm in ("09:00", "09:15", "09:45", "09:54"):
         assert m.age_limit_ms(_at(hm)) == wide, f"{hm} is inside the opening window"
     for hm in ("08:59", "09:55", "10:30", "15:15", "23:00"):
         assert m.age_limit_ms(_at(hm)) == tight, f"{hm} is outside it"
-    assert Settings(_env_file=None).paper_open_max_book_age_ms == 25_000.0
+    assert Settings(_env_file=None).paper_open_max_book_age_ms == 10_000.0
     assert Settings(_env_file=None).paper_max_book_age_ms == 6_000.0
     assert Engine(settings).matcher.open_window_ist == ("09:00", "09:55")
 
@@ -82,14 +82,16 @@ def test_the_book_that_was_rejected_at_the_open_would_now_fill(settings, option)
     inst = option
     intent = OrderIntent(strategy="FUDKII", instrument=inst, side=OrderSide.BUY, qty=250,
                          purpose=Purpose.ENTRY, signal_id="s", client_order_id="c", reason="r")
-    fill = m.fill(intent, book(15_271, _at("09:45")), now=_at("09:45"))
-    assert fill.qty == 250 and round(fill.book_age_ms) == 15_271 and m.rejected_stale == 0
-    with pytest.raises(NoBook, match="15271 ms old"):
-        m.fill(intent, book(15_271, _at("10:30")), now=_at("10:30"))
+    fill = m.fill(intent, book(9_500, _at("09:45")), now=_at("09:45"))
+    assert fill.qty == 250 and round(fill.book_age_ms) == 9_500 and m.rejected_stale == 0
+    with pytest.raises(NoBook, match="9500 ms old"):
+        m.fill(intent, book(9_500, _at("10:30")), now=_at("10:30"))
     assert m.rejected_stale == 1
-    # the wide window is not unlimited
-    with pytest.raises(NoBook, match=r"limit 25000"):
-        m.fill(intent, book(25_100, _at("09:45")), now=_at("09:45"))
+    # the opening allowance is a margin for a thin strike, not a licence for a 15 s price: the
+    # backlog that produced those was measured out, so the book that was refused at 09:45 today
+    # would be refused again — correctly, this time.
+    with pytest.raises(NoBook, match=r"limit 10000"):
+        m.fill(intent, book(15_271, _at("09:45")), now=_at("09:45"))
 
 
 # -- one exchange per book ------------------------------------------------------------------------

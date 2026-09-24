@@ -108,18 +108,19 @@ class PaperMatcher:
         costs: CostModel,
         *,
         max_book_age_ms: float = 6_000.0,
-        open_max_book_age_ms: float = 25_000.0,
+        open_max_book_age_ms: float = 10_000.0,
         open_window_ist: tuple[str, str] = ("09:00", "09:55"),
         ceiling_pct: float = 10.0,
     ) -> None:
         self.costs = costs
         #: the depth a fill may be priced on outside the opening window
         self.max_book_age_ms = max_book_age_ms
-        #: …and inside it. The first minutes of a session deliver depth in bursts: on 2026-09-24
-        #: three NSE names came back 13–15 s stale at the 09:45 decision, each order was rejected,
-        #: and three consecutive rejects tripped the gateway breaker — which halts the ENGINE and
-        #: force-flattened live positions in every book. A wider window through the opens is the
-        #: operator's answer (2026-09-24); the tight one governs the rest of the day.
+        #: …and inside it. Those 13–17 s "stale books" at the 09:45 decision were never the
+        #: exchange's: depth was subscribed for 2,504 instruments and the socket reader fell that
+        #: far behind its own backlog. With depth narrowed to what is actually priced, the reader's
+        #: worst lag across the 11:15 and 11:45 boundaries measured 25 MILLISECONDS. So this
+        #: allowance was cut 25s -> 10s and now covers only what it should: a thin strike that has
+        #: genuinely not quoted for a few seconds at the open.
         self.open_max_book_age_ms = open_max_book_age_ms
         self.open_window_ist = open_window_ist
         self.ceiling_pct = ceiling_pct

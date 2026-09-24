@@ -170,7 +170,11 @@ changes, in this order:
 3. **A cold contract fills on the quote the selector already fetched** (`book_from_quote`): one
    level, truncating at what the touch can absorb, instead of the degraded last-price path. It
    never replaces a live ladder — only a book that would have been refused anyway.
-4. Once measured, the opening window goes back to strict.
+4. **Measured, then tightened.** Across the 11:15 and 11:45 boundaries of 2026-09-24 the reader's
+   worst dispatch lag was **25 ms**, with no frame more than a second behind and no stale
+   rejection — against 13,000–17,000 ms book ages at 09:45 that morning. The opening allowance was
+   cut 25 s → 10 s on that evidence. It is provisional at 10 s until one post-fix 09:15 open has
+   been measured; what it still covers is genuine per-contract sparsity, not our own backlog.
 
 **What the 2026-09-24 open forced** (operator, same morning). Three NSE names came back with
 depth 13–15 s stale at the 09:45 decision, each order was refused, and three consecutive rejects

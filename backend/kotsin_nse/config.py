@@ -216,8 +216,14 @@ class Settings(BaseSettings):
     # ---- paper fill realism ---------------------------------------------------------------------
     #: how stale a depth snapshot may be before a paper fill is refused, outside the opening window
     paper_max_book_age_ms: float = 6_000.0
-    #: …and inside it. A session's first minutes deliver depth in bursts.
-    paper_open_max_book_age_ms: float = 25_000.0
+    #: …and inside it. Tightened 25s -> 10s on 2026-09-24 once the cause was measured out: the
+    #: 13-17 s "stale books" at 09:45 were this engine's own backlog, not the exchange's, and with
+    #: depth narrowed to what is actually priced the reader's worst lag across the 11:15 and 11:45
+    #: boundaries was 25 MILLISECONDS with no frame more than a second behind. What the allowance
+    #: still covers is genuine per-contract sparsity at the open — an OTM strike that has not
+    #: quoted for a few seconds — which needs a fraction of the old headroom. Provisional at 10 s
+    #: until one post-fix 09:15 open has been measured; the floor is 6 s, not this.
+    paper_open_max_book_age_ms: float = 10_000.0
     paper_open_window_from_ist: str = "09:00"
     paper_open_window_to_ist: str = "09:55"
 
