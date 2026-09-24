@@ -2301,10 +2301,20 @@ class Engine:
         return want
 
     async def _follow_depth(self, instruments: list[Instrument]) -> None:
-        """Put these contracts on the depth channel now, ahead of an order, and let the tape's own
-        lifecycle hand them back later (``_sync_depth``). Never fails the trade path."""
+        """Put these contracts on the depth channel now, ahead of an order, and register the same
+        interest on the tape so ``_sync_depth`` knows they are wanted.
+
+        Registering both in one call is the point. Subscribing depth without telling the tape made
+        the reconciler drop the strikes the selector had just quoted, one second later and every
+        second after — 142 unsubscribes in a single pass, ~24 a second sustained, and the socket
+        reader 753 ms behind for the trouble (found live 2026-09-24 13:15). The tape is the single
+        registry of what we are interested in; depth follows it, and nothing subscribes behind it.
+        """
         if not self.s.depth_follow_enabled or self.feed is None:
             return
+        now = time.time()
+        for inst in instruments:
+            self.tape.follow(inst.symbol, [inst.scrip_code], now=now)
         fresh = [i for i in instruments if i.scrip_code not in self._depth_following]
         if not fresh:
             return

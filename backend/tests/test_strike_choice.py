@@ -200,3 +200,35 @@ async def test_the_fallback_strikes_are_quoted_not_just_the_span(settings, optio
     assert asked and asked[0] >= 12, "the strikes around spot, plus the span"
     assert "3875CE" in e.quotes, "a span strike outside the nearest twelve is still quoted"
     assert e.option_volume.get("3875CE") == 5.0, "and its volume is kept for the ranking"
+
+
+@pytest.mark.asyncio
+async def test_depth_and_the_tape_never_disagree_about_what_is_wanted(settings, option):
+    """Live at 13:15: `_follow_depth` subscribed twelve strikes while the tape registered a few, so
+    the reconciler dropped the rest a second later and the next trigger re-added them — 142
+    unsubscribes in one pass and the socket reader 753 ms behind. One call, both registries."""
+    from kotsin_nse.engine import Engine
+
+    e = Engine(settings)
+    subs: list[str] = []
+
+    class Feed:
+        async def subscribe(self, ch, insts):
+            subs.extend(i.scrip_code for i in insts)
+
+        async def unsubscribe(self, ch, insts):
+            pass
+
+    e.feed = Feed()
+    strikes = [_opt(s) for s in (3550, 3600, 3650)]
+    for i in strikes:                       # the catalogue must resolve them for the reconciler
+        e.catalogue_loader.catalogue.by_code[i.scrip_code] = i
+
+    await e._follow_depth(strikes)
+    following = {i.scrip_code for i in strikes}
+    assert following <= e._depth_following and following <= set(subs)
+    # everything depth follows is wanted, so the next reconcile drops none of it
+    assert following <= e.depth_wanted(), "the tape knows about every code depth subscribed"
+    before = e.depth_drops
+    await e._sync_depth()
+    assert e.depth_drops == before, "no flapping: nothing just subscribed is handed straight back"
