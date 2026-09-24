@@ -19,6 +19,7 @@ from kotsin_nse.domain import Instrument, InstrumentKind, OrderIntent, OrderSide
 from kotsin_nse.engine import Engine
 from kotsin_nse.exec.gateway import LiveCaps
 from kotsin_nse.exec.paper import BookSnapshot, NoBook, PaperMatcher
+from kotsin_nse.instrument.select import Quote
 from kotsin_nse.market.session import IST
 from kotsin_nse.risk.costs import CostModel
 from kotsin_nse.strategy.keys import StrategyKey
@@ -266,6 +267,7 @@ async def test_the_selectors_rest_quote_stands_a_book_behind_a_cold_contract(set
     await e._ensure_quotes([option], spot=1500.0)
 
     book = e.books.get(option.scrip_code)
+    assert book is not None
     assert book is not None and book.best_ask == 7.0 and book.asks[0][1] == 4_000
     assert dict(subscribed).keys() >= {"mf", "md"}, "price AND depth, ahead of the order"
     assert option.scrip_code in e._depth_following
@@ -277,3 +279,28 @@ async def test_the_selectors_rest_quote_stands_a_book_behind_a_cold_contract(set
     e.quotes.pop(option.scrip_code, None)
     await e._ensure_quotes([option], spot=1500.0)
     assert e.books[option.scrip_code] is real, "the real ladder wins while it is fresh"
+
+
+@pytest.mark.asyncio
+async def test_a_strike_with_a_fresh_price_still_gets_its_depth_before_the_order(settings, option):
+    """The REST fetch is skipped when the price is already fresh. Depth must not be skipped with
+    it — since depth only follows what is in use, that strike would reach the matcher with no book
+    at all, which is exactly the hole narrowing the subscription could have opened."""
+    e = Engine(settings)
+    subs: list[tuple[str, tuple[str, ...]]] = []
+
+    class Feed:
+        async def subscribe(self, ch, insts):
+            subs.append((ch, tuple(i.scrip_code for i in insts)))
+
+    class Rest:
+        async def market_feed(self, insts):
+            raise AssertionError("must not be called: the quote is fresh")
+
+    e.feed, e.rest = Feed(), Rest()
+    e.quotes[option.scrip_code] = Quote(ltp=7.0, bid=6.9, ask=7.0, ts=time.time())
+
+    await e._ensure_quotes([option], spot=1500.0)
+    assert ("md", (option.scrip_code,)) in subs, "depth is subscribed regardless of price freshness"
+    assert option.scrip_code in e._depth_following
+    assert not any(ch == "mf" for ch, _ in subs), "and no REST round trip was needed"

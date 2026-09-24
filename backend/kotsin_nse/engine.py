@@ -1967,6 +1967,10 @@ class Engine:
         if not chain:
             return
         near = sorted(chain, key=lambda i: abs(i.strike - spot))[:12]
+        # Depth FIRST, and outside the staleness early-exit below: these are the strikes an order is
+        # about to be priced against, and since depth only follows what is in use, a strike whose
+        # price happens to be fresh would otherwise reach the matcher with no book at all.
+        await self._follow_depth(near)
         stale = [i for i in near if (q := self.quotes.get(i.scrip_code)) is None or time.time() - q.ts > 20]
         if not stale:
             return
@@ -1993,14 +1997,7 @@ class Engine:
                 )
                 if book is not None:
                     self.books[code] = book
-        # Depth as well as price: these are the strikes an order is about to be priced against,
-        # and `_sync_depth` will hand them back when the tape stops following them.
         await self.feed.subscribe("mf", stale)
-        if self.s.depth_follow_enabled:
-            fresh = [i for i in stale if i.scrip_code not in self._depth_following]
-            if fresh:
-                await self.feed.subscribe("md", fresh)
-                self._depth_following |= {i.scrip_code for i in fresh}
 
     async def _submit(self, intent: OrderIntent, *, verdict_ok: bool, verdict_reason: str) -> Any:
         mode = self.mode()
@@ -2226,6 +2223,22 @@ class Engine:
             want.add(code)
             want.update(leg for leg, _role in self._tape_legs(w["symbol"]))
         return want
+
+    async def _follow_depth(self, instruments: list[Instrument]) -> None:
+        """Put these contracts on the depth channel now, ahead of an order, and let the tape's own
+        lifecycle hand them back later (``_sync_depth``). Never fails the trade path."""
+        if not self.s.depth_follow_enabled or self.feed is None:
+            return
+        fresh = [i for i in instruments if i.scrip_code not in self._depth_following]
+        if not fresh:
+            return
+        try:
+            await self.feed.subscribe("md", fresh)
+        except Exception as exc:  # noqa: BLE001 — depth is an input, never a reason to stop
+            log.warning("depth.follow_failed", n=len(fresh), error=str(exc)[:120])
+            return
+        self._depth_following |= {i.scrip_code for i in fresh}
+        self.depth_adds += len(fresh)
 
     async def _sync_depth(self) -> None:
         """Bring the depth channel in line with ``depth_wanted`` once a second. Adds first, so a
