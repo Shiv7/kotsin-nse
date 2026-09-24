@@ -73,13 +73,14 @@ def test_a_candidate_lapses_a_held_contract_stays_and_its_rows_are_flagged_throu
     later = now + CANDIDATE_TTL_S + 10
     quotes = {"45678": q(later, 12.0), "2885": q(later, 1300.0)}
     assert t.sample(later, quotes, held=[("45678", "RELIANCE", "option")]) == 2
-    w = t.watched()["45678"]
+    w = t.watched(later)["45678"]
     assert w["open"] and w["held"] and t.stats()["held"] == 1
     # it closes → a grace: still on tape, still flagged, no longer open
     t2 = later + 1
     quotes = {"45678": q(t2, 11.0), "2885": q(t2, 1299.0)}
     assert t.sample(t2, quotes, held=[]) == 2
-    w = t.watched()["45678"]
+    # `watched` is read at a stated instant, never the wall clock: these timestamps are simulated
+    w = t.watched(t2)["45678"]
     assert not w["open"] and w["held"] and t.stats()["held"] == 0
     # past the grace it is gone, legs included
     t3 = t2 + AFTER_CLOSE_S + 1

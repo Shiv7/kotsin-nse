@@ -86,6 +86,22 @@ def walk_book(
     return Walk(cost / taken if taken else 0.0, taken, used, capped)
 
 
+def book_from_quote(
+    scrip_code: str, *, bid: float, ask: float, bid_qty: int, ask_qty: int, ts: float
+) -> BookSnapshot | None:
+    """A one-level book from a snapshot quote.
+
+    The selector already REST-quotes the strikes it is choosing between (``Engine._ensure_quotes``)
+    and that response carries the touch and its size. Turning it into a book means a contract whose
+    depth subscription has not warmed up yet fills against a real (if shallow) ladder instead of
+    the degraded last-price-plus-slippage path. It is one level, so a large order truncates rather
+    than walking — which is honest, and is what the touch could actually absorb.
+    """
+    if bid <= 0 or ask <= 0 or bid_qty <= 0 or ask_qty <= 0:
+        return None
+    return BookSnapshot(scrip_code=str(scrip_code), bids=[(bid, bid_qty)], asks=[(ask, ask_qty)], ts=ts)
+
+
 class PaperMatcher:
     def __init__(
         self,

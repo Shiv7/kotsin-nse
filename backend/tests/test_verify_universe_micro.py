@@ -251,12 +251,34 @@ def test_subscriptions_never_put_cash_equity_on_the_oi_channel():
     b = UniverseBuilder(_catalogue(), UniversePolicy(strikes_per_side=2))
     groups = b.build_underlyings([Segment.NSE_FO], TODAY)
     b.select_all(groups, lambda s: 1500.0, TODAY)
-    subs = UniverseBuilder.subscriptions(groups.values())
+    subs = UniverseBuilder.subscriptions(groups.values(), depth_symbols=["RELIANCE"])
     codes = lambda ch: {i.scrip_code for i in subs[ch]}  # noqa: E731
     assert "2885" in codes("mf") and "2885" in codes("md") and "2885" not in codes("oi")
     assert {"1", "2"} <= codes("oi") and {"1", "2"} <= codes("mf")
     assert any(i.kind is InstrumentKind.OPTION for i in subs["oi"])
-    assert UniverseBuilder.summary(groups)["subscriptions"] == {k: len(v) for k, v in subs.items()}
+    got = UniverseBuilder.summary(groups, depth_symbols=["RELIANCE"])["subscriptions"]
+    assert got == {k: len(v) for k, v in subs.items()}, "the summary reports what was subscribed"
+
+
+def test_depth_is_subscribed_for_the_archive_sample_only_never_every_strike():
+    """~1,000 depth frames a second went through the socket reader for microstructure metrics no
+    strategy reads, and at a 30m boundary the reader fell 15 s behind — every book stale at once.
+    Depth now rides the rolling set (Engine._sync_depth); the boot subscription is the sample."""
+    b = UniverseBuilder(_catalogue(), UniversePolicy(strikes_per_side=2))
+    groups = b.build_underlyings([Segment.NSE_FO], TODAY)
+    b.select_all(groups, lambda s: 1500.0, TODAY)
+
+    none = UniverseBuilder.subscriptions(groups.values())
+    assert none["md"] == [], "no sample named, no standing depth at all"
+    assert len(none["mf"]) > 1 and none["oi"], "prices and OI are unaffected"
+
+    sample = UniverseBuilder.subscriptions(groups.values(), depth_symbols=["reliance"])
+    assert {i.scrip_code for i in sample["md"]} == {"2885"}, "the underlying, case-insensitively"
+    assert not any(i.kind is InstrumentKind.OPTION for i in sample["md"]), "never a strike"
+    assert {i.scrip_code for i in sample["mf"]} == {i.scrip_code for i in none["mf"]}
+
+    other = UniverseBuilder.subscriptions(groups.values(), depth_symbols=["NOTLISTED"])
+    assert other["md"] == []
 
 
 # ---------------------------------------------------------------------------------------------------

@@ -152,6 +152,26 @@ The route and the wall are stamped on the ENTRY card (`card.route`); a COUNTER w
 flipped side is recorded as `COUNTER_NO_PLAN`. The in-trend mirrors (RT-X/N/Y) trade regardless of
 the route — the fade is beside them, not instead of them.
 
+**Depth where it is used** (operator, 2026-09-24 midday). The 09:45 staleness was never the
+exchange's: `recv_ts` was stamped when the engine got round to a frame, so "book age" measured our
+own backlog. Depth was subscribed for 2,504 instruments — every underlying and every shortlisted
+strike — delivering ~1,000 frames a second, each parsed and pushed through the microstructure
+accumulator **inside the socket reader**. No strategy reads those metrics; they are archived for a
+backtest that has never run. At a 30m boundary the reader fell 15 s behind, every book in the
+engine went stale at once, three orders were refused and the breaker halted every book. Four
+changes, in this order:
+
+1. **Frames are stamped on arrival**, and `feed.dispatch_lag_ms` reports how far behind the reader
+   is. Book age now means the age of the data, not the age of our last turn.
+2. **Depth follows what is about to be priced** — open positions, live cards, the strikes the
+   selector is weighing and their legs — reconciled once a second (`Engine._sync_depth`, capped by
+   `KN_DEPTH_MAX_SUBSCRIPTIONS`). `KN_DEPTH_ARCHIVE_SYMBOLS` keeps a small, declared sample of
+   underlyings on depth permanently, for the archive and nothing else.
+3. **A cold contract fills on the quote the selector already fetched** (`book_from_quote`): one
+   level, truncating at what the touch can absorb, instead of the degraded last-price path. It
+   never replaces a live ladder — only a book that would have been refused anyway.
+4. Once measured, the opening window goes back to strict.
+
 **What the 2026-09-24 open forced** (operator, same morning). Three NSE names came back with
 depth 13–15 s stale at the 09:45 decision, each order was refused, and three consecutive rejects
 tripped the gateway breaker — which reports the **engine** halted, not just the gateway, so every

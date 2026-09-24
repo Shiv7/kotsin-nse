@@ -19,7 +19,7 @@ the first pass produces.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
@@ -179,30 +179,47 @@ class UniverseBuilder:
     # -- what to subscribe -------------------------------------------------------------------------
 
     @staticmethod
-    def subscriptions(groups: Iterable[ScripGroup]) -> dict[str, list[Instrument]]:
-        """``getDesiredWebSocket``: ticks + depth on what we decide and trade, OI on what has it.
+    def subscriptions(
+        groups: Iterable[ScripGroup], *, depth_symbols: Collection[str] | None = None
+    ) -> dict[str, list[Instrument]]:
+        """``getDesiredWebSocket``: prices and OI on everything we watch, **depth on almost
+        nothing**.
 
         Cash equity has no open interest, so it is never put on the ``oi`` channel — reading OI off
         the cash segment is the defect that pinned MicroAlpha's OI term at zero for its whole life.
+
+        Depth used to go on every underlying and every shortlisted strike: 2,504 subscriptions
+        delivering ~1,000 frames a second, each one parsed and pushed through the microstructure
+        accumulator **inside the socket reader**. Nothing in the decision path reads those metrics —
+        they are archived for a backtest that has never run — and the price of carrying them was
+        paid at the worst moment: at a 30m boundary the reader fell so far behind that every book
+        in the engine was 15 s old at once, three orders were refused for staleness and the breaker
+        halted every book (2026-09-24). Depth is now subscribed where it is *used* — the contract
+        being priced, the contracts on live cards, open positions (``Engine._sync_depth``) — plus
+        the declared ``depth_symbols`` sample kept for the archive.
         """
         mf: dict[str, Instrument] = {}
         md: dict[str, Instrument] = {}
         oi: dict[str, Instrument] = {}
+        keep = {s.upper() for s in (depth_symbols or ())}
         for g in groups:
             mf[g.underlying.scrip_code] = g.underlying
-            md[g.underlying.scrip_code] = g.underlying
+            if g.root.upper() in keep:
+                md[g.underlying.scrip_code] = g.underlying
             for f in g.futures:
                 mf[f.scrip_code] = f
                 oi[f.scrip_code] = f
             for o in g.options:
                 mf[o.scrip_code] = o
-                md[o.scrip_code] = o
                 oi[o.scrip_code] = o
         return {"mf": list(mf.values()), "md": list(md.values()), "oi": list(oi.values())}
 
     @staticmethod
-    def summary(groups: dict[str, ScripGroup]) -> dict[str, Any]:
-        subs = UniverseBuilder.subscriptions(groups.values())
+    def summary(
+        groups: dict[str, ScripGroup], *, depth_symbols: Collection[str] | None = None
+    ) -> dict[str, Any]:
+        # the same argument the caller subscribed with, so the reported counts are the real ones
+        subs = UniverseBuilder.subscriptions(groups.values(), depth_symbols=depth_symbols)
         return {
             "underlyings": len(groups),
             "with_equity": sum(1 for g in groups.values() if g.equity is not None),

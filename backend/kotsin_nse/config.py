@@ -221,6 +221,24 @@ class Settings(BaseSettings):
     paper_open_window_from_ist: str = "09:00"
     paper_open_window_to_ist: str = "09:55"
 
+    # ---- market depth ---------------------------------------------------------------------------
+    #: Depth is subscribed where it is USED — the contract being priced, the contracts on live
+    #: trigger cards, open positions — and reconciled once a second against that set
+    #: (``Engine._sync_depth``). Everything else rides the price channel. Carrying depth for every
+    #: shortlisted strike put ~1,000 frames a second through the socket reader for metrics no
+    #: strategy reads, and at a 30m boundary the reader fell 15 s behind: every book in the engine
+    #: went stale at once, three orders were refused and the breaker halted every book (2026-09-24).
+    depth_follow_enabled: bool = True
+    #: A ceiling on the rolling set, so a pathological day cannot put the old load back.
+    depth_max_subscriptions: int = 250
+    #: Underlyings kept on depth permanently for the microstructure ARCHIVE (``bars/micro.py``) —
+    #: never for a live decision. Comma-separated roots; empty keeps none.
+    depth_archive_symbols: str = "RELIANCE,HDFCBANK,ICICIBANK,INFY,TCS,SBIN,AXISBANK,ITC"
+
+    @property
+    def depth_archive_list(self) -> list[str]:
+        return [s.strip().upper() for s in self.depth_archive_symbols.split(",") if s.strip()]
+
     # ---- cost model ----------------------------------------------------------------------------
     # Measured on this book, not assumed: at ₹33,000/position the NSE cash round trip was 0.299%,
     # of which 81% was flat brokerage (₹40/order × 2) — see kotsin-box/SESSION-PRIMER.md. These are

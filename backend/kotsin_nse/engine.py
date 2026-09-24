@@ -65,7 +65,7 @@ from .domain import (
 )
 from .exec.gateway import Decision, Gateway, LiveCaps, LiveContext, Mode
 from .exec.live import LiveExecutor
-from .exec.paper import BookSnapshot, PaperMatcher
+from .exec.paper import BookSnapshot, PaperMatcher, book_from_quote
 from .exec.reconcile import Reconciler
 from .instrument.catalogue import CatalogueLoader
 from .instrument.legs import OPTION_CLUSTER_TOL_PCT, LegPivotLoader, otm_legs
@@ -219,6 +219,13 @@ class Engine:
         )
         #: the tick tape: every held, considered and carded contract and its legs, once a second
         self.tape = Tape(self.archive, enabled=settings.tape_enabled, legs_for=self._tape_legs)
+        #: scrip codes currently on the depth channel because something needs their book. The
+        #: archive sample is subscribed at boot and never reconciled away.
+        self._depth_following: set[str] = set()
+        self._depth_pinned: set[str] = set()
+        self.depth_syncs = 0
+        self.depth_adds = 0
+        self.depth_drops = 0
         self._tape_legs_cache: dict[str, tuple[str, list[tuple[str, str]]]] = {}
         self._autopilot_day = ""
 
@@ -438,7 +445,7 @@ class Engine:
         universe = [g.underlying for g in groups.values()]
         log.info(
             "engine.universe",
-            **self.universe_builder.summary(groups),
+            **self.universe_builder.summary(groups, depth_symbols=self.s.depth_archive_list),
             sample=[g.root for g in list(groups.values())[:8]],
         )
         for inst in universe:
@@ -461,7 +468,13 @@ class Engine:
         # Futures are OI sources, not bar sources: on NSE the front future's `symbol` is the cash
         # symbol, and tracking it wrote futures ticks into the equity's bars (found 2026-09-21).
         # `subscriptions()` puts them on mf+oi only; the aggregator ignores untracked codes.
-        subs = UniverseBuilder.subscriptions(groups.values())
+        subs = UniverseBuilder.subscriptions(
+            groups.values(), depth_symbols=self.s.depth_archive_list
+        )
+        # The archive sample is the only standing depth subscription; the rolling set is added and
+        # removed by `_sync_depth` around it and may never drop these.
+        self._depth_pinned = {i.scrip_code for i in subs["md"]}
+        self._depth_following = set(self._depth_pinned)
         # India VIX rides the cash feed and is not a tradeable root, so it never enters the
         # universe — it is subscribed for its price alone, and only where it means something.
         # MCX bands on the contract's own realised vol instead: an equity-index implied vol says
@@ -1962,11 +1975,32 @@ class Engine:
         except Exception as exc:  # noqa: BLE001
             log.warning("quotes.failed", n=len(stale), error=str(exc))
             return
+        now = time.time()
+        limit = self.matcher.age_limit_ms(now)
         for code, r in rows.items():
             self.quotes[code] = Quote(ltp=r["ltp"], bid=r["bid"], ask=r["ask"], ts=r["ts"])
             if r["ltp"] > 0:
                 self.ltps[code] = r["ltp"]
+            # Stand a one-level book behind the quote, but only where the real one would have been
+            # refused anyway: a depth subscription that has not warmed up, or a book already past
+            # the staleness limit. A live 20-level book is never replaced by this.
+            held = self.books.get(code)
+            if held is None or held.age_ms(now) > limit:
+                book = book_from_quote(
+                    code, bid=r["bid"], ask=r["ask"],
+                    bid_qty=int(r.get("bid_qty") or 0), ask_qty=int(r.get("ask_qty") or 0),
+                    ts=r["ts"],
+                )
+                if book is not None:
+                    self.books[code] = book
+        # Depth as well as price: these are the strikes an order is about to be priced against,
+        # and `_sync_depth` will hand them back when the tape stops following them.
         await self.feed.subscribe("mf", stale)
+        if self.s.depth_follow_enabled:
+            fresh = [i for i in stale if i.scrip_code not in self._depth_following]
+            if fresh:
+                await self.feed.subscribe("md", fresh)
+                self._depth_following |= {i.scrip_code for i in fresh}
 
     async def _submit(self, intent: OrderIntent, *, verdict_ok: bool, verdict_reason: str) -> Any:
         mode = self.mode()
@@ -2182,6 +2216,52 @@ class Engine:
         ]
         self.tape.sample(time.time(), self.quotes, held)
 
+    def depth_wanted(self) -> set[str]:
+        """Every scrip code whose ORDER BOOK something is about to read: an open position's
+        contract, anything the tape is following (a live card, a strike the selector weighed) and
+        the underlying legs of both. This is the set the matcher and the card walks price against;
+        everything else in the universe rides the price channel and never touches the reader."""
+        want = {p.instrument.scrip_code for p in self.positions.values() if p.status == "OPEN"}
+        for code, w in self.tape.watched().items():
+            want.add(code)
+            want.update(leg for leg, _role in self._tape_legs(w["symbol"]))
+        return want
+
+    async def _sync_depth(self) -> None:
+        """Bring the depth channel in line with ``depth_wanted`` once a second. Adds first, so a
+        contract is never dropped in the same pass that something else needs it; the archive
+        sample is pinned and never dropped."""
+        if not self.s.depth_follow_enabled or self.feed is None:
+            return
+        want = self.depth_wanted()
+        if len(want) > self.s.depth_max_subscriptions:
+            want = set(sorted(want)[: self.s.depth_max_subscriptions])
+        cat = self.catalogue_loader.catalogue
+        add = [i for c in want - self._depth_following if (i := cat.get(c)) is not None]
+        drop = [
+            i
+            for c in self._depth_following - want - self._depth_pinned
+            if (i := cat.get(c)) is not None
+        ]
+        if not add and not drop:
+            self.depth_syncs += 1
+            return
+        try:
+            if add:
+                await self.feed.subscribe("md", add)
+            if drop:
+                await self.feed.unsubscribe("md", drop)
+        except Exception as exc:  # noqa: BLE001 — depth is an input, never a reason to stop
+            log.warning("depth.sync_failed", add=len(add), drop=len(drop), error=str(exc)[:120])
+            return
+        self._depth_following = (self._depth_following | {i.scrip_code for i in add}) - {
+            i.scrip_code for i in drop
+        }
+        self.depth_syncs += 1
+        self.depth_adds += len(add)
+        self.depth_drops += len(drop)
+        log.info("depth.synced", following=len(self._depth_following), added=len(add), dropped=len(drop))
+
     def _tape_legs(self, symbol: str) -> list[tuple[str, str]]:
         """The underlying's own codes for the tape — the equity (or the MCX future the levels are
         computed on) and, on NSE, the front future. Resolved once per symbol per day: the
@@ -2212,6 +2292,7 @@ class Engine:
                 self.alerts.refresh_live()
                 # Last, so the tape carries the quotes the exit loop and the cards just used.
                 self._record_tape()
+                await self._sync_depth()
             except Exception as exc:
                 log.exception("clock.failed", error=str(exc))
             await asyncio.sleep(1.0)
@@ -2429,6 +2510,10 @@ class Engine:
             "halted": self.halted()[0],
             "feed": {
                 "connected": fh.connected,
+                # how far behind the socket reader is — see FeedHealth.note_dispatch
+                "dispatch_lag_ms": round(fh.dispatch_lag_ms, 1),
+                "dispatch_lag_max_ms": round(fh.dispatch_lag_max_ms, 1),
+                "frames_behind": fh.frames_behind,
                 "messages": fh.messages,
                 "ticks": fh.ticks,
                 "depth": fh.depth,
@@ -2441,12 +2526,24 @@ class Engine:
             "gateway": self.gateway.stats(),
             "rest": self.rest.stats(),
             "catalogue": self.catalogue_loader.catalogue.stats(),
-            "universe": self.universe_builder.summary(self.groups) if self.universe_builder else {},
+            "universe": (
+                self.universe_builder.summary(self.groups, depth_symbols=self.s.depth_archive_list)
+                if self.universe_builder
+                else {}
+            ),
             "fidelity": self.reconciler.snapshot() if self.reconciler_ready else {},
             "micro": self.micro.stats(),
             "option_oi_tracked": len(self.option_oi),
             "archive": self.archive.stats(),
             "tape": self.tape.stats(),
+            "depth": {
+                "following": len(self._depth_following),
+                "pinned_for_archive": len(self._depth_pinned),
+                "syncs": self.depth_syncs,
+                "added": self.depth_adds,
+                "dropped": self.depth_drops,
+                "cap": self.s.depth_max_subscriptions,
+            },
             "telegram": self.telegram.stats(),
             "positions_open": len([p for p in self.positions.values() if p.status == "OPEN"]),
             "positions_stale_quote": len(self._stale_positions),

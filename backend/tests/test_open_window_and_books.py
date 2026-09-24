@@ -156,3 +156,124 @@ def test_a_fresh_book_is_used_at_its_own_age_the_window_is_a_ceiling_not_a_wait(
     assert m.rejected_stale == 0
     # the price comes from the book it was handed, not from the window
     assert m.fill(intent, book(200, inside, 7.5), now=inside).price == 7.5
+
+
+# -- depth where it is used, not everywhere ------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_depth_follows_what_is_about_to_be_priced_and_lets_the_rest_go(settings, equity, option):
+    """~1,000 frames a second went through the socket reader for metrics no strategy reads. Depth
+    now tracks the contract being priced, live cards and open positions — and nothing else."""
+    from kotsin_nse.domain import Direction, Position, PosSide
+
+    e = Engine(settings)
+    e.underlyings[equity.symbol] = equity
+    cat = e.catalogue_loader.catalogue
+    for inst in (equity, option):
+        cat.by_code[inst.scrip_code] = inst
+
+    calls: list[tuple[str, tuple[str, ...]]] = []
+
+    class Feed:
+        async def subscribe(self, ch, insts):
+            calls.append(("s", tuple(i.scrip_code for i in insts)))
+
+        async def unsubscribe(self, ch, insts):
+            calls.append(("u", tuple(i.scrip_code for i in insts)))
+
+    e.feed = Feed()
+    e._depth_pinned = {"2885"}          # the archive sample
+    e._depth_following = {"2885"}
+    assert e.depth_wanted() == set(), "nothing held, nothing carded, nothing to follow"
+    await e._sync_depth()
+    assert calls == [], "an empty set is not a subscription storm"
+
+    # a contract the selector is weighing goes on depth, with its underlying leg
+    e.tape.follow(equity.symbol, [option.scrip_code], now=time.time())
+    await e._sync_depth()
+    assert calls and calls[0][0] == "s" and option.scrip_code in calls[0][1]
+    assert option.scrip_code in e._depth_following
+
+    # it lapses -> depth is handed back, but never the pinned archive sample
+    e.tape._watch.clear()
+    calls.clear()
+    await e._sync_depth()
+    assert calls and calls[0][0] == "u" and calls[0][1] == (option.scrip_code,)
+    assert e._depth_following == {"2885"}, "the archive sample survives every reconcile"
+
+    # an open position pins its own contract for as long as it is open
+    e.positions["p"] = Position(
+        id="p", strategy="FUDKII_RT_X", instrument=option, underlying=equity, side=PosSide.LONG,
+        qty=250, entry=10.0, opened_ts=time.time(), signal_id="s", direction=Direction.BULLISH,
+    )
+    assert option.scrip_code in e.depth_wanted()
+    # and the rolling set is capped so a pathological day cannot restore the old load
+    assert e.s.depth_max_subscriptions == 250 and e.s.depth_follow_enabled
+
+
+def test_a_snapshot_quote_becomes_a_one_level_book_rather_than_a_guessed_price(settings, option):
+    """The selector already REST-quotes the strikes it weighs, and that response carries the touch
+    and its size. A contract whose depth has not warmed up fills against that instead of the
+    degraded last-price-plus-slippage path."""
+    from kotsin_nse.exec.paper import book_from_quote
+
+    now = time.time()
+    b = book_from_quote("45678", bid=6.9, ask=7.0, bid_qty=5_000, ask_qty=5_000, ts=now)
+    assert b is not None and b.best_bid == 6.9 and b.best_ask == 7.0 and b.age_ms(now) == 0
+
+    m = PaperMatcher(CostModel(settings))
+    intent = OrderIntent(strategy="FUDKII", instrument=option, side=OrderSide.BUY, qty=250,
+                         purpose=Purpose.ENTRY, signal_id="s", client_order_id="c", reason="r")
+    fill = m.fill(intent, b, now=now)
+    assert fill.price == 7.0 and fill.qty == 250 and fill.levels == 1
+
+    # one level only: a bigger order truncates at what the touch could absorb, and says so
+    big = OrderIntent(strategy="FUDKII", instrument=option, side=OrderSide.BUY, qty=9_000,
+                      purpose=Purpose.ENTRY, signal_id="s2", client_order_id="c2", reason="r")
+    assert m.fill(big, b, now=now).qty == 5_000 and m.truncated == 1
+    # a one-sided or sizeless quote is not a book, and is refused rather than invented
+    assert book_from_quote("1", bid=0.0, ask=7.0, bid_qty=0, ask_qty=10, ts=now) is None
+    assert book_from_quote("1", bid=6.9, ask=7.0, bid_qty=0, ask_qty=10, ts=now) is None
+
+
+@pytest.mark.asyncio
+async def test_the_selectors_rest_quote_stands_a_book_behind_a_cold_contract(settings, option):
+    """The contract chosen at a trigger may not have had its depth subscription warm up yet. The
+    quote the selector already fetched becomes its book — but never over a live one."""
+    e = Engine(settings)
+    e.matcher.max_book_age_ms = 6_000.0
+    e.matcher.open_window_ist = ("09:00", "09:00")  # never inside the window, for determinism
+
+    subscribed: list[tuple[str, int]] = []
+
+    class Feed:
+        async def subscribe(self, ch, insts):
+            subscribed.append((ch, len(insts)))
+
+        async def unsubscribe(self, ch, insts):
+            pass
+
+    class Rest:
+        async def market_feed(self, insts):
+            return {
+                i.scrip_code: {"ltp": 7.0, "bid": 6.9, "ask": 7.0, "bid_qty": 4_000,
+                               "ask_qty": 4_000, "ts": time.time()}
+                for i in insts
+            }
+
+    e.feed, e.rest = Feed(), Rest()
+    await e._ensure_quotes([option], spot=1500.0)
+
+    book = e.books.get(option.scrip_code)
+    assert book is not None and book.best_ask == 7.0 and book.asks[0][1] == 4_000
+    assert dict(subscribed).keys() >= {"mf", "md"}, "price AND depth, ahead of the order"
+    assert option.scrip_code in e._depth_following
+
+    # a live, fresh 20-level book is never replaced by the one-level stand-in
+    real = BookSnapshot(scrip_code=option.scrip_code, bids=[(6.95, 9_999)], asks=[(6.99, 9_999)],
+                        ts=time.time())
+    e.books[option.scrip_code] = real
+    e.quotes.pop(option.scrip_code, None)
+    await e._ensure_quotes([option], spot=1500.0)
+    assert e.books[option.scrip_code] is real, "the real ladder wins while it is fresh"

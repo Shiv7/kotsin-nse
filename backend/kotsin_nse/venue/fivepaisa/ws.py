@@ -93,6 +93,21 @@ class FeedHealth:
     parse_errors: int = 0
     subscriptions: dict[str, int] = field(default_factory=dict)
     last_error: str = ""
+    #: Milliseconds between a frame ARRIVING at the socket and this process getting round to it.
+    #: Zero on an idle loop. It is the backlog, and it is the number that matters: a book is only
+    #: as fresh as the reader's last turn, so when this climbs every book in the engine is stale at
+    #: once — which is what refused three orders and halted every book on 2026-09-24.
+    dispatch_lag_ms: float = 0.0
+    dispatch_lag_max_ms: float = 0.0
+    frames_behind: int = 0
+
+    def note_dispatch(self, arrived: float, done: float) -> None:
+        lag = max(0.0, (done - arrived) * 1000)
+        # a decayed mean, so one slow frame does not read as a stall and a real one cannot hide
+        self.dispatch_lag_ms = lag if self.dispatch_lag_ms == 0 else self.dispatch_lag_ms * 0.9 + lag * 0.1
+        self.dispatch_lag_max_ms = max(self.dispatch_lag_max_ms, lag)
+        if lag > 1000:
+            self.frames_behind += 1
 
     @property
     def silence_s(self) -> float | None:
@@ -215,8 +230,13 @@ class FivePaisaFeed:
     # -- message handling ---------------------------------------------------------------------------
 
     async def _handle(self, raw: str | bytes) -> None:
+        # Stamped the instant the frame comes off the socket, BEFORE any work. Everything
+        # downstream ages from this, so "how old is this book" answers the real question — how old
+        # is the data — rather than "how long since we last got round to it", which is what a
+        # dispatch-time stamp measures and why a busy loop looked like a stale exchange.
+        arrived = time.time()
         self.health.messages += 1
-        self.health.last_message_ts = time.time()
+        self.health.last_message_ts = arrived
         try:
             payload = json.loads(raw)
         except Exception:  # noqa: BLE001 - a malformed frame must not kill the reader
@@ -227,28 +247,29 @@ class FivePaisaFeed:
             if not isinstance(row, dict):
                 continue
             try:
-                await self._dispatch(row)
+                await self._dispatch(row, arrived)
             except Exception as exc:  # noqa: BLE001
                 self.health.parse_errors += 1
                 log.warning("feed.dispatch_failed", error=str(exc))
+        self.health.note_dispatch(arrived, time.time())
 
-    async def _dispatch(self, row: dict[str, Any]) -> None:
+    async def _dispatch(self, row: dict[str, Any], arrived: float) -> None:
         if "Details" in row or "MarketDepthData" in row:
             if self.on_depth:
                 self.health.depth += 1
-                await self.on_depth(self._depth(row))
+                await self.on_depth(self._depth(row, arrived))
             return
         if "OpenInterest" in row:
             if self.on_oi:
                 self.health.oi += 1
-                await self.on_oi(self._oi(row))
+                await self.on_oi(self._oi(row, arrived))
             return
         if "LastRate" in row or "Token" in row:
             self.health.ticks += 1
-            await self.on_tick(self._tick(row))
+            await self.on_tick(self._tick(row, arrived))
 
     @staticmethod
-    def _tick(row: dict[str, Any]) -> dict[str, Any]:
+    def _tick(row: dict[str, Any], arrived: float | None = None) -> dict[str, Any]:
         ts = parse_broker_date(row.get("TickDt")) or float(row.get("Time") or 0) or time.time()
         return {
             "scrip_code": str(row.get("Token")),
@@ -267,11 +288,12 @@ class FivePaisaFeed:
             "bid_qty": int(row.get("BidQty") or 0),
             "ask_qty": int(row.get("OffQty") or 0),
             "ts": ts,
-            "recv_ts": time.time(),
+            "recv_ts": arrived if arrived is not None else time.time(),
+            "dispatch_ts": time.time(),
         }
 
     @staticmethod
-    def _oi(row: dict[str, Any]) -> dict[str, Any]:
+    def _oi(row: dict[str, Any], arrived: float | None = None) -> dict[str, Any]:
         return {
             "scrip_code": str(row.get("Token") or row.get("ScripCode")),
             "symbol": str(row.get("Symbol") or ""),
@@ -281,11 +303,12 @@ class FivePaisaFeed:
             "ltp": float(row.get("LastRate") or 0),
             "volume": int(row.get("Volume") or 0),
             "ts": parse_broker_date(row.get("TickDt")) or time.time(),
-            "recv_ts": time.time(),
+            "recv_ts": arrived if arrived is not None else time.time(),
+            "dispatch_ts": time.time(),
         }
 
     @staticmethod
-    def _depth(row: dict[str, Any]) -> dict[str, Any]:
+    def _depth(row: dict[str, Any], arrived: float | None = None) -> dict[str, Any]:
         details = row.get("Details") or row.get("MarketDepthData") or []
         bids: list[tuple[float, int]] = []
         asks: list[tuple[float, int]] = []
@@ -304,5 +327,6 @@ class FivePaisaFeed:
             "bids": bids,
             "asks": asks,
             "ts": parse_broker_date(row.get("TickDt")) or time.time(),
-            "recv_ts": time.time(),
+            "recv_ts": arrived if arrived is not None else time.time(),
+            "dispatch_ts": time.time(),
         }
