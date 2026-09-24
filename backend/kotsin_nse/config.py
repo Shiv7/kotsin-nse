@@ -168,6 +168,15 @@ class Settings(BaseSettings):
     #: scripFinder's strike shortlist: ±band around the previous close, N per side, nearest expiry
     universe_band_pct: float = 12.0
     universe_strikes_per_side: int = 5
+    #: A wider band subscribed to OPEN INTEREST only. The strike is chosen on volume and OI across
+    #: every strike between spot and the pivot it is aimed at, and that span can run past the ±5
+    #: traded shortlist — KAYNES on 2026-09-24 aimed 5.5 strikes out. OI is a cheap channel (it
+    #: ticks on a change in open interest, not on every book update: ~2/s against depth's ~1,000/s
+    #: before the narrowing), so widening it costs little. Prices and depth are unaffected.
+    universe_oi_strikes_per_side: int = 12
+    #: A pivot this close to spot is no target at all — the strike placed against it would be ATM
+    #: in all but name — so the next level ahead is used instead. In units of the 30m ATR.
+    strike_anchor_min_atr: float = 0.35
     universe_include_indices: bool = True
     #: An open position whose contract has not quoted for this long is NOT evaluated for exits —
     #: a stop checked against a price from minutes ago is worse than one not checked at all. A

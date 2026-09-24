@@ -152,6 +152,31 @@ The route and the wall are stamped on the ENTRY card (`card.route`); a COUNTER w
 flipped side is recorded as `COUNTER_NO_PLAN`. The in-trend mirrors (RT-X/N/Y) trade regardless of
 the route — the fade is beside them, not instead of them.
 
+**Which strike to buy, decided on its own terms** (operator, 2026-09-24 midday). The chooser used
+to borrow the confluence target: the strike nearest T1. Those are not the same question. T1 is a
+*cluster* strong enough to be a wall and it is what the trade **exits** on; on a distant wall it put
+the strike where nothing trades — KAYNES that morning anchored on 3800 against a 3523 spot, every
+candidate came back one-sided and the trigger was lost. Of thirteen signals that day it was the only
+one past 3 % from spot, so the failure is rare and total rather than common and mild.
+
+Now, and **only for choosing the strike**:
+
+- the anchor is the nearest **raw classic pivot** ahead of the trade
+  (`instrument/select.py::strike_anchor_from_pivots`), skipping any inside
+  `KN_STRIKE_ANCHOR_MIN_ATR` × ATR30 of spot — a level sitting on spot is no target, so the next one
+  is used;
+- every OTM strike between spot and that pivot competes, ranked by the **combined rank of traded
+  volume and open interest** (`rank_by_liquidity`), ties broken toward the anchor. Ranks are by
+  value, so equal liquidity ties rather than being decided by list order;
+- a first choice that is not tradeable (no quote, one-sided, outside the premium band) falls
+  through to the next suitable OTM, and the substitution is logged (`strike.fell_back`);
+- open interest is subscribed on a wider band than the traded shortlist
+  (`KN_UNIVERSE_OI_STRIKES_PER_SIDE` = 12 against 5) because the span can run past it. OI is a cheap
+  channel — a couple of frames a second — so this is not the load depth was.
+
+**The exit ladder is untouched.** `Signal.stop` and `Signal.targets` still come from the confluence
+engine, for the parent and every twin; a test asserts the strike path writes none of them.
+
 **Depth where it is used** (operator, 2026-09-24 midday). The 09:45 staleness was never the
 exchange's: `recv_ts` was stamped when the engine got round to a frame, so "book age" measured our
 own backlog. Depth was subscribed for 2,504 instruments — every underlying and every shortlisted

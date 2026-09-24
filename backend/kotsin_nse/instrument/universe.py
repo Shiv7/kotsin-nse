@@ -43,6 +43,9 @@ class UniversePolicy:
     band_pct: float = 12.0
     #: per side, closest to ATM (scripFinder: scripgroup.strikes.per.side=5)
     strikes_per_side: int = 5
+    #: strikes per side subscribed to OPEN INTEREST only; the strike chooser reads OI across the
+    #: whole span between spot and the pivot it aims at, which runs past the traded shortlist
+    oi_strikes_per_side: int = 12
     #: an expiry closer than this is all theta; skip to the next one
     min_days_to_expiry: int = 2
     #: front + next month, so a rollover never leaves the OI source empty
@@ -63,6 +66,8 @@ class ScripGroup:
     futures: list[Instrument] = field(default_factory=list)
     options: list[Instrument] = field(default_factory=list)
     close: float | None = None
+    #: a wider band than ``options``, subscribed to open interest only (see UniversePolicy)
+    oi_options: list[Instrument] = field(default_factory=list)
     option_expiry: str | None = None
     note: str = ""
 
@@ -162,11 +167,15 @@ class UniverseBuilder:
         band = self.policy.mcx_band_pct if group.segment is Segment.MCX_FO else self.policy.band_pct
         lo, hi = close * (1 - band / 100), close * (1 + band / 100)
         chosen: list[Instrument] = []
+        wide: list[Instrument] = []
+        per_side = max(self.policy.strikes_per_side, self.policy.oi_strikes_per_side)
         for otype in (OptionType.CE, OptionType.PE):
             rows = [i for i in self.cat.chain(group.root, expiry, otype) if lo <= i.strike <= hi]
             rows.sort(key=lambda i: abs(i.strike - close))
             chosen += rows[: self.policy.strikes_per_side]
+            wide += rows[:per_side]
         group.options = sorted(chosen, key=lambda i: (i.option_type.value, i.strike))
+        group.oi_options = sorted(wide, key=lambda i: (i.option_type.value, i.strike))
         group.option_expiry = expiry
 
     def select_all(self, groups: dict[str, ScripGroup], close_for: Callable[[str], float | None], today: date) -> int:
@@ -211,6 +220,9 @@ class UniverseBuilder:
                 oi[f.scrip_code] = f
             for o in g.options:
                 mf[o.scrip_code] = o
+            # OI on the wider band: the strike chooser ranks every strike between spot and its
+            # pivot, and that span runs past the traded shortlist.
+            for o in g.oi_options or g.options:
                 oi[o.scrip_code] = o
         return {"mf": list(mf.values()), "md": list(md.values()), "oi": list(oi.values())}
 

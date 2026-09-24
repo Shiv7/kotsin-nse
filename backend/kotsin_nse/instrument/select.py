@@ -18,6 +18,7 @@ from gold and silver does not support a stop.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date
 
@@ -100,6 +101,52 @@ def otm_strike_anchor(
     return target1
 
 
+def strike_anchor_from_pivots(
+    *, prices: Iterable[float], spot: float, direction: Direction, min_distance: float
+) -> float | None:
+    """The nearest **raw classic pivot** ahead of the trade, skipping any too close to aim at.
+
+    Deliberately not the confluence target. T1 is a *cluster* of levels strong enough to be a wall,
+    and it is what the trade exits on; borrowing it to place the strike coupled two decisions that
+    are not the same question, and on a distant wall it put the strike five to seven strikes out
+    where nothing trades (KAYNES, 2026-09-24: anchor 3800 against a 3523 spot, every candidate
+    one-sided). This answers only "which strike", on the nearest level price would actually have to
+    reach — and a level sitting almost on top of spot is no target at all, so the next one is used.
+
+    ``min_distance`` is in price, normally a fraction of ATR. Returns None when nothing is ahead.
+    """
+    ahead = sorted(
+        (p for p in prices if (p > spot if direction is Direction.BULLISH else p < spot)),
+        key=lambda p: abs(p - spot),
+    )
+    if not ahead:
+        return None
+    for p in ahead:
+        if abs(p - spot) >= min_distance:
+            return p
+    return ahead[-1]  # every level is inside the floor: the furthest is the best of them
+
+
+def rank_by_liquidity(
+    candidates: list[Instrument], liquidity: Mapping[str, tuple[float, float]], anchor: float
+) -> list[Instrument]:
+    """Best combined rank of traded volume and open interest, ties broken toward the anchor.
+
+    Neither number decides alone: volume is what you can be filled against today, open interest is
+    where the positions actually are, and a strike that is merely extreme on one of them is not the
+    one to trade. A strike with no data ranks last on that metric rather than being dropped.
+    """
+    def ranks(which: int) -> dict[str, int]:
+        # ranked by VALUE, not by position: two strikes with the same volume must tie, or the
+        # tie-break below never runs and the arbitrary input order decides the trade.
+        vals = sorted({liquidity.get(i.scrip_code, (0.0, 0.0))[which] for i in candidates}, reverse=True)
+        at = {v: n for n, v in enumerate(vals)}
+        return {i.scrip_code: at[liquidity.get(i.scrip_code, (0.0, 0.0))[which]] for i in candidates}
+
+    vr, orr = ranks(0), ranks(1)
+    return sorted(candidates, key=lambda i: (vr[i.scrip_code] + orr[i.scrip_code], abs(i.strike - anchor)))
+
+
 def select_option(
     *,
     chain: list[Instrument],
@@ -109,11 +156,18 @@ def select_option(
     direction: Direction,
     now: float,
     policy: SelectionPolicy | None = None,
+    strike_anchor: float | None = None,
+    liquidity: Mapping[str, tuple[float, float]] | None = None,
 ) -> Selection:
-    """Nearest strike to the anchor that is genuinely OTM at entry and genuinely tradeable."""
+    """The most liquid OTM strike between spot and the anchor that is genuinely tradeable.
+
+    ``strike_anchor`` is the pivot the strike is placed against (``strike_anchor_from_pivots``);
+    without one this falls back to the old behaviour, the confluence target. ``liquidity`` maps a
+    scrip code to ``(volume, open interest)``.
+    """
     pol = policy or SelectionPolicy()
     want = direction.option_type
-    anchor = otm_strike_anchor(spot=spot, target1=target1, direction=direction)
+    anchor = strike_anchor or otm_strike_anchor(spot=spot, target1=target1, direction=direction)
     candidates = [i for i in chain if i.option_type is want and i.strike > 0]
     if not candidates:
         return Selection(None, reason=f"no {want.value} strikes in the chain", anchor=anchor)
@@ -124,7 +178,15 @@ def select_option(
     else:
         otm = [i for i in candidates if i.strike < spot]
     pool = otm or candidates  # a chain with no OTM strike is odd but not a reason to skip the trade
-    pool = sorted(pool, key=lambda i: abs(i.strike - anchor))
+    if liquidity is not None:
+        # every OTM strike the move would travel through, ranked by how much actually trades there
+        lo, hi = (spot, anchor) if want is OptionType.CE else (anchor, spot)
+        span = [i for i in pool if lo <= i.strike <= hi]
+        pool = rank_by_liquidity(span, liquidity, anchor) if span else sorted(
+            pool, key=lambda i: abs(i.strike - anchor)
+        )
+    else:
+        pool = sorted(pool, key=lambda i: abs(i.strike - anchor))
 
     skipped: list[str] = []
     for inst in pool:
