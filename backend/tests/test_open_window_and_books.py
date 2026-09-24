@@ -306,3 +306,41 @@ async def test_a_strike_with_a_fresh_price_still_gets_its_depth_before_the_order
     assert ("md", (option.scrip_code,)) in subs, "depth is subscribed regardless of price freshness"
     assert option.scrip_code in e._depth_following
     assert not any(ch == "mf" for ch, _ in subs), "and no REST round trip was needed"
+
+
+@pytest.mark.asyncio
+async def test_no_path_puts_a_contract_on_depth_without_tracking_it(settings, equity, option):
+    """Every depth subscribe must go through `_follow_depth`, or the reconciler cannot hand it
+    back: `_sync_depth` only drops what it knows it added, so an untracked subscribe leaks for the
+    rest of the session — and enough of them restore the load the narrowing removed."""
+    import inspect
+
+    from kotsin_nse.engine import Engine as E
+
+    src = inspect.getsource(E)
+    # exactly three subscribes (boot sample, `_follow_depth`, the reconciler's add) and one
+    # unsubscribe. A fourth subscribe means someone added an untracked path.
+    assert src.count('await self.feed.subscribe("md"') == 3, "route it through _follow_depth"
+    assert src.count('await self.feed.unsubscribe("md"') == 1
+    assert 'await self.feed.subscribe("md", fresh)' in inspect.getsource(E._follow_depth)
+
+    # the 09:20 rebuild subscribes price and OI for newly listed strikes, never depth
+    rebuild = inspect.getsource(E._intraday_universe_rebuild)
+    assert '"mf", fresh' in rebuild and '"oi", fresh' in rebuild and '"md"' not in rebuild
+
+    e = Engine(settings)
+    tracked: list[str] = []
+
+    class Feed:
+        async def subscribe(self, ch, insts):
+            if ch == "md":
+                tracked.extend(i.scrip_code for i in insts)
+
+        async def unsubscribe(self, ch, insts):
+            pass
+
+    e.feed = Feed()
+    await e._follow_depth([option])
+    assert tracked == [option.scrip_code] and option.scrip_code in e._depth_following
+    await e._follow_depth([option])
+    assert tracked == [option.scrip_code], "already followed: no duplicate subscribe"

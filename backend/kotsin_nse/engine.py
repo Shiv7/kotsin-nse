@@ -603,7 +603,7 @@ class Engine:
             return []
         insts = list(held.values())
         await self.feed.subscribe("mf", insts)
-        await self.feed.subscribe("md", insts)
+        await self._follow_depth(insts)  # tracked, so `_sync_depth` hands it back on the exit
         await self.feed.subscribe("oi", [i for i in insts if i.kind is not InstrumentKind.EQUITY])
         log.info("positions.resubscribed", instruments=[i.name or i.scrip_code for i in insts])
         return insts
@@ -941,8 +941,10 @@ class Engine:
             for o in fresh:
                 self._segment_by_code[o.scrip_code] = o.segment
             if fresh:
+                # Price and OI only. Depth follows what is about to be priced (`_sync_depth`) —
+                # putting a strike listed this morning on the depth channel here would restore the
+                # load the narrowing removed, and untracked, so nothing would ever hand it back.
                 await self.feed.subscribe("mf", fresh)
-                await self.feed.subscribe("md", fresh)
                 await self.feed.subscribe("oi", fresh)
             log.info("universe.intraday_rebuild", new_strikes=len(fresh))
         except Exception as exc:  # noqa: BLE001 - a failed rebuild keeps the overnight universe
@@ -1001,7 +1003,7 @@ class Engine:
         # paper fill silently took the degraded LTP+slippage path, which is the thing PaperMatcher
         # exists to avoid.
         await self.feed.subscribe("mf", [inst])
-        await self.feed.subscribe("md", [inst])
+        await self._follow_depth([inst])
         delta = (
             estimate_delta(spot=sig.entry, strike=inst.strike, option_type=inst.option_type)
             if inst.is_option
