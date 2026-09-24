@@ -134,3 +134,25 @@ async def test_an_nse_trigger_never_reaches_the_commodity_books_page(settings, e
             assert [c["symbol"] for c in rows["cards"]] == ["RELIANCE"], f"{book} sees no commodity"
     finally:
         await e.stop()
+
+
+def test_a_fresh_book_is_used_at_its_own_age_the_window_is_a_ceiling_not_a_wait(settings, option):
+    """The wider opening window must not make a fill wait for, or prefer, older depth. The matcher
+    prices on whatever snapshot the feed last delivered; the window only decides whether to refuse
+    it. A 2 s book fills on 2 s data at 09:45 exactly as it does at 11:00."""
+    m = PaperMatcher(CostModel(settings))
+    intent = OrderIntent(strategy="FUDKII", instrument=option, side=OrderSide.BUY, qty=250,
+                         purpose=Purpose.ENTRY, signal_id="s", client_order_id="c", reason="r")
+
+    def book(age_ms: float, at: float, ask: float) -> BookSnapshot:
+        return BookSnapshot(scrip_code="45678", bids=[(ask - 0.1, 10_000)], asks=[(ask, 10_000)],
+                            ts=at - age_ms / 1000)
+
+    inside, outside = _at("09:45"), _at("11:00")
+    fresh_in = m.fill(intent, book(2_000, inside, 7.0), now=inside)
+    fresh_out = m.fill(intent, book(2_000, outside, 7.0), now=outside)
+    assert fresh_in.price == fresh_out.price == 7.0, "same book, same price, whatever the window"
+    assert round(fresh_in.book_age_ms) == round(fresh_out.book_age_ms) == 2_000
+    assert m.rejected_stale == 0
+    # the price comes from the book it was handed, not from the window
+    assert m.fill(intent, book(200, inside, 7.5), now=inside).price == 7.5
