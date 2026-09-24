@@ -92,6 +92,27 @@ def _pivot_read(bar: dict[str, Any], levels: dict[str, float] | None, atr: float
     }
 
 
+def _levels_ahead(close: float, levels: dict[str, float] | None, bullish: bool, n: int = 4
+                  ) -> list[tuple[str, float]]:
+    """The future's own classic levels ahead of its close, nearest first.
+
+    Not a second confluence ladder — the trade's stop and targets are computed on the equity and
+    mapped onto the option through delta, and nothing here changes that. These are the levels the
+    future would have to pass through, reported so the read has both legs.
+    """
+    if not levels:
+        return []
+    ahead = [(k, v) for k, v in levels.items() if (v > close) == bullish and v != close]
+    return sorted(ahead, key=lambda kv: abs(kv[1] - close))[:n]
+
+
+def _level_behind(close: float, levels: dict[str, float] | None, bullish: bool) -> tuple[str, float] | None:
+    if not levels:
+        return None
+    behind = [(k, v) for k, v in levels.items() if (v < close) == bullish and v != close]
+    return min(behind, key=lambda kv: abs(kv[1] - close)) if behind else None
+
+
 def assemble(
     *, signals: list[dict], positions: list[dict], trades: list[dict], events: list[dict]
 ) -> list[dict[str, Any]]:
@@ -137,8 +158,12 @@ def assemble(
             })
         fills.sort(key=lambda f: (f["book"] != "FUDKII", f["book"]))
 
+        fut_close = fut["close"] if fut else 0.0
+        fut_levels = fut.get("levels") if fut else None
+        fut_stop = _level_behind(fut_close, fut_levels, bull) if fut else None
         out.append({
-            "ts": sig["ts"], "symbol": sig.get("symbol"), "dir": sig.get("direction"),
+            "ts": sig["ts"], "fired_ts": sig.get("created_ts") or sig["ts"],
+            "symbol": sig.get("symbol"), "dir": sig.get("direction"),
             "grade": sig.get("grade"), "decision": sig.get("decision"),
             "reason": sig.get("decision_reason") or sig.get("reason") or "",
             "entry": entry, "atr": round(atr, 2), "atr_pct": round(float(ev.get("atr_pct") or 0), 2),
@@ -158,6 +183,12 @@ def assemble(
             "bar_fut": {k: fut[k] for k in ("open", "high", "low", "close")} if fut else None,
             "pivot_eq": _pivot_read(eq, eq.get("levels"), eq.get("atr")) if eq else None,
             "pivot_fut": _pivot_read(fut, fut.get("levels"), fut.get("atr")) if fut else None,
+            "oi": ev.get("oi"), "oi_change_pct": ev.get("oi_change_pct"),
+            "fut_stop": {"label": fut_stop[0], "price": round(fut_stop[1], 2)} if fut_stop else None,
+            "fut_targets": [{"label": k, "price": round(v, 2)}
+                            for k, v in _levels_ahead(fut_close, fut_levels, bull)],
+            # the contract actually bought, or the strikes the selector tried and could not
+            "contract": fills[0]["contract"] if fills else None,
             "skips": [{"book": s.get("book", ""), "why": s.get("reason", "")} for s in skips.get(sig["signal_id"], [])],
             "fills": fills,
         })
@@ -249,9 +280,13 @@ def render(rows: list[dict[str, Any]], ticket: Ticket) -> str:
     fills = [(r, f) for r in rows for f in r["fills"]]
 
     head = [
-        "Time", "Symbol", "Dir", "Gr", "Outcome", "Entry", "ATR", "ATR%", "RR", "Fortress",
-        "Room ATR", "Eq stop", "Stop zone", "Eq targets", "Target zones", "Wall", "Wall str",
-        "Wall ATR", "Surge T", "Surge T−1", "Vol", "Fut surge T", "Fut T−1", "Fut vol",
+        "Fired", "Symbol", "Dir", "Gr", "Outcome", "OTM contract", "Bar", "Entry", "ATR", "ATR%",
+        "RR", "Fortress", "Room ATR",
+        "Eq stop", "Stop zone", "Eq T1", "Eq T2", "Eq T3", "Eq T4", "Target zones",
+        "Fut stop", "Fut T1", "Fut T2", "Fut T3", "Fut T4",
+        "Wall", "Wall str", "Wall ATR",
+        "Vol surge T", "Vol surge T−1", "Vol", "Fut surge T", "Fut surge T−1", "Fut vol",
+        "OI", "OI chg%",
         "Eq bar O/H/L/C", "Pivot", "Pivot px", "In bar", "Nearest", "ATR away",
         "Fut bar O/H/L/C", "Fut pivot", "Fut in bar", "Fut ATR away", "Why",
     ]
@@ -259,20 +294,28 @@ def render(rows: list[dict[str, Any]], ticket: Ticket) -> str:
     for r in rows:
         b, pe, pf, be, bf = _bucket(r["decision"]), r["pivot_eq"], r["pivot_fut"], r["bar_eq"], r["bar_fut"]
         ohlc = lambda x: "—" if not x else " · ".join(_fmt(x[k]) for k in ("open", "high", "low", "close"))  # noqa: E731
+        eqt = list(r["eq_targets"]) + [None] * 4
+        ft = list(r["fut_targets"]) + [None] * 4
+        fs = r["fut_stop"]
         body.append(
-            f'<tr><td class="sym">{ist(r["ts"])}</td><td class="sym l">{html.escape(r["symbol"] or "")}</td>'
+            f'<tr><td class="sym">{ist(r["fired_ts"])}</td><td class="sym l">{html.escape(r["symbol"] or "")}</td>'
             f'<td>{"long" if r["dir"] == "BULLISH" else "short"}</td><td>{html.escape(r["grade"] or "—")}</td>'
             f'<td><span class="chip {b}">{_LABEL.get(r["decision"], r["decision"])}</span></td>'
+            f'<td class="l">{html.escape(r["contract"] or "—")}</td>'
+            f'<td class="dim">{ist(r["ts"])}</td>'
             f'<td>{_fmt(r["entry"])}</td><td>{_fmt(r["atr"])}</td><td>{_fmt(r["atr_pct"])}%</td>'
             f'<td>{_fmt(r["rr"])}</td><td>{_fmt(r["fortress"], 1)}</td><td>{_fmt(r["room_atr"])}</td>'
             f'<td>{_fmt(r["eq_stop"])}</td><td class="dim l">{html.escape(r["eq_stop_zone"] or "—")}</td>'
-            f'<td>{" · ".join(_fmt(t) for t in r["eq_targets"]) or "—"}</td>'
-            f'<td class="dim l">{html.escape(" / ".join(r["eq_target_zones"]) or "—")}</td>'
-            f'<td>{_fmt(r["wall_price"])}</td><td>{_fmt(r["wall_strength"], 1)}</td>'
+            + "".join(f"<td>{_fmt(t)}</td>" for t in eqt[:4])
+            + f'<td class="dim l">{html.escape(" / ".join(r["eq_target_zones"]) or "—")}</td>'
+            f'<td>{(_fmt(fs["price"]) + " " + fs["label"]) if fs else "—"}</td>'
+            + "".join(f'<td>{(_fmt(t["price"]) + " " + t["label"]) if t else "—"}</td>' for t in ft[:4])
+            + f'<td>{_fmt(r["wall_price"])}</td><td>{_fmt(r["wall_strength"], 1)}</td>'
             f'<td>{_fmt(r["wall_atr"])}</td><td>{_fmt(r["surge_t"])}</td><td>{_fmt(r["surge_t1"])}</td>'
             f'<td class="dim">{html.escape(r["vol_label"] or "—")}</td>'
             f'<td>{_fmt(r["fut_surge_t"])}</td><td>{_fmt(r["fut_surge_t1"])}</td>'
             f'<td class="dim">{html.escape(r["fut_vol_label"] or "—")}</td>'
+            f'<td>{_fmt(r["oi"], 0)}</td><td>{_fmt(r["oi_change_pct"])}</td>'
             f'<td>{ohlc(be)}</td>'
             f'<td class="dim l">{html.escape(pe["label"]) if pe else "—"}</td><td>{_fmt(pe["price"]) if pe else "—"}</td>'
             f'<td class="{"inside" if pe and pe["inside_bar"] else "dim"}">{("yes" if pe["inside_bar"] else "no") if pe else "—"}</td>'
@@ -285,7 +328,7 @@ def render(rows: list[dict[str, Any]], ticket: Ticket) -> str:
             f'<td class="why l">{html.escape(r["reason"])}</td></tr>'
         )
 
-    fhead = ["Time", "Symbol", "Book", "Contract", "Lots", "Qty", "Premium", "Option SL",
+    fhead = ["Entry time", "Symbol", "Book", "OTM contract", "Lots", "Qty", "Premium", "Option SL",
              "SL now", "Option targets", "Status", "Exit", "Exit time", "Reason", "Net", "R"]
     fbody = []
     for r, f in fills:
@@ -334,7 +377,7 @@ def render(rows: list[dict[str, Any]], ticket: Ticket) -> str:
   </div>
 </header>
 <h2>Signals · {len(rows)}</h2>
-<div class="scroll"><table><thead><tr>{"".join(f'<th class="l">{h}</th>' if h in ("Symbol", "Stop zone", "Target zones", "Pivot", "Fut pivot", "Why") else f"<th>{h}</th>" for h in head)}</tr></thead>
+<div class="scroll"><table><thead><tr>{"".join(f'<th class="l">{h}</th>' if h in ("Symbol", "OTM contract", "Stop zone", "Target zones", "Pivot", "Fut pivot", "Why") else f"<th>{h}</th>" for h in head)}</tr></thead>
 <tbody>{"".join(body)}</tbody></table></div>
 <h2>Executions · {len(fills)}</h2>
 <div class="scroll"><table><thead><tr>{"".join(f'<th class="l">{h}</th>' if h in ("Symbol", "Book", "Contract", "Reason") else f"<th>{h}</th>" for h in fhead)}</tr></thead>
@@ -347,9 +390,13 @@ def render(rows: list[dict[str, Any]], ticket: Ticket) -> str:
   "In bar" says whether it fell between the bar's high and low. "ATR away" is its distance from
   whichever of open, high, low or close it sat closest to, in units of the 30-minute ATR — so 0.16
   means about a sixth of a typical bar.</p>
-  <p><b>On the future.</b> Stops and targets are computed on the equity and mapped onto the option
-  through delta. There is no separate futures ladder, so the future's columns are its own bar, its
-  volume surge and its nearest pivot — context for the read, not a second set of levels.</p>
+  <p><b>On the future.</b> The trade's stop and targets are computed on the equity and mapped onto
+  the option through delta; nothing is decided on the future. Its stop and T1–T4 columns are its own
+  classic pivots either side of its close, nearest first — the levels it would have to pass through,
+  reported so the read has both legs, not a second ladder the trade acts on.</p>
+  <p><b>Fired</b> is when the signal was actually emitted; <b>Bar</b> is the 30-minute bucket it
+  fired on, which starts half an hour earlier. <b>OI</b> is the front future's open interest on the
+  trigger bar and <b>OI chg%</b> its change.</p>
   <p><b>Volume surge</b> is the trigger bar against the T−2 to T−7 baseline; T−1 is the bar before
   it. Both legs are shown because the dried-volume gate reads both.</p>
   <p>This page is served by the engine and renders from the ledger on every request, so it stays

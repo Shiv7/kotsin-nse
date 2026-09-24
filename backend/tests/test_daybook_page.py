@@ -11,9 +11,10 @@ from kotsin_nse.api.daybook import TTL_HOURS, TemporaryPage, assemble, render
 
 def _signal(**kw):
     base = dict(
-        signal_id="S1", strategy="FUDKII", symbol="AUBANK", direction="BEARISH", ts=1_790_221_500,
+        signal_id="S1", strategy="FUDKII", symbol="AUBANK", direction="BEARISH",
+        ts=1_790_221_500, created_ts=1_790_223_304,
         grade="A", entry=1000.9, decision="PAPER_FILLED", decision_reason="ST flip DOWN; grade A",
-        evidence={"atr": 7.69, "atr_pct": 0.77},
+        evidence={"atr": 7.69, "atr_pct": 0.77, "oi": 17_837_000.0, "oi_change_pct": 1.4},
         context={
             "confluence": {"stop": 1002.15, "stop_zone": "1d.S3", "targets": [979.55],
                            "target_zones": ["1d.S4"], "rr": 17.08, "fortress": 6.0, "room_ratio": 2.78},
@@ -34,7 +35,7 @@ def _route():
              "levels": {"1d.S3": 1002.13, "1d.S4": 979.5}},
             {"name": "future", "open": 1043.8, "high": 1043.8, "low": 1001.2, "close": 1004.4,
              "atr": 9.44, "surgeT": 11.15, "surgeT1": 0.68, "volume": "surge",
-             "levels": {"1wk.S2": 995.4}},
+             "levels": {"1wk.S2": 995.4, "1d.S3": 993.7, "1d.S4": 966.7, "1wk.S1": 1018.2}},
         ],
     }
 
@@ -132,3 +133,37 @@ def test_the_ticket_expires_by_deleting_itself(tmp_path):
 
     store.path.write_text("{not json")
     assert store.read() is None, "a corrupt ticket is no page, never an exception"
+
+
+def test_the_signal_time_is_when_it_fired_not_when_its_bar_opened():
+    """The bar bucket starts half an hour before the decision. Reporting the bucket as the signal
+    time said 09:15 for a signal that fired at 09:45:04."""
+    rows = assemble(signals=[_signal()], positions=[], trades=[], events=[_route()])
+    r = rows[0]
+    assert r["ts"] == 1_790_221_500 and r["fired_ts"] == 1_790_223_304
+    assert r["fired_ts"] - r["ts"] == 1804, "half an hour and change apart"
+    from kotsin_nse.api.daybook import Ticket
+    out = render(rows, Ticket(day="2026-09-24", created_ts=time.time(), expires_ts=time.time() + 60))
+    assert ">09:45:04<" in out and ">09:15:00<" in out, "both shown, the fired time first"
+    assert out.index(">09:45:04<") < out.index(">09:15:00<")
+
+
+def test_the_future_reports_its_own_levels_either_side_of_its_close():
+    """Not a second ladder the trade acts on — the levels the future would pass through."""
+    rows = assemble(signals=[_signal()], positions=[], trades=[], events=[_route()])
+    r = rows[0]
+    assert r["fut_stop"] == {"label": "1wk.S1", "price": 1018.2}, "nearest level behind a short"
+    assert [t["price"] for t in r["fut_targets"]] == [995.4, 993.7, 966.7], "ahead, nearest first"
+    assert all(t["price"] < 1004.4 for t in r["fut_targets"])
+
+
+def test_open_interest_and_the_contract_reach_the_page():
+    rows = assemble(signals=[_signal()], positions=[_position()],
+                    trades=[{"position_id": "p1", "net": -15_748, "r_multiple": -1.84}],
+                    events=[_route()])
+    assert rows[0]["oi"] == 17_837_000.0 and rows[0]["oi_change_pct"] == 1.4
+    assert rows[0]["contract"] == "AUBANK 29 SEP 2026 PE 980.00"
+    from kotsin_nse.api.daybook import Ticket
+    out = render(rows, Ticket(day="2026-09-24", created_ts=time.time(), expires_ts=time.time() + 60))
+    for token in ("17,837,000", "1.40", "PE 980.00", "OI chg%", "Fut T1", "Eq T4", "OTM contract"):
+        assert token in out, f"{token} missing"

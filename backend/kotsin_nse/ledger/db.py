@@ -352,7 +352,9 @@ class Ledger:
         JSON with the columns the JSON does not carry merged in (a signal's decision, an event's
         kind and time). The trigger-card page reads a whole session this way."""
         table, col, extra = {
-            "signals": (signals, "ts", ("decision", "decision_reason")),
+            # created_ts is when the signal FIRED; ``ts`` is the bar bucket it fired on, half an
+            # hour earlier on the decision frame, and reporting that as the signal time is wrong.
+            "signals": (signals, "ts", ("decision", "decision_reason", "created_ts")),
             "positions": (positions, "opened_ts", ("status", "closed_ts")),
             "trades": (trades, "closed_ts", ()),
             "orders": (orders, "ts", ("purpose", "status")),
