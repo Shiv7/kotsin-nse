@@ -14,13 +14,13 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 import sqlalchemy as sa
 from fastapi import APIRouter, FastAPI, HTTPException, Query, WebSocket
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -30,9 +30,10 @@ from ..engine import SELECTION_POLICY, Engine, _position_json
 from ..exec.gateway import Mode
 from ..hotstocks.service import HotStocksService
 from ..ledger.db import events, rejections, signals, trades
-from ..market.session import TF_SECONDS, ist_hm, to_ist
+from ..market.session import IST, TF_SECONDS, ist_hm, ist_today, to_ist
 from ..strategy.catalog import BOOKS, LIVE_KEYS
 from ..strategy.keys import ALL_KEYS, StrategyKey
+from . import daybook
 from .ws import Hub, handle, pump
 
 
@@ -88,6 +89,7 @@ class ProposeRequest(BaseModel):
 
 def build_app(engine: Engine) -> FastAPI:
     app = FastAPI(title="kotsin-nse", version="0.1.0", docs_url="/api/docs", openapi_url="/api/openapi.json")
+    temp_page = daybook.TemporaryPage(engine.s.data_dir)
     api = APIRouter(prefix="/api")
     hot_stocks_service = HotStocksService(engine, engine.s.data_dir / "hotstocks-sectors.tsv")
 
@@ -850,12 +852,44 @@ def build_app(engine: Engine) -> FastAPI:
         engine.reconciler.acknowledge()
         return {"frozen": engine.reconciler.frozen}
 
+    @api.post("/temporary")
+    async def temporary_create(hours: float = Query(daybook.TTL_HOURS, gt=0, le=168)) -> dict[str, Any]:
+        """Open (or reopen) the shareable day-book page for today's session."""
+        t = temp_page.create(ist_today(), hours=hours)
+        return {"url": "/temporary", **t.to_json()}
+
+    @api.delete("/temporary")
+    async def temporary_revoke() -> dict[str, Any]:
+        temp_page.revoke()
+        return {"revoked": True}
+
+    @api.get("/temporary")
+    async def temporary_status() -> dict[str, Any]:
+        t = temp_page.read()
+        return {"live": t is not None, **(t.to_json() if t else {})}
+
     @api.post("/control/reset-breaker")
     async def reset_breaker() -> dict[str, Any]:
         engine.gateway.reset_breaker()
         return engine.gateway.stats()
 
     app.include_router(api)
+
+    @app.get("/temporary", response_class=HTMLResponse)
+    async def temporary_page() -> HTMLResponse:
+        """The shareable day book. Renders from the ledger on every request, and is gone the first
+        time it is asked for after its expiry — the read deletes the ticket, so nothing lingers."""
+        ticket = temp_page.read()
+        if ticket is None:
+            return HTMLResponse(daybook.EXPIRED_HTML, status_code=410)
+        day = date.fromisoformat(ticket.day)
+        start = datetime(day.year, day.month, day.day, tzinfo=IST).timestamp()
+        names = ("signals", "positions", "trades", "events")
+        signals, positions, trades, events = await asyncio.gather(
+            *(engine.ledger.rows_between(n, start, start + 86_400) for n in names)
+        )
+        rows = daybook.assemble(signals=signals, positions=positions, trades=trades, events=events)
+        return HTMLResponse(daybook.render(rows, ticket))
 
     # One socket of state diffs: every forming bar and every LTP, once a second. The chart's
     # live candle and the position LTPs come from here, not from polling the REST surface.
