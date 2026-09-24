@@ -150,3 +150,53 @@ async def test_the_exit_ladder_is_untouched_by_any_of_this(settings, equity):
     e = Engine(settings)
     # and the anchor is a read: no pivots loaded -> None, never an exception, never a mutation
     assert e.strike_anchor("NOSUCH", 100.0, Direction.BULLISH) is None
+
+
+def test_a_one_sided_best_strike_falls_through_to_the_rest_of_the_chain():
+    """Found live: INDUSTOWER and RADICO were lost at 12:45 because the span was one strike wide
+    and that strike was one-sided. The span is a preference, not a cage — the walk continues
+    outward through the rest of the OTM chain, which is 'the nearest possible OTM suitable'."""
+    now = time.time()
+    inside, outside = _opt(3550), _opt(3700)          # 3550 is in the span, 3700 beyond it
+    chain = [inside, outside]
+    quotes = {
+        inside.scrip_code: Quote(ltp=20.0, bid=0.0, ask=20.1, ts=now),    # one-sided
+        outside.scrip_code: Quote(ltp=8.0, bid=7.9, ask=8.1, ts=now),
+    }
+    liq = {inside.scrip_code: (9_999.0, 9_999.0), outside.scrip_code: (1.0, 1.0)}
+    sel = select_option(chain=chain, quotes=quotes, spot=3523.1, target1=None,
+                        direction=Direction.BULLISH, now=now, strike_anchor=3600.0, liquidity=liq)
+    assert sel.ok and sel.instrument is outside, "the trigger survives a one-sided first choice"
+
+    # and with nothing tradeable anywhere, the refusal names what it tried, span first
+    dead = {i.scrip_code: Quote(ltp=20.0, bid=0.0, ask=20.1, ts=now) for i in chain}
+    bad = select_option(chain=chain, quotes=dead, spot=3523.1, target1=None,
+                        direction=Direction.BULLISH, now=now, strike_anchor=3600.0, liquidity=liq)
+    assert not bad.ok and "3550" in bad.reason and "3700" in bad.reason
+
+
+@pytest.mark.asyncio
+async def test_the_fallback_strikes_are_quoted_not_just_the_span(settings, option):
+    """Quoting only the span left every fallback strike with no quote, so the walk had nothing to
+    walk to — the second half of the same live failure."""
+    from kotsin_nse.engine import Engine
+
+    e = Engine(settings)
+    asked: list[int] = []
+
+    class Rest:
+        async def market_feed(self, insts):
+            asked.append(len(insts))
+            return {i.scrip_code: {"ltp": 7.0, "bid": 6.9, "ask": 7.0, "bid_qty": 10, "ask_qty": 10,
+                                   "volume": 5.0, "ts": time.time()} for i in insts}
+
+    class Feed:
+        async def subscribe(self, ch, insts):
+            pass
+
+    e.rest, e.feed = Rest(), Feed()
+    chain = [_opt(s) for s in range(3500, 3900, 25)]
+    await e._ensure_quotes(chain, spot=3523.1, extra=[_opt(3875)])
+    assert asked and asked[0] >= 12, "the strikes around spot, plus the span"
+    assert "3875CE" in e.quotes, "a span strike outside the nearest twelve is still quoted"
+    assert e.option_volume.get("3875CE") == 5.0, "and its volume is kept for the ranking"

@@ -1954,7 +1954,9 @@ class Engine:
         # target the trade exits on — those stay exactly as they are, for every book and twin.
         anchor = self.strike_anchor(sig.symbol, sig.entry, sig.direction)
         span = self._strike_span(chain, sig.entry, sig.direction, anchor)
-        await self._ensure_quotes(span or chain, sig.entry)
+        # The span AND the strikes around spot the fallback walks: quoting only the span left the
+        # next-best strikes with no quote at all, so a one-sided first choice lost the trigger.
+        await self._ensure_quotes(chain, sig.entry, extra=span)
         if tape:
             # every strike the chooser is weighing goes on tape, chosen or not
             self.tape.follow(sig.symbol, [i.scrip_code for i in (span or chain[:6])], now=now)
@@ -2026,7 +2028,9 @@ class Engine:
             out[code] = (self.option_volume.get(code, 0.0), float(oi))
         return out
 
-    async def _ensure_quotes(self, chain: list[Instrument], spot: float) -> None:
+    async def _ensure_quotes(
+        self, chain: list[Instrument], spot: float, *, extra: list[Instrument] | None = None
+    ) -> None:
         """Snapshot-quote the handful of strikes near the money.
 
         One batched REST call, not an inline per-strike fetch. The old enricher took 3–23 seconds
@@ -2035,6 +2039,8 @@ class Engine:
         if not chain:
             return
         near = sorted(chain, key=lambda i: abs(i.strike - spot))[:12]
+        seen = {i.scrip_code for i in near}
+        near += [i for i in (extra or []) if i.scrip_code not in seen]
         # Depth FIRST, and outside the staleness early-exit below: these are the strikes an order is
         # about to be priced against, and since depth only follows what is in use, a strike whose
         # price happens to be fresh would otherwise reach the matcher with no book at all.

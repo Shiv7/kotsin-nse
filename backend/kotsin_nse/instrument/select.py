@@ -179,12 +179,15 @@ def select_option(
         otm = [i for i in candidates if i.strike < spot]
     pool = otm or candidates  # a chain with no OTM strike is odd but not a reason to skip the trade
     if liquidity is not None:
-        # every OTM strike the move would travel through, ranked by how much actually trades there
+        # The strikes the move would travel through, most-traded first — then everything else,
+        # nearest the anchor first. The span is a preference, not a cage: it is often one or two
+        # strikes wide, and "the best strike is one-sided" must fall through to the next suitable
+        # OTM rather than abandoning the trigger (found live 2026-09-24: INDUSTOWER and RADICO
+        # were lost to a single one-sided quote).
         lo, hi = (spot, anchor) if want is OptionType.CE else (anchor, spot)
         span = [i for i in pool if lo <= i.strike <= hi]
-        pool = rank_by_liquidity(span, liquidity, anchor) if span else sorted(
-            pool, key=lambda i: abs(i.strike - anchor)
-        )
+        rest = sorted((i for i in pool if i not in span), key=lambda i: abs(i.strike - anchor))
+        pool = rank_by_liquidity(span, liquidity, anchor) + rest
     else:
         pool = sorted(pool, key=lambda i: abs(i.strike - anchor))
 
