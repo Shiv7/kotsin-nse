@@ -24,13 +24,14 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from ..bars.indicators import bollinger, supertrend
+from ..bars.daily import previous_session
+from ..bars.indicators import atr, bollinger, supertrend
 from ..bars.unified import UnifiedBar
 from ..engine import SELECTION_POLICY, Engine, _position_json
 from ..exec.gateway import Mode
 from ..hotstocks.service import HotStocksService
 from ..ledger.db import events, rejections, signals, trades
-from ..market.session import IST, TF_SECONDS, ist_hm, ist_today, to_ist
+from ..market.session import IST, TF_SECONDS, ist_day, ist_hm, ist_today, to_ist
 from ..strategy.catalog import BOOKS, LIVE_KEYS
 from ..strategy.keys import ALL_KEYS, StrategyKey
 from . import daybook
@@ -875,6 +876,25 @@ def build_app(engine: Engine) -> FastAPI:
 
     app.include_router(api)
 
+    def _gap_market(symbols: set[str], day: date) -> dict[str, dict[str, float]]:
+        """Per symbol: the previous official close, the daily ATR and today's session open — the
+        three inputs the gap readings need and a signal row does not carry. Best effort: a symbol
+        the store cannot answer for simply has no gap columns."""
+        out: dict[str, dict[str, float]] = {}
+        for sym in symbols:
+            dailies = engine.store.bars(sym, "1d")
+            prev = previous_session(dailies, day)
+            intraday = engine.store.bars(sym, "30m", 40)
+            todays = [b for b in intraday if ist_day(b.ts) == day]
+            if prev is None or not todays:
+                continue
+            out[sym] = {
+                "prev_close": prev.close,
+                "atr1d": atr(list(dailies), 14) or 0.0,
+                "open": todays[0].open,
+            }
+        return out
+
     @app.get("/temporary", response_class=HTMLResponse)
     async def temporary_page() -> HTMLResponse:
         """The shareable day book. Renders from the ledger on every request, and is gone the first
@@ -888,7 +908,11 @@ def build_app(engine: Engine) -> FastAPI:
         signals, positions, trades, events = await asyncio.gather(
             *(engine.ledger.rows_between(n, start, start + 86_400) for n in names)
         )
-        rows = daybook.assemble(signals=signals, positions=positions, trades=trades, events=events)
+        rows = daybook.assemble(
+            signals=signals, positions=positions, trades=trades, events=events,
+            market=_gap_market({s["symbol"] for s in signals if s.get("symbol")}, day),
+            vix=engine.india_vix(),
+        )
         return HTMLResponse(daybook.render(rows, ticket))
 
     # One socket of state diffs: every forming bar and every LTP, once a second. The chart's

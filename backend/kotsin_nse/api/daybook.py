@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from ..market.session import IST
+from ..strategy.gapscore import f14_score, gap_open_class
 
 TTL_HOURS = 24
 
@@ -114,9 +115,16 @@ def _level_behind(close: float, levels: dict[str, float] | None, bullish: bool) 
 
 
 def assemble(
-    *, signals: list[dict], positions: list[dict], trades: list[dict], events: list[dict]
+    *, signals: list[dict], positions: list[dict], trades: list[dict], events: list[dict],
+    market: dict[str, dict[str, float]] | None = None, vix: float | None = None,
 ) -> list[dict[str, Any]]:
-    """One row per trigger, with everything the day book shows. Pure: rows in, rows out."""
+    """One row per trigger, with everything the day book shows. Pure: rows in, rows out.
+
+    ``market`` carries what the two gap readings need and a signal does not: each symbol's previous
+    close, its daily ATR and today's session open. Absent, those columns are simply blank — the
+    reading is advisory and never worth failing a page for.
+    """
+    market = market or {}
     routes = {e["signal_id"]: e for e in events if e.get("kind") == "counter.route" and e.get("signal_id")}
     skips: dict[str, list[dict]] = {}
     for e in events:
@@ -189,6 +197,7 @@ def assemble(
                             for k, v in _levels_ahead(fut_close, fut_levels, bull)],
             # the contract actually bought, or the strikes the selector tried and could not
             "contract": fills[0]["contract"] if fills else None,
+            **_gap_reads(sig, eq, atr, market.get(sig.get("symbol") or "", {}), vix, bull, conf),
             "skips": [{"book": s.get("book", ""), "why": s.get("reason", "")} for s in skips.get(sig["signal_id"], [])],
             "fills": fills,
         })
@@ -287,6 +296,7 @@ def render(rows: list[dict[str, Any]], ticket: Ticket) -> str:
         "Wall", "Wall str", "Wall ATR",
         "Vol surge T", "Vol surge T−1", "Vol", "Fut surge T", "Fut surge T−1", "Fut vol",
         "OI", "OI chg%",
+        "Gap class", "Gap %", "Gap/ATR1d", "F14", "F14 says", "F14 tier", "F14 components",
         "Eq bar O/H/L/C", "Pivot", "Pivot px", "In bar", "Nearest", "ATR away",
         "Fut bar O/H/L/C", "Fut pivot", "Fut in bar", "Fut ATR away", "Why",
     ]
@@ -316,7 +326,8 @@ def render(rows: list[dict[str, Any]], ticket: Ticket) -> str:
             f'<td>{_fmt(r["fut_surge_t"])}</td><td>{_fmt(r["fut_surge_t1"])}</td>'
             f'<td class="dim">{html.escape(r["fut_vol_label"] or "—")}</td>'
             f'<td>{_fmt(r["oi"], 0)}</td><td>{_fmt(r["oi_change_pct"])}</td>'
-            f'<td>{ohlc(be)}</td>'
+            + _gap_cells(r)
+            + f'<td>{ohlc(be)}</td>'
             f'<td class="dim l">{html.escape(pe["label"]) if pe else "—"}</td><td>{_fmt(pe["price"]) if pe else "—"}</td>'
             f'<td class="{"inside" if pe and pe["inside_bar"] else "dim"}">{("yes" if pe["inside_bar"] else "no") if pe else "—"}</td>'
             f'<td class="dim">{html.escape(pe["nearest_to"]) if pe else "—"}</td>'
@@ -377,7 +388,8 @@ def render(rows: list[dict[str, Any]], ticket: Ticket) -> str:
   </div>
 </header>
 <h2>Signals · {len(rows)}</h2>
-<div class="scroll"><table><thead><tr>{"".join(f'<th class="l">{h}</th>' if h in ("Symbol", "OTM contract", "Stop zone", "Target zones", "Pivot", "Fut pivot", "Why") else f"<th>{h}</th>" for h in head)}</tr></thead>
+<div class="scroll"><table><thead><tr>{"".join(f'<th class="l">{h}</th>' if h in ("Symbol", "OTM contract", "Stop zone", "Target zones", "Pivot", "Fut pivot",
+                     "Gap class", "F14 says", "F14 components", "Why") else f"<th>{h}</th>" for h in head)}</tr></thead>
 <tbody>{"".join(body)}</tbody></table></div>
 <h2>Executions · {len(fills)}</h2>
 <div class="scroll"><table><thead><tr>{"".join(f'<th class="l">{h}</th>' if h in ("Symbol", "Book", "Contract", "Reason") else f"<th>{h}</th>" for h in fhead)}</tr></thead>
@@ -399,6 +411,15 @@ def render(rows: list[dict[str, Any]], ticket: Ticket) -> str:
   trigger bar and <b>OI chg%</b> its change.</p>
   <p><b>Volume surge</b> is the trigger bar against the T−2 to T−7 baseline; T−1 is the bar before
   it. Both legs are shown because the dried-volume gate reads both.</p>
+  <p><b>Gap class and F14 are advisory and nothing routes on them.</b> They are the old stack's two
+  gap readings, ported so a session can be read against what it would have said — this engine's own
+  router does not look at the overnight gap at all. <b>Gap class</b> labels the 09:15 open against
+  yesterday's close and today's daily pivots; a <b>*</b> means the gap was large enough to be
+  "fill likely" but was labelled on S1 or R1 instead, because that classifier tests direction before
+  magnitude and returns early. <b>F14</b> is a nine-component counter-trend score, flipping at 50
+  and only when at least one candle-anchored component fired; its ATR-tier bonus is shown but not
+  added, matching the setting that stack ships disabled. Two components are missing here because
+  their inputs do not exist in this engine, so a score is a floor, not an exact figure.</p>
   <p>This page is served by the engine and renders from the ledger on every request, so it stays
   current while the session runs. It stops serving at {html.escape(expires)}.</p>
 </footer>
@@ -419,3 +440,58 @@ p{margin:0;color:#7C8494}
 <p>The day book was shared for 24 hours and that window has closed. The page has deleted itself.
 Ask for a fresh link if you still need it.</p>
 </div></body></html>"""
+
+
+def _gap_reads(
+    sig: dict[str, Any], eq: dict[str, Any] | None, atr30: float,
+    mkt: dict[str, float], vix: float | None, bullish: bool, conf: dict[str, Any],
+) -> dict[str, Any]:
+    """The two reference-stack readings for one trigger. Advisory: nothing routes on them."""
+    prev_close, atr1d, open_today = mkt.get("prev_close", 0.0), mkt.get("atr1d", 0.0), mkt.get("open", 0.0)
+    levels = (eq or {}).get("levels") or {}
+    gap = None
+    if open_today and prev_close:
+        gap = gap_open_class(open_px=open_today, prev_close=prev_close, atr1d=atr1d,
+                             r1=levels.get("1d.R1"), s1=levels.get("1d.S1"))
+    f14 = None
+    if eq and atr30 > 0 and gap is not None:
+        phase = "OPEN" if datetime.fromtimestamp(sig["ts"], IST).strftime("%H:%M") <= "09:15" else "MID"
+        f14 = f14_score(
+            bullish=bullish, grade=sig.get("grade") or "F", rr=float(conf.get("rr") or 0),
+            fortress=float(conf.get("fortress") or 0), atr30=atr30,
+            bar=(eq["open"], eq["high"], eq["low"], eq["close"]),
+            gap_pct=gap.gap_pct, phase=phase, vix=vix,
+        )
+    return {"gap": gap.to_json() if gap else None, "f14": f14.to_json() if f14 else None}
+
+
+_VERDICT_CHIP = {"COUNTER": "refused", "IN_TREND": "filled", "SKIP": "blocked"}
+
+
+def _gap_cells(r: dict[str, Any]) -> str:
+    """The two reference readings as table cells: values, then what each would have concluded."""
+    g, f = r.get("gap"), r.get("f14")
+    if not g:
+        return '<td class="dim l">—</td><td>—</td><td>—</td><td>—</td><td class="dim l">—</td><td>—</td><td class="dim l">—</td>'
+    label = g["label"] + (" *" if g.get("fill_hidden") else "")
+    title = ("fill-likely by magnitude, but labelled on S1/R1 because the classifier returns "
+             "before the ATR test") if g.get("fill_hidden") else ""
+    cells = [
+        f'<td class="dim l"{f" title={title!r}" if title else ""}>{html.escape(label)}</td>',
+        f'<td>{_fmt(g["gap_pct"])}%</td>',
+        f'<td>{_fmt(g["gap_atr1d"])}</td>',
+    ]
+    if not f:
+        return "".join(cells) + '<td>—</td><td class="dim l">—</td><td>—</td><td class="dim l">—</td>'
+    v = f["verdict"]
+    says = f'<span class="chip {_VERDICT_CHIP.get(v, "blocked")}">{v.replace("_", " ").lower()}</span>'
+    if f["blocked"]:
+        says += f' <span class="dim">{html.escape(f["blocked"].lower())}</span>'
+    comps = " · ".join(c.split("(")[0] for c in f["components"]) or "—"
+    cells += [
+        f'<td>{f["score"]}</td>',
+        f'<td class="l">{says}</td>',
+        f'<td>T{f["tier"]}{"" if not f["tier_points"] else f" (+{f['tier_points']})"}</td>',
+        f'<td class="why l" title="{html.escape(" | ".join(f["components"]))}">{html.escape(comps)}</td>',
+    ]
+    return "".join(cells)
