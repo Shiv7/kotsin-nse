@@ -209,6 +209,17 @@ class Settings(BaseSettings):
     live_max_orders_per_day: int = 6
     live_daily_loss_inr: float = 2_000.0
     live_entry_cutoff_ist: str = "15:10"
+    #: consecutive order rejects tolerated before the gateway breaker trips. The breaker halts the
+    #: ENGINE, not just the gateway, so it force-flattens every book — see exec/gateway.py.
+    live_breaker_consecutive_rejects: int = 12
+
+    # ---- paper fill realism ---------------------------------------------------------------------
+    #: how stale a depth snapshot may be before a paper fill is refused, outside the opening window
+    paper_max_book_age_ms: float = 6_000.0
+    #: …and inside it. A session's first minutes deliver depth in bursts.
+    paper_open_max_book_age_ms: float = 25_000.0
+    paper_open_window_from_ist: str = "09:00"
+    paper_open_window_to_ist: str = "09:55"
 
     # ---- cost model ----------------------------------------------------------------------------
     # Measured on this book, not assumed: at ₹33,000/position the NSE cash round trip was 0.299%,
@@ -258,7 +269,13 @@ class Settings(BaseSettings):
                 raise ValueError(f"unknown segment {n!r} — known: {', '.join(Segment.__members__)}")
         return ",".join(names)
 
-    @field_validator("live_entry_cutoff_ist", "committee_autopilot_ist", "alerts_reset_ist")
+    @field_validator(
+        "live_entry_cutoff_ist",
+        "committee_autopilot_ist",
+        "alerts_reset_ist",
+        "paper_open_window_from_ist",
+        "paper_open_window_to_ist",
+    )
     @classmethod
     def _hhmm(cls, v: str) -> str:
         hh, _, mm = v.partition(":")

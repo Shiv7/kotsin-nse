@@ -23,6 +23,7 @@ import time
 from dataclasses import dataclass
 
 from ..domain import Fill, Instrument, OrderIntent, OrderSide
+from ..market.session import ist_hm
 from ..risk.costs import CostModel
 
 
@@ -90,11 +91,21 @@ class PaperMatcher:
         self,
         costs: CostModel,
         *,
-        max_book_age_ms: float = 5000.0,
+        max_book_age_ms: float = 6_000.0,
+        open_max_book_age_ms: float = 25_000.0,
+        open_window_ist: tuple[str, str] = ("09:00", "09:55"),
         ceiling_pct: float = 10.0,
     ) -> None:
         self.costs = costs
+        #: the depth a fill may be priced on outside the opening window
         self.max_book_age_ms = max_book_age_ms
+        #: …and inside it. The first minutes of a session deliver depth in bursts: on 2026-09-24
+        #: three NSE names came back 13–15 s stale at the 09:45 decision, each order was rejected,
+        #: and three consecutive rejects tripped the gateway breaker — which halts the ENGINE and
+        #: force-flattened live positions in every book. A wider window through the opens is the
+        #: operator's answer (2026-09-24); the tight one governs the rest of the day.
+        self.open_max_book_age_ms = open_max_book_age_ms
+        self.open_window_ist = open_window_ist
         self.ceiling_pct = ceiling_pct
         self.fills = 0
         self.truncated = 0
@@ -132,9 +143,10 @@ class PaperMatcher:
             )
 
         age = book.age_ms(now)
-        if age > self.max_book_age_ms:
+        limit = self.age_limit_ms(now)
+        if age > limit:
             self.rejected_stale += 1
-            raise NoBook(f"book for {inst.symbol} is {age:.0f} ms old")
+            raise NoBook(f"book for {inst.symbol} is {age:.0f} ms old (limit {limit:.0f})")
 
         levels = book.asks if buy else book.bids
         touch = levels[0][0]
@@ -158,6 +170,11 @@ class PaperMatcher:
             levels=walk.levels,
         )
 
+    def age_limit_ms(self, now: float | None = None) -> float:
+        """How stale the depth may be right now. Wider inside the opening window, tight after."""
+        lo, hi = self.open_window_ist
+        return self.open_max_book_age_ms if lo <= ist_hm(now or time.time()) < hi else self.max_book_age_ms
+
     def stats(self) -> dict[str, float]:
         return {
             "fills": self.fills,
@@ -165,4 +182,7 @@ class PaperMatcher:
             "rejected_stale": self.rejected_stale,
             "ceiling_pct": self.ceiling_pct,
             "max_book_age_ms": self.max_book_age_ms,
+            "open_max_book_age_ms": self.open_max_book_age_ms,
+            "open_window_ist": f"{self.open_window_ist[0]}-{self.open_window_ist[1]}",
+            "age_limit_now_ms": self.age_limit_ms(),
         }

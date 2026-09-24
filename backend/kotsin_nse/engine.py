@@ -22,7 +22,7 @@ import time
 from collections.abc import MutableMapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
-from typing import Any
+from typing import Any, ClassVar
 
 import httpx
 import structlog
@@ -255,7 +255,12 @@ class Engine:
         self._decision_tasks: set[asyncio.Task[Any]] = set()
         self._sweep_task: asyncio.Task[Any] | None = None
         self._intraday_rebuild_day: str = ""
-        self.matcher = PaperMatcher(self.costs)
+        self.matcher = PaperMatcher(
+            self.costs,
+            max_book_age_ms=settings.paper_max_book_age_ms,
+            open_max_book_age_ms=settings.paper_open_max_book_age_ms,
+            open_window_ist=(settings.paper_open_window_from_ist, settings.paper_open_window_to_ist),
+        )
         self.live_exec: LiveExecutor | None = None
         self.reconciler_positions: Reconciler | None = None
         self.reconciler_ready = False
@@ -272,6 +277,7 @@ class Engine:
                 max_orders_per_day=settings.live_max_orders_per_day,
                 daily_loss_inr=settings.live_daily_loss_inr,
                 entry_cutoff_ist=settings.live_entry_cutoff_ist,
+                breaker_consecutive_rejects=settings.live_breaker_consecutive_rejects,
             ),
         )
 
@@ -998,6 +1004,12 @@ class Engine:
         if inst.is_option:
             option_sl = self.floored_option_stop(sig.strategy, selection.premium, option_sl, inst.tick_size)
 
+        if not self.book_trades(sig.strategy.value, underlying.segment):
+            why = f"{sig.strategy.value} does not trade {underlying.segment.value}"
+            await self.ledger.insert_signal(sig.to_json(), "WRONG_SEGMENT", why)
+            log.warning("signal.wrong_segment", symbol=sig.symbol, strategy=sig.strategy.value)
+            return
+
         wallet = self.wallets[sig.strategy.value]
         if wallet.halted:
             await self.ledger.insert_signal(sig.to_json(), "WALLET_HALTED", wallet.halt_reason)
@@ -1274,6 +1286,14 @@ class Engine:
             else None
         )
         for twin_key in keys:
+            if not self.book_trades(twin_key.value, pos.underlying.segment):
+                log.warning(
+                    "rt_twin.wrong_segment",
+                    book=twin_key.value,
+                    symbol=pos.underlying.symbol,
+                    segment=pos.underlying.segment.value,
+                )
+                continue
             engine_for = self._exits_by_strategy[twin_key.value]
             lim_v = engine_for.limits.dried_volume_v
             if lim_v and vol:
@@ -1351,7 +1371,15 @@ class Engine:
         latest: dict[str, dict[str, Any]] = {}
         for sgn in signals:  # a take re-enters the same id: the last row is the decision that stands
             latest[sgn["signal_id"]] = sgn
-        parents = sorted((sgn for sgn in latest.values() if sgn["strategy"] == StrategyKey.FUDKII.value), key=lambda x: x["ts"])
+        parents = sorted(
+            (
+                sgn
+                for sgn in latest.values()
+                if sgn["strategy"] == StrategyKey.FUDKII.value
+                and self.book_trades(key.value, self._segment_of(sgn["symbol"]))
+            ),
+            key=lambda x: x["ts"],
+        )
         by_source = {sgn["source_signal_id"]: sgn for sgn in latest.values() if sgn.get("source_signal_id") and sgn["strategy"] == StrategyKey.FUDKII_CT_X.value}
         pos_by_key = {(ps["strategy"], ps["signal_id"]): ps for ps in positions}
         trades_by_pos = {t["position_id"]: t for t in trades}
@@ -1786,6 +1814,13 @@ class Engine:
         self._fut_cache[underlying.symbol] = (bucket, ctx)
         return ctx
 
+    def _segment_of(self, symbol: str) -> Segment | None:
+        """The underlying's segment, from the live universe. None when the name is not in it —
+        treated as 'not the reserved segment', so an unknown name is never hidden from the books
+        that do trade everything, and never shown on the one that does not."""
+        inst = self.underlyings.get(symbol)
+        return inst.segment if inst is not None else None
+
     def _pivot_points(self, symbol: str) -> list[PivotPoint]:
         """The equity's classic levels for today — daily from the previous session, weekly and
         monthly from the previous completed periods — with their timeframe weights."""
@@ -1850,6 +1885,21 @@ class Engine:
         """The selector's policy for a book: the shared one, minus the premium floor for the
         FUDKII family."""
         return replace(SELECTION_POLICY, min_premium=0.0) if key in NO_PREMIUM_FLOOR else SELECTION_POLICY
+
+    #: Books that trade one exchange only. FUDKII-RT-MCX is the commodity book — its wallet is
+    #: sized in CRUDEOIL lots and its exits were tuned on commodities — so an NSE fill reaching it
+    #: is a bug, not a diversification. (There is no currency segment in this engine at all:
+    #: ``config.Segment`` is NSE_EQ / NSE_FO / NSE_IDX / MCX_FO.)
+    SEGMENT_BOOKS: ClassVar[dict[str, Segment]] = {StrategyKey.FUDKII_RT_MCX.value: Segment.MCX_FO}
+
+    @classmethod
+    def book_trades(cls, book: str, segment: Segment | None) -> bool:
+        """Whether ``book`` may see an underlying in ``segment``. A book with no restriction
+        takes everything except the segments another book is reserved for."""
+        want = cls.SEGMENT_BOOKS.get(book)
+        if want is not None:
+            return segment is want
+        return segment not in set(cls.SEGMENT_BOOKS.values())
 
     @staticmethod
     def floored_option_stop(key: StrategyKey, premium: float, option_sl: float, tick: float) -> float:

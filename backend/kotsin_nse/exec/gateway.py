@@ -62,7 +62,10 @@ class LiveCaps:
     max_orders_per_day: int = 6
     daily_loss_inr: float = 2_000.0
     entry_cutoff_ist: str = "15:10"
-    breaker_consecutive_rejects: int = 3
+    #: Eleven consecutive rejects are tolerated; the twelfth trips the breaker (operator,
+    #: 2026-09-24). It was 3, and three stale-depth rejections at the 09:45 open tripped it —
+    #: which halts the whole engine and force-flattens every book, including books that were fine.
+    breaker_consecutive_rejects: int = 12
     #: index options are excluded by default — they move faster than a personal risk budget likes
     skip_index: bool = True
 

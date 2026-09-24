@@ -152,6 +152,23 @@ The route and the wall are stamped on the ENTRY card (`card.route`); a COUNTER w
 flipped side is recorded as `COUNTER_NO_PLAN`. The in-trend mirrors (RT-X/N/Y) trade regardless of
 the route — the fade is beside them, not instead of them.
 
+**What the 2026-09-24 open forced** (operator, same morning). Three NSE names came back with
+depth 13–15 s stale at the 09:45 decision, each order was refused, and three consecutive rejects
+tripped the gateway breaker — which reports the **engine** halted, not just the gateway, so every
+open position in every book was force-flattened at market seconds after entry. Three changes:
+
+- **The reject fuse is eleven, not two.** `LiveCaps.breaker_consecutive_rejects` = 12
+  (`KN_LIVE_BREAKER_CONSECUTIVE_REJECTS`): eleven consecutive rejects are tolerated, the twelfth
+  trips it.
+- **The depth window widens across the opens.** A paper fill may be priced on depth up to
+  25 s old between 09:00 and 09:55 IST, and 6 s the rest of the day
+  (`PaperMatcher.age_limit_ms`, `KN_PAPER_OPEN_MAX_BOOK_AGE_MS` / `KN_PAPER_MAX_BOOK_AGE_MS`).
+  A session's first minutes deliver depth in bursts; the rest of the day has no such excuse.
+- **One exchange per book.** `Engine.SEGMENT_BOOKS` reserves MCX_FO for FUDKII-RT-MCX, and
+  `book_trades()` gates the twin mirror, every direct entry and the trigger-card page: the
+  commodity book never sees an NSE trigger and the NSE books never see a commodity one. (There is
+  no currency segment in this engine at all — `Segment` is NSE_EQ / NSE_FO / NSE_IDX / MCX_FO.)
+
 **One session on the page, all of it** (operator, 2026-09-24). Three rules, one for each place a
 signal could go missing:
 
