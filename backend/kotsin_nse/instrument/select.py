@@ -18,7 +18,7 @@ from gold and silver does not support a stop.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 
@@ -41,6 +41,15 @@ class SelectionPolicy:
     max_spread_pct: float = 8.0
     #: how stale a chain snapshot may be before selection refuses to choose
     max_quote_age_s: float = 30.0
+    #: a strike under this delta barely responds to the move being predicted, whatever its open
+    #: interest. ETERNAL on 2026-09-24 had MORE open interest at its target strike than one ATR
+    #: out, on 0.15 delta; buying that is buying where positions are parked, not where the thesis
+    #: pays. Applied only to the two candidates, never to the fallback walk.
+    min_delta: float = 0.20
+    #: how far the further strike must beat the nearer one on every liquidity measure before its
+    #: lower delta is accepted. HAVELLS the same day: 10 % more open interest for a quarter less
+    #: delta is a bad trade; 2-3x more is not.
+    oi_margin: float = 1.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,30 +110,78 @@ def otm_strike_anchor(
     return target1
 
 
-def strike_anchor_from_pivots(
-    *, prices: Iterable[float], spot: float, direction: Direction, min_distance: float
-) -> float | None:
-    """The nearest **raw classic pivot** ahead of the trade, skipping any too close to aim at.
+def beats_on_liquidity(
+    b: tuple[float, float], a: tuple[float, float], margin: float
+) -> bool:
+    """Whether ``b`` beats ``a`` by ``margin`` on **every** liquidity measure both of them have.
 
-    Deliberately not the confluence target. T1 is a *cluster* of levels strong enough to be a wall,
-    and it is what the trade exits on; borrowing it to place the strike coupled two decisions that
-    are not the same question, and on a distant wall it put the strike five to seven strikes out
-    where nothing trades (KAYNES, 2026-09-24: anchor 3800 against a 3523 spot, every candidate
-    one-sided). This answers only "which strike", on the nearest level price would actually have to
-    reach — and a level sitting almost on top of spot is no target at all, so the next one is used.
-
-    ``min_distance`` is in price, normally a fraction of ATR. Returns None when nothing is ahead.
+    Deliberately conservative, and the reason is a real trade. HAVELLS on 2026-09-24: the target
+    strike carried 549k open interest against 499k at the nearer one — a 10 % edge — and 0.36 delta
+    against 0.50. Paying a quarter of the option's responsiveness for a tenth more open interest is
+    a bad trade, so a clear margin is required before the further strike is taken. Where neither
+    side has data the answer is False: the nearer strike stands.
     """
-    ahead = sorted(
-        (p for p in prices if (p > spot if direction is Direction.BULLISH else p < spot)),
-        key=lambda p: abs(p - spot),
-    )
-    if not ahead:
-        return None
-    for p in ahead:
-        if abs(p - spot) >= min_distance:
-            return p
-    return ahead[-1]  # every level is inside the floor: the furthest is the best of them
+    ratios = []
+    for vb, va in zip(b, a, strict=True):
+        if va > 0:
+            ratios.append(vb / va)
+        elif vb > 0:
+            ratios.append(float("inf"))
+    return bool(ratios) and min(ratios) >= margin
+
+
+def strike_candidates(
+    *,
+    otm: list[Instrument],
+    spot: float,
+    direction: Direction,
+    atr: float,
+    target1: float | None,
+    liquidity: Mapping[str, tuple[float, float]],
+    delta_floor: float,
+    oi_margin: float,
+) -> tuple[list[Instrument], str]:
+    """The two strikes worth considering, best first, and why.
+
+    **A** is the strike one ATR beyond spot — where the move the trigger predicts actually gets to.
+    **B** is the strike at the confluence target — where the move is expected to stop. Open interest
+    is lumpy rather than decaying with distance (RELIANCE 2026-09-24 held 12.5 m lots at the 1300
+    call against 3.5 m one strike from spot), so which of the two is the tradeable contract is a
+    real question and liquidity is the right arbiter — but only between strikes the thesis
+    supports. A strike under ``delta_floor`` barely responds to the move being predicted, however
+    much open interest is parked on it: ETERNAL that day had MORE open interest at its target strike
+    than at the nearer one, on 0.15 delta.
+
+    Returns the preferred order; the caller walks outward from there if neither is tradeable.
+    """
+    if not otm or spot <= 0 or atr <= 0:
+        return [], ""
+    bullish = direction is Direction.BULLISH
+    ot = direction.option_type
+
+    def nearest(level: float) -> Instrument | None:
+        return min(otm, key=lambda i: abs(i.strike - level), default=None)
+
+    a = nearest(spot + atr if bullish else spot - atr)
+    b = nearest(target1) if target1 else None
+    picks = [i for i in (a, b) if i is not None]
+    if not picks:
+        return [], ""
+    if b is not None and a is not None and b.scrip_code == a.scrip_code:
+        return [a], "one strike serves both"
+
+    live = [i for i in picks if abs(estimate_delta(spot=spot, strike=i.strike, option_type=ot)) >= delta_floor]
+    blocked = [i for i in picks if i not in live]
+    low = ",".join(f"{i.strike:g}" for i in blocked)
+    note = f"delta<{delta_floor:.2f}: {low}" if blocked else ""
+    if not live:
+        return [], note or "both candidates under the delta floor"
+    if len(live) == 1:
+        return live, note
+    la, lb = liquidity.get(a.scrip_code, (0.0, 0.0)), liquidity.get(b.scrip_code, (0.0, 0.0))
+    if beats_on_liquidity(lb, la, oi_margin):
+        return [b, a], f"{b.strike:g} clears {a.strike:g} by {oi_margin:g}x on liquidity"
+    return [a, b], note
 
 
 def rank_by_liquidity(
@@ -156,18 +213,18 @@ def select_option(
     direction: Direction,
     now: float,
     policy: SelectionPolicy | None = None,
-    strike_anchor: float | None = None,
+    atr: float = 0.0,
     liquidity: Mapping[str, tuple[float, float]] | None = None,
 ) -> Selection:
-    """The most liquid OTM strike between spot and the anchor that is genuinely tradeable.
+    """The tradeable OTM strike this move should be expressed in.
 
-    ``strike_anchor`` is the pivot the strike is placed against (``strike_anchor_from_pivots``);
-    without one this falls back to the old behaviour, the confluence target. ``liquidity`` maps a
-    scrip code to ``(volume, open interest)``.
+    With ``atr`` and ``liquidity`` the two-candidate rule applies (``strike_candidates``): one ATR
+    out against the confluence target, decided on liquidity, floored on delta. Without them this is
+    the old behaviour — nearest to the target — which is what the trigger-card preview uses.
     """
     pol = policy or SelectionPolicy()
     want = direction.option_type
-    anchor = strike_anchor or otm_strike_anchor(spot=spot, target1=target1, direction=direction)
+    anchor = otm_strike_anchor(spot=spot, target1=target1, direction=direction)
     candidates = [i for i in chain if i.option_type is want and i.strike > 0]
     if not candidates:
         return Selection(None, reason=f"no {want.value} strikes in the chain", anchor=anchor)
@@ -178,16 +235,21 @@ def select_option(
     else:
         otm = [i for i in candidates if i.strike < spot]
     pool = otm or candidates  # a chain with no OTM strike is odd but not a reason to skip the trade
-    if liquidity is not None:
-        # The strikes the move would travel through, most-traded first — then everything else,
-        # nearest the anchor first. The span is a preference, not a cage: it is often one or two
-        # strikes wide, and "the best strike is one-sided" must fall through to the next suitable
-        # OTM rather than abandoning the trigger (found live 2026-09-24: INDUSTOWER and RADICO
-        # were lost to a single one-sided quote).
-        lo, hi = (spot, anchor) if want is OptionType.CE else (anchor, spot)
-        span = [i for i in pool if lo <= i.strike <= hi]
-        rest = sorted((i for i in pool if i not in span), key=lambda i: abs(i.strike - anchor))
-        pool = rank_by_liquidity(span, liquidity, anchor) + rest
+    note = ""
+    if liquidity is not None and atr > 0:
+        # The two candidates first, best first; then everything else, most-traded first. The
+        # candidates are a preference, not a cage — "the best strike is one-sided" must fall
+        # through to the next suitable OTM rather than abandoning the trigger (found live
+        # 2026-09-24: INDUSTOWER and RADICO were lost to a single one-sided quote).
+        picks, note = strike_candidates(
+            otm=pool, spot=spot, direction=direction, atr=atr, target1=target1,
+            liquidity=liquidity, delta_floor=pol.min_delta, oi_margin=pol.oi_margin,
+        )
+        chosen = {i.scrip_code for i in picks}
+        rest = rank_by_liquidity([i for i in pool if i.scrip_code not in chosen], liquidity, anchor)
+        pool = picks + rest
+        if picks:
+            anchor = picks[0].strike
     else:
         pool = sorted(pool, key=lambda i: abs(i.strike - anchor))
 
@@ -214,7 +276,8 @@ def select_option(
         if spread > pol.max_spread_pct:
             skipped.append(f"{inst.strike:g}:spread-{spread:.1f}%")
             continue
-        return Selection(inst, premium=premium, anchor=anchor, spread_pct=spread, reason="ok")
+        return Selection(inst, premium=premium, anchor=anchor, spread_pct=spread,
+                         reason=f"ok ({note})" if note else "ok")
     return Selection(
         None,
         reason="no tradeable strike: " + ", ".join(skipped[:6]),

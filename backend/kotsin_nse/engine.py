@@ -75,10 +75,9 @@ from .instrument.select import (
     choose_expiry,
     estimate_delta,
     map_levels_to_option,
-    rank_by_liquidity,
     select_future,
     select_option,
-    strike_anchor_from_pivots,
+    strike_candidates,
 )
 from .instrument.universe import ScripGroup, UniverseBuilder, UniversePolicy
 from .ledger.db import Ledger
@@ -1950,16 +1949,17 @@ class Engine:
                 chain=[], quotes={}, spot=sig.entry, target1=None, direction=sig.direction, now=now
             )
         chain = cat.chain(sig.symbol, expiry, sig.direction.option_type)
-        # The strike is placed against the nearest raw classic pivot ahead, NOT the confluence
-        # target the trade exits on — those stay exactly as they are, for every book and twin.
-        anchor = self.strike_anchor(sig.symbol, sig.entry, sig.direction)
-        span = self._strike_span(chain, sig.entry, sig.direction, anchor)
-        # The span AND the strikes around spot the fallback walks: quoting only the span left the
-        # next-best strikes with no quote at all, so a one-sided first choice lost the trigger.
-        await self._ensure_quotes(chain, sig.entry, extra=span)
+        # Two candidates — one ATR out, and the confluence target — decided on liquidity and
+        # floored on delta. The exit ladder is untouched: targets and stops are the confluence
+        # engine's, for every book and twin. `_strike_watch` is what gets quoted and taped.
+        atr30 = atr(self.store.bars(sig.symbol, DECISION_TF, 60), 14) or 0.0
+        watch = self._strike_watch(chain, sig.entry, sig.direction, atr30, sig.targets)
+        # The candidates AND the strikes around spot the fallback walks: quoting only the
+        # candidates left the next-best strikes with no quote at all, so a one-sided first choice
+        # lost the trigger (INDUSTOWER, RADICO, 2026-09-24 12:45).
+        await self._ensure_quotes(chain, sig.entry, extra=watch)
         if tape:
-            # every strike the chooser is weighing goes on tape, chosen or not
-            self.tape.follow(sig.symbol, [i.scrip_code for i in (span or chain[:6])], now=now)
+            self.tape.follow(sig.symbol, [i.scrip_code for i in (watch or chain[:6])], now=now)
         sel = select_option(
             chain=chain,
             quotes=self.quotes,
@@ -1968,56 +1968,42 @@ class Engine:
             direction=sig.direction,
             now=now,
             policy=pol,
-            strike_anchor=anchor,
-            liquidity=self.liquidity_for(span) if span else None,
+            atr=atr30,
+            liquidity=self.liquidity_for(watch) if watch else None,
         )
-        if span and sel.instrument is not None:
-            best = rank_by_liquidity(span, self.liquidity_for(span), sel.anchor)[0]
-            if best.scrip_code != sel.instrument.scrip_code:
-                # asked for, not available: say which and what was taken instead
+        if watch and sel.instrument is not None:
+            picks, why = strike_candidates(
+                otm=[i for i in watch if (i.strike > sig.entry) is (sig.direction is Direction.BULLISH)],
+                spot=sig.entry, direction=sig.direction, atr=atr30,
+                target1=sig.targets[0] if sig.targets else None,
+                liquidity=self.liquidity_for(watch),
+                delta_floor=pol.min_delta, oi_margin=pol.oi_margin,
+            )
+            if picks and picks[0].scrip_code != sel.instrument.scrip_code:
                 log.info(
-                    "strike.fell_back",
-                    symbol=sig.symbol,
-                    wanted=best.strike,
-                    took=sel.instrument.strike,
-                    anchor=round(sel.anchor, 2),
-                    reason=sel.reason,
+                    "strike.fell_back", symbol=sig.symbol, wanted=picks[0].strike,
+                    took=sel.instrument.strike, why=why, reason=sel.reason,
                 )
         return sel
 
-    def _strike_span(
-        self, chain: list[Instrument], spot: float, direction: Direction, anchor: float | None
+    def _strike_watch(
+        self, chain: list[Instrument], spot: float, direction: Direction, atr30: float,
+        targets: tuple[float, ...],
     ) -> list[Instrument]:
-        """Every OTM strike the move would travel through, spot to the anchor. Empty when there is
-        no anchor, which puts the selector back on its old nearest-to-target behaviour."""
-        if not anchor or spot <= 0:
+        """The strikes worth quoting and taping: the two candidates and everything between them,
+        so the fallback has somewhere to walk. Empty when there is nothing OTM or no ATR."""
+        if spot <= 0 or atr30 <= 0:
             return []
         bullish = direction is Direction.BULLISH
         otm = [i for i in chain if (i.strike > spot if bullish else i.strike < spot) and i.strike > 0]
-        lo, hi = (spot, anchor) if bullish else (anchor, spot)
-        span = [i for i in otm if lo <= i.strike <= hi]
-        if not span and otm:
-            span = sorted(otm, key=lambda i: abs(i.strike - anchor))[:1]
-        return sorted(span, key=lambda i: abs(i.strike - spot))
-
-    def strike_anchor(self, symbol: str, spot: float, direction: Direction) -> float | None:
-        """The raw classic pivot the STRIKE is placed against — not the target the trade exits on.
-
-        The exit ladder is untouched: ``Signal.targets`` and ``Signal.stop`` still come from the
-        confluence engine, for every book and twin. This answers a different question — which
-        strike to buy — and answers it on the nearest level price would actually have to reach,
-        skipping any sitting on top of spot (``strike_anchor_min_atr``).
-        """
-        points = self._pivot_points(symbol)
-        if not points:
-            return None
-        atr30 = atr(self.store.bars(symbol, DECISION_TF, 60), 14) or 0.0
-        return strike_anchor_from_pivots(
-            prices=[p.price for p in points],
-            spot=spot,
-            direction=direction,
-            min_distance=atr30 * self.s.strike_anchor_min_atr,
-        )
+        if not otm:
+            return []
+        levels = [spot + atr30 if bullish else spot - atr30]
+        if targets:
+            levels.append(targets[0])
+        edges = [min(otm, key=lambda i: abs(i.strike - lv)).strike for lv in levels]
+        lo, hi = min(spot, *edges), max(spot, *edges)
+        return sorted((i for i in otm if lo <= i.strike <= hi), key=lambda i: abs(i.strike - spot))
 
     def liquidity_for(self, chain: list[Instrument]) -> dict[str, tuple[float, float]]:
         """``(volume, open interest)`` per scrip code, for ranking the strikes in the span."""

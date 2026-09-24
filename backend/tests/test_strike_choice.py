@@ -19,9 +19,11 @@ from kotsin_nse.config import Segment, Settings
 from kotsin_nse.domain import Direction, Instrument, InstrumentKind, OptionType
 from kotsin_nse.instrument.select import (
     Quote,
+    SelectionPolicy,
+    beats_on_liquidity,
     rank_by_liquidity,
     select_option,
-    strike_anchor_from_pivots,
+    strike_candidates,
 )
 
 
@@ -36,39 +38,63 @@ def _opt(strike: float, ot: OptionType = OptionType.CE) -> Instrument:
 # -- the anchor ----------------------------------------------------------------------------------
 
 
-def test_the_anchor_is_the_nearest_raw_pivot_ahead_and_skips_one_sitting_on_spot():
-    pivots = [95.0, 100.2, 104.0, 110.0, 120.0]
-    # bullish: 100.2 is 0.2 above spot and no target at all -> the next one ahead
-    assert strike_anchor_from_pivots(prices=pivots, spot=100.0, direction=Direction.BULLISH,
-                                     min_distance=1.0) == 104.0
-    # with no floor, the nearest ahead wins
-    assert strike_anchor_from_pivots(prices=pivots, spot=100.0, direction=Direction.BULLISH,
-                                     min_distance=0.0) == 100.2
-    # "ahead" is strict: a level below spot is never a bullish anchor, however close
-    assert strike_anchor_from_pivots(prices=[99.9], spot=100.0, direction=Direction.BULLISH,
-                                     min_distance=0.0) is None
-    # bearish looks the other way
-    assert strike_anchor_from_pivots(prices=pivots, spot=100.0, direction=Direction.BEARISH,
-                                     min_distance=1.0) == 95.0
-    # nothing ahead at all
-    assert strike_anchor_from_pivots(prices=[90.0], spot=100.0, direction=Direction.BULLISH,
-                                     min_distance=1.0) is None
-    # every level inside the floor: the furthest of them is still the best available
-    assert strike_anchor_from_pivots(prices=[100.1, 100.4], spot=100.0,
-                                     direction=Direction.BULLISH, min_distance=5.0) == 100.4
+def _cands(otm, spot, direction, atr, target, liq, floor=0.20, margin=1.5):
+    return strike_candidates(otm=otm, spot=spot, direction=direction, atr=atr, target1=target,
+                             liquidity=liq, delta_floor=floor, oi_margin=margin)
 
 
-def test_the_anchor_is_not_the_confluence_target_and_does_not_touch_it():
-    """KAYNES: spot 3523.10, confluence T1 3800 (5.5 strikes out, nothing trading there), but the
-    nearest raw pivot ahead is far closer. The exit ladder still says 3800."""
-    pivots = [3480.0, 3555.0, 3610.0, 3800.0]
-    anchor = strike_anchor_from_pivots(prices=pivots, spot=3523.10,
-                                       direction=Direction.BULLISH, min_distance=12.0)
-    assert anchor == 3555.0, "the strike aims at the next level, not the exit target"
-    assert anchor != 3800.0
+def test_the_two_candidates_are_one_atr_out_and_the_target():
+    otm = [_opt(s) for s in (3550, 3600, 3650, 3700, 3800)]
+    liq = {i.scrip_code: (100.0, 100.0) for i in otm}
+    picks, _ = _cands(otm, 3523.1, Direction.BULLISH, 27.4, 3650.0, liq)
+    assert [i.strike for i in picks] == [3550, 3650], "one ATR out first, then the target"
+    # the same strike serving both is one candidate, not two
+    picks, why = _cands(otm, 3523.1, Direction.BULLISH, 27.4, 3555.0, liq)
+    assert [i.strike for i in picks] == [3550] and "both" in why
 
 
-# -- the ranking ---------------------------------------------------------------------------------
+def test_liquidity_decides_between_them_but_only_by_a_clear_margin():
+    """HAVELLS 2026-09-24: the target strike had 10 % more open interest and a quarter less delta.
+    A margin is required before the further, less responsive strike is taken."""
+    otm = [_opt(s) for s in (3550, 3650)]
+    near, far = otm[0].scrip_code, otm[1].scrip_code
+    thin = {near: (100.0, 499_000.0), far: (100.0, 549_500.0)}          # +10 %: not enough
+    assert [i.strike for i in _cands(otm, 3523.1, Direction.BULLISH, 27.4, 3650.0, thin)[0]][0] == 3550
+    rich = {near: (100.0, 265_000.0), far: (300.0, 635_000.0)}          # 2.4x: enough
+    picks, why = _cands(otm, 3523.1, Direction.BULLISH, 27.4, 3650.0, rich)
+    assert picks[0].strike == 3650 and "1.5x" in why
+
+
+def test_the_margin_must_hold_on_every_measure_we_have():
+    a, b = (100.0, 100.0), (1_000.0, 1_000.0)
+    assert beats_on_liquidity(b, a, 1.5)
+    assert not beats_on_liquidity((1_000.0, 100.0), a, 1.5), "big on volume, flat on OI: no"
+    assert not beats_on_liquidity((100.0, 1_000.0), a, 1.5), "big on OI, flat on volume: no"
+    assert not beats_on_liquidity((0.0, 0.0), (0.0, 0.0), 1.5), "no data anywhere: the nearer wins"
+    assert beats_on_liquidity((5.0, 5.0), (0.0, 0.0), 1.5), "data against none is a clear win"
+
+
+def test_a_strike_that_cannot_respond_is_refused_however_much_is_parked_on_it():
+    """ETERNAL 2026-09-24 held MORE open interest at its target strike than one ATR out — 8.64 m
+    against 7.65 m — on 0.15 delta. Open interest says the contract is alive, not that it pays."""
+    otm = [_opt(s, OptionType.PE) for s in (340, 320)]
+    near, far = otm[0].scrip_code, otm[1].scrip_code
+    liq = {near: (100.0, 7_650_875.0), far: (100_000.0, 8_640_275.0)}
+    picks, why = _cands(otm, 339.7, Direction.BEARISH, 1.44, 320.0, liq)
+    assert [i.strike for i in picks] == [340], "the responsive strike, not the crowded one"
+    assert "delta<0.20" in why and "320" in why
+    # Two independent guards catch it. The margin alone would have: 8.64 m against 7.65 m is a
+    # 1.13x edge, under the 1.5x required. Drop both and the far strike is genuinely taken — which
+    # is what the rule looked like before either guard existed.
+    picks, _ = _cands(otm, 339.7, Direction.BEARISH, 1.44, 320.0, liq, floor=0.20, margin=1.0)
+    assert picks[0].strike == 340, "the delta floor alone still refuses it"
+    picks, _ = _cands(otm, 339.7, Direction.BEARISH, 1.44, 320.0, liq, floor=0.0, margin=1.0)
+    assert picks[0].strike == 320, "with neither guard, open interest carries it"
+
+
+def test_the_floor_and_the_margin_are_the_validated_numbers():
+    pol = SelectionPolicy()
+    assert pol.min_delta == 0.20 and pol.oi_margin == 1.5
 
 
 def test_the_strike_is_the_one_that_actually_trades_not_merely_the_nearest():
@@ -88,21 +114,8 @@ def test_the_strike_is_the_one_that_actually_trades_not_merely_the_nearest():
     assert rank_by_liquidity([a, b, c], flat, anchor=3650.0)[0] is c
 
 
-def test_only_strikes_between_spot_and_the_anchor_compete():
-    chain = [_opt(s) for s in (3550, 3600, 3650, 3700, 3900)]
-    q = {i.scrip_code: Quote(ltp=20.0, bid=19.9, ask=20.1, ts=time.time()) for i in chain}
-    # 3900 is past the anchor and must not be chosen however liquid it looks
-    liq = {i.scrip_code: (100.0, 100.0) for i in chain}
-    liq[chain[-1].scrip_code] = (10_000_000.0, 10_000_000.0)
-    sel = select_option(chain=chain, quotes=q, spot=3523.1, target1=3800.0,
-                        direction=Direction.BULLISH, now=time.time(),
-                        strike_anchor=3650.0, liquidity=liq)
-    assert sel.ok and sel.instrument.strike in (3550, 3600, 3650)
-    assert sel.anchor == 3650.0
-
-
-def test_without_an_anchor_the_old_behaviour_is_exactly_preserved():
-    """No pivots, no liquidity: the selector must still choose nearest-to-target as it always did."""
+def test_without_atr_or_liquidity_the_old_behaviour_is_exactly_preserved():
+    """What the trigger-card preview uses: nearest-to-target, exactly as before."""
     chain = [_opt(s) for s in (3550, 3600, 3650, 3700)]
     q = {i.scrip_code: Quote(ltp=20.0, bid=19.9, ask=20.1, ts=time.time()) for i in chain}
     sel = select_option(chain=chain, quotes=q, spot=3523.1, target1=3700.0,
@@ -122,7 +135,7 @@ def test_an_unavailable_first_choice_falls_through_to_the_next_suitable_otm():
         second.scrip_code: Quote(ltp=30.0, bid=29.9, ask=30.1, ts=now),
     }
     sel = select_option(chain=chain, quotes=quotes, spot=3523.1, target1=3800.0,
-                        direction=Direction.BULLISH, now=now, strike_anchor=3650.0, liquidity=liq)
+                        direction=Direction.BULLISH, now=now, atr=27.4, liquidity=liq)
     assert sel.ok and sel.instrument is second, "the most liquid was untradeable; the next stands in"
     assert rank_by_liquidity(chain, liq, 3650.0)[0] is best, "and it WAS the first choice"
 
@@ -144,12 +157,12 @@ async def test_the_exit_ladder_is_untouched_by_any_of_this(settings, equity):
 
     from kotsin_nse.engine import Engine
 
-    src = inspect.getsource(Engine._select_instrument) + inspect.getsource(Engine._strike_span)
+    src = inspect.getsource(Engine._select_instrument) + inspect.getsource(Engine._strike_watch)
     for forbidden in ("sig.targets =", "sig.stop =", "option_targets =", "option_sl ="):
         assert forbidden not in src, f"strike selection must not write {forbidden}"
     e = Engine(settings)
-    # and the anchor is a read: no pivots loaded -> None, never an exception, never a mutation
-    assert e.strike_anchor("NOSUCH", 100.0, Direction.BULLISH) is None
+    # and the watch set is a read: no bars, no ATR -> empty, never an exception, never a mutation
+    assert e._strike_watch([], 100.0, Direction.BULLISH, 0.0, ()) == []
 
 
 def test_a_one_sided_best_strike_falls_through_to_the_rest_of_the_chain():
@@ -165,13 +178,13 @@ def test_a_one_sided_best_strike_falls_through_to_the_rest_of_the_chain():
     }
     liq = {inside.scrip_code: (9_999.0, 9_999.0), outside.scrip_code: (1.0, 1.0)}
     sel = select_option(chain=chain, quotes=quotes, spot=3523.1, target1=None,
-                        direction=Direction.BULLISH, now=now, strike_anchor=3600.0, liquidity=liq)
+                        direction=Direction.BULLISH, now=now, atr=27.4, liquidity=liq)
     assert sel.ok and sel.instrument is outside, "the trigger survives a one-sided first choice"
 
     # and with nothing tradeable anywhere, the refusal names what it tried, span first
     dead = {i.scrip_code: Quote(ltp=20.0, bid=0.0, ask=20.1, ts=now) for i in chain}
     bad = select_option(chain=chain, quotes=dead, spot=3523.1, target1=None,
-                        direction=Direction.BULLISH, now=now, strike_anchor=3600.0, liquidity=liq)
+                        direction=Direction.BULLISH, now=now, atr=27.4, liquidity=liq)
     assert not bad.ok and "3550" in bad.reason and "3700" in bad.reason
 
 
