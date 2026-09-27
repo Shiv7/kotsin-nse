@@ -30,6 +30,8 @@ from .auth import APIM_KEY, Authenticator
 log = structlog.get_logger(__name__)
 
 HISTORICAL_BASE = "https://openapi.5paisa.com/V2/historical/"
+#: the broker keeps the first 38 characters of a RemoteOrderID; our ids are unique within them
+REMOTE_ID_MAX = 38
 VALID_INTERVALS = frozenset({"1m", "3m", "5m", "10m", "15m", "30m", "60m", "1d"})
 
 #: Messages the broker returns with ``head.status=1`` that mean "nothing to return", not "your
@@ -261,7 +263,7 @@ class FivePaisaREST:
             "DisQty": 0,
             "IsIntraday": intraday,
             "AHPlaced": "N",
-            "RemoteOrderID": remote_order_id[:38],
+            "RemoteOrderID": remote_order_id[:REMOTE_ID_MAX],
             "AppSource": self.s.fp_app_source,
             "iOrderValidity": 0,
         }
@@ -271,7 +273,9 @@ class FivePaisaREST:
             body["StopLossPrice"] = instrument.round_price(stop_trigger)
             body["IsStopLossOrder"] = True
         resp = await self._post("V1/PlaceOrderRequest", body)
-        return str(resp.get("RemoteOrderID") or remote_order_id)
+        # the id AS SENT when the broker does not echo one: the untrimmed id was polled for and
+        # never matched, so a filled order read as rejected (review, 2026-09-26)
+        return str(resp.get("RemoteOrderID") or remote_order_id[:REMOTE_ID_MAX])
 
     async def modify_order(self, exch_order_id: str, *, price: float, qty: int) -> None:
         await self._post(
@@ -296,7 +300,7 @@ class FivePaisaREST:
             "V2/OrderStatus",
             {
                 "ClientCode": self.s.fp_client_code,
-                "OrdStatusReqList": [{"Exch": exch, "RemoteOrderID": remote_order_id}],
+                "OrdStatusReqList": [{"Exch": exch, "RemoteOrderID": remote_order_id[:REMOTE_ID_MAX]}],
             },
         )
         rows = resp.get("OrdStatusResLst") or []

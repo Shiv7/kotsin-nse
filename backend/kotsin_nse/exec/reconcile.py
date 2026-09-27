@@ -113,11 +113,17 @@ class Reconciler:
             return report
 
         venue = {r["scrip_code"]: r for r in venue_rows if r["net_qty"] != 0}
-        local = (
-            {p.instrument.scrip_code: p for p in positions if p.status == "OPEN" and p.qty_remaining}
-            if at_venue
-            else {}
-        )
+        # One broker account, several books: two books long the same strike are ONE net position at
+        # the broker, so the engine's side is the sum per contract (keyed by scrip, the last book's
+        # position used to win, and a second book on the same strike read as a QTY_MISMATCH).
+        local: dict[str, Any] = {}
+        held: dict[str, int] = {}
+        if at_venue:
+            for p in positions:
+                if p.status == "OPEN" and p.qty_remaining:
+                    code = p.instrument.scrip_code
+                    local.setdefault(code, p)
+                    held[code] = held.get(code, 0) + int(p.qty_remaining)
         report.checked = len(venue) + len(local)
 
         for code, row in venue.items():
@@ -134,13 +140,13 @@ class Reconciler:
                         "broker holds a position the engine does not know about",
                     )
                 )
-            elif p.qty_remaining != vq:
+            elif held[code] != vq:
                 report.mismatches.append(
                     Mismatch(
                         MismatchKind.QTY_MISMATCH,
                         code,
                         p.instrument.symbol,
-                        p.qty_remaining,
+                        held[code],
                         vq,
                     )
                 )
@@ -151,7 +157,7 @@ class Reconciler:
                         MismatchKind.PHANTOM,
                         code,
                         p.instrument.symbol,
-                        p.qty_remaining,
+                        held[code],
                         0,
                         "engine holds a position the broker does not show",
                     )

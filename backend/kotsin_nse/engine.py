@@ -18,15 +18,23 @@ engine that restarts after expiry comes up in PAPER and says so.
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import re
+import statistics
 import time
+from bisect import bisect_right
 from collections.abc import MutableMapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
+from itertools import pairwise
+from pathlib import Path
 from typing import Any, ClassVar
 
 import httpx
 import structlog
 
+from .alerts.engine import LOOKBACK as ALERT_LOOKBACK
 from .alerts.engine import AlertEngine
 from .bars.aggregator import Aggregator
 from .bars.daily import MIN_DAILY_BARS, REPAIR_BATCH, DailyCache, is_official, previous_session
@@ -40,6 +48,7 @@ from .bars.pivots import (
     Zone,
     classic_pivots,
     cluster_zones,
+    compute_confluence,
     pivot_points,
 )
 from .bars.store import BarStore
@@ -63,12 +72,24 @@ from .domain import (
     Trade,
     new_id,
 )
-from .exec.gateway import Decision, Gateway, LiveCaps, LiveContext, Mode
+from .exec.gateway import LIVE_MODES, Decision, Gateway, LiveCaps, LiveContext, Mode
 from .exec.live import LiveExecutor
 from .exec.paper import BookSnapshot, PaperMatcher, book_from_quote
 from .exec.reconcile import Reconciler
+from .exec.resting import (
+    LimitPolicy,
+    Resting,
+    entry_cap,
+    entry_limit,
+    exit_limit,
+    fills,
+    option_run_pct,
+    race_call,
+    touch_fills,
+)
 from .instrument.catalogue import CatalogueLoader
 from .instrument.legs import OPTION_CLUSTER_TOL_PCT, LegPivotLoader, otm_legs
+from .instrument.pricing import value_at
 from .instrument.select import (
     Quote,
     SelectionPolicy,
@@ -80,7 +101,7 @@ from .instrument.select import (
     strike_candidates,
 )
 from .instrument.universe import ScripGroup, UniverseBuilder, UniversePolicy
-from .ledger.db import Ledger
+from .ledger.db import Ledger, events
 from .market.iv import (
     MIN_HISTORY,
     IvHistory,
@@ -103,6 +124,8 @@ from .market.session import (
     ist_naive_to_ts,
     ist_today,
     past_force_flat,
+    session_open_ts,
+    to_ist,
 )
 from .market.session import (
     session_phase as session_phase_of,
@@ -114,20 +137,40 @@ from .market.volatility import (
     regime_for_equity,
 )
 from .ops.archive import DailyArchive
+from .ops.fulltape import FullTape
 from .ops.health import Check, HealthMonitor
 from .ops.tape import ROLE_EQUITY, ROLE_FUTURE, ROLE_INDEX, ROLE_OPTION, Tape
 from .ops.telegram import Telegram
 from .risk.costs import CostModel
 from .risk.exits import ExitEngine, MarketView, apply_exit
 from .risk.exposure import ExposureBook
-from .risk.limits import CT_X_LIMITS, CT_Y_LIMITS, RT_N_LIMITS, RT_X_LIMITS, RT_Y_LIMITS, RiskLimits
+from .risk.limits import (
+    CT_X_LIMITS,
+    CT_Y_LIMITS,
+    FIXED_LOTS_UNDER_INR,
+    RT_MCX_LIMITS,
+    RT_N_LIMITS,
+    RT_X_LIMITS,
+    RT_Y_LIMITS,
+    RT_Y_W1_LIMITS,
+    RiskLimits,
+)
 from .risk.sizing import size_position
 from .risk.wallet import Wallet
 from .strategy.base import Outcome, Signal
-from .strategy.counter import NO_WALL, CounterDecision, Leg, counter_route, flipped_signal
+from .strategy.counter import (
+    KEY_LEVELS,
+    NO_WALL,
+    CounterDecision,
+    Leg,
+    counter_route,
+    fade_refusal,
+    flipped_signal,
+)
 from .strategy.fudkii import Fudkii, FudkiiConfig
 from .strategy.fukaa import Fukaa, FukaaConfig, select
-from .strategy.keys import ALL_KEYS, INITIAL_INR, StrategyKey
+from .strategy.keys import ALL_KEYS, INITIAL_INR, SHADOW_OF, StrategyKey
+from .strategy.regime_gates import rt_gate_reasons, trigger_verdicts, volume_labels
 from .venue.fivepaisa.auth import Authenticator
 from .venue.fivepaisa.rest import FivePaisaREST
 from .venue.fivepaisa.ws import FivePaisaFeed
@@ -142,9 +185,111 @@ SELECTION_POLICY = SelectionPolicy()
 #: option stop floored at MIN_STOP_TICKS below entry instead of the one-tick δ projection.
 NO_PREMIUM_FLOOR = frozenset({
     StrategyKey.FUDKII, StrategyKey.FUDKII_RT_X, StrategyKey.FUDKII_RT_N, StrategyKey.FUDKII_RT_Y,
-    StrategyKey.FUDKII_CT_X, StrategyKey.FUDKII_CT_Y,
+    StrategyKey.FUDKII_CT_X, StrategyKey.FUDKII_CT_Y, StrategyKey.FUDKII_RT_Y_W1,
 })
 MIN_STOP_TICKS = 8
+#: How long an entry may wait for the chosen strike's own previous-session ladder. Bounded
+#: because it sits in front of the order: a slow broker must cost a fraction of a second,
+#: not an entry. On a miss the book opens on the percentage arm instead.
+LEG_ENSURE_TIMEOUT_S = 2.0
+#: A held contract whose quote is older than this, or whose book is past the matcher's age limit,
+#: is re-quoted from the broker in the background — the depth socket only speaks when something
+#: changes, and a quiet put's perfectly good book ages into "stale" (TATASTEEL, 2026-09-25).
+HELD_QUOTE_MAX_AGE_S = 20.0
+HELD_QUOTE_POLL_S = 5.0
+#: a feed with no frame for this long in an open session is dead, whatever its socket says
+FEED_SILENCE_S = 15.0
+
+BOOK_LABELS = {
+    "FUDKII": "FUDKII", "FUDKII_RT_X": "RT-X", "FUDKII_RT_N": "RT-N", "FUDKII_RT_Y": "RT-Y",
+    "FUDKII_CT_X": "CT-X", "FUDKII_CT_Y": "CT-Y", "FUDKII_RT_MCX": "RT-MCX",
+    "FUDKII_RT_Y_W1": "RT-Y wide (shadow)",
+}
+
+
+def _humanise_reason(reason: str) -> str:
+    """A selector or sizing reason in words: ``1000:one-sided, 1020:spread-7.2%`` reads as
+    ``1000 one-sided, 1020 spread 7.2%``."""
+    out = re.sub(r"(\d+(?:\.\d+)?):(one-sided|no-quote|stale-\d+s|spread-|premium-)", r"\1 \2", reason)
+    return out.replace("spread-", "spread ").replace("premium-", "premium ").replace("stale-", "stale ").replace("no-quote", "no quote")
+
+
+#: the trigger label "pivot just ahead" (and gate B's default reach), and how far ahead the context
+#: records key levels so a gate can read its own threshold
+PIVOT_AHEAD_ATR = 0.5
+PIVOT_SCAN_ATR = 2.0
+
+
+#: a signal written when its limit entry was placed, settled when it fills or is missed
+_RESTING_DECISIONS = frozenset({"RESTING", "PARENT_HALTED_TWINS_RESTING", "PARENT_SKIPPED_TWINS_RESTING"})
+#: The book part of an order id (operator, 2026-09-26: "cant all strategy names have its code in the
+#: order ID so that they all remain unique"). ``ORDER_CODES[book]-YYMMDD-HHMMSS-NNN`` stays inside the
+#: 38 characters of an id the broker keeps; the descriptive rest may be cut there without a collision.
+ORDER_CODES = {
+    "FUDKII": "FII-P", "FUDKII_RT_X": "FII-RTX", "FUDKII_RT_N": "FII-RTN", "FUDKII_RT_Y": "FII-RTY",
+    "FUDKII_CT_X": "FII-CTX", "FUDKII_CT_Y": "FII-CTY", "FUDKII_RT_MCX": "FII-RTM", "FUDKII_RT_Y_W1": "FII-RYW",
+    "FUKAA": "FKA",
+}
+_ORDER_REF_RE = re.compile(r"^([A-Z]{3}(?:-[A-Z]{1,3})?)-(\d{6})-\d{6}-(\d{3,})(?:-|$)")
+#: what an exit order is, in its id
+EXIT_CODES = {
+    ExitReason.SL_EQ: "SLE", ExitReason.SL_OP: "SLO", ExitReason.TARGET: "TG", ExitReason.TRAIL: "TR",
+    ExitReason.TIME_STOP: "TS", ExitReason.EOD: "EOD", ExitReason.HALT: "HLT", ExitReason.DAILY_LOSS: "DL",
+    ExitReason.MANUAL: "MAN", ExitReason.END: "END",
+}
+
+
+def _contract_tag(inst: Instrument, qty: int) -> str:
+    """``HINDUNILVR-1960CE-L4``: the underlying, the contract and the lots — letters and digits only."""
+    sym = re.sub(r"[^A-Z0-9]", "", str(inst.underlying or inst.symbol).upper())
+    if inst.is_option:
+        k = f"{inst.strike:g}".replace(".", "P") + (inst.option_type.value if inst.option_type else "")
+    else:
+        k = "FUT" if inst.kind is InstrumentKind.FUTURE else "EQ"
+    return f"{sym}-{k}-L{int(qty) // max(1, int(inst.lot_size or 1))}"
+
+
+#: 5paisa V4/Margin fields that carry the money free to trade, in the order they are trusted
+LIVE_MARGIN_FIELDS = ("NetAvailableMargin", "AvailableMargin", "ALB")
+#: whose fills a book mirrors — its card waits on that book's resting entry. Since 2026-09-26 every
+#: book places its own entry; only the shadow opens on another book's fill
+_MIRRORS = {"FUDKII_RT_Y_W1": "FUDKII_RT_Y"}
+#: the books that take a FUDKII trigger in the trend's way, each judging it for itself
+IN_TREND_BOOKS = (StrategyKey.FUDKII, StrategyKey.FUDKII_RT_X, StrategyKey.FUDKII_RT_N, StrategyKey.FUDKII_RT_Y)
+#: the books that take the counter-trend fade of it (CT-X's plan), each judging it for itself
+FADE_BOOKS = (StrategyKey.FUDKII_CT_X, StrategyKey.FUDKII_CT_Y)
+
+
+@dataclass(slots=True)
+class _EntryPlan:
+    """Everything a filled entry needs to become a position — carried by a resting limit order
+    until the market comes to it (exec/resting.py)."""
+
+    sig: Signal
+    underlying: Instrument
+    inst: Instrument
+    option_sl: float
+    option_targets: tuple[float, ...]
+    delta: float
+    outlay: float
+    wallet: Wallet | None
+    book: Any
+    book_limits: RiskLimits
+    decided_at: float
+    ref: float
+    #: the book placing this entry (its position's strategy)
+    key: str = ""
+    #: the signal is this book's own and its ledger row records the decision; False = the book
+    #: takes another book's signal (an RT book the FUDKII trigger, CT-Y CT-X's fade) and records
+    #: its decision on its card
+    owns_row: bool = True
+    #: ``FII-RTX-260926-192510-007`` — the entry's id base; the position's exits and targets carry it
+    order_ref: str = ""
+    #: where the hold went: into the position's cost (booked) or back to the purse (released)
+    booked: bool = False
+    released: bool = False
+    #: the entry's outcome so far ``(decision, reason)`` — what an operator take is told
+    outcome: tuple[str, str] = ("", "")
 
 
 @dataclass
@@ -172,6 +317,45 @@ class StrategyContext:
         return self._state
 
 
+class AsOfContext:
+    """A strategy's Context with every series cut at one past bar — how the boot replay asks what
+    a strategy would have said at a boundary the process was not running for. Reads only the store
+    and the day's zones, which is all FUDKII reads, so nothing after ``until`` can leak in."""
+
+    def __init__(self, engine: Engine) -> None:
+        self.engine = engine
+        self.until = 0
+        self._state: dict[str, Any] = {}
+        self._series: dict[tuple[str, str], tuple[list[UnifiedBar], list[int]]] = {}
+
+    def upto(self, symbol: str, tf: str, n: int | None = None) -> list[UnifiedBar]:
+        key = (symbol, tf)
+        hit = self._series.get(key)
+        if hit is None:
+            rows = self.engine.store.bars(symbol, tf)
+            hit = self._series[key] = (rows, [b.ts for b in rows])
+        rows, stamps = hit
+        cut = bisect_right(stamps, self.until)
+        return rows[max(0, cut - n):cut] if n else rows[:cut]
+
+    def bars(self, symbol: str, tf: str, n: int) -> Sequence[UnifiedBar]:
+        return self.upto(symbol, tf, n)
+
+    def zones(self, symbol: str) -> list[Zone]:
+        return self.engine.zones_for(symbol)
+
+    def exchange(self, symbol: str) -> str:
+        inst = self.engine.underlyings.get(symbol)
+        return inst.exch if inst else "N"
+
+    def session_phase(self, symbol: str, ts: int) -> str:
+        return self.engine.session_phase(symbol, ts)
+
+    @property
+    def state(self) -> MutableMapping[str, Any]:
+        return self._state
+
+
 class Engine:
     def __init__(self, settings: Settings) -> None:
         self.s = settings
@@ -179,7 +363,13 @@ class Engine:
         self.store = BarStore()
         self.ledger = Ledger(settings.db_url)
         self.costs = CostModel(settings)
-        self.limits = RiskLimits()
+        #: the parent's limits: 4 lots a trade, the cap every book carries for itself (operator,
+        #: 2026-09-26: "how can we ever buy 30 lots of the same trade?" — uncapped, it bought up to 83
+        #: in the Sep replay and 80 live). Its TARGETS stay its own — the equity levels projected
+        #: through delta: "the parents' targets come from that parent's own logic and strategy and
+        #: not borrowed or adopted from its variants or twins"
+        # 4 lots under ₹75,000, stepping further OTM when they cost more (operator, 2026-09-27)
+        self.limits = RiskLimits(max_lots=4, fixed_lots_under_inr=FIXED_LOTS_UNDER_INR)
         self.exits = ExitEngine(self.limits)
         # FUDKII_RT_X trades FUDKII's entries under a different exit policy, so it gets its own
         # engine rather than a flag inside the shared one — the two must never be able to drift
@@ -190,11 +380,14 @@ class Engine:
         # ran on 2026-09-23, Y the third vertical. MCX rides X's policy in its own purse.
         self._exits_by_strategy = {
             StrategyKey.FUDKII_RT_X.value: self.exits_rt,
-            StrategyKey.FUDKII_RT_MCX.value: self.exits_rt,
+            # its own limits: the NSE books' fixed 4 lots under ₹75,000 is not for MCX
+            StrategyKey.FUDKII_RT_MCX.value: ExitEngine(RT_MCX_LIMITS),
             StrategyKey.FUDKII_RT_N.value: ExitEngine(RT_N_LIMITS),
             StrategyKey.FUDKII_RT_Y.value: ExitEngine(RT_Y_LIMITS),
             StrategyKey.FUDKII_CT_X.value: ExitEngine(CT_X_LIMITS),
             StrategyKey.FUDKII_CT_Y.value: ExitEngine(CT_Y_LIMITS),
+            # the wide-stop shadow: RT-Y's policy with the equity stop 1 % further out
+            StrategyKey.FUDKII_RT_Y_W1.value: ExitEngine(RT_Y_W1_LIMITS),
         }
         #: Each twin is checked against its own pool — 30 slots, its own lot cap — rather than
         #: skipping the check entirely, which is what it did when first written.
@@ -220,6 +413,12 @@ class Engine:
         )
         #: the tick tape: every held, considered and carded contract and its legs, once a second
         self.tape = Tape(self.archive, enabled=settings.tape_enabled, legs_for=self._tape_legs)
+        #: the full tape: every NSE code the feed quotes, once a second on change (ops/fulltape.py)
+        self._fulltape_skip_cache: dict[str, bool] = {}
+        self.fulltape = FullTape(
+            settings.data_dir / "archive" / "tape_full", enabled=settings.tape_full_enabled,
+            keep_days=settings.tape_full_keep_days, skip=self._fulltape_skip,
+        )
         #: scrip codes currently on the depth channel because something needs their book. The
         #: archive sample is subscribed at boot and never reconciled away.
         self._depth_following: set[str] = set()
@@ -244,6 +443,7 @@ class Engine:
             on_tick=self._on_tick,
             on_depth=self._on_depth,
             on_oi=self._on_oi,
+            on_connect=self._on_feed_connect,
         )
         self.aggregator = Aggregator(self.store, on_bar_close=self._on_bar_close)
         #: Advisory books — they read the same closed bars the decision path does and emit
@@ -266,6 +466,37 @@ class Engine:
         self._decision_tasks: set[asyncio.Task[Any]] = set()
         self._sweep_task: asyncio.Task[Any] | None = None
         self._intraday_rebuild_day: str = ""
+        #: PAPER limit orders (exec/resting.py) and the ones working right now, by client order id
+        self.limit_policy = LimitPolicy(
+            enabled=settings.paper_limit_orders,
+            entry_wait_s=settings.paper_limit_entry_wait_s,
+            entry_chase_pct=settings.paper_limit_entry_chase_pct,
+            entry_recheck_s=settings.paper_limit_entry_recheck_s,
+            entry_hold_s=settings.paper_limit_entry_hold_s,
+            entry_cap_pct=settings.paper_limit_entry_cap_pct,
+            entry_race_check_s=settings.paper_limit_entry_race_check_s,
+            entry_race_pct=settings.paper_limit_entry_race_pct,
+            entry_cross_after_hold=settings.paper_limit_entry_cross_after_hold,
+            exit_reprice_s=settings.paper_limit_exit_reprice_s,
+            exit_cross_stop_s=settings.paper_limit_exit_cross_stop_s,
+            exit_cross_urgent_s=settings.paper_limit_exit_cross_urgent_s,
+            exit_cross_other_s=settings.paper_limit_exit_cross_other_s,
+            rest_targets=settings.paper_limit_rest_targets,
+        )
+        self._resting: dict[str, Resting] = {}
+        #: book → (drift, first seen) of a ``deployed`` that disagrees with the book's open positions
+        #: and resting entries; corrected on the second sighting (``_reconcile_deployed``)
+        self._deployed_drift: dict[str, tuple[float, float]] = {}
+        self._deployed_fix: dict[str, dict[str, float]] = {}
+        self._margin_cache: tuple[float, dict[str, Any]] = (0.0, {})
+        #: "signal|books" already handled this session — a re-run is never entered twice
+        self._handled_signals: set[str] = set()
+        #: (book, YYMMDD) → the book's last order number that day (``_order_ref``)
+        self._order_seq: dict[tuple[str, str], int] = {}
+        #: client_order_id → (wallet, hold) of an entry at the broker, neither resting nor a position yet
+        self._inflight_holds: dict[str, tuple[Wallet, float]] = {}
+        #: (book, symbol) of an entry being decided or placed — neither resting nor a position yet
+        self._entering: set[tuple[str, str]] = set()
         self.matcher = PaperMatcher(
             self.costs,
             max_book_age_ms=settings.paper_max_book_age_ms,
@@ -309,6 +540,39 @@ class Engine:
         self._fut_cache: dict[str, tuple[int, dict[str, Any] | None]] = {}
         #: every signal handled today, by id — what an operator take re-enters from
         self._signals_today: dict[str, Signal] = {}
+        #: market breadth measured at each trigger, by signal id — the RT-Y gate reads the number the
+        #: trigger was logged with, not a later one
+        self._breadth_at: dict[str, dict[str, Any]] = {}
+        #: triggers CT-Y faded on the 09:45 gap rule — their CT-X fade is not mirrored into CT-Y
+        self._gap_faded: set[str] = set()
+        #: positions with an exit order in flight: a second exit for the same position (the
+        #: operator's SKIP racing the exit loop) must not send a second order
+        self._exits_in_flight: set[str] = set()
+        # -- the FUDKII rescan: every signal of the day, whether or not the live path saw its bar --
+        #: (symbol, bar ts) the live decision path actually decided — the rescan never second-guesses these
+        self._decided: set[tuple[str, int]] = set()
+        #: decision-frame buckets whose close has been handed to a decision (see _on_bar_close)
+        self._closes_seen: set[tuple[str, int]] = set()
+        self._duplicate_closes = 0
+        self._silence_reconnects = 0
+        self._last_silence_reconnect = 0.0
+        #: (symbol, bar ts) the rescan has evaluated on a confirmed bar
+        self._fudkii_scanned: set[tuple[str, int]] = set()
+        #: exchange-confirmation attempts per unconfirmed bar, so a bucket REST never serves is not
+        #: asked for every five minutes all afternoon
+        self._confirm_attempts: dict[tuple[str, int], int] = {}
+        self._decided_saved = 0
+        #: per position: definitive exit rejections so far, and when the next attempt may go.
+        #: A rejected exit used to keep its client_order_id, so every retry was refused as a
+        #: duplicate and the position could never close (TATASTEEL RT-X/RT-N, 2026-09-25 14:03).
+        self._exit_attempts: dict[str, int] = {}
+        self._exit_retry_at: dict[str, float] = {}
+        self._exit_quote_ts: dict[str, float] = {}
+        self._fudkii_scan_lock = asyncio.Lock()
+        self._fudkii_scan_task: asyncio.Task[Any] | None = None
+        self.last_fudkii_scan: dict[str, Any] = {}
+        #: when this process started deciding live; a bar that closed before it was never seen
+        self._live_from_ts = float("inf")
         #: every symbol decides in its own task, so a 09:45 burst of sixteen signals would be
         #: thirty-two concurrent historical calls; the broker client has no limiter of its own
         self._fut_sem = asyncio.Semaphore(4)
@@ -318,6 +582,8 @@ class Engine:
         self._daily_confirmed: dict[str, date] = {}  # asked once for this expected session already
         self._daily_due = False  # a full refetch is owed: day roll or a refresh slot
         self._legs_due = False  # a full leg reload is owed: day roll
+        self._legs_reanchor_due = False  # re-band the OTM legs on the session's real spot
+        self._legs_reanchor_done: set[str] = set()
         self._daily_refresh_done: set[str] = set()  # "YYYY-MM-DD HH:MM" slots already run
         #: the alert-ring reset slots already run, same shape. Seeded here, at construction, and
         #: not in the universe path: a process that boots after the slot has nothing to clear, and
@@ -345,16 +611,38 @@ class Engine:
         self._stop = asyncio.Event()
         self.started_ts = time.time()
         self.boot_notes: list[str] = []
+        #: true until the market boot (catalogue, backfill, feed) has finished. The web server
+        #: opens before it, so the pages answer during the ~2.5 minutes the backfill takes.
+        self.booting = True
 
     # -- lifecycle ---------------------------------------------------------------------------------
 
     async def start(self) -> None:
+        await self.start_core()
+        await self.start_market()
+
+    async def start_core(self) -> None:
+        """The fast half: the ledger, the books, and the session's alerts as they were before the
+        restart. Everything the pages need to answer, in well under a second."""
         await self.ledger.init()
         await self._load_control()
         await self._load_wallets()
         await self._load_positions()
+        await self._load_order_seq()
+        await self._load_breakers()
+        # the wallets' own records made true before anything reads them: a new day rolled over
+        # (the process may have been down at midnight), both breakers re-read, deployed money
+        # matched to the positions actually open
+        await self._wallet_upkeep(time.time(), boot=True)
         for cid in await self.ledger.known_client_order_ids():
             self.gateway.remember(cid)
+        self.alerts.store_dir = self.s.data_dir / "alerts"
+        self.alerts.restore(self._last_alerts_reset_ts())
+        self._load_decided()
+
+    async def start_market(self) -> None:
+        """The slow half: the catalogue, the backfill, the replay of today's closed bars into the
+        alert books, and the feed. The web server is already up while this runs."""
 
         warn = self.calendar.missing_holidays_warning()
         if warn:
@@ -368,7 +656,9 @@ class Engine:
             )
             log.warning("engine.no_credentials")
         elif self.s.engine_enabled:
+            await self._wait_for_broker()
             await self._boot_market()
+            await self._catch_up_alerts()
 
         self._banner()
         self._tasks = [
@@ -377,15 +667,257 @@ class Engine:
         ]
         if self.s.engine_enabled and self.s.feed_enabled and self.s.has_credentials:
             self._tasks.append(asyncio.create_task(self.feed.run(), name="feed"))
+            self._tasks.append(asyncio.create_task(self._keep_held_quotes(), name="held-quotes"))
+            self._live_from_ts = time.time()
+        self.booting = False
+
+    async def _wait_for_broker(self, first_delay_s: float = 15.0, max_delay_s: float = 300.0) -> None:
+        """Hold the market boot until the broker answers a login, retrying with backoff.
+
+        The boot needs the broker for everything after the catalogue: the backfill, the position
+        reconcile, the feed. 2026-09-25 11:30: macOS cached a failed DNS lookup for
+        openapi.5paisa.com, every backfill call failed at once, the reconcile's login raised, and
+        the process exited — taking the pages with it. The web server is up before this runs, so
+        waiting here keeps the alerts page and the day book serving while the network recovers,
+        and the boot then continues on its own. A login refused in 5paisa's midnight window waits
+        the same way instead of exiting."""
+        delay = first_delay_s
+        while True:
+            try:
+                await self.auth.token()
+                if delay != first_delay_s:
+                    log.info("engine.broker_reachable")
+                    self.boot_notes.append("broker reachable again — market boot resumed")
+                return
+            except Exception as exc:  # noqa: BLE001 - any failure here is "not yet", never fatal
+                log.warning("engine.waiting_for_broker", error=str(exc)[:160], retry_in_s=delay)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, max_delay_s)
+
+    def _last_alerts_reset_ts(self) -> float:
+        """The most recent 00:30 IST reset at or before now. A session saved before it belongs to
+        a day the page has already been emptied for."""
+        now = datetime.now(IST)
+        hh, mm = (int(x) for x in self.s.alerts_reset_ist.split(":"))
+        cut = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if now < cut:
+            cut -= timedelta(days=1)
+        return cut.timestamp()
+
+    async def _catch_up_alerts(self) -> None:
+        """Replay today's closed decision bars into the alert books and FUDKII, so a restart — or
+        a process that was not running at a boundary — does not leave the page blank. Advisory:
+        nothing here reaches the gateway, and a replayed FUDKII trigger says it was not traded."""
+        try:
+            tf_s = TF_SECONDS[DECISION_TF]
+            now = time.time()
+            today = ist_today()
+            bars = [
+                b
+                for sym in self.underlyings
+                for b in self.store.bars(sym, DECISION_TF)
+                if ist_day(b.ts) == today and b.ts + tf_s <= now
+            ]
+            bars.sort(key=lambda b: (b.ts, b.symbol))
+            if not bars:
+                return
+            start = datetime(today.year, today.month, today.day, tzinfo=IST).timestamp()
+            known = {
+                str(r.get("signal_id") or "")
+                for r in await self.ledger.rows_between("signals", start, start + 86_400)
+            }
+            ctx = AsOfContext(self)
+            replay = Fudkii(self.fudkii.cfg)
+
+            def history_of(bar: UnifiedBar) -> list[UnifiedBar]:
+                ctx.until = bar.ts
+                return ctx.upto(bar.symbol, bar.tf, ALERT_LOOKBACK)
+
+            def fudkii_signals(bar: UnifiedBar) -> list[Signal]:
+                ctx.until = bar.ts
+                return list(replay.on_bar(ctx, bar).signals)
+
+            began = time.time()
+            # FUDKII is left to the rescan below, which also writes the ledger the book tabs read
+            got = await self.alerts.catch_up(bars, history_of=history_of, fudkii=None, known_signal_ids=known)
+            log.info("alerts.catch_up_done", took_s=round(time.time() - began, 1), **got)
+        except Exception as exc:  # noqa: BLE001 - advisory; the engine boots regardless
+            log.warning("alerts.catch_up_failed", error=str(exc)[:200])
+        try:
+            await self.scan_fudkii()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("fudkii.scan_failed", error=str(exc)[:200])
+
+    async def scan_fudkii(self, *, max_confirm_attempts: int = 3) -> dict[str, Any]:
+        """Every FUDKII signal of the day, checked on the exchange's own 30m candles.
+
+        The live path decides each bar as it closes. It never sees a bar that closed while the
+        process was down or still booting, and it skips one the exchange had not confirmed in time
+        (a partial bar after a restart). This finds both: FUDKII is a pure function of the bars up
+        to its bar, the day's zones and the session phase, so running it on history cut at each
+        such bar is exactly what it would have said. Unconfirmed bars are fetched from the broker
+        first. Bars the live path decided are left alone — its decision stands.
+
+        A signal found here that the ledger does not hold is recorded with a MISSED_* decision and
+        its reason, stamped at its bar's close, so the book tabs, the day book and the alerts page
+        all list it — and all say it was not traded. Nothing here reaches the gateway.
+        """
+        async with self._fudkii_scan_lock:
+            began = time.time()
+            tf_s = TF_SECONDS[DECISION_TF]
+            today = ist_today()
+            start = datetime(today.year, today.month, today.day, tzinfo=IST).timestamp()
+            todo = [
+                b
+                for sym in self.underlyings
+                for b in self.store.bars(sym, DECISION_TF)
+                if ist_day(b.ts) == today
+                and b.ts + tf_s <= began
+                and (sym, b.ts) not in self._decided
+                and (sym, b.ts) not in self._fudkii_scanned
+            ]
+            todo.sort(key=lambda b: (b.ts, b.symbol))
+            confirmed = unconfirmed = 0
+            for b in todo:
+                if b.source is not BarSource.PARTIAL:
+                    continue
+                key = (b.symbol, b.ts)
+                n = self._confirm_attempts.get(key, 0)
+                if n >= max_confirm_attempts or not (self.reconciler_ready and self.s.has_credentials):
+                    continue
+                self._confirm_attempts[key] = n + 1
+                chk = await self.reconciler.reconcile_bar(b, timeout_s=self.s.decision_reconcile_timeout_s)
+                confirmed += 1 if chk.found else 0
+            ledger = {r["signal_id"]: r for r in await self.ledger.rows_between("signals", start, start + 86_400)}
+            ctx = AsOfContext(self)
+            replay = Fudkii(self.fudkii.cfg)
+            found: list[tuple[Signal, UnifiedBar, list[UnifiedBar]]] = []
+            for i, b in enumerate(todo):
+                ctx.until = b.ts
+                cur = next((x for x in reversed(ctx.upto(b.symbol, DECISION_TF, 3)) if x.ts == b.ts), b)
+                if cur.source is BarSource.PARTIAL:
+                    unconfirmed += 1  # not marked scanned: the next pass asks the exchange again
+                    continue
+                self._fudkii_scanned.add((b.symbol, b.ts))
+                try:
+                    for sig in replay.on_bar(ctx, cur).signals:
+                        found.append((sig, cur, ctx.upto(b.symbol, DECISION_TF, ALERT_LOOKBACK)))
+                except Exception as exc:  # noqa: BLE001 - one name must not cost the rest
+                    log.warning("fudkii.scan_bar_failed", symbol=b.symbol, ts=b.ts, error=str(exc)[:160])
+                if i % 100 == 99:
+                    await asyncio.sleep(0)  # the pages keep answering while the day is scanned
+            recorded = restored = 0
+            for sig, bar, history in found:
+                sj = sig.to_json()
+                closed = float(bar.ts + tf_s)
+                row = ledger.get(sig.signal_id)
+                if row is None:
+                    if closed < self._live_from_ts:
+                        code, why = (
+                            "MISSED_ENGINE_DOWN",
+                            "not traded — the engine was not running, or still starting, when this bar "
+                            "closed; found by the rescan of the exchange's 30m candles",
+                        )
+                    else:
+                        code, why = (
+                            "MISSED_UNCONFIRMED_BAR",
+                            "not traded — the live decision was skipped because the exchange had not "
+                            "confirmed this bar in time; found by the rescan once it had",
+                        )
+                    await self.ledger.insert_signal(sj, code, why, created_ts=closed)
+                    ledger[sig.signal_id] = {"decision": code, "decision_reason": why}
+                    recorded += 1
+                    log.info("fudkii.rescan_found", symbol=sig.symbol, ts=sig.ts, direction=sig.direction.value, decision=code)
+                    skipped: str | None = why
+                else:
+                    dec = str(row.get("decision") or "")
+                    skipped = str(row.get("decision_reason") or "") if dec.startswith("MISSED") else None
+                if self.alerts.adopt_rebuilt(sj, bar, history, skipped=skipped):
+                    restored += 1
+            self.last_fudkii_scan = {
+                "ts": time.time(),
+                "took_s": round(time.time() - began, 2),
+                "bars_scanned": len(todo) - unconfirmed,
+                "bars_unconfirmed": unconfirmed,
+                "bars_confirmed_now": confirmed,
+                "signals_found": len(found),
+                "recorded_as_missed": recorded,
+                "rows_added_to_alerts": restored,
+            }
+            log.info("fudkii.rescan", **self.last_fudkii_scan)
+            return self.last_fudkii_scan
+
+    def _decided_path(self) -> Path:
+        return self.s.data_dir / "decided.json"
+
+    def _load_decided(self) -> None:
+        """The bars the live path decided earlier today, so a restart's rescan does not re-judge a
+        bar a previous run already decided (and call its answer 'missed')."""
+        try:
+            d = json.loads(self._decided_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if d.get("day") == ist_today().isoformat():
+            self._decided |= {(str(k[0]), int(k[1])) for k in d.get("keys") or []}
+            self._decided_saved = len(self._decided)
+
+    def _save_decided(self) -> None:
+        if len(self._decided) == self._decided_saved:
+            return
+        path = self._decided_path()
+        tmp = path.with_suffix(".tmp")
+        today = ist_today()
+        keep = sorted(k for k in self._decided if ist_day(k[1]) == today)
+        tmp.write_text(json.dumps({"day": today.isoformat(), "keys": keep}), encoding="utf-8")
+        os.replace(tmp, path)
+        self._decided_saved = len(self._decided)
+
+    async def fudkii_today(self) -> list[dict[str, Any]]:
+        """Today's FUDKII signals from 09:00 IST, one row each, as the ledger holds them."""
+        today = ist_today()
+        start = datetime(today.year, today.month, today.day, tzinfo=IST).timestamp()
+        latest: dict[str, dict[str, Any]] = {}
+        for r in await self.ledger.rows_between("signals", start, start + 86_400):
+            if r.get("strategy") == StrategyKey.FUDKII.value:
+                latest[r["signal_id"]] = r
+        out = []
+        for r in sorted(latest.values(), key=lambda r: (r.get("ts") or 0, r.get("symbol") or "")):
+            out.append({
+                "signal_id": r["signal_id"],
+                "symbol": r.get("symbol"),
+                "direction": r.get("direction"),
+                "grade": r.get("grade"),
+                "bar_ts": r.get("ts"),
+                "fired_ts": r.get("created_ts"),
+                "entry": r.get("entry"),
+                "stop": r.get("stop"),
+                "targets": r.get("targets"),
+                "reason": r.get("reason"),
+                "decision": r.get("decision"),
+                "decision_reason": r.get("decision_reason"),
+            })
+        return out
 
     async def stop(self) -> None:
         self._stop.set()
+        try:
+            self._save_decided()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("decided.save_failed", error=str(exc)[:120])
+        try:
+            self.alerts.save()
+        except Exception as exc:  # noqa: BLE001 - a failed save must not block the shutdown
+            log.warning("alerts.save_failed", error=str(exc)[:120])
         await self.feed.stop()
         await self.committee.stop()
         try:
             await asyncio.to_thread(self.archive.flush, final=True)
         except Exception as exc:  # noqa: BLE001 - shutting down; the archive must not block it
             log.warning("archive.final_flush_failed", error=str(exc))
+        try:
+            await asyncio.to_thread(self.fulltape.write, self.fulltape.take())
+        except Exception as exc:  # noqa: BLE001 - shutting down; the tape must not block it
+            log.warning("tape_full.final_write_failed", error=str(exc))
         if self._pivot_repair_task is not None and not self._pivot_repair_task.done():
             self._pivot_repair_task.cancel()
         for t in self._tasks:
@@ -502,9 +1034,39 @@ class Engine:
         )
         if self.reconciler_positions is not None:
             await self.reconciler_positions.run(
-                list(self.positions.values()),
+                self._venue_positions(),
                 at_venue=self.mode() in (Mode.LIVE, Mode.LIVE_CAPPED),
             )
+
+    def _venue_positions(self) -> list[Position]:
+        """The positions that exist at the broker: the LIVE books' only. The paper books' positions
+        do not — counted, each one was a PHANTOM that froze every book within 60 s (audit,
+        2026-09-26). The reconciler sums them per contract: two live books on one strike are one
+        net position at the broker."""
+        return [p for p in self.positions.values() if p.strategy in self.LIVE_BOOKS]
+
+    async def _live_funds_short(self, intent: OrderIntent) -> str | None:
+        """None when the broker account has the money for this live entry, else why not. Every live
+        book draws on the one account, so the paper purses prove nothing about it. Fails CLOSED: no
+        answer from the broker, or no margin field recognised in it, refuses the entry.
+        The field names are 5paisa's V4/Margin ``EquityMargin`` row as documented publicly —
+        CONFIRM on the first armed session (docs/FIVEPAISA_FACTS.md lists no fields)."""
+        now = time.time()
+        if now - self._margin_cache[0] > 15.0:
+            try:
+                row = await asyncio.wait_for(self.rest.margin(), timeout=5.0)
+            except Exception as exc:  # noqa: BLE001 — fail closed, and say why
+                return f"broker funds unknown ({str(exc)[:80]}) — live entry refused"
+            self._margin_cache = (now, row)
+        row = self._margin_cache[1] or {}
+        field = next((f for f in LIVE_MARGIN_FIELDS if f in row), None)
+        if field is None:
+            return f"no margin field in the broker's answer ({', '.join(sorted(row)[:8])}) — live entry refused"
+        avail = float(row[field] or 0.0)
+        need = (intent.ref_price or intent.limit_price or 0.0) * intent.qty * intent.instrument.multiplier
+        if need > avail:
+            return f"broker {field} ₹{avail:,.0f} < this entry's ₹{need:,.0f} — live entry refused"
+        return None
 
     def _prev_close(self, symbol: str) -> float | None:
         bars = self.store.bars(symbol, "1d")
@@ -677,12 +1239,20 @@ class Engine:
             if wanted:
                 n = await self._refetch_daily(wanted[:REPAIR_BATCH])
                 log.info("daily.repaired", refetched=n, asked=len(wanted), audit=a.summary())
-            if self._legs_due or self.leg_pivots.failed_codes:
+            # Never alongside the boot's bulk load: a boot after 12:30 found both re-anchor slots
+            # due and fetched the same ~2,000 ladders a second time, concurrently. The flags stay
+            # set, so the re-anchor runs on the next pass — on the live spot, for the gap only.
+            if (self._legs_due or self._legs_reanchor_due or self.leg_pivots.failed_codes) and not self.leg_pivots.running:
                 legs = self._expected_legs(self.groups.values())
+                # A re-anchor is not a reload: _expected_legs re-bands the OTM set on the LIVE
+                # spot, and everything already held stays. Only the strikes the gap brought into
+                # band are fetched.
                 todo = legs if self._legs_due else self.leg_pivots.missing(legs)
-                self._legs_due = False
+                reanchor, self._legs_due, self._legs_reanchor_due = self._legs_reanchor_due, False, False
                 if todo:
-                    await self.leg_pivots.load(todo, ist_today())
+                    n = await self.leg_pivots.load(todo, ist_today())
+                    if reanchor:
+                        log.info("legs.reanchored", fetched=n, asked=len(todo))
         except Exception as exc:  # noqa: BLE001 - advisory levels never stall the engine
             log.warning("pivot_repair.failed", error=str(exc))
 
@@ -713,8 +1283,8 @@ class Engine:
             return True, self._halt_reason
         if self.reconciler_positions is not None and self.reconciler_positions.frozen:
             return True, f"reconcile: {self.reconciler_positions.freeze_reason}"
-        if self.gateway.breaker_tripped:
-            return True, "order gateway circuit breaker"
+        # the order breaker is per book now (exec/gateway.py): a tripped book stops its own
+        # entries; it no longer halts — and flattens — every book
         return False, ""
 
     async def set_mode(self, mode: Mode, *, armed_minutes: int | None = None) -> dict[str, Any]:
@@ -875,6 +1445,13 @@ class Engine:
         inst = self.underlyings.get(symbol)
         return session_phase_of(inst.segment if inst else Segment.NSE_EQ, ts)
 
+    async def _on_feed_connect(self, reconnect: bool) -> None:
+        if not reconnect:
+            return
+        marked = self.aggregator.on_reconnect()
+        log.warning("feed.gap_repaired", forming_marked_partial=marked)
+        await self.ledger.event("feed.reconnected", {"forming_marked_partial": marked, "silence_reconnects": self._silence_reconnects})
+
     # -- decision path -----------------------------------------------------------------------------
 
     async def _on_bar_close(self, bar: UnifiedBar) -> None:
@@ -882,10 +1459,22 @@ class Engine:
         if bar.tf == "1m":
             self.archive.bar(bar)
         # Advisory books run on every frame — MCX_BB15 decides on 15m and FUDKII-RT on 1m, so
-        # this must sit above the decision-timeframe return, not inside it.
-        self.alerts.on_bar(bar)
+        # this must sit above the decision-timeframe return, not inside it. The decision frame's
+        # books wait for the exchange's candle, like the decision itself (_reconcile_then_decide):
+        # they used to read the live build, which the reconciler then corrected under them.
         if bar.tf != DECISION_TF:
+            self.alerts.on_bar(bar)
             return
+        # One decision per bucket, whatever the feed does: a bucket closed twice was decided twice
+        # and counted twice toward every open position's time stop.
+        key = (bar.symbol, int(bar.ts))
+        if key in self._decided or key in self._closes_seen:
+            self._duplicate_closes += 1
+            log.warning("decide.duplicate_close", symbol=bar.symbol, ts=bar.ts)
+            return
+        if len(self._closes_seen) > 20_000:
+            self._closes_seen = {k for k in self._closes_seen if ist_day(k[1]) == ist_today()}
+        self._closes_seen.add(key)
         for pos in self.positions.values():
             if pos.status == "OPEN" and pos.underlying.symbol == bar.symbol:
                 pos.bars_held += 1
@@ -928,6 +1517,7 @@ class Engine:
                 current = latest
                 if "micro" in bar.extra and "micro" not in current.extra:
                     current.extra["micro"] = bar.extra["micro"]
+        self.alerts.on_bar(current)
         try:
             await self._decide(current)
         except Exception as exc:
@@ -961,6 +1551,7 @@ class Engine:
             log.warning("committee.autopilot_failed", error=str(exc))
 
     async def _decide(self, bar: UnifiedBar) -> None:
+        self._decided.add((bar.symbol, bar.ts))
         base_out = self.fudkii.on_bar(self.contexts[StrategyKey.FUDKII], bar)
         derived = Outcome()
         fukaa_ctx = self.contexts[StrategyKey.FUKAA]
@@ -977,8 +1568,20 @@ class Engine:
         for rej in (*base_out.rejections, *derived.rejections):
             await self.ledger.insert_rejection(rej.to_json())
 
-        for sig in (*base_out.signals, *admitted):
-            await self._handle_signal(sig, bar)
+        for sig in base_out.signals:
+            await self._log_breadth(sig)
+        for sig in base_out.signals:
+            # the trigger reaches every in-trend book at once; each decides for itself. One signal's
+            # error never costs the bar's other signals, FUKAA or the fade their turn.
+            try:
+                await self._handle_signal(sig, bar, books=IN_TREND_BOOKS)
+            except Exception as exc:
+                log.exception("signal.failed", symbol=sig.symbol, error=str(exc))
+        for sig in admitted:
+            try:
+                await self._handle_signal(sig, bar)
+            except Exception as exc:
+                log.exception("signal.failed", symbol=sig.symbol, strategy=sig.strategy.value, error=str(exc))
         for sig in base_out.signals:
             # the fade is strictly additive: it may never cost the in-trend books their entry
             try:
@@ -986,20 +1589,62 @@ class Engine:
             except Exception as exc:
                 log.exception("counter.failed", symbol=sig.symbol, error=str(exc))
 
-    async def _handle_signal(self, sig: Signal, bar: UnifiedBar | None) -> None:
+    async def _handle_signal(
+        self, sig: Signal, bar: UnifiedBar | None, *, adopt: bool = True, books: Sequence[StrategyKey] | None = None,
+        take: bool = False,
+    ) -> dict[str, dict[str, str]]:
+        """One signal into the books that take it, each judging it for ITSELF, all at once (operator,
+        2026-09-26: "a fudkii signal goes to all variants at the same time at once. each variant and
+        twin assess it at the same time in parallel to decide if it fullfill teh specific logic of
+        that particular strategy, ifyes, then it gets qualified for trade , if not, stat teh reason
+        and record it").
+
+        Decided ONCE, for every book, is what belongs to the trigger and the contract: the
+        underlying, its segment, the strike (the selector's choice), the δ-projected levels and the
+        future's volume reading — a reason there stops every book. Everything else is each book's
+        own (``_enter_book``, run concurrently): its halt, its gates, its size from its own purse,
+        its exposure, its money and its own order — a reason there stops that book alone.
+        ``books`` defaults to the signal's own book (a fade's CT-X, CT-Y's gap fade, a routed
+        commodity trigger, an operator take, FUKAA). Returns each book's outcome
+        ``{book: {"decision", "reason"}}`` — what an operator TAKE shows."""
+        decided_at = time.time()  # the signal's own timestamp on the order trail
+        owner = sig.strategy.value
+        keys = [k.value for k in books] if books else [owner]
+        handled = f"{sig.signal_id}|{','.join(keys)}"
+        if not take and handled in self._handled_signals:
+            # the same signal for the same books a second time (a re-run): never twice. A TAKE is the
+            # operator asking again on purpose — the per-book checks decide it (audit, 2026-09-26: a
+            # FUDKII take was dropped in silence while the RT books' entries rested on its trigger)
+            log.info("signal.already_handled", strategy=owner, symbol=sig.symbol, signal=sig.signal_id)
+            return {k: {"decision": "ALREADY_HANDLED", "reason": "this trigger was already handled for this book"} for k in keys}
+        self._handled_signals.add(handled)
+
+        async def everyone(decision: str, why: str) -> dict[str, dict[str, str]]:
+            await self.ledger.insert_signal(sig.to_json(), decision, why)
+            return {k: {"decision": decision, "reason": why} for k in keys}
+
         self._signals_today[sig.signal_id] = sig
         await self.bus.publish(Topic.SIGNAL, sig)
-        self.alerts.adopt_signal(sig.to_json(), bar)
+        if adopt:
+            self.alerts.adopt_signal(sig.to_json(), bar)
         underlying = self.underlyings.get(sig.symbol)
         if underlying is None:
-            await self.ledger.insert_signal(sig.to_json(), "NO_UNDERLYING", "not in the universe")
-            return
+            return await everyone("NO_UNDERLYING", "not in the universe")
+        segment_book = next((k for k, seg in self.SEGMENT_BOOKS.items() if seg is underlying.segment), None)
+        if sig.strategy is StrategyKey.FUDKII and segment_book is not None and not self.book_trades(sig.strategy.value, underlying.segment):
+            # A commodity trigger. FUDKII's purse never trades MCX and RT-MCX only mirrored FUDKII
+            # FILLS — so no commodity trigger was ever entered by anyone (every one was booked
+            # WRONG_SEGMENT). It goes to the segment's own book directly, with the trigger as its
+            # source; the ENTRY card is the trigger's, so it is not adopted twice.
+            await self.ledger.insert_signal(sig.to_json(), "ROUTED", f"{segment_book} trades {underlying.segment.value}")
+            routed = replace(sig, strategy=StrategyKey(segment_book), source_signal_id=sig.signal_id)
+            log.info("signal.routed", symbol=sig.symbol, to=segment_book)
+            return await self._handle_signal(routed, bar, adopt=False)
 
         selection = await self._select_instrument(underlying, sig)
         if not selection.ok or selection.instrument is None:
-            await self.ledger.insert_signal(sig.to_json(), "NO_INSTRUMENT", selection.reason)
             log.info("signal.no_instrument", symbol=sig.symbol, reason=selection.reason)
-            return
+            return await everyone("NO_INSTRUMENT", selection.reason)
 
         inst = selection.instrument
         # Subscribe the contract we are about to hold on BOTH channels. `mf` gives the LTP the exit
@@ -1020,61 +1665,147 @@ class Engine:
             option_premium=selection.premium,
             delta=delta,
         )
-        if inst.is_option:
-            option_sl = self.floored_option_stop(sig.strategy, selection.premium, option_sl, inst.tick_size)
+        gated = books is not None
+        # The volume reading is the trigger's, read once for every book that gates on it (the
+        # future's two REST calls, not two per book) — and waited on by those books alone: a book
+        # without the gate (FUDKII) places its order at once, and a failed read blocks no one
+        # (review, 2026-09-26: read before the gather, FUDKII's order waited on it and an error in
+        # it cost every book its entry).
+        vol = (
+            asyncio.ensure_future(self._volume_surges_safe(underlying))
+            if gated and any(self.limits_for(k).dried_volume_v for k in keys)
+            else None
+        )
+        results = await asyncio.gather(
+            *(
+                self._enter_book(
+                    StrategyKey(k), sig, underlying, inst, selection.premium, delta, option_sl, option_targets, decided_at,
+                    owns_row=k == owner, gated=gated, take=take, vol=vol,
+                )
+                for k in keys
+            ),
+            return_exceptions=True,
+        )
+        if vol is not None and not vol.done():
+            vol.cancel()  # no gating book got as far as reading it
+        out: dict[str, dict[str, str]] = {}
+        for k, res in zip(keys, results, strict=True):
+            if isinstance(res, BaseException):  # one book's fault never costs another book its entry
+                log.error("book.entry_failed", book=k, symbol=sig.symbol, error=str(res), exc_info=res)
+                out[k] = {"decision": "ERROR", "reason": str(res)[:200]}
+            else:
+                out[k] = res
+        return out
 
-        if not self.book_trades(sig.strategy.value, underlying.segment):
-            why = f"{sig.strategy.value} does not trade {underlying.segment.value}"
-            await self.ledger.insert_signal(sig.to_json(), "WRONG_SEGMENT", why)
-            log.warning("signal.wrong_segment", symbol=sig.symbol, strategy=sig.strategy.value)
-            return
+    async def _enter_book(self, key: StrategyKey, sig: Signal, *args: Any, **kw: Any) -> dict[str, str]:
+        """One trade per book per name, also while its entry is still being placed. The resting
+        check and EXPOSURE see a resting entry and an open position, but not an entry between the
+        two — a LIVE order waits on the broker for up to ~30 s, and a TAKE in that window was a
+        second position on the same trigger (review, 2026-09-26). Claimed synchronously, released
+        when the entry is resting, booked or refused."""
+        slot = (key.value, sig.symbol)
+        if slot in self._entering:
+            return await self._enter_book_once(key, sig, *args, busy=True, **kw)
+        self._entering.add(slot)
+        try:
+            return await self._enter_book_once(key, sig, *args, **kw)
+        finally:
+            self._entering.discard(slot)
 
-        wallet = self.wallets[sig.strategy.value]
+    async def _enter_book_once(
+        self, key: StrategyKey, sig: Signal, underlying: Instrument, inst: Instrument, premium: float, delta: float,
+        raw_sl: float, option_targets: tuple[float, ...], decided_at: float, *, owns_row: bool, gated: bool,
+        take: bool = False, vol: asyncio.Future[dict[str, tuple[float, float]]] | None = None, busy: bool = False,
+    ) -> dict[str, str]:
+        """ONE book's decision on a signal, and its own entry order. ``owns_row``: the signal is
+        this book's (FUDKII on its trigger, CT-X on its fade) and its ledger row records the
+        decision; otherwise the book takes another book's signal (RT-X/RT-N/RT-Y the trigger, CT-Y
+        the fade) and its decision is recorded on its card. A book's size, money, halt and exposure
+        are its own: the parent short of money or halted costs its twins nothing, and a twin sizes
+        4 lots from its own purse whatever the parent could afford (operator, 2026-09-26).
+        Returns the outcome ``{"decision", "reason"}``."""
+        book_key = key.value
+        label = BOOK_LABELS.get(book_key, book_key)
+
+        async def refuse(decision: str, why: str, gate: str | None = None, **extra: Any) -> dict[str, str]:
+            log.info("book.refused", book=book_key, symbol=sig.symbol, decision=decision, why=why)
+            if owns_row:
+                await self.ledger.insert_signal(sig.to_json(), decision, why)
+            else:
+                await self._book_skip(book_key, sig, why, gate=gate or decision.lower(), **extra)
+            return {"decision": decision, "reason": why}
+
+        if self._entry_resting(book_key, sig.signal_id, sig.symbol) is not None:
+            return await refuse("ALREADY_RESTING", f"{label} already has an entry working on {sig.symbol}")
+        if busy:
+            # The entry being placed owns this signal's row and card and writes its outcome when it
+            # fills; the first row written wins, so this attempt must not write one ahead of it.
+            why = f"{label} is already placing an entry on {sig.symbol}"
+            log.info("book.refused", book=book_key, symbol=sig.symbol, decision="ALREADY_ENTERING", why=why)
+            await self.ledger.event("book.already_entering", {"book": book_key, "signal_id": sig.signal_id, "symbol": sig.symbol})
+            return {"decision": "ALREADY_ENTERING", "reason": why}
+        halted, halt_why = self.halted()
+        if halted:
+            # refused HERE, before any order: sent, each book's order was rejected by the gateway
+            # and counted toward the breaker (audit, 2026-09-26: 12 rejects in three halted triggers)
+            return await refuse("ENGINE_HALTED", f"engine halted — {halt_why}")
+        if self.gateway.book_tripped(book_key):
+            return await refuse("BREAKER", f"{label}'s order breaker is tripped after {self.gateway.caps.breaker_consecutive_rejects} "
+                                           "consecutive rejected orders — reset it on the Risk page")
+        if not self.book_trades(book_key, underlying.segment):
+            return await refuse("WRONG_SEGMENT", f"{label} does not trade {underlying.segment.value}")
+        wallet = self.wallets[book_key]
         if wallet.halted:
-            await self.ledger.insert_signal(sig.to_json(), "WALLET_HALTED", wallet.halt_reason)
-            return
-        # an RT/CT book entered directly (the counter-trend fade) sizes and pools under its own
-        # limits; the base books keep theirs
-        book = self._exits_by_strategy.get(sig.strategy.value)
+            return await refuse("WALLET_HALTED", f"{label} halted — {wallet.halt_reason}")
+        if gated and (hit := await self._book_gates(key, sig, underlying, vol)) is not None:
+            gate, why, extra = hit
+            return await refuse("SKIPPED", why, gate=gate, **extra)
+        if (breach := self._stop_breached(sig, underlying)) is not None:
+            return await refuse("STOP_BREACHED", breach)
+        book = self._exits_by_strategy.get(book_key)
         book_limits = book.limits if book is not None else self.limits
-        exposure = self._exposure_by_strategy.get(sig.strategy.value, self.exposure)
-
+        option_sl = self.floored_option_stop(key, premium, raw_sl, inst.tick_size) if inst.is_option else raw_sl
+        exposure = self._exposure_by_strategy.get(book_key, self.exposure)
         sizing = size_position(
             instrument=inst,
-            premium=selection.premium,
+            premium=premium,
             option_stop=option_sl,
-            option_target1=option_targets[0] if option_targets else None,
+            # The costs-against-T1 test belongs to the book that OWNS the signal and knows its T1 now
+            # (FUDKII and FUKAA on their triggers, CT-X on its fade, CT-Y on its gap fade, a take).
+            # A book taking another's signal on its own ladder (RT-X/N/Y, CT-Y on CT-X's fade) never
+            # had it: its T1 is its contract's own level, and the owner's T1 is not its business
+            # (operator: "the twins decide for themselves").
+            option_target1=None if (book_limits.own_ladder and not owns_row) else (option_targets[0] if option_targets else None),
             balance=wallet.balance,
             available=wallet.available,
             limits=book_limits,
             costs=self.costs,
         )
         if not sizing.ok:
-            await self.ledger.insert_signal(sig.to_json(), "NOT_SIZED", sizing.reason)
-            log.info("signal.not_sized", symbol=sig.symbol, reason=sizing.reason)
-            return
-
+            return await refuse("NOT_SIZED", f"{label}: {sizing.reason}")
         verdict = exposure.check(
-            strategy=sig.strategy.value,
+            strategy=book_key,
             underlying=sig.symbol,
             outlay=sizing.outlay,
             positions=list(self.positions.values()),
             total_capital=wallet.balance,  # each book is checked against its own purse
         )
         if not verdict.allowed:
-            await self.ledger.insert_signal(sig.to_json(), "EXPOSURE", verdict.reason)
-            return
-
+            return await refuse("EXPOSURE", verdict.reason)
+        now = time.time()
+        ref = self._order_ref(book_key, now)
         intent = OrderIntent(
-            strategy=sig.strategy.value,
+            strategy=book_key,
             instrument=inst,
             side=OrderSide.BUY,
             qty=sizing.qty,
             purpose=Purpose.ENTRY,
             signal_id=sig.signal_id,
-            client_order_id=f"{sig.signal_id}|ENTRY",
+            # "FII-RTX-260926-192510-007-EN-HINDUNILVR-1960CE-L4": the book, the IST date and time,
+            # the book's order number that day, then what it is (operator, 2026-09-26)
+            client_order_id=f"{ref}-{'TK' if take else 'EN'}-{_contract_tag(inst, sizing.qty)}",
             reason=sig.reason,
-            ref_price=selection.premium,
+            ref_price=premium,
         )
         # Take the money BEFORE the first await. The sizer read `wallet.available` and the
         # exposure check read the open positions in this same synchronous block, but placing the
@@ -1082,29 +1813,190 @@ class Engine:
         # same instant, each in its own decision task. Left until after the fill, two entries on
         # one boundary both sized against the same rupees and the book deployed each of them. The
         # hold is provisional: released if nothing fills, and replaced by the fill's real cost.
-        if not wallet.reserve(sizing.outlay, time.time()):
-            why = f"₹{sizing.outlay:,.0f} outlay > ₹{wallet.available:,.0f} left in the book"
-            await self.ledger.insert_signal(sig.to_json(), "WALLET", why)
-            log.info("signal.wallet_taken", symbol=sig.symbol, strategy=sig.strategy.value, reason=why)
-            return
+        if not wallet.reserve(sizing.outlay, now):
+            return await refuse("WALLET", f"₹{sizing.outlay:,.0f} outlay > ₹{wallet.available:,.0f} left in {label}")
+        plan = _EntryPlan(
+            sig=sig, underlying=underlying, inst=inst, option_sl=option_sl, option_targets=option_targets, delta=delta,
+            outlay=sizing.outlay, wallet=wallet, book=book, book_limits=book_limits, decided_at=decided_at, ref=premium,
+            key=book_key, owns_row=owns_row, order_ref=ref,
+        )
+        # Every entry ends in exactly one state: resting (the hold stays with the order), booked (the
+        # hold became the position's cost) or released. Any error on the way releases a hold that
+        # reached none of them (audit, 2026-09-26: an exception after the reserve leaked it).
         try:
-            result = await self._submit(intent, verdict_ok=verdict.allowed, verdict_reason=verdict.reason)
-            await self.ledger.insert_order(_order_json(result.order), result.decision.value)
-            await self.ledger.insert_signal(
-                sig.to_json(), result.decision.value, result.order.note or sig.reason
-            )
-        except Exception:
-            wallet.release(sizing.outlay, time.time())  # a hold must not outlive its order
-            raise
-        if result.fill is None:
+            if self._limit_mode() and self.s.paper_limit_entries:
+                await self._place_entry_limit(intent, plan)
+                return {"decision": plan.outcome[0] or "RESTING", "reason": plan.outcome[1]}
+            submitted_at = time.time()
+            # while the order is at the broker (a live entry waits up to ~30 s) its hold is neither a
+            # resting entry nor a position: the money check must still count it (audit, 2026-09-26)
+            self._inflight_holds[intent.client_order_id] = (wallet, sizing.outlay)
+            try:
+                result = await self._submit(intent, verdict_ok=verdict.allowed, verdict_reason=verdict.reason)
+            finally:
+                self._inflight_holds.pop(intent.client_order_id, None)
+            audit = self._market_audit("entry", decided_at, submitted_at, result, inst.scrip_code)
+            if result.fill is not None:
+                await self._book_entry(plan, result, audit)  # in memory first: a ledger error cannot lose it
+                try:
+                    await self.ledger.insert_order(_order_json(result.order, audit), result.decision.value)
+                    if owns_row:
+                        await self.ledger.insert_signal(sig.to_json(), result.decision.value, result.order.note or sig.reason)
+                except Exception as exc:
+                    log.exception("entry.record_failed", book=book_key, symbol=sig.symbol, error=str(exc))
+                return {"decision": result.decision.value, "reason": f"{result.fill.qty} @ {result.fill.price:g}"}
             wallet.release(sizing.outlay, time.time())
-            return
+            plan.released = True
+            note = result.order.note or result.decision.value
+            await self.ledger.insert_order(_order_json(result.order, audit), result.decision.value)
+            if owns_row:
+                await self.ledger.insert_signal(sig.to_json(), result.decision.value, note)
+            else:
+                await self._book_skip(book_key, sig, f"entry not filled — {note}", gate="not_filled")
+            return {"decision": result.decision.value, "reason": note}
+        except BaseException:
+            if not plan.booked and not plan.released and intent.client_order_id not in self._resting:
+                wallet.release(sizing.outlay, time.time())
+                plan.released = True
+            raise
 
+    def _order_ref(self, book: str, now: float) -> str:
+        """``FII-RTX-260926-192510-007``: the book's code, the IST date and time, and the book's
+        order number that day — unique, and all within the 38 characters of an id the broker keeps
+        (``rest.place_order``), so the descriptive rest of the id may be cut without a collision."""
+        t = to_ist(now)
+        day = t.strftime("%y%m%d")
+        n = self._order_seq.get((book, day), 0) + 1
+        self._order_seq[(book, day)] = n
+        return f"{ORDER_CODES.get(book, book[:7].upper())}-{day}-{t.strftime('%H%M%S')}-{n:03d}"
+
+    async def _load_order_seq(self) -> None:
+        """The books' order numbers for today, from the ledger's orders and the loaded positions'
+        refs — a restart never reuses one (a wide-stop shadow's ref is on no order until it exits)."""
+        start = datetime.combine(ist_today(), datetime.min.time(), tzinfo=IST).timestamp()
+        by_code = {v: k for k, v in ORDER_CODES.items()}
+        rows = await self.ledger.rows_between("orders", start, start + 86_400)
+        ids = [str(o.get("client_order_id") or "") for o in rows]
+        ids += [str(p.exec_log.get("ref") or "") for p in self.positions.values()]
+        # a book's live orders today — those that reached the broker — so a restart does not
+        # hand it a fresh LIVE_CAPPED order allowance
+        live = {m.value for m in LIVE_MODES}
+        for o in rows:
+            if o.get("mode") in live and o.get("decision") in (Decision.SUBMITTED.value, Decision.REJECTED_BROKER.value):
+                b = str(o.get("strategy") or "")
+                self.gateway.live_orders_by_book[b] = self.gateway.live_orders_by_book.get(b, 0) + 1
+        for cid in ids:
+            m = _ORDER_REF_RE.match(cid)
+            if m and m.group(1) in by_code:
+                key = (by_code[m.group(1)], m.group(2))
+                self._order_seq[key] = max(self._order_seq.get(key, 0), int(m.group(3)))
+
+    async def _load_breakers(self) -> None:
+        """A tripped order breaker survives a restart: the ledger's trips and resets, replayed in
+        order (a deploy used to clear every breaker). A run of rejects short of a trip starts again."""
+        rows = await self.ledger.recent(
+            events, 500, where=events.c.kind.in_(("gateway.book_breaker", "gateway.breaker_reset")),
+        )
+        tripped: set[str] = set()
+        for r in reversed(rows):  # oldest first
+            book = r.get("book")
+            if r.get("reset"):
+                if book:
+                    tripped.discard(book)
+                else:
+                    tripped.clear()
+            elif book:
+                tripped.add(book)
+        for b in tripped:
+            self.gateway.tripped_books.add(b)
+            self.gateway.rejects_by_book[b] = self.gateway.caps.breaker_consecutive_rejects
+        if tripped:
+            log.warning("gateway.breakers_restored", books=sorted(tripped))
+
+    async def reset_breaker(self, book: str | None = None) -> dict[str, Any]:
+        """The operator resets one book's order breaker, or every book's — recorded, so a restart
+        does not bring back a breaker that was reset."""
+        self.gateway.reset_breaker(book)
+        await self.ledger.event("gateway.breaker_reset", {"book": book, "reset": True})
+        log.warning("gateway.breaker_reset", book=book or "all")
+        return self.gateway.stats()
+
+    async def reconcile_now(self) -> dict[str, Any]:
+        """The Risk page's "reconcile now": the broker's net positions against the LIVE books', at
+        once. The buttons called the bar reconciler (``self.reconciler``), which has no ``run`` —
+        a 500, and a freeze nobody could lift (review, 2026-09-26)."""
+        if self.reconciler_positions is None:
+            raise RuntimeError("no broker session")
+        report = await self.reconciler_positions.run(self._venue_positions(), at_venue=self.mode() in LIVE_MODES)
+        return {**report.to_json(), "frozen": self.reconciler_positions.frozen,
+                "freeze_reason": self.reconciler_positions.freeze_reason}
+
+    async def acknowledge_reconcile(self) -> dict[str, Any]:
+        """Operator override: accept the broker's state as it is and let entries resume."""
+        if self.reconciler_positions is None:
+            raise RuntimeError("no broker session")
+        previous = self.reconciler_positions.freeze_reason
+        self.reconciler_positions.acknowledge()
+        await self.ledger.event("reconcile.acknowledged", {"previous": previous})
+        return {"frozen": self.reconciler_positions.frozen, "previous": previous}
+
+    async def _book_gates(
+        self, key: StrategyKey, sig: Signal, underlying: Instrument,
+        reading: asyncio.Future[dict[str, tuple[float, float]]] | None = None,
+    ) -> tuple[str, str, dict[str, Any]] | None:
+        """The book's own entry gates, from its own limits — ``(gate, why, extra)`` or None when the
+        signal qualifies: dried volume (RT-X, RT-Y), gate B (RT-Y: breadth, a key pivot just ahead,
+        a 09:45 gap with the trade), and CT-Y standing aside from a CT-X fade on a trigger it has
+        already gap-faded. A reading that cannot be taken never blocks."""
+        lim = self.limits_for(key.value)
+        if lim.dried_volume_v:
+            # shielded: one book's task cancelled never cancels the reading the others wait on
+            vol = await asyncio.shield(reading) if reading is not None else await self._volume_surges_safe(underlying)
+            dry = [leg for leg, (s_t, s_t1) in vol.items() if dried_volume(s_t, s_t1, v=lim.dried_volume_v)]
+            if dry:
+                why = "dried volume " + ", ".join(f"{leg} {vol[leg][0]:.2f}/{vol[leg][1]:.2f}" for leg in dry) + f" < {lim.dried_volume_v}"
+                return "dried_volume", why, {}
+        if lim.breadth_min is not None or lim.skip_pivot_ahead_atr is not None or lim.skip_open_gap_datr is not None:
+            ctx = self._trigger_ctx(sig.signal_id, sig.direction)
+            gates = rt_gate_reasons(ctx, lim)
+            if gates:
+                gate, why = gates[0]
+                return gate, why, {"gates": [g for g, _ in gates], "breadth": ctx.get("share")}
+        if key is StrategyKey.FUDKII_CT_Y and sig.source_signal_id and sig.source_signal_id in self._gap_faded:
+            return "gap_fade", "CT-Y holds its own 09:45 gap fade on this trigger — not the CT-X fade as well", {}
+        return None
+
+    def _stop_breached(self, sig: Signal, underlying: Instrument) -> str | None:
+        """The trade is dead before it starts: the underlying is already through the signal's own
+        stop. SBILIFE, 2026-09-24 09:45: the stop sat 10 paise under the close, the stock printed
+        through it and every book was stopped out 67 ms after its fill. Checked before an entry is
+        placed and on every look at a resting one. None when the price is not known."""
+        ltp = self.ltps.get(underlying.scrip_code)
+        if not ltp or not sig.stop:
+            return None
+        through = ltp <= sig.stop if sig.direction is Direction.BULLISH else ltp >= sig.stop
+        return f"stop already breached — {sig.symbol} {ltp:g} through its stop {sig.stop:g}" if through else None
+
+    async def _book_skip(self, book: str, sig: Signal, why: str, *, gate: str, **extra: Any) -> None:
+        """A book did not take a signal it was offered: recorded for its card with the reason. The
+        event keeps its historical kind (``rt_twin.skipped``) — the card, the day book and the shadow
+        page all read it."""
+        log.info("book.skipped", book=book, symbol=sig.symbol, reason=why, gate=gate)
+        self.alerts.mark_skipped(sig.signal_id, book=book, reason=why)
+        await self.ledger.event("rt_twin.skipped", {
+            "book": book, "signal_id": sig.signal_id, "symbol": sig.symbol, "reason": why, "gate": gate, **extra,
+        })
+
+    async def _book_entry(self, plan: _EntryPlan, result: Any, audit: dict[str, Any]) -> None:
+        """A filled entry becomes the book's position — from an immediate fill or a resting limit
+        alike: the book's wallet swaps its hold for the real cost. Each book entered on its own
+        order; only a shadow (the wide-stop RT-Y) opens on another book's fill."""
+        sig, inst, wallet, book, book_limits = plan.sig, plan.inst, plan.wallet, plan.book, plan.book_limits
         pos = Position(
             id=new_id("pos"),
-            strategy=sig.strategy.value,
+            strategy=plan.key,
             instrument=inst,
-            underlying=underlying,
+            underlying=plan.underlying,
             side=PosSide.LONG,  # both books BUY premium; direction lives on `direction`
             qty=result.fill.qty,
             entry=result.fill.price,
@@ -1114,27 +2006,43 @@ class Engine:
             equity_entry=sig.entry,
             equity_sl=sig.stop,
             equity_targets=tuple(sig.targets),
-            option_sl=option_sl,
-            option_targets=option_targets,
+            option_sl=plan.option_sl,
+            option_targets=plan.option_targets,
             grade=sig.grade,
-            note=f"delta≈{delta:.2f} (estimated)",
+            note=f"delta≈{plan.delta:.2f} (estimated)",
+            entry_charges=round(result.fill.charges, 2),
+            exec_log={"entry": audit, "exits": [], **({"ref": plan.order_ref} if plan.order_ref else {})},
         )
+        self._protect_option_stop(pos, book_limits, plan.key, result.fill.ts)
         if book is not None and book_limits.own_ladder:
             self._stamp_own_ladder(pos, inst, book_limits, sig.symbol)
+        elif book_limits.targets_from_own_ladder:
+            own, _, note = self._own_ladder_for(sig.symbol, inst, pos.entry, book_limits)
+            if own:
+                pos.option_targets = own
+                pos.option_t1 = own[0]
+            pos.note += " · targets: " + (note if own else "no own ladder, δ-projected")
         self.positions[pos.id] = pos
         # swap the provisional hold for what the fill actually cost
-        wallet.release(sizing.outlay, result.fill.ts)
+        wallet.release(plan.outlay, result.fill.ts)
         self._commit_outlay(wallet, pos.entry * pos.qty * inst.multiplier, result.fill.ts, pos)
         wallet.apply_charges(result.fill.charges, result.fill.ts)
-        await self.ledger.upsert_position(_position_json(pos))
-        await self.ledger.upsert_wallet(wallet.strategy, wallet.to_json())
-        # A twin failing must never cost the real entry. The primary position is already
-        # registered and its wallet charged by this point; the mirror is strictly additive, so
-        # it is wrapped rather than allowed to unwind a trade that succeeded.
+        plan.booked = True
         try:
-            await self._open_rt_twin(pos, inst, result)
+            await self.ledger.upsert_position(_position_json(pos))
+            await self.ledger.upsert_wallet(wallet.strategy, wallet.to_json())
         except Exception as exc:
-            log.exception("rt_twin.failed", of=pos.id, symbol=pos.underlying.symbol, error=str(exc))
+            # the position and the money are right in memory and are written again on the next
+            # change; the order row, the card and the shadow must still follow (review, 2026-09-26)
+            log.exception("position.record_failed", book=plan.key, symbol=sig.symbol, error=str(exc))
+        if plan.key != StrategyKey.FUKAA.value:
+            self.alerts.mark_entered(sig.signal_id, ts=result.fill.ts, price=pos.entry, qty=pos.qty, book=plan.key)
+        # A shadow failing must never cost the real entry: the position is registered and its
+        # wallet charged by this point, and the shadow is strictly additive.
+        try:
+            await self._open_shadow_twins(pos, inst, result.fill.ts, result.fill.charges)
+        except Exception as exc:
+            log.exception("shadow.failed", of=pos.id, symbol=pos.underlying.symbol, error=str(exc))
         log.info(
             "position.open",
             strategy=pos.strategy,
@@ -1151,6 +2059,360 @@ class Engine:
             f"{inst.name or inst.scrip_code} qty {pos.qty} @ {pos.entry:.2f} "
             f"SL {pos.option_sl:.2f} grade {pos.grade} [{self.mode().value}]"
         )
+
+    # -- paper limit orders (exec/resting.py) ---------------------------------------------------------
+
+    def _limit_mode(self) -> bool:
+        return self.mode() is Mode.PAPER and self.limit_policy.enabled
+
+    def _touch(self, scrip_code: str, now: float) -> tuple[float | None, float | None, float | None, float | None]:
+        """``(bid, ask, ltp, age_ms)`` — the depth book when it is fresh enough to trade on, else
+        the snapshot quote, else nothing two-sided."""
+        ltp = self.ltps.get(scrip_code)
+        b = self.books.get(scrip_code)
+        if b is not None and (b.best_bid or b.best_ask) and b.age_ms(now) <= self.matcher.age_limit_ms(now):
+            return b.best_bid, b.best_ask, ltp, b.age_ms(now)
+        q = self.quotes.get(scrip_code)
+        if q is not None and (now - q.ts) <= self.s.position_quote_max_age_s:
+            return (q.bid or None), (q.ask or None), ltp, (now - q.ts) * 1000
+        return None, None, ltp, None
+
+    def _entry_resting(self, strategy: str, signal_id: str, symbol: str) -> Resting | None:
+        return next(
+            (r for r in self._resting.values() if r.kind == "entry" and r.intent.strategy == strategy
+             and (r.intent.signal_id == signal_id or r.ctx.sig.symbol == symbol)),
+            None,
+        )
+
+    def _pending_for(self, book: str, signal_ids: set[Any]) -> dict[str, Any] | None:
+        """The resting entry a card is waiting on: this book's own (the wide-stop shadow waits on
+        RT-Y's)."""
+        parents = {book, _MIRRORS.get(book, "")}
+        now = time.time()
+        for r in self._resting.values():
+            if r.kind == "entry" and r.intent.signal_id in signal_ids and r.intent.strategy in parents:
+                return r.audit(book=r.intent.strategy, restingS=round(now - r.placed_ts, 1),
+                               contract=r.intent.instrument.name or r.intent.instrument.scrip_code)
+        return None
+
+    def _exit_resting(self, position_id: str) -> Resting | None:
+        return next((r for r in self._resting.values() if r.kind == "exit" and r.intent.position_id == position_id), None)
+
+    def _target_resting(self, position_id: str) -> Resting | None:
+        return next((r for r in self._resting.values() if r.kind == "target" and r.intent.position_id == position_id), None)
+
+    # -- target sells placed in advance (exec/resting.py, risk/exits.py) --------------------------------
+
+    async def _ensure_resting_target(self, pos: Position, now: float) -> None:
+        """Keep the next rung's SELL resting for a book whose target is a touch: placed when the
+        position has none, replaced when its rung, price or size has moved on, cancelled when the
+        book no longer wants one. Never while another exit of the position is working."""
+        want = None
+        if (
+            self._limit_mode() and self.s.paper_limit_exits and self.limit_policy.rest_targets
+            and pos.status == "OPEN" and pos.qty_remaining > 0 and self.positions.get(pos.id) is pos
+            and pos.id not in self._exits_in_flight and self._exit_resting(pos.id) is None
+            and now >= self._exit_retry_at.get(pos.id, 0.0)
+        ):
+            want = self._exits_by_strategy.get(pos.strategy, self.exits).resting_target(pos)
+        cur = self._target_resting(pos.id)
+        if cur is not None:
+            if want is not None and (cur.ctx[1], cur.limit, cur.intent.qty) == want:
+                return
+            await self._cancel_resting_target(pos, now, "replaced — the ladder moved on" if want else "no target to rest")
+        if want is None:
+            return
+        rung, price, qty = want
+        ref = pos.exec_log.get("ref")
+        if ref:
+            k = int(pos.exec_log.get("tgtSeq", 0)) + 1
+            pos.exec_log["tgtSeq"] = k
+            cid = f"{ref}-T{rung + 1}V{k}-{_contract_tag(pos.instrument, pos.qty)}"
+        else:  # a position opened before readable ids
+            cid = f"{pos.id}|TGT|T{rung + 1}|{new_id('r')}"
+        intent = OrderIntent(
+            strategy=pos.strategy, instrument=pos.instrument, side=OrderSide.SELL, qty=qty, purpose=Purpose.EXIT,
+            signal_id=pos.signal_id, client_order_id=cid,
+            reason=f"T{rung + 1} {price:g} target sell, placed in advance", position_id=pos.id, ref_price=price, limit_price=price,
+        )
+        res = self.gateway.place_limit(intent)
+        if res.decision is not Decision.RESTING:
+            await self.ledger.insert_order(_order_json(res.order), res.decision.value)
+            log.warning("target.not_placed", position=pos.id, rung=rung + 1, reason=res.order.note)
+            return
+        bid, ask, _, _ = self._touch(pos.instrument.scrip_code, now)
+        r = Resting(intent=intent, kind="target", limit=price, placed_ts=now, deadline_s=0.0, signal_ts=pos.opened_ts, ref=price,
+                    why=f"T{rung + 1} sell placed in advance — fills on a touch", book_at_place=(bid, ask), last_check=now,
+                    ctx=(pos, rung))
+        r.order = res.order
+        self._resting[intent.client_order_id] = r
+        self._target_trail(pos, r, now, "placed")
+        await self.ledger.upsert_position(_position_json(pos))
+        log.info("limit.placed", kind="target", strategy=pos.strategy, symbol=pos.underlying.symbol, rung=rung + 1, limit=price, qty=qty)
+        await self._advance_one(r, now, first=True)
+
+    def _target_trail(self, pos: Position, r: Resting, now: float, outcome: str) -> None:
+        """The resting target's life on the position's order trail: placed, filled, cancelled (why)."""
+        trail = pos.exec_log.setdefault("targets", [])
+        trail.append({"rung": r.ctx[1] + 1, "limit": r.limit, "qty": r.intent.qty, "placedTs": r.placed_ts, "ts": now, "outcome": outcome})
+        del trail[:-20]
+
+    async def _cancel_resting_target(self, pos: Position, now: float, why: str) -> None:
+        """Take the resting target sell off before any other exit — never two SELLs for the same lots."""
+        r = self._target_resting(pos.id)
+        if r is None:
+            return
+        self._resting.pop(r.intent.client_order_id, None)  # before the first await: nothing can fill it now
+        bid, ask, _, _ = self._touch(pos.instrument.scrip_code, now)
+        res = self.gateway.cancel_resting(r.order, f"T{r.ctx[1] + 1} resting sell {r.limit:g} cancelled — {why}")
+        audit = r.audit(cancelledTs=now, cancelReason=why, bookAtCancel={"bid": bid, "ask": ask},
+                        waitS=round(now - r.placed_ts, 3), outcome="cancelled")
+        self._target_trail(pos, r, now, f"cancelled — {why}")
+        await self.ledger.insert_order(_order_json(res.order, audit), "TARGET_CANCELLED")
+        if pos.status == "OPEN":
+            await self.ledger.upsert_position(_position_json(pos))
+        log.info("target.cancelled", position=pos.id, rung=r.ctx[1] + 1, limit=r.limit, why=why)
+
+    async def _target_filled(self, r: Resting, now: float, price: float, bid: float | None, ask: float | None, age: float | None) -> None:
+        """A resting target sell was touched: booked as a TARGET exit with the same state changes the
+        exit engine's touch makes (risk/exits.py ``resting_target_filled``), then the next rung rests."""
+        pos, rung = r.ctx
+        if pos.id in self._exits_in_flight:
+            return  # another exit is being sent — it takes this order off the book itself
+        if pos.targets_hit != rung:
+            await self._cancel_resting_target(pos, now, "the ladder moved on")
+            return
+        self._resting.pop(r.intent.client_order_id, None)
+        self._exits_in_flight.add(pos.id)  # an operator SKIP arriving mid-booking stands down, as for any exit
+        try:
+            mid = (bid + ask) / 2 if bid and ask else None
+            result = self.gateway.fill_resting(r.order, r.intent, price=price, mid=mid, book_age_ms=age, now=now)
+            decision = self._exits_by_strategy.get(pos.strategy, self.exits).resting_target_filled(pos, now, result.fill.price, mid)
+            decision = replace(decision, qty=int(result.fill.qty))
+            audit = r.audit(filledTs=now, fillPrice=result.fill.price, bookAtFill={"bid": bid, "ask": ask},
+                            waitS=round(now - r.placed_ts, 3), outcome=f"T{rung + 1} resting limit filled")
+            self._target_trail(pos, r, now, "filled")
+            log.info("limit.filled", kind="target", strategy=pos.strategy, symbol=pos.underlying.symbol, rung=rung + 1,
+                     price=result.fill.price, qty=result.fill.qty)
+            await self.ledger.insert_order(_order_json(result.order, audit), result.decision.value)
+            await self._book_exit(pos, decision, result, now, self._exit_attempts.get(pos.id, 0), audit)
+        finally:
+            self._exits_in_flight.discard(pos.id)
+        if pos.status == "OPEN":
+            await self._ensure_resting_target(pos, now)  # the next rung, at once
+
+    def _market_audit(self, kind: str, signal_ts: float, placed_ts: float, result: Any, scrip_code: str) -> dict[str, Any]:
+        """The trail of an immediate fill (limit orders off, or a cross): when, at what, against which book."""
+        bid, ask, _, _ = self._touch(scrip_code, placed_ts)
+        fill = getattr(result, "fill", None)
+        return {
+            "kind": kind, "signalTs": signal_ts, "placedTs": placed_ts, "limit": None, "why": "market — walked the book",
+            "bookAtPlace": {"bid": bid, "ask": ask}, "reprices": [],
+            "filledTs": fill.ts if fill else None, "fillPrice": fill.price if fill else None,
+            "waitS": round(fill.ts - placed_ts, 3) if fill else None, "outcome": "filled" if fill else "not filled",
+        }
+
+    async def _place_entry_limit(self, intent: OrderIntent, plan: _EntryPlan) -> None:
+        """BUY LIMIT at the signal price if the book still straddles it, else at the mid — never
+        over the cap (the signal price + ``entry_cap_pct``)."""
+        now = time.time()
+        bid, ask, _, _ = self._touch(plan.inst.scrip_code, now)
+        tick = plan.inst.tick_size or 0.05
+        cap = entry_cap(plan.ref, self.limit_policy.entry_cap_pct, tick)
+        limit, why = entry_limit(plan.ref, bid, ask, tick, cap)
+        if limit is None:
+            limit, why = plan.ref, "at the signal price — no book to read"
+        intent = replace(intent, limit_price=limit)
+        res = self.gateway.place_limit(intent)
+        if res.decision is not Decision.RESTING:
+            if plan.wallet is not None:
+                plan.wallet.release(plan.outlay, now)
+            plan.released = True
+            plan.outcome = (res.decision.value, res.order.note or res.decision.value)
+            await self.ledger.insert_order(_order_json(res.order), res.decision.value)
+            if plan.owns_row:
+                await self.ledger.insert_signal(plan.sig.to_json(), res.decision.value, res.order.note or plan.sig.reason)
+            else:
+                await self._book_skip(plan.key, plan.sig, f"entry refused — {res.order.note or res.decision.value}", gate="order_refused")
+            return
+        r = Resting(intent=intent, kind="entry", limit=limit, placed_ts=now, deadline_s=self.limit_policy.entry_wait_s,
+                    signal_ts=plan.decided_at, ref=plan.ref, why=why, book_at_place=(bid, ask), last_check=now, ctx=plan)
+        r.order = res.order
+        self._resting[intent.client_order_id] = r
+        plan.outcome = ("RESTING", f"limit {limit:g} {why}")
+        if plan.owns_row:
+            await self.ledger.settle_signal(
+                plan.sig.to_json(), Decision.RESTING.value,
+                f"limit {limit:g} {why} (book {bid if bid else '—'}/{ask if ask else '—'})",
+            )
+        log.info("limit.placed", kind="entry", strategy=intent.strategy, symbol=plan.sig.symbol, limit=limit, ref=plan.ref,
+                 bid=bid, ask=ask, why=why)
+        await self._advance_one(r, now, first=True)
+
+    async def _advance_resting(self, now: float) -> None:
+        """Every resting limit, once per exit-loop tick: filled, repriced, crossed or cancelled."""
+        for r in list(self._resting.values()):
+            try:
+                await self._advance_one(r, now)
+            except Exception as exc:  # one order's fault must not stall the others
+                log.exception("limit.advance_failed", order=r.intent.client_order_id, error=str(exc))
+
+    async def _advance_one(self, r: Resting, now: float, *, first: bool = False) -> None:
+        key = r.intent.client_order_id
+        if self._resting.get(key) is not r:
+            return
+        code = r.intent.instrument.scrip_code
+        buy = r.intent.side is OrderSide.BUY
+        bid, ask, ltp, age = self._touch(code, now)
+        if r.kind == "target":
+            pos, _rung = r.ctx
+            if pos.status != "OPEN" or pos.qty_remaining <= 0 or self.positions.get(pos.id) is not pos:
+                await self._cancel_resting_target(pos, now, "the position is closed")
+            # a touch, on a book or quote fresh enough to trade on (age None = nothing fresh)
+            elif age is not None and touch_fills(r.limit, bid, ltp):
+                await self._target_filled(r, now, max(r.limit, bid) if (first and bid) else r.limit, bid, ask, age)
+            return
+        if r.kind == "entry":
+            # Before any fill: an entry whose book (or the engine) has halted, or whose stop the
+            # underlying is already through, is cancelled — never filled (audit, 2026-09-26: a
+            # book halted while its entry rested still bought; SBILIFE bought through its stop).
+            plan: _EntryPlan = r.ctx
+            halted, why = self.halted()
+            if not halted and plan.wallet is not None and plan.wallet.halted:
+                halted, why = True, f"{BOOK_LABELS.get(plan.key, plan.key)} halted — {plan.wallet.halt_reason}"
+            if not halted and self.gateway.book_tripped(plan.key):
+                halted, why = True, f"{BOOK_LABELS.get(plan.key, plan.key)}'s order breaker is tripped"
+            dead = self._stop_breached(plan.sig, plan.underlying)
+            if halted or dead:
+                await self._entry_missed(r, now, bid, ask, dead or why)
+                return
+        # only a print the order has not seen yet is a trade through it; a stale last price is not
+        fresh_ltp = ltp if (not first and ltp is not None and ltp != r.ltp_seen) else None
+        r.ltp_seen = ltp
+        if fills(buy, r.limit, bid, ask, fresh_ltp):
+            # at placement a marketable limit takes the touch (price improvement); resting, it fills at its own price
+            price = r.limit
+            if first and buy and ask and ask < r.limit:
+                price = ask
+            elif first and not buy and bid and bid > r.limit:
+                price = bid
+            self._resting.pop(key, None)
+            mid = (bid + ask) / 2 if bid and ask else None
+            result = self.gateway.fill_resting(r.order, r.intent, price=price, mid=mid, book_age_ms=age, now=now)
+            audit = r.audit(filledTs=now, fillPrice=result.fill.price, bookAtFill={"bid": bid, "ask": ask},
+                            waitS=round(now - r.placed_ts, 3), outcome="filled at the limit")
+            log.info("limit.filled", kind=r.kind, strategy=r.intent.strategy, symbol=r.intent.instrument.symbol,
+                     price=result.fill.price, wait_s=round(now - r.placed_ts, 1))
+            if r.kind == "entry":
+                await self._entry_filled(r, result, audit)
+            else:
+                await self._exit_filled(r, result, audit)
+            return
+        elapsed = now - r.placed_ts
+        tick = r.intent.instrument.tick_size or 0.05
+        if r.kind == "entry":
+            pol = self.limit_policy
+            cap = entry_cap(r.ref, pol.entry_cap_pct, tick)
+            if (pol.entry_race_pct is not None and not r.race_checked and elapsed >= pol.entry_race_check_s
+                    and elapsed < r.deadline_s):
+                # the one look: the OPTION racing ahead on its signal price takes the ask, under the cap
+                r.race_checked = True
+                run = option_run_pct(r.ref, bid, ask, ltp)
+                go, note = race_call(run, ask, cap, pol)
+                r.momentum.append({"atS": round(elapsed, 1), "runPct": round(run, 2) if run is not None else None, "note": note})
+                if go and ask:
+                    log.info("limit.momentum", strategy=r.intent.strategy, symbol=r.intent.instrument.symbol, run_pct=run,
+                             ask=ask, ref=r.ref, cap=cap)
+                    await self._entry_take_ask(r, now, bid, ask, age, f"crossed at the ask after {elapsed:.0f} s — {note}")
+                    return
+            if (pol.entry_cross_after_hold and elapsed >= pol.entry_hold_s and elapsed < r.deadline_s
+                    and ask and ask > 0 and (cap is None or ask <= cap)):
+                # "fill order at the least price within 3% cap as soon as possible": the ask is the
+                # lowest price it can be bought at now, and it is within the cap
+                run = option_run_pct(r.ref, bid, ask, ltp)
+                ran = f", the option {run:+.1f}% on its signal price" if run is not None else ""
+                log.info("limit.crossed_after_hold", strategy=r.intent.strategy, symbol=r.intent.instrument.symbol, ask=ask, ref=r.ref, cap=cap)
+                await self._entry_take_ask(r, now, bid, ask, age,
+                                           f"crossed at the ask {ask:g} after {elapsed:.0f} s — within the cap {cap if cap is not None else '—'}{ran}")
+                return
+            if elapsed >= r.deadline_s:
+                chase = pol.entry_chase_pct
+                if chase is not None and ask and r.ref and ask <= r.ref * (1 + chase / 100) and (cap is None or ask <= cap):
+                    # not filled at the limit, but the market is still within `chase`% of the signal
+                    # price: take the ask rather than lose the trigger (the misses were the winners)
+                    log.info("limit.chased", strategy=r.intent.strategy, symbol=r.intent.instrument.symbol, ask=ask, ref=r.ref)
+                    await self._entry_take_ask(r, now, bid, ask, age,
+                                               f"crossed at the ask after {r.deadline_s:g} s (within {chase:g}% of the signal price)")
+                    return
+                run = option_run_pct(r.ref, bid, ask, ltp)
+                ran = f" — the option {run:+.1f}% on its signal price" if run is not None else ""
+                await self._entry_missed(r, now, bid, ask, f"limit not filled in {r.deadline_s:g} s{ran}")
+                return
+            if elapsed >= pol.entry_hold_s and not pol.entry_cross_after_hold and now - r.last_check >= pol.entry_recheck_s:
+                # after the hold, a signal price that has left the book is followed to the mid — under the
+                # cap. Not when crossing after the hold: a limit raised to the cap would fill AT the cap
+                # when the ask dips under it, where taking the ask pays the lower price
+                r.last_check = now
+                if bid and ask and r.ref is not None and not (bid <= r.ref <= ask):
+                    new, _ = entry_limit(r.ref, bid, ask, tick, cap)
+                    if new is not None and new != r.limit:
+                        r.limit = new
+                        r.intent = replace(r.intent, limit_price=new)
+                        r.reprices.append((now, new))
+            return
+        if elapsed >= r.deadline_s:
+            await self._exit_cross(r, now, bid, ask)
+            return
+        if now - r.last_check >= self.limit_policy.exit_reprice_s:
+            r.last_check = now
+            new = exit_limit(bid, ask, elapsed, r.deadline_s, tick)
+            if new is not None and new != r.limit:
+                r.limit = new
+                r.intent = replace(r.intent, limit_price=new)
+                r.reprices.append((now, new))
+
+    async def _entry_take_ask(self, r: Resting, now: float, bid: float | None, ask: float, age: float | None, outcome: str) -> None:
+        """An unfilled entry buys the ask — the race or the chase rule's call."""
+        self._resting.pop(r.intent.client_order_id, None)
+        mid = (bid + ask) / 2 if bid and ask else None
+        result = self.gateway.fill_resting(r.order, r.intent, price=ask, mid=mid, book_age_ms=age, now=now)
+        audit = r.audit(filledTs=now, fillPrice=result.fill.price, bookAtFill={"bid": bid, "ask": ask},
+                        waitS=round(now - r.placed_ts, 3), outcome=outcome)
+        await self._entry_filled(r, result, audit)
+
+    async def _entry_filled(self, r: Resting, result: Any, audit: dict[str, Any]) -> None:
+        plan: _EntryPlan = r.ctx
+        plan.outcome = (result.decision.value, f"{result.fill.qty} @ {result.fill.price:g}")
+        # the position first, in memory: a ledger error after it cannot lose a fill (audit, 2026-09-26)
+        await self._book_entry(plan, result, audit)
+        try:
+            await self.ledger.insert_order(_order_json(result.order, audit), result.decision.value)
+            if plan.owns_row:
+                await self.ledger.settle_signal(plan.sig.to_json(), result.decision.value, plan.sig.reason)
+        except Exception as exc:
+            log.exception("entry.record_failed", book=plan.key, symbol=plan.sig.symbol, error=str(exc))
+
+    async def _entry_missed(self, r: Resting, now: float, bid: float | None, ask: float | None, why: str) -> None:
+        """No fill: the book's trigger is recorded as missed, with the book it was missed in."""
+        self._resting.pop(r.intent.client_order_id, None)
+        plan: _EntryPlan = r.ctx
+        if plan.wallet is not None:
+            plan.wallet.release(plan.outlay, now)
+        plan.released = True
+        note = f"{why} — limit {r.limit:g}, book {bid if bid else '—'}/{ask if ask else '—'} at cancel"
+        plan.outcome = (Decision.LIMIT_UNFILLED.value, note)
+        res = self.gateway.cancel_resting(r.order, note)
+        audit = r.audit(cancelledTs=now, cancelReason=why, bookAtCancel={"bid": bid, "ask": ask},
+                        waitS=round(now - r.placed_ts, 3), outcome="missed")
+        await self.ledger.insert_order(_order_json(res.order, audit), res.decision.value)
+        if plan.owns_row:
+            await self.ledger.settle_signal(plan.sig.to_json(), res.decision.value, note)
+        else:
+            await self._book_skip(plan.key, plan.sig, f"entry missed — {note}", gate="missed")
+        await self.ledger.event("limit.missed", {"signal_id": plan.sig.signal_id, "symbol": plan.sig.symbol,
+                                                 "book": r.intent.strategy, "limit": r.limit, "ref": r.ref, "why": why,
+                                                 "bid": bid, "ask": ask, "wait_s": round(now - r.placed_ts, 3)})
+        log.info("limit.missed", strategy=r.intent.strategy, symbol=plan.sig.symbol, limit=r.limit, why=why)
 
     async def _load_leg_pivots(self, groups: Any) -> None:
         """Previous-session pivots for the future and eight OTM strikes of every F&O name.
@@ -1277,99 +2539,191 @@ class Engine:
             legs.extend(otm_legs(chain=chain, spot=spot))
         return legs
 
-    async def _open_rt_twin(self, pos: Position, inst: Instrument, result: Any) -> None:
-        """Mirror a FUDKII entry into FUDKII_RT_X so only the exit policy differs.
+    def market_breadth(self, direction: Direction, at_ts: int | None = None) -> dict[str, Any]:
+        """Does the market agree with the breakout? The share of the NSE universe (indices
+        included, as in the replay) trading beyond its own day open in ``direction``: each name's
+        live price — its latest 30m close before any tick — against the open of its first 30m
+        bar today. A bearish name is one at or below its open. ``share`` is None when fewer than
+        20 names have a bar today (a gate reading None never blocks)."""
+        start = session_open_ts(Segment.NSE_EQ, ist_today())
+        agree = n = 0
+        mkt_t: list[float] = []
+        mkt_t1: list[float] = []
+        for sym, und in self.underlyings.items():
+            if und.segment is Segment.MCX_FO:
+                continue
+            recent = self.store.bars(sym, DECISION_TF, 16)
+            if at_ts is not None and recent and int(recent[-1].ts) == int(at_ts):
+                # the market's own volume at the trigger's bar: is the whole tape quiet, or this stock?
+                v_t, v_t1, _ = volume_surges(self._continuous_volumes(sym, recent)[-14:], window=6, floor=1000.0)
+                if v_t and v_t1:
+                    mkt_t.append(v_t)
+                    mkt_t1.append(v_t1)
+            today = [b for b in recent if b.ts >= start]
+            forming = self.store.forming(sym, DECISION_TF)
+            if forming is not None and forming.ts >= start and (not today or forming.ts > today[-1].ts):
+                today.append(forming)
+            if not today:
+                continue
+            px = self.ltps.get(und.scrip_code) or today[-1].close
+            n += 1
+            agree += (px > today[0].open) if direction is Direction.BULLISH else (px <= today[0].open)
+        out: dict[str, Any] = {"share": round(agree / n, 3) if n >= 20 else None, "agree": agree, "names": n, "direction": direction.value, "ts": time.time()}
+        if len(mkt_t) >= 20:
+            out["mktSurgeT"] = round(statistics.median(mkt_t), 3)
+            out["mktSurgeT1"] = round(statistics.median(mkt_t1), 3)
+        return out
 
-        Same contract, same quantity, same fill price and the same instant. If the entries differed
-        by even a tick the two equity curves would be comparing entries as well as exits, and the
-        question being asked — does the RT exit policy do better — would no longer have a clean
-        answer. The fill is *copied*, not re-matched: re-running the matcher would walk the ask
-        ladder a second time and produce a different price for a trade that never happened twice.
-        """
-        # Commodities and equities keep separate purses: one CRUDEOIL lot is a different size of
-        # bet from one BLUESTARCO lot, and a shared wallet would let whichever fired first decide
-        # what the other could afford. NSE fills are mirrored into all three RT books; a
-        # counter-trend fade entered by CT-X is mirrored into CT-Y.
-        mcx = pos.underlying.segment is Segment.MCX_FO
-        keys = {
-            StrategyKey.FUDKII.value: [StrategyKey.FUDKII_RT_MCX] if mcx else [StrategyKey.FUDKII_RT_X, StrategyKey.FUDKII_RT_N, StrategyKey.FUDKII_RT_Y],
-            StrategyKey.FUDKII_CT_X.value: [] if mcx else [StrategyKey.FUDKII_CT_Y],
-        }.get(pos.strategy, [])
-        if not keys:
+    def trigger_context(self, sig: Signal) -> dict[str, Any]:
+        """Labels stamped on every trigger for the paper A/B — logged, not gated (operator,
+        2026-09-26). Each is what the Sep 1–25 replay measured, the same way:
+
+        * ``efficiency`` — net move over the last 8 closed 30m bars / the path travelled, signed
+          the trade's way (1 = a straight line, ~0 = chop). Inconsistent across halves: a label.
+        * ``volBand`` — the MCX own-volatility logic on the stock's daily ATR% (vs its 20-session
+          median). No band separated winners from losers in Sep: a label.
+        * ``gapDatr`` — today's first 30m open against the previous close, in daily ATRs, signed
+          the trade's way. 09:45 triggers gapping WITH the trade (>= 0.3) averaged −2.0 % / −5.7 %
+          in the two halves, against −0.7 % / −1.3 % without.
+        * ``pivotsAhead`` — classic 1d/1wk/1mo key levels within 0.5 ATR30 AHEAD of the close.
+          Trades with one averaged −1.5 % / −1.6 % against +0.1 % / +1.0 % without.
+        * ``openBar`` — the trigger is the session's first 30m bar (fires at 09:45)."""
+        sign = 1 if sig.direction is Direction.BULLISH else -1
+        out: dict[str, Any] = {}
+        bars = [b for b in self.store.bars(sig.symbol, DECISION_TF, 40) if b.ts <= sig.ts][-8:]
+        if len(bars) >= 3:
+            path = abs(bars[0].close - bars[0].open) + sum(abs(b.close - a.close) for a, b in pairwise(bars))
+            out["efficiency"] = round(sign * (bars[-1].close - bars[0].open) / path, 3) if path > 0 else 0.0
+        und = self.underlyings.get(sig.symbol)
+        seg = und.segment if und else Segment.NSE_EQ
+        reg = regime_for_commodity(self._atr_pct_history(sig.symbol))
+        out["volBand"] = reg.band.value if reg.source == "realised" else None
+        today = ist_today()
+        start = session_open_ts(seg, today)
+        out["openBar"] = int(sig.ts) == int(start)
+        recent = self.store.bars(sig.symbol, DECISION_TF, 16)
+        if recent and int(recent[-1].ts) == int(sig.ts):
+            v_t, v_t1, _ = volume_surges(self._continuous_volumes(sig.symbol, recent)[-14:], window=6, floor=1000.0)
+            if v_t is not None and v_t1 is not None:
+                out["volSurgeT"], out["volSurgeT1"] = round(v_t, 3), round(v_t1, 3)
+        dailies = list(self.store.bars(sig.symbol, "1d", 40))
+        prev = previous_session(dailies, today)
+        first = next((b for b in self.store.bars(sig.symbol, DECISION_TF, 20) if b.ts >= start), None)
+        datr = atr([b for b in dailies if b.ts <= prev.ts], 14) if prev is not None else None
+        if prev is not None and first is not None and datr:
+            out["gapDatr"] = round(sign * (first.open - prev.close) / datr, 3)
+        atr30 = atr(self.store.bars(sig.symbol, DECISION_TF, 60), 14) or 0.0
+        if atr30 > 0:
+            ahead = sorted(
+                (
+                    # 4 dp: a gate compares against its reach, and a level at 0.503 ATR rounded to
+                    # 0.50 was read as "within 0.5" (GAIL, ADANIENT in the 19-25 Sep parity check)
+                    (p.label, round(sign * (p.price - sig.entry) / atr30, 4))
+                    for p in self._pivot_points(sig.symbol)
+                    if p.label.split(".", 1)[-1] in KEY_LEVELS and 0 <= sign * (p.price - sig.entry) <= PIVOT_SCAN_ATR * atr30
+                ),
+                key=lambda x: x[1],
+            )
+            out["pivotsAhead"] = [f"{lab} +{round(d, 2):g} ATR" for lab, d in ahead if d <= PIVOT_AHEAD_ATR]
+            out["pivotsAheadAtr"] = [[lab, d] for lab, d in ahead]  # what a gate with its own reach reads
+            out["atr30"] = round(atr30, 4)
+        return out
+
+    def _trigger_ctx_for(self, pos: Position) -> dict[str, Any]:
+        return self._trigger_ctx(pos.signal_id, pos.direction)
+
+    def _trigger_ctx(self, signal_id: str, direction: Direction) -> dict[str, Any]:
+        """The context the trigger was logged with; failing that (an operator take on the parent),
+        measured now from the day's signal; failing that, breadth alone — and a measure that
+        cannot be taken never blocks."""
+        ctx = self._breadth_at.get(signal_id)
+        if ctx is not None:
+            return ctx
+        sig = self._signals_today.get(signal_id)
+        ctx = self.market_breadth(direction)
+        if sig is not None:
+            try:
+                ctx.update(self.trigger_context(sig))
+            except Exception as exc:  # noqa: BLE001 — a gate that cannot measure does not block
+                log.warning("regime.context_failed", symbol=sig.symbol, error=str(exc)[:120])
+        return ctx
+
+    async def _log_breadth(self, sig: Signal) -> None:
+        """Breadth at every FUDKII trigger, taken or not — the paper A/B's record: the RT-Y gate
+        reads it, and the gated-out triggers' RT-X / RT-N results say what the gate saved or cost."""
+        if sig.strategy is not StrategyKey.FUDKII or sig.signal_id in self._breadth_at:
             return
-        cost = pos.entry * pos.qty * inst.multiplier
-        opened = 0
-        vol = (
-            await self._volume_surges(pos.underlying)
-            if any(self._exits_by_strategy[k.value].limits.dried_volume_v for k in keys)
-            else None
-        )
-        for twin_key in keys:
-            if not self.book_trades(twin_key.value, pos.underlying.segment):
-                log.warning(
-                    "rt_twin.wrong_segment",
-                    book=twin_key.value,
-                    symbol=pos.underlying.symbol,
-                    segment=pos.underlying.segment.value,
-                )
+        und = self.underlyings.get(sig.symbol)
+        if und is None or und.segment is Segment.MCX_FO:
+            return
+        try:
+            br = self.market_breadth(sig.direction, at_ts=int(sig.ts))
+        except Exception as exc:  # noqa: BLE001 — a measurement never costs a trigger its entry
+            log.warning("regime.breadth_failed", symbol=sig.symbol, error=str(exc)[:120])
+            return
+        try:
+            br.update(self.trigger_context(sig))
+            br.update(volume_labels(br))
+        except Exception as exc:  # noqa: BLE001 — descriptive labels never cost a trigger its entry
+            log.warning("regime.context_failed", symbol=sig.symbol, error=str(exc)[:120])
+        self._breadth_at[sig.signal_id] = br
+        log.info("regime.breadth", symbol=sig.symbol, direction=sig.direction.value, share=br["share"], names=br["names"])
+        await self.ledger.event("regime.breadth", {"signal_id": sig.signal_id, "symbol": sig.symbol, **br})
+
+    async def _open_shadow_twins(self, of: Position, inst: Instrument, ts: float, charges: float) -> None:
+        """Mirror a book's fresh entry into each book that shadows it (``SHADOW_OF``): the same
+        contract, size, price, instant and ladder, one rule changed. The wide-stop shadow moves the
+        equity stop ``equity_stop_buffer_pct`` further from entry and re-projects the option stop
+        for it — at entry here, and every ``reproject_stop_s`` after, as RT-Y's own stop is."""
+        for shadow_key, source in SHADOW_OF.items():
+            if source.value != of.strategy:
                 continue
-            engine_for = self._exits_by_strategy[twin_key.value]
-            lim_v = engine_for.limits.dried_volume_v
-            if lim_v and vol:
-                dry = [leg for leg, (s_t, s_t1) in vol.items() if dried_volume(s_t, s_t1, v=lim_v)]
-                if dry:
-                    why = "dried volume " + ", ".join(f"{leg} {vol[leg][0]:.2f}/{vol[leg][1]:.2f}" for leg in dry) + f" < {lim_v}"
-                    log.info("rt_twin.skipped", book=twin_key.value, symbol=pos.underlying.symbol, reason=why)
-                    self.alerts.mark_skipped(pos.signal_id, book=twin_key.value, reason=why)
-                    await self.ledger.event("rt_twin.skipped", {"book": twin_key.value, "signal_id": pos.signal_id, "symbol": pos.underlying.symbol, "reason": why})
-                    continue
-            twin_wallet = self.wallets.get(twin_key.value)
-            if twin_wallet is None or twin_wallet.halted:
+            engine_for = self._exits_by_strategy[shadow_key.value]
+            wallet = self.wallets.get(shadow_key.value)
+            cost = of.entry * of.qty * inst.multiplier
+            if wallet is None:
                 continue
-            if twin_wallet.available < cost:
-                log.info("rt_twin.skipped", book=twin_key.value, symbol=pos.underlying.symbol, reason="wallet")
-                await self.ledger.event("rt_twin.skipped", {"book": twin_key.value, "signal_id": pos.signal_id, "symbol": pos.underlying.symbol, "reason": f"wallet: {twin_wallet.available:,.0f} available < {cost:,.0f}"})
+            if wallet.halted:
+                await self.ledger.event("rt_twin.skipped", {"book": shadow_key.value, "signal_id": of.signal_id, "symbol": of.underlying.symbol, "reason": f"halted — {wallet.halt_reason}"})
                 continue
-            verdict = self._exposure_by_strategy[twin_key.value].check(
-                strategy=twin_key.value,
-                underlying=pos.underlying.symbol,
-                outlay=cost,
-                positions=list(self.positions.values()),
-                total_capital=twin_wallet.balance,  # each book is checked against its own purse
+            if wallet.available < cost:
+                await self.ledger.event("rt_twin.skipped", {"book": shadow_key.value, "signal_id": of.signal_id, "symbol": of.underlying.symbol, "reason": f"wallet: {wallet.available:,.0f} available < {cost:,.0f}"})
+                continue
+            verdict = self._exposure_by_strategy[shadow_key.value].check(
+                strategy=shadow_key.value, underlying=of.underlying.symbol, outlay=cost,
+                positions=list(self.positions.values()), total_capital=wallet.balance,
             )
             if not verdict.allowed:
-                log.info("rt_twin.skipped", book=twin_key.value, symbol=pos.underlying.symbol, reason=verdict.reason)
-                await self.ledger.event("rt_twin.skipped", {"book": twin_key.value, "signal_id": pos.signal_id, "symbol": pos.underlying.symbol, "reason": f"exposure: {verdict.reason}"})
+                await self.ledger.event("rt_twin.skipped", {"book": shadow_key.value, "signal_id": of.signal_id, "symbol": of.underlying.symbol, "reason": f"exposure: {verdict.reason}"})
                 continue
-            twin = replace(
-                pos,
-                id=new_id("pos"),
-                strategy=twin_key.value,
-                note=f"{pos.note} · RT exit policy, twin of {pos.id}",
-                targets_hit=0, ratchet_sl=0.0, armed_by="", armed_ts=None, sustained_idx=-1,
-                t_touch_ts=None, t_close_ok=False, line_breach_since=None, peak_mid=0.0, trail_dwell=0,
+            # its own order ref: its exits are its own orders, never the source's ids
+            shadow = replace(of, id=new_id("pos"), strategy=shadow_key.value, note=f"{of.note} · shadow of {of.id}",
+                             exec_log={"entry": dict(of.exec_log.get("entry") or {}), "exits": [],
+                                       "ref": self._order_ref(shadow_key.value, ts)})
+            self._widen_stop(shadow, engine_for.limits)
+            self.positions[shadow.id] = shadow
+            self._commit_outlay(wallet, cost, ts, shadow)
+            wallet.apply_charges(charges, ts)
+            await self.ledger.upsert_position(_position_json(shadow))
+            await self.ledger.upsert_wallet(wallet.strategy, wallet.to_json())
+            log.info("shadow.open", book=shadow_key.value, shadow=shadow.id, of=of.id, symbol=of.underlying.symbol,
+                     equity_sl=shadow.equity_sl, option_sl=shadow.option_sl)
+
+    def _widen_stop(self, pos: Position, lim: RiskLimits) -> None:
+        """``equity_stop_buffer_pct`` further from entry on the underlying (a bullish trade's stop
+        × 0.99 at 1 %, a bearish one's × 1.01), and the option stop projected through the delta at
+        entry for that wider level, floored as the book's own is."""
+        buf = lim.equity_stop_buffer_pct
+        if not buf or pos.equity_sl <= 0:
+            return
+        k = buf / 100
+        pos.equity_sl = round(pos.equity_sl * (1 - k) if pos.direction is Direction.BULLISH else pos.equity_sl * (1 + k), 2)
+        if pos.instrument.is_option and pos.equity_entry > 0:
+            delta = estimate_delta(spot=pos.equity_entry, strike=pos.instrument.strike, option_type=pos.instrument.option_type)
+            option_sl, _ = map_levels_to_option(
+                equity_entry=pos.equity_entry, equity_stop=pos.equity_sl, equity_targets=(), option_premium=pos.entry, delta=delta,
             )
-            lim = engine_for.limits
-            if lim.own_ladder:
-                self._stamp_own_ladder(twin, inst, lim, pos.underlying.symbol)
-            self.positions[twin.id] = twin
-            self._commit_outlay(twin_wallet, cost, result.fill.ts, twin)
-            twin_wallet.apply_charges(result.fill.charges, result.fill.ts)
-            await self.ledger.upsert_position(_position_json(twin))
-            await self.ledger.upsert_wallet(twin_wallet.strategy, twin_wallet.to_json())
-            log.info(
-                "rt_twin.open",
-                book=twin_key.value,
-                twin=twin.id,
-                of=pos.id,
-                symbol=pos.underlying.symbol,
-                qty=twin.qty,
-                entry=twin.entry,
-                targets=list(twin.option_targets),
-            )
-            opened += 1
-        if opened:
-            self.alerts.mark_entered(pos.signal_id, ts=result.fill.ts, price=pos.entry, qty=pos.qty)
+            pos.option_sl = self.floored_option_stop(StrategyKey(pos.strategy), pos.entry, option_sl, pos.instrument.tick_size)
 
     # -- the trigger-card page ----------------------------------------------------------------------
 
@@ -1400,6 +2754,9 @@ class Engine:
             key=lambda x: x["ts"],
         )
         by_source = {sgn["source_signal_id"]: sgn for sgn in latest.values() if sgn.get("source_signal_id") and sgn["strategy"] == StrategyKey.FUDKII_CT_X.value}
+        #: an entry a book made on a trigger under its OWN id — RT-MCX's routed commodity trigger, an
+        #: operator take — found through the trigger it came from
+        own_by_source = {(sgn["strategy"], sgn["source_signal_id"]): sgn for sgn in latest.values() if sgn.get("source_signal_id")}
         pos_by_key = {(ps["strategy"], ps["signal_id"]): ps for ps in positions}
         trades_by_pos = {t["position_id"]: t for t in trades}
         exits_by_pos: dict[str, list[dict[str, Any]]] = {}
@@ -1419,17 +2776,59 @@ class Engine:
             if a.get("kind") == "ENTRY"
         }
         counter_books = {StrategyKey.FUDKII_CT_X.value, StrategyKey.FUDKII_CT_Y.value}
+        nse_books = (
+            StrategyKey.FUDKII.value, StrategyKey.FUDKII_RT_X.value, StrategyKey.FUDKII_RT_N.value, StrategyKey.FUDKII_RT_Y.value,
+            StrategyKey.FUDKII_CT_X.value, StrategyKey.FUDKII_CT_Y.value,
+        )
+
+        def position_on(b: str, sid: str, fade: dict[str, Any] | None) -> dict[str, Any] | None:
+            """Book ``b``'s position on the trigger ``sid``, resolved the way the card resolves its
+            own: a fade book by the fade's id, an in-trend book by the trigger's id or by its own
+            entry that names the trigger as its source (RT-MCX's routed entry, an operator take)."""
+            if b in counter_books:
+                gap_b = own_by_source.get((StrategyKey.FUDKII_CT_Y.value, sid)) if b == StrategyKey.FUDKII_CT_Y.value else None
+                if gap_b is not None:  # CT-Y's own 09:45 gap fade on this trigger
+                    return pos_by_key.get((b, gap_b["signal_id"]))
+                return pos_by_key.get((b, fade["signal_id"])) if fade else None
+            hit = pos_by_key.get((b, sid))
+            if hit is None and (own_b := own_by_source.get((b, sid))) is not None:
+                hit = pos_by_key.get((b, own_b["signal_id"]))
+            return hit
+
+        def book_row(b: str, hit: dict[str, Any] | None) -> dict[str, Any]:
+            inst_j = (hit or {}).get("instrument") or {}
+            if inst_j.get("option_type") in ("CE", "PE"):
+                b_side = inst_j["option_type"]
+            elif hit is not None:
+                b_side = "LONG" if hit.get("direction") == "BULLISH" else "SHORT"
+            else:
+                b_side = None
+            closed = hit is not None and hit.get("status") != "OPEN"
+            trade = trades_by_pos.get(hit["id"]) if closed else None
+            return {
+                "book": b, "label": BOOK_LABELS.get(b, b),
+                "status": "NONE" if hit is None else ("EXITED" if closed else "OPEN"),
+                "side": b_side, "openedTs": (hit or {}).get("opened_ts"), "closedTs": (hit or {}).get("closed_ts") if closed else None,
+                "exitReason": (hit or {}).get("exit_reason") if closed else None,
+                "pnl": (trade or {}).get("net") if closed else None,
+            }
+
         cards = []
         for sgn in parents:
             sid = sgn["signal_id"]
             evs = ev_by_sig.get(sid, [])
             route = next((e for e in reversed(evs) if e.get("kind") == "counter.route"), None)
-            fade = by_source.get(sid)
+            fade_x = by_source.get(sid)  # CT-X's fade (mirrored into CT-Y unless CT-Y gap-faded)
+            gap_fade = own_by_source.get((StrategyKey.FUDKII_CT_Y.value, sid))
+            fade = gap_fade if (key is StrategyKey.FUDKII_CT_Y and gap_fade is not None) else fade_x
             fade_evs = ev_by_sig.get(fade["signal_id"], []) if fade else []
             skip = next((e for e in reversed(evs + fade_evs) if e.get("kind") == "rt_twin.skipped" and e.get("book") == book), None)
             operator = [e for e in evs + fade_evs if str(e.get("kind", "")).startswith("operator.") and e.get("book") == book]
             entry_sig = fade if key.value in counter_books else sgn
             ps = pos_by_key.get((book, entry_sig["signal_id"])) if entry_sig else None
+            own = own_by_source.get((book, sid)) if key.value not in counter_books else None
+            if ps is None and own is not None:
+                ps = pos_by_key.get((book, own["signal_id"]))
             live = None
             if ps and ps.get("status") == "OPEN" and ps["id"] in self.positions:
                 lp = self.positions[ps["id"]]
@@ -1443,10 +2842,20 @@ class Engine:
                     "unrealised": round((mid - lp.entry) * lp.qty_remaining * lp.instrument.multiplier, 2) if mid else None,
                     "realised": round(realised * lp.instrument.multiplier, 2),
                 }
+            # the books whose decision is the signal row itself; every other book records its own
+            # (a skip with its reason, or its own resting entry) since each places its own order
+            owns_row = key in (StrategyKey.FUDKII, StrategyKey.FUDKII_CT_X) or (key is StrategyKey.FUDKII_CT_Y and gap_fade is not None)
+            pending = self._pending_for(book, {sid, (entry_sig or {}).get("signal_id"), (own or {}).get("signal_id")}) if ps is None else None
             if ps:
                 state = "OPEN" if ps.get("status") == "OPEN" else "TRADED"
+            elif pending is not None:
+                state = "PENDING"
+            elif skip is not None and not owns_row:
+                state = "SKIPPED"
             elif key is StrategyKey.FUDKII:
                 state = sgn.get("decision") or "UNKNOWN"
+            elif key is StrategyKey.FUDKII_CT_Y and gap_fade is not None:
+                state = gap_fade.get("decision") or "UNKNOWN"
             elif key.value in counter_books:
                 if route is None:
                     state = "NO_ROUTE"
@@ -1458,22 +2867,47 @@ class Engine:
                     state = fade.get("decision") or "UNKNOWN"
             elif skip is not None:
                 state = "SKIPPED"
+            elif own is not None:
+                state = own.get("decision") or "UNKNOWN"
             elif str(sgn.get("decision", "")).endswith("FILLED"):
                 state = "NOT_MIRRORED"
+            elif sgn.get("decision") in _RESTING_DECISIONS:
+                state = "PENDING"  # the parent's (or the halted parent's twin-feed) limit is still working
             else:
                 state = "NO_FILL"
+            if state in _RESTING_DECISIONS:
+                state = "PENDING"
             # the trigger bar and the underlying's path since, for the sparkline
             bars30 = self.store.bars(sgn["symbol"], DECISION_TF, 80)
             candle = next(({"o": b.open, "h": b.high, "l": b.low, "c": b.close, "v": b.volume} for b in bars30 if int(b.ts) == int(sgn["ts"])), None)
-            s_t, s_t1, base = volume_surges([b.volume for b in bars30 if b.ts <= sgn["ts"]], window=6, floor=1000.0)
+            s_t, s_t1, base = volume_surges(self._continuous_volumes(sgn["symbol"], [b for b in bars30 if b.ts <= sgn["ts"]]), window=6, floor=1000.0)
             m1 = [b for b in self.store.bars(sgn["symbol"], "1m", 400) if b.ts >= sgn["ts"] - 1800]
             step = max(1, len(m1) // 120)
             spark = [[int(b.ts), b.close] for b in m1[::step]]
-            ctx = sgn.get("context") or {}
+            # What the card describes: a fade book with a fade shows the FADE's direction, levels,
+            # zones and plan; everything else shows the trigger. (NAM-INDIA, 2026-09-25: the CT-Y
+            # card showed the bullish trigger's CE, stop and targets although CT-Y's trade is a PE.)
+            vs = fade if (key.value in counter_books and fade is not None) else sgn
+            ctx = vs.get("context") or {}
             conf = ctx.get("confluence") or {}
             pros, cons = [], []
             if s_t and s_t >= 2.5:
                 pros.append(f"volume surge {s_t:.1f}×")
+            breadth = next((e for e in reversed(evs) if e.get("kind") == "regime.breadth"), None)
+            b_share = (breadth or {}).get("share")
+            if b_share is not None:
+                # the share agreeing with the TRIGGER; a fade book reads the other side of it
+                agree = (1 - b_share) if (key.value in counter_books and fade is not None) else b_share
+                (pros if agree > 0.5 else cons).append(f"breadth {agree:.0%} of {breadth.get('names')} names agree")
+            if breadth and not (key.value in counter_books and fade is not None):
+                # the two trigger labels that held up in both halves of the Sep replay (see
+                # trigger_context); for a fade card they describe the other side, so not shown there
+                ahead = breadth.get("pivotsAhead") or []
+                if ahead:
+                    cons.append("pivot just ahead: " + ", ".join(ahead[:3]))
+                gap = breadth.get("gapDatr")
+                if breadth.get("openBar") and gap is not None and gap >= 0.3:
+                    cons.append(f"09:45 gap with the trade: {gap:.2f} daily ATR")
             reads = (route or {}).get("reads") or []
             if any(r.get("volume") == "dried" for r in reads):
                 cons.append("dried volume on " + "/".join(r["leg"] for r in reads if r.get("volume") == "dried"))
@@ -1486,23 +2920,26 @@ class Engine:
                 pros.append(f"room {room:.1f} ATR")
             elif 0 < room < 0.5:
                 cons.append(f"no room ({room:.2f} ATR)")
-            stop_pct = abs(float(sgn["entry"]) - float(sgn["stop"])) / float(sgn["entry"]) * 100 if sgn.get("stop") else 0
+            stop_pct = abs(float(vs["entry"]) - float(vs["stop"])) / float(vs["entry"]) * 100 if vs.get("stop") else 0
             if 0 < stop_pct < 0.2:
                 cons.append(f"stop {stop_pct:.2f}% away — inside one bar's noise")
             if float(conf.get("fortress") or 0) >= 9:
                 cons.append(f"T1 is a {float(conf['fortress']):.1f} wall")
             ev = sgn.get("evidence") or {}
-            bull = sgn["direction"] == "BULLISH"
+            bull = vs["direction"] == "BULLISH"
             zones = ctx.get("zones") or []
             clusters = sorted(
                 ({"price": z["price"], "strength": z["strength"], "members": z["members"], "wall": z.get("wall", False),
-                  "side": "ahead" if (z["price"] > float(sgn["entry"])) == bull else "behind"}
-                 for z in zones if abs(z["price"] - float(sgn["entry"])) / float(sgn["entry"]) <= 0.03),
+                  "side": "ahead" if (z["price"] > float(vs["entry"])) == bull else "behind"}
+                 for z in zones if abs(z["price"] - float(vs["entry"])) / float(vs["entry"]) <= 0.03),
                 key=lambda z: z["price"], reverse=not bull,
             )
             und = self.underlyings.get(sgn["symbol"])
             plan = None
-            if ps is None and und is not None and (state not in ("IN_TREND", "NO_ROUTE") or key is StrategyKey.FUDKII):
+            fade_book = key.value in counter_books
+            # A fade book with no fade has nothing to preview: falling back to the PARENT's signal
+            # showed CT-Y a bullish trigger's CE (NAM-INDIA, 2026-09-25 14:45) as if CT-Y would buy it.
+            if ps is None and und is not None and (state not in ("IN_TREND", "NO_ROUTE") or key is StrategyKey.FUDKII) and not (fade_book and entry_sig is None):
                 plan_sig = entry_sig if entry_sig is not None else sgn
                 try:
                     plan = await self._plan_preview(key, plan_sig, und)
@@ -1515,26 +2952,136 @@ class Engine:
                     exit_plan = self._exit_plan(key, p_inst, int(ps["qty"]), tuple(ps.get("option_targets") or ()), float(ps.get("option_sl") or 0), float(ps.get("equity_sl") or 0), und.segment if und else Segment.NSE_EQ)
             if skip is not None:
                 route_label = "SKIP"
+            elif key is StrategyKey.FUDKII_CT_Y and gap_fade is not None:
+                route_label = "GAP FADE"
             elif route is not None:
                 route_label = "COUNTER-TREND" if route.get("route") == "COUNTER" else "IN TREND"
             else:
                 route_label = None
+            # The side THIS book trades on this trigger, for the card's colour and contract: the held
+            # contract's own side if there is a position; else the trigger's side for the in-trend
+            # books and the opposite side for the fade books.
+            trig_bull = sgn["direction"] == "BULLISH"
+            inst_json = (ps or {}).get("instrument") or {}
+            if inst_json.get("option_type") in ("CE", "PE"):
+                side = inst_json["option_type"]
+            elif inst_json.get("kind") == "FUTURE":
+                side = "LONG" if (ps or {}).get("direction") == "BULLISH" else "SHORT"
+            else:
+                side = ("PE" if trig_bull else "CE") if fade_book else ("CE" if trig_bull else "PE")
+            if und is not None and und.segment is Segment.MCX_FO and not inst_json:
+                side = ("SHORT" if trig_bull else "LONG") if fade_book else ("LONG" if trig_bull else "SHORT")
+            rt_card = alert_cards.get(entry_sig["signal_id"]) if (fade_book and entry_sig is not None) else (None if fade_book else alert_cards.get(sid))
+            no_plan = next((e for e in reversed(evs) if e.get("kind") == "counter.no_plan"), None)
+            cta = self._card_cta(book, key, state, ps, plan, route, skip, und, sgn, vs, fade_book, entry_sig is None, no_plan)
+            if pending is not None:
+                # a limit entry is working for this trigger: its fill (or its miss) decides; a TAKE now
+                # would enter the book a second time when the mirrored fill lands
+                cta = {"action": "take", "enabled": False, "contract": pending.get("contract"), "type": cta.get("type"),
+                       "reason": f"limit {pending['limit']:g} resting {pending['restingS']:g} s ({pending['why']})"}
+            # Every book that trades this segment, and what each did with the trigger — the card's row
+            # of circles: who bought it, who still holds it (operator, 2026-09-26).
+            if self._segment_of(sgn["symbol"]) is Segment.MCX_FO:
+                seg_books = [StrategyKey.FUDKII_RT_MCX.value]
+                if position_on(StrategyKey.FUDKII.value, sid, fade_x) is not None:
+                    seg_books.insert(0, StrategyKey.FUDKII.value)
+            else:
+                seg_books = list(nse_books)
+            books_row = [book_row(b, position_on(b, sid, fade_x)) for b in seg_books]
+            verdicts = self._card_verdicts(sgn, evs, fade_x, gap_fade, pos_by_key)
+            if cta.get("type") not in ("CE", "PE"):
+                cta["type"] = side  # a future reads LONG / SHORT
             cards.append({
+                "side": side,
                 "atr": ev.get("atr"), "oi": ev.get("oi"), "oiChangePct": ev.get("oi_change_pct"), "clusters": clusters[:8],
                 "futLevels": self._fut_levels(route, bull), "plan": plan, "exitPlan": exit_plan, "routeLabel": route_label,
-                "signalId": sid, "symbol": sgn["symbol"], "direction": sgn["direction"], "ts": sgn["ts"], "grade": sgn.get("grade"),
-                "rr": sgn.get("rr"), "reason": sgn.get("reason"), "entry": sgn["entry"], "stop": sgn["stop"], "targets": sgn.get("targets"),
+                "signalId": sid, "symbol": sgn["symbol"], "direction": vs["direction"], "ts": sgn["ts"], "grade": vs.get("grade"),
+                "rr": vs.get("rr"), "reason": vs.get("reason"), "entry": vs["entry"], "stop": vs["stop"], "targets": vs.get("targets"),
+                "triggerDirection": sgn["direction"], "describes": "fade" if vs is not sgn else "trigger",
                 "stopPct": round(stop_pct, 2), "confluence": conf, "evidence": sgn.get("evidence") or {}, "gates": sgn.get("gates") or [],
                 "parentDecision": sgn.get("decision"), "parentReason": sgn.get("decision_reason"),
                 "candle": candle, "surgeT": s_t, "surgeT1": s_t1, "baseline": base, "spark": spark,
                 "route": route, "skip": skip, "operator": operator, "fade": fade, "state": state,
                 "position": ps, "trade": trades_by_pos.get(ps["id"]) if ps else None, "exits": exits_by_pos.get(ps["id"], []) if ps else [],
-                "live": live, "rtCard": alert_cards.get(sid), "pros": pros, "cons": cons,
+                "live": live, "rtCard": rt_card, "pros": pros, "cons": cons, "cta": cta, "breadth": breadth, "books": books_row,
+                "pending": pending, "execLog": (ps or {}).get("exec_log") or None,
+                "restingTarget": self._resting_target_card(ps),
+                "verdicts": verdicts,
             })
         counts: dict[str, int] = {}
         for c in cards:
             counts[c["state"]] = counts.get(c["state"], 0) + 1
         return {"book": book, "day": day.isoformat(), "wallet": self.wallets[book].to_json() if book in self.wallets else None, "counts": counts, "cards": cards, "nowTs": time.time()}
+
+    def _resting_target_card(self, ps: dict[str, Any] | None) -> dict[str, Any] | None:
+        """The target sell resting in advance for this card's open position, if any."""
+        r = self._target_resting(ps["id"]) if ps and ps.get("status") == "OPEN" else None
+        if r is None:
+            return None
+        return {"rung": r.ctx[1] + 1, "limit": r.limit, "qty": r.intent.qty, "placedTs": r.placed_ts,
+                "lots": r.intent.qty // max(1, r.intent.instrument.lot_size)}
+
+    def _card_verdicts(
+        self, sgn: dict[str, Any], evs: list[dict[str, Any]], fade_x: dict[str, Any] | None,
+        gap_fade: dict[str, Any] | None, pos_by_key: dict[tuple[str, str], dict[str, Any]],
+    ) -> dict[str, Any]:
+        """What RT-Y and CT-Y do with this trigger — a label on EVERY book's card (operator,
+        2026-09-26: "mention on all respective strategies as label"); see ``trigger_verdicts``."""
+        if self._segment_of(sgn["symbol"]) is Segment.MCX_FO:
+            return {"rtY": None, "ctY": None}
+        return trigger_verdicts(
+            sgn, evs, fade_x=fade_x, gap_fade=gap_fade,
+            rt_y_held=(StrategyKey.FUDKII_RT_Y.value, sgn["signal_id"]) in pos_by_key,
+            lim_y=self._exits_by_strategy[StrategyKey.FUDKII_RT_Y.value].limits,
+        )
+
+    def _card_cta(
+        self, book: str, key: StrategyKey, state: str, ps: dict[str, Any] | None, plan: dict[str, Any] | None,
+        route: dict[str, Any] | None, skip: dict[str, Any] | None, und: Instrument | None, sgn: dict[str, Any],
+        vs: dict[str, Any], fade_book: bool, no_fade: bool, no_plan: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """The card's one button, always naming the contract it is about: TAKE when the book can
+        enter now, SKIP (close) while it holds, and otherwise the same contract greyed out with the
+        reason underneath — never a bare "no plan" (the operator asked for this 2026-09-25)."""
+        label = BOOK_LABELS.get(book, book)
+        if ps is not None:
+            inst = ps.get("instrument") or {}
+            name = inst.get("name") or inst.get("scrip_code")
+            if ps.get("status") == "OPEN":
+                return {"action": "skip", "enabled": True, "contract": name, "type": inst.get("option_type"), "reason": None}
+            why = ps.get("exit_reason") or "closed"
+            return {"action": "taken", "enabled": False, "contract": name, "type": inst.get("option_type"), "reason": f"traded — closed ({why})"}
+        if plan is not None and plan.get("ok"):
+            note = f"{label} skipped it: {(skip or {}).get('reason')} — TAKE overrides" if skip is not None else None
+            return {"action": "take", "enabled": True, "contract": plan.get("contract"), "type": plan.get("type"), "reason": note}
+        # Disabled: name the contract anyway, then say why.
+        trig_bull = sgn["direction"] == "BULLISH"
+        aim_dir = Direction.BEARISH if (fade_book and trig_bull) or (not fade_book and not trig_bull) else Direction.BULLISH
+        aim = None
+        if plan is not None and plan.get("contract"):
+            aim = {k: plan.get(k) for k in ("contract", "scripCode", "strike", "type", "bid", "ask", "spreadPct")}
+        elif und is not None:
+            try:
+                tgts = vs.get("targets") or []
+                aim = self._aim_contract(und, sgn["symbol"], aim_dir, float(sgn["entry"]), float(tgts[0]) if tgts and not (fade_book and no_fade) else None)
+            except Exception:  # noqa: BLE001 — the page must render even if the catalogue cannot answer
+                aim = None
+        if fade_book and no_fade:
+            summary = str((route or {}).get("summary") or (route or {}).get("reason") or "").strip()
+            if state == "IN_TREND":
+                reason = f"{label} fades counter-trend triggers only; this one was routed IN TREND" + (f" ({summary})" if summary else "")
+            elif state == "NO_ROUTE":
+                reason = "no counter-trend route was recorded for this trigger"
+            else:
+                refusal = str((no_plan or {}).get("reason") or "no fade plan could be made")
+                reason = f"routed COUNTER-TREND, but {refusal}" + (f" · route: {summary}" if summary else "")
+        elif plan is None:
+            reason = "no preview for this trigger (underlying not loaded)" if und is None else "no preview"
+        else:
+            reason = _humanise_reason(str(plan.get("reason") or "no plan"))
+        mcx = und is not None and und.segment is Segment.MCX_FO
+        blank = {"contract": None, "type": ("LONG" if aim_dir is Direction.BULLISH else "SHORT") if mcx else aim_dir.option_type.value}
+        return {"action": "take", "enabled": False, **(aim or blank), "reason": reason}
 
     def _exit_plan(self, key: StrategyKey, inst: Instrument, qty: int, ladder: tuple[float, ...], option_sl: float, equity_stop: float, segment: Segment) -> dict[str, Any]:
         """What leaves at which threshold, for this book — the card's "what happens next"."""
@@ -1564,6 +3111,12 @@ class Engine:
         if lim.own_ladder:
             if lim.arm_mode == "immediate":
                 trail = f"armed at once by the equity T1 or a 1m close over own R1: peak − {lim.peak_giveback_pct:.0f}% ({lim.trail_dwell_samples} reads)"
+            elif lim.arm_at_pct is not None:
+                confirm = f"{lim.trail_dwell_samples} reads" if lim.band_exit == "dwell" else f"{lim.sustain_s:.0f} s sustain"
+                trail = (
+                    f"T1 = max(own T1, entry +{lim.arm_at_pct:g}%): one lot out there and the SL to breakeven, "
+                    f"SL one rung behind, then all remaining out on a {lim.peak_giveback_pct:g}% fall from the peak ({confirm})"
+                )
             elif lim.arm_min_move:
                 trail = f"armed once T1 (≥ {lim.arm_min_move:g}× expected move) is sustained: SL one rung behind, band max({lim.peak_giveback_pct:.0f}%, {lim.giveback_move_frac:g}× expected move), {lim.sustain_s:.0f} s sustain"
             else:
@@ -1576,7 +3129,7 @@ class Engine:
             "FUDKII": "legacy: share ladder 40/30/20/10, trail 3%/40%",
             "FUDKII_RT_X": "RT-X: own MTF ladder · touch pays a lot, sustain steps the SL · 3% line",
             "FUDKII_RT_N": "RT-N: daily R1–R4 · immediate arm · 2% line, 3 reads",
-            "FUDKII_RT_Y": "RT-Y: arm at 0.5× expected move · SL one rung behind · band in expected-move units",
+            "FUDKII_RT_Y": "RT-Y: T1 = max(own T1, +5%) · SL one rung behind · all out on a 3% fall from the peak",
             "FUDKII_CT_X": "CT-X: the fade under RT-X's exits",
             "FUDKII_CT_Y": "CT-Y: the fade under RT-Y's exits",
             "FUDKII_RT_MCX": "RT-MCX: RT-X's exits on commodities",
@@ -1608,15 +3161,47 @@ class Engine:
             instrument=inst, premium=sel.premium, option_stop=option_sl, option_target1=option_targets[0] if option_targets else None,
             balance=wallet.balance if wallet else 0.0, available=wallet.available if wallet else 0.0, limits=lim, costs=self.costs,
         )
-        ladder, edm, note = (self._own_ladder_for(sig.symbol, inst, sel.premium, lim) if lim.own_ladder else (option_targets, 0.0, "δ-projected"))
+        ladder, edm, note = (self._own_ladder_for(sig.symbol, inst, sel.premium, lim) if (lim.own_ladder or lim.targets_from_own_ladder) else (option_targets, 0.0, "δ-projected"))
+        if not ladder and lim.targets_from_own_ladder:
+            ladder, note = option_targets, "δ-projected (no own ladder)"
         q = self.quotes.get(inst.scrip_code)
         return {
             "ok": sizing.ok, "reason": sizing.reason, "contract": inst.name or inst.scrip_code, "scripCode": inst.scrip_code,
             "strike": inst.strike, "type": inst.option_type.value if inst.option_type else None, "premium": sel.premium,
-            "bid": q.bid if q else None, "ask": q.ask if q else None, "spreadPct": round(q.spread_pct * 100, 2) if q and q.spread_pct is not None else None,
+            "bid": q.bid if q else None, "ask": q.ask if q else None, "spreadPct": round(q.spread_pct, 2) if q and q.spread_pct is not None else None,
             "oi": getattr(q, "oi", None) if q else None, "delta": round(abs(delta), 2), "lots": sizing.lots, "qty": sizing.qty, "outlay": round(sizing.outlay, 0),
             "lotSize": inst.lot_size, "optionSl": option_sl, "ladder": list(ladder), "edm": edm, "ladderNote": note,
             "exitPlan": self._exit_plan(key, inst, sizing.qty, tuple(ladder), option_sl, sig.stop, underlying.segment) if sizing.ok else None,
+        }
+
+    def _aim_contract(self, underlying: Instrument, symbol: str, direction: Direction, entry: float, target1: float | None) -> dict[str, Any] | None:
+        """The contract a book would aim at on this trigger with the liquidity gates left out — so
+        a card whose button is disabled can still name the option it is about (NAM-INDIA
+        2026-09-25: the button said only "no plan"). Read-only: cached quotes, no REST, no tape."""
+        cat = self.catalogue_loader.catalogue
+        if underlying.segment is Segment.MCX_FO:
+            inst = cat.front_future(symbol)
+        else:
+            pol = self.selection_policy_for(StrategyKey.FUDKII)
+            expiry = choose_expiry(cat.expiries(symbol), ist_today(), pol)
+            if expiry is None:
+                return None
+            bullish = direction is Direction.BULLISH
+            otm = [i for i in cat.chain(symbol, expiry, direction.option_type) if (i.strike > entry if bullish else i.strike < entry) and i.strike > 0]
+            atr30 = atr(self.store.bars(symbol, DECISION_TF, 60), 14) or 0.0
+            picks, _ = strike_candidates(
+                otm=otm, spot=entry, direction=direction, atr=atr30, target1=target1,
+                liquidity=self.liquidity_for(otm), delta_floor=pol.min_delta, oi_margin=pol.oi_margin,
+            )
+            inst = picks[0] if picks else min(otm, key=lambda i: abs(i.strike - entry), default=None)
+        if inst is None:
+            return None
+        q = self.quotes.get(inst.scrip_code)
+        return {
+            "contract": inst.name or inst.scrip_code, "scripCode": inst.scrip_code, "strike": inst.strike,
+            "type": inst.option_type.value if inst.option_type else None,
+            "bid": q.bid if q else None, "ask": q.ask if q else None,
+            "spreadPct": round(q.spread_pct, 2) if q and q.spread_pct is not None else None,
         }
 
     @staticmethod
@@ -1648,20 +3233,33 @@ class Engine:
             raise KeyError(f"no signal {signal_id} in today's book")
         if any(p.status == "OPEN" and p.strategy == book and p.underlying.symbol == sig.symbol for p in self.positions.values()):
             raise RuntimeError(f"{book} already holds {sig.symbol}")
+        if self._pending_for(book, {signal_id}) is not None:
+            raise RuntimeError(f"a limit entry is resting on {sig.symbol} for {book}; its fill decides")
+        if (book, sig.symbol) in self._entering:
+            raise RuntimeError(f"{book} is placing an entry on {sig.symbol}; its fill decides")
         if key in (StrategyKey.FUDKII_CT_X, StrategyKey.FUDKII_CT_Y):
             und = self.underlyings.get(sig.symbol)
             dec = CounterDecision("COUNTER", "operator take", NO_WALL)
             entry = flipped_signal(sig, key=key, zones=self.zones_for(sig.symbol), atr=atr(self.store.bars(sig.symbol, DECISION_TF, 60), 14) or 0.0,
-                                   tick_size=(und.tick_size if und else 0.05) or 0.05, decision=dec, policy=self.fudkii.cfg.grade_policy)
+                                   tick_size=(und.tick_size if und else 0.05) or 0.05, decision=dec, policy=self.fudkii.cfg.fade_grade_policy)
             if entry is None:
-                raise RuntimeError("no wall on the flipped side — nothing to aim the fade at")
+                why = fade_refusal(sig, zones=self.zones_for(sig.symbol), atr=atr(self.store.bars(sig.symbol, DECISION_TF, 60), 14) or 0.0,
+                                   tick_size=(und.tick_size if und else 0.05) or 0.05, policy=self.fudkii.cfg.fade_grade_policy)
+                raise RuntimeError(f"no fade plan — {why['reason']}")
         else:
-            entry = replace(sig, strategy=key, reason=f"operator take · {sig.reason}")
+            # the trigger rides along as the source, so the card finds the position this take opens
+            entry = replace(sig, strategy=key, reason=f"operator take · {sig.reason}", source_signal_id=sig.signal_id)
         await self.ledger.event("operator.take", {"book": book, "signal_id": signal_id, "entry_signal_id": entry.signal_id, "symbol": sig.symbol})
         log.info("operator.take", book=book, symbol=sig.symbol, signal=signal_id)
-        await self._handle_signal(entry, None)
-        pos = next((p for p in self.positions.values() if p.strategy == book and p.signal_id == entry.signal_id), None)
-        return {"book": book, "signalId": signal_id, "entered": pos is not None, "position": _position_json(pos) if pos else None}
+        before = set(self.positions)
+        out = (await self._handle_signal(entry, None, take=True)).get(book) or {}
+        # only a position THIS take opened (review, 2026-09-26: a refused take reported "entered"
+        # off a position that was already there)
+        pos = next((p for p in self.positions.values() if p.id not in before and p.strategy == book
+                    and p.signal_id == entry.signal_id and p.status == "OPEN"), None)
+        # never a silent "not entered": the book's own decision and why (audit, 2026-09-26)
+        return {"book": book, "signalId": signal_id, "entered": pos is not None, "position": _position_json(pos) if pos else None,
+                "decision": out.get("decision", ""), "reason": out.get("reason", "")}
 
     async def operator_skip(self, book: str, signal_id: str) -> dict[str, Any]:
         """The operator's other override: close THIS book's open position on a trigger now, at the
@@ -1723,6 +3321,26 @@ class Engine:
         )
         return targets, edm, note
 
+    def _protect_option_stop(self, pos: Position, lim: RiskLimits, key: str, now: float) -> None:
+        """The option stop at the fill, priced and/or capped when the book says so
+        (``RiskLimits.priced_option_stop`` / ``max_premium_loss_pct``); the books that re-project
+        their stop hold the same rules every re-projection (risk/exits.py ``_reproject_stop``)."""
+        inst = pos.instrument
+        if not inst.is_option or (not lim.priced_option_stop and lim.max_premium_loss_pct is None):
+            return
+        sl = pos.option_sl
+        if lim.priced_option_stop and pos.equity_sl > 0 and inst.expiry:
+            spot = self.ltps.get(pos.underlying.scrip_code) or pos.equity_entry
+            priced = value_at(option_price=pos.entry, spot=spot, target_spot=pos.equity_sl, strike=inst.strike,
+                              expiry=inst.expiry, now=now, call=inst.option_type is OptionType.CE)
+            if priced is not None:
+                sl = max(0.05, priced)
+        if lim.max_premium_loss_pct is not None:
+            sl = max(sl, pos.entry * (1 - lim.max_premium_loss_pct / 100))
+        sl = self.floored_option_stop(StrategyKey(key), pos.entry, sl, inst.tick_size)  # never nearer than 8 ticks
+        pos.option_sl = pos.initial_option_sl = round(sl, 2)
+        pos.r_unit = abs(pos.entry - pos.initial_option_sl)
+
     def _stamp_own_ladder(self, pos: Position, inst: Instrument, lim: RiskLimits, symbol: str) -> None:
         targets, edm, note = self._own_ladder_for(symbol, inst, pos.entry, lim)
         pos.option_targets = targets
@@ -1740,6 +3358,10 @@ class Engine:
         underlying = self.underlyings.get(sig.symbol)
         if underlying is None or underlying.segment is Segment.MCX_FO:
             return
+        try:
+            await self._gap_fade(sig, bar, underlying)
+        except Exception as exc:  # the gap fade may never cost the counter route
+            log.exception("gap_fade.failed", symbol=sig.symbol, error=str(exc)[:160])
         legs = await self._counter_legs(underlying, bar)
         atr_v = legs[0].atr if legs else 0.0
         dec = counter_route(legs, bullish=sig.direction is Direction.BULLISH, st_flipped="ST flip" in sig.reason)
@@ -1758,13 +3380,99 @@ class Engine:
             return
         fade = flipped_signal(
             sig, key=StrategyKey.FUDKII_CT_X, zones=self.zones_for(sig.symbol), atr=atr_v,
-            tick_size=underlying.tick_size or 0.05, decision=dec, policy=self.fudkii.cfg.grade_policy,
+            tick_size=underlying.tick_size or 0.05, decision=dec, policy=self.fudkii.cfg.fade_grade_policy,
         )
         if fade is None:
-            log.info("counter.no_plan", symbol=sig.symbol, reason="no wall on the flipped side")
+            why = fade_refusal(sig, zones=self.zones_for(sig.symbol), atr=atr_v, tick_size=underlying.tick_size or 0.05, policy=self.fudkii.cfg.fade_grade_policy)
+            log.info("counter.no_plan", symbol=sig.symbol, reason=why["reason"])
+            # the card reads this: the route alone cannot say why no fade was planned
+            await self.ledger.event("counter.no_plan", {"signal_id": sig.signal_id, "symbol": sig.symbol, **why})
             await self.ledger.insert_signal(sig.to_json(), "COUNTER_NO_PLAN", dec.reason)
             return
-        await self._handle_signal(fade, bar)
+        # the fade reaches both fade books at once; CT-X's row is the fade's, CT-Y decides for itself
+        await self._handle_signal(fade, bar, books=FADE_BOOKS)
+
+    def gap_fade_plan(self, sig: Signal, ctx: dict[str, Any] | None) -> dict[str, Any] | None:
+        """The 09:45 gap fade's plan, or None when the trigger is not one (operator, 2026-09-26).
+
+        Eligible: a FUDKII trigger on the session's first 30m bar whose open gapped at least
+        ``gap_fade_datr`` daily ATRs its OWN way — the first-bar trap RT-Y now stands aside from.
+        The fade: the opposite direction from the trigger's close, the equity stop 1 ATR30 past the
+        close (the replay's stop: +3.72 % / +5.87 % a trade in the two halves of Sep 1–25, 40
+        trades, before costs), the walls on the fade's side as its targets — or, with none, one
+        target 1 ATR30 away. Its RR is its own (T1 against the 1-ATR stop) and its grade a label."""
+        lim = self._exits_by_strategy[StrategyKey.FUDKII_CT_Y.value].limits
+        ctx = ctx or {}
+        gap = ctx.get("gapDatr")
+        if lim.gap_fade_datr is None or not ctx.get("openBar") or gap is None or gap < lim.gap_fade_datr:
+            return None
+        und = self.underlyings.get(sig.symbol)
+        if und is None or und.segment is not Segment.NSE_EQ:
+            return None
+        atr30 = float(ctx.get("atr30") or 0.0) or (atr(self.store.bars(sig.symbol, DECISION_TF, 60), 14) or 0.0)
+        if atr30 <= 0:
+            return None
+        tick = und.tick_size or 0.05
+        rnd = lambda px: round(round(px / tick) * tick, 4)  # noqa: E731
+        fade_bull = sig.direction is Direction.BEARISH
+        sign = 1 if fade_bull else -1
+        close = float(sig.entry)
+        stop = rnd(close - sign * atr30)
+        pol = self.fudkii.cfg.fade_grade_policy  # a counter-trend plan: the fade's grading
+        # the confluence engine's own walls on the fade's side; its stop is not used — the fade's
+        # stop is the replay's 1 ATR — so the noise filter that would skip the targets is off
+        conf = compute_confluence(close=close, bullish=fade_bull, zones=self.zones_for(sig.symbol), atr_value=atr30,
+                                  tick_size=tick, policy=replace(pol, min_stop_atr_filter=0.0))
+        targets = list(conf.targets) or [rnd(close + sign * atr30)]
+        rr = abs(targets[0] - close) / atr30
+        grade = "A" if rr >= pol.rr_a else "B" if rr >= pol.rr_b else "C" if rr >= pol.rr_c else "F"
+        return {
+            "direction": (Direction.BULLISH if fade_bull else Direction.BEARISH).value, "side": "CE" if fade_bull else "PE",
+            "entry": close, "stop": stop, "targets": targets, "rr": round(rr, 2), "grade": grade, "gapDatr": gap,
+            "atr30": round(atr30, 4), "targetNote": "walls on the fade's side" if conf.targets else "no wall on the fade's side — 1 ATR30",
+        }
+
+    async def _gap_fade(self, sig: Signal, bar: UnifiedBar | None, underlying: Instrument) -> None:
+        """CT-Y's entry on a 09:45 gap-with trigger: the plan above, through the ordinary entry
+        path under CT-Y's own key (CT-X is untouched; CT-Y does not also mirror CT-X's fade)."""
+        if sig.signal_id in self._gap_faded:
+            return
+        ctx = self._breadth_at.get(sig.signal_id)
+        if ctx is None:
+            ctx = self.trigger_context(sig)
+        plan = self.gap_fade_plan(sig, ctx)
+        if plan is None:
+            return
+        lim = self._exits_by_strategy[StrategyKey.FUDKII_CT_Y.value].limits
+        event = {"signal_id": sig.signal_id, "symbol": sig.symbol, **plan}
+        if lim.gap_fade_min_rr is not None and plan["rr"] < lim.gap_fade_min_rr:
+            event["blocked"] = f"RR {plan['rr']:.2f} < {lim.gap_fade_min_rr:g}"
+            await self.ledger.event("counter.gap_fade", event)
+            log.info("gap_fade.blocked", symbol=sig.symbol, rr=plan["rr"])
+            return
+        fade = replace(
+            sig,
+            strategy=StrategyKey.FUDKII_CT_Y,
+            direction=Direction(plan["direction"]),
+            stop=plan["stop"],
+            targets=tuple(plan["targets"]),
+            grade=plan["grade"],
+            rr=plan["rr"],
+            reason=f"GAP FADE of {sig.signal_id}: 09:45 gap with the trigger {plan['gapDatr']:.2f} daily ATR; stop 1 ATR past the close",
+            source_signal_id=sig.signal_id,
+            evidence={**dict(sig.evidence), "gap_datr": plan["gapDatr"], "rr": plan["rr"]},
+            context={
+                **dict(sig.context),
+                "gap_fade": plan,
+                "confluence": {"stop": plan["stop"], "stop_zone": "1 ATR30 past the close", "targets": plan["targets"],
+                               "target_zones": [plan["targetNote"]], "grade": plan["grade"], "rr": plan["rr"]},
+            },
+        )
+        self._gap_faded.add(sig.signal_id)
+        event["fade_signal_id"] = fade.signal_id
+        await self.ledger.event("counter.gap_fade", event)
+        log.info("gap_fade", symbol=sig.symbol, side=plan["side"], stop=plan["stop"], t1=plan["targets"][0], rr=plan["rr"])
+        await self._handle_signal(fade, bar, adopt=False)
 
     async def _counter_legs(self, underlying: Instrument, bar: UnifiedBar) -> list[Leg]:
         """The equity's side of the trigger from the store, the front future's from the broker
@@ -1773,7 +3481,7 @@ class Engine:
         from .market.session import to_ist
 
         eq_bars = self.store.bars(underlying.symbol, DECISION_TF, 60)
-        s_t, s_t1, _ = volume_surges([b.volume for b in eq_bars], window=6, floor=1000.0)
+        s_t, s_t1, _ = volume_surges(self._continuous_volumes(underlying.symbol, eq_bars), window=6, floor=1000.0)
         legs = [Leg(
             "equity", bar.open, bar.high, bar.low, bar.close, atr(eq_bars, 14) or 0.0,
             self._pivot_points(underlying.symbol), s_t, s_t1,
@@ -1860,6 +3568,15 @@ class Engine:
                     points += pivot_points(lv, tf)
         return points
 
+    async def _volume_surges_safe(self, underlying: Instrument) -> dict[str, tuple[float, float]]:
+        """``_volume_surges`` that never raises: a reading that cannot be taken is no reading, and
+        no reading never blocks an entry."""
+        try:
+            return await self._volume_surges(underlying)
+        except Exception as exc:  # noqa: BLE001 - no reading is information, never an error to the books
+            log.warning("volume.read_failed", symbol=underlying.symbol, error=str(exc))
+            return {}
+
     async def _volume_surges(self, underlying: Instrument) -> dict[str, tuple[float, float]]:
         """``surge_T`` / ``surge_T-1`` of the last two closed 30m bars against the T-2…T-7 baseline
         (``volume_surges``, floor 1000) — for the underlying from the store, and for its front
@@ -1869,8 +3586,8 @@ class Engine:
         from .market.session import to_ist
 
         out: dict[str, tuple[float, float]] = {}
-        eq = self.store.bars(underlying.symbol, DECISION_TF, 12)
-        s_t, s_t1, _ = volume_surges([b.volume for b in eq], window=6, floor=1000.0)
+        eq = self.store.bars(underlying.symbol, DECISION_TF, 14)
+        s_t, s_t1, _ = volume_surges(self._continuous_volumes(underlying.symbol, eq), window=6, floor=1000.0)
         if s_t is not None and s_t1 is not None:
             out["equity"] = (s_t, s_t1)
         if underlying.segment is not Segment.NSE_EQ or not eq:
@@ -1885,6 +3602,18 @@ class Engine:
         if f_t is not None and f_t1 is not None:
             out["future"] = (f_t, f_t1)
         return out
+
+    def _continuous_volumes(self, symbol: str, bars: Sequence[UnifiedBar]) -> list[float]:
+        """Volumes of the 30m bars that were continuously traded. An NSE stock's 15:15 bar is now
+        the closing auction — one print, and the broker's candle carries almost none of its volume
+        (HEROMOTOCO 2026-09-24: 55 shares, against 354,142 in the auction print on the tape). As
+        the bar BEFORE a 09:45 trigger it read 0.00x, so every 09:45 dried-volume check tested
+        the trigger bar alone (all four dried skips in the ledger: PNBHOUSING and RELIANCE, RT-X
+        and RT-Y, "0.53/0.00", "0.40/0.00"). Futures and MCX trade on through 15:30: unchanged."""
+        inst = self.underlyings.get(symbol)
+        if inst is None or inst.segment is not Segment.NSE_EQ or inst.kind is not InstrumentKind.EQUITY:
+            return [b.volume for b in bars]
+        return [b.volume for b in bars if ist_hm(b.ts) != "15:15"]
 
     def expected_move(self, symbol: str, inst: Instrument, premium: float) -> float:
         """One day's expected move of the parent (its own IV, or its median) through delta, as a
@@ -1902,8 +3631,14 @@ class Engine:
     @staticmethod
     def selection_policy_for(key: StrategyKey) -> SelectionPolicy:
         """The selector's policy for a book: the shared one, minus the premium floor for the
-        FUDKII family."""
-        return replace(SELECTION_POLICY, min_premium=0.0) if key in NO_PREMIUM_FLOOR else SELECTION_POLICY
+        FUDKII family — which also passes over a strike whose 4 lots cost ₹75,000 or more for the
+        next one out (operator, 2026-09-22: "try identifying far otm who's 4 lots rest within our
+        cap"; the cap 2026-09-27). The MCX route selects a future, never through this."""
+        if key in NO_PREMIUM_FLOOR:
+            return replace(SELECTION_POLICY, min_premium=0.0, outlay_lots=4, outlay_under_inr=FIXED_LOTS_UNDER_INR)
+        if key is StrategyKey.FUKAA:  # sizes on FUDKII's limits: the same 4 lots under ₹75,000
+            return replace(SELECTION_POLICY, outlay_lots=4, outlay_under_inr=FIXED_LOTS_UNDER_INR)
+        return SELECTION_POLICY
 
     #: Books that trade one exchange only. FUDKII-RT-MCX is the commodity book — its wallet is
     #: sized in CRUDEOIL lots and its exits were tuned on commodities — so an NSE fill reaching it
@@ -1919,6 +3654,11 @@ class Engine:
         if want is not None:
             return segment is want
         return segment not in set(cls.SEGMENT_BOOKS.values())
+
+    def limits_for(self, strategy: str) -> RiskLimits:
+        """A book's own limits: its exit engine's, else the parent's (FUDKII, FUKAA)."""
+        book = self._exits_by_strategy.get(strategy)
+        return book.limits if book is not None else self.limits
 
     @staticmethod
     def floored_option_stop(key: StrategyKey, premium: float, option_sl: float, tick: float) -> float:
@@ -1984,7 +3724,33 @@ class Engine:
                     "strike.fell_back", symbol=sig.symbol, wanted=picks[0].strike,
                     took=sel.instrument.strike, why=why, reason=sel.reason,
                 )
+        if tape and sel.instrument is not None:
+            await self._ensure_leg_ladder(sel.instrument)
         return sel
+
+    async def _ensure_leg_ladder(self, inst: Instrument) -> None:
+        """Guarantee the contract we are about to buy has its own previous-session ladder.
+
+        The re-anchor above keeps the bulk set near the live spot, but it runs on a clock and the
+        strike finally chosen can still sit outside it. Without a ladder an own-ladder book opens
+        with no T1 and nothing to trail — which is what happened to BANKNIFTY on 2026-09-24, its
+        traded 55300 PE eleven strikes below a set banded on the previous close. One REST call,
+        alongside the quote fetch and bounded, so a slow broker delays an entry by no more than
+        LEG_ENSURE_TIMEOUT_S; a miss is logged and the book falls back to the percentage arm.
+        """
+        if self.leg_pivots.for_code(inst.scrip_code) is not None:
+            return
+        try:
+            await asyncio.wait_for(
+                self.leg_pivots.ensure(inst, ist_today()), timeout=LEG_ENSURE_TIMEOUT_S
+            )
+        except TimeoutError:
+            log.warning("legs.ensure_timeout", scrip=inst.scrip_code, name=inst.name or inst.symbol)
+        except Exception as exc:  # noqa: BLE001 - advisory levels never block an entry
+            log.warning("legs.ensure_failed", scrip=inst.scrip_code, error=str(exc)[:120])
+        else:
+            if self.leg_pivots.for_code(inst.scrip_code) is not None:
+                log.info("legs.ensured", scrip=inst.scrip_code, name=inst.name or inst.symbol)
 
     def _strike_watch(
         self, chain: list[Instrument], spot: float, direction: Direction, atr30: float,
@@ -2031,7 +3797,16 @@ class Engine:
         # about to be priced against, and since depth only follows what is in use, a strike whose
         # price happens to be fresh would otherwise reach the matcher with no book at all.
         await self._follow_depth(near)
-        stale = [i for i in near if (q := self.quotes.get(i.scrip_code)) is None or time.time() - q.ts > 20]
+        now_ = time.time()
+        limit_ms = self.matcher.age_limit_ms(now_)
+        # A quote can be fresh while its depth book has aged past the matcher's limit (the socket
+        # sends depth only on change) — the 09:45 stale-book entry rejections. Either one stale
+        # means a snapshot.
+        stale = [
+            i for i in near
+            if (q := self.quotes.get(i.scrip_code)) is None or now_ - q.ts > 20
+            or (b := self.books.get(i.scrip_code)) is None or b.age_ms(now_) > limit_ms
+        ]
         if not stale:
             return
         try:
@@ -2039,7 +3814,12 @@ class Engine:
         except Exception as exc:  # noqa: BLE001
             log.warning("quotes.failed", n=len(stale), error=str(exc))
             return
-        now = time.time()
+        self._apply_snapshot(rows, time.time())
+        await self.feed.subscribe("mf", stale)
+
+    def _apply_snapshot(self, rows: dict[str, dict[str, Any]], now: float) -> None:
+        """Install REST snapshot quotes: the quote, the LTP, and a one-level book wherever the real
+        book is missing or past the matcher's age limit. A live 20-level book is never replaced."""
         limit = self.matcher.age_limit_ms(now)
         for code, r in rows.items():
             self.quotes[code] = Quote(ltp=r["ltp"], bid=r["bid"], ask=r["ask"], ts=r["ts"])
@@ -2047,27 +3827,85 @@ class Engine:
                 self.ltps[code] = r["ltp"]
             if r.get("volume"):
                 self.option_volume[code] = float(r["volume"])
-            # Stand a one-level book behind the quote, but only where the real one would have been
-            # refused anyway: a depth subscription that has not warmed up, or a book already past
-            # the staleness limit. A live 20-level book is never replaced by this.
             held = self.books.get(code)
             if held is None or held.age_ms(now) > limit:
                 book = book_from_quote(
                     code, bid=r["bid"], ask=r["ask"],
-                    bid_qty=int(r.get("bid_qty") or 0), ask_qty=int(r.get("ask_qty") or 0),
-                    ts=r["ts"],
+                    bid_qty=int(r.get("bid_qty") or 0), ask_qty=int(r.get("ask_qty") or 0), ts=r["ts"],
                 )
                 if book is not None:
                     self.books[code] = book
-        await self.feed.subscribe("mf", stale)
+                else:
+                    log.warning("snapshot.no_book", scrip=code, bid=r["bid"], ask=r["ask"],
+                                bid_qty=r.get("bid_qty"), ask_qty=r.get("ask_qty"))
+
+    async def _keep_held_quotes(self) -> None:
+        """Re-quote held contracts that have gone quiet, every few seconds, while their segment is
+        open. One batched call covers them all; nothing is called when nothing is stale."""
+        while not self._stop.is_set():
+            try:
+                await self._refresh_held_quotes(time.time())
+            except Exception as exc:  # noqa: BLE001 - a missed refresh is retried next pass
+                log.warning("held_quotes.failed", error=str(exc)[:120])
+            await asyncio.sleep(HELD_QUOTE_POLL_S)
+
+    async def _refresh_held_quotes(self, now: float) -> int:
+        limit_ms = self.matcher.age_limit_ms(now)
+        stale: dict[str, Instrument] = {}
+        for p in self.positions.values():
+            if p.status != "OPEN" or not is_open(p.underlying.segment, now):
+                continue
+            code = p.instrument.scrip_code
+            q, b = self.quotes.get(code), self.books.get(code)
+            if q is None or now - q.ts > HELD_QUOTE_MAX_AGE_S or b is None or b.age_ms(now) > limit_ms:
+                stale[code] = p.instrument
+        if not stale:
+            return 0
+        rows = await asyncio.wait_for(self.rest.market_feed(list(stale.values())), timeout=5.0)
+        self._apply_snapshot(rows, time.time())
+        return len(rows)
+
+    async def _refresh_exit_book(self, inst: Instrument, now: float) -> None:
+        """Make sure an exit has a book to trade against.
+
+        The depth socket only sends a book when it changes. A quiet contract — a ₹0.73 put nobody
+        is trading — keeps a perfectly good book that simply ages past the matcher's limit, and the
+        exit is refused as stale while the position bleeds. A snapshot quote stands a fresh
+        one-level book behind it, exactly as the selector does for an entry. At most one quote per
+        contract every two seconds, and bounded, so the exit loop is never held up for long."""
+        code = inst.scrip_code
+        held = self.books.get(code)
+        if held is not None and held.age_ms(now) <= self.matcher.age_limit_ms(now):
+            return
+        if now - self._exit_quote_ts.get(code, 0.0) < 2.0:
+            return
+        self._exit_quote_ts[code] = now
+        try:
+            rows = await asyncio.wait_for(self.rest.market_feed([inst]), timeout=3.0)
+        except Exception as exc:  # noqa: BLE001 - the matcher will say what it can't do
+            log.warning("exit.quote_failed", scrip=code, error=str(exc)[:120])
+            return
+        if rows.get(code):
+            self._apply_snapshot({code: rows[code]}, time.time())
+
+    #: the books whose orders go to the broker in a LIVE mode. Every other book — each now places its
+    #: own entry and exits — fills on PAPER against the same live book, so a LIVE session can never send
+    #: one real order per book for a single trigger (before 2026-09-26 the twins copied the parent's
+    #: fill, and their exits would have reached the broker for lots never bought there)
+    LIVE_BOOKS = frozenset({StrategyKey.FUDKII.value})
 
     async def _submit(self, intent: OrderIntent, *, verdict_ok: bool, verdict_reason: str) -> Any:
         mode = self.mode()
+        if mode in (Mode.LIVE, Mode.LIVE_CAPPED) and intent.strategy not in self.LIVE_BOOKS:
+            return self.gateway.submit_paper(intent)
         if mode in (Mode.LIVE, Mode.LIVE_CAPPED):
             wallet = self.wallets[intent.strategy]
+            if intent.purpose is Purpose.ENTRY and (short := await self._live_funds_short(intent)) is not None:
+                return self.gateway.refused(intent, Decision.REJECTED_CAP, short)
             ctx = LiveContext(
                 balance=wallet.balance,
-                open_positions=len([p for p in self.positions.values() if p.status == "OPEN"]),
+                # each book's LIVE caps are its own (operator, 2026-09-26: "per-book caps")
+                open_positions=len([p for p in self.positions.values() if p.status == "OPEN" and p.strategy == intent.strategy]),
                 day_pnl_inr=wallet.day_pnl,
                 now_hm_ist=ist_hm(time.time()),
                 segment=intent.instrument.segment.value,
@@ -2100,6 +3938,8 @@ class Engine:
 
     async def _manage_positions(self) -> None:
         now = time.time()
+        # resting limit orders first: a fill here changes what the positions below are
+        await self._advance_resting(now)
         for pos in list(self.positions.values()):
             if pos.status != "OPEN":
                 continue
@@ -2122,8 +3962,12 @@ class Engine:
                 self._stale_positions.add(pos.id)
                 continue
             wallet = self.wallets[pos.strategy]
-            halted, _ = self.halted()
+            # Only an OPERATOR halt closes positions. The gateway breaker and the reconcile freeze
+            # stop new entries (self.halted() still reports them to the gateway), but they used to
+            # force-close every book — the 2026-09-24 09:45 cascade — for a fault in the order path.
+            halted = self._halted
             forced = past_force_flat(pos.underlying.segment, now) or halted
+            engine_for = self._exits_by_strategy.get(pos.strategy, self.exits)
 
             # An illiquid strike can stop ticking for minutes. Evaluating a stop against a price
             # that old is worse than not evaluating it — but staleness must never trap a position
@@ -2141,10 +3985,18 @@ class Engine:
                         age_s=round(age, 1),
                     )
                     self.telegram.fire_and_forget(
-                        f"⚠️ {pos.strategy} {pos.underlying.symbol}: no quote for "
-                        f"{age:.0f}s — the stop is not being evaluated",
+                        f"⚠️ {pos.strategy} {pos.underlying.symbol}: no option quote for "
+                        f"{age:.0f}s — only the equity stop and the backstops are being enforced",
                         key=f"stale:{pos.id}",
                     )
+                stale_view = MarketView(
+                    option_mid=None, spread_pct=None, quote_ok=False, option_ltp=ltp,
+                    underlying_ltp=self.ltps.get(pos.underlying.scrip_code), now=now,
+                    bars_held=pos.bars_held, past_force_flat=past_force_flat(pos.underlying.segment, now),
+                    halted=halted, daily_loss_hit=bool(wallet.daily_halt),
+                )
+                if (stale_exit := engine_for.evaluate_stale(pos, stale_view)) is not None:
+                    await self._exit(pos, stale_exit, now)
                 continue
             self._stale_positions.discard(pos.id)
             q = self.quotes.get(pos.instrument.scrip_code)
@@ -2160,7 +4012,7 @@ class Engine:
                 bars_held=pos.bars_held,
                 past_force_flat=past_force_flat(pos.underlying.segment, now),
                 halted=halted,
-                daily_loss_hit=wallet.halted and wallet.halt_reason.startswith("DAILY_LOSS"),
+                daily_loss_hit=bool(wallet.daily_halt),
             )
             # The exact numbers the exit is judged against, published so the card shows these
             # and not a second computation of them.
@@ -2176,13 +4028,116 @@ class Engine:
                 "option_t1": pos.option_t1,
                 "ts": now,
             }
-            engine_for = self._exits_by_strategy.get(pos.strategy, self.exits)
             decision = engine_for.evaluate(pos, view)
             if decision is None:
+                await self._ensure_resting_target(pos, now)
                 continue
             await self._exit(pos, decision, now)
 
     async def _exit(self, pos: Position, decision: Any, now: float) -> None:
+        """One exit in flight per position. The operator's SKIP and the exit loop both call this;
+        while one is awaiting the venue the other used to send a second SELL for the same lots —
+        on paper a double-booked P&L, live a naked short. The second caller now stands down, and
+        whoever holds the slot re-reads the position before sending anything."""
+        if pos.id in self._exits_in_flight:
+            log.warning("exit.in_flight", position=pos.id, symbol=pos.underlying.symbol, reason=getattr(decision.reason, "value", decision.reason))
+            return
+        resting = self._exit_resting(pos.id)
+        if resting is not None:
+            # A limit exit is already working. The tick reprices and crosses it; a second SELL is
+            # never sent — unless this decision is more urgent or larger (a stop behind a resting
+            # target, the rest behind a one-lot tranche): then it replaces the resting one.
+            _, old, _ = resting.ctx
+            urgent = self.limit_policy.exit_deadline(decision.reason) < resting.deadline_s
+            if not (urgent or decision.qty > old.qty):
+                return
+            self._resting.pop(resting.intent.client_order_id, None)
+            self._exit_attempts[pos.id] = self._exit_attempts.get(pos.id, 0) + 1  # a fresh id for the new order
+            log.info("limit.superseded", position=pos.id, was=old.reason.value, now=decision.reason.value, qty=decision.qty)
+        self._exits_in_flight.add(pos.id)
+        try:
+            # any other exit — stop, trail, band, the equity-T1 arm, the exit engine's own target,
+            # EOD, halt, daily loss, SKIP — takes the resting target sell off first
+            await self._cancel_resting_target(pos, now, f"{decision.reason.value}: {decision.note}")
+            if pos.status != "OPEN" or pos.qty_remaining <= 0:
+                return
+            if decision.qty > pos.qty_remaining:  # decided before an earlier slice filled
+                decision = replace(decision, qty=pos.qty_remaining)
+            await self._exit_now(pos, decision, now)
+        finally:
+            self._exits_in_flight.discard(pos.id)
+
+    async def _exit_now(self, pos: Position, decision: Any, now: float) -> None:
+        if now < self._exit_retry_at.get(pos.id, 0.0):
+            return  # backing off after a rejected exit; the decision is re-made next pass
+        if self._limit_mode() and self.s.paper_limit_exits:
+            await self._place_exit_limit(pos, decision, now)
+            return
+        await self._exit_market(pos, decision, now)
+
+    async def _place_exit_limit(self, pos: Position, decision: Any, now: float) -> None:
+        """SELL LIMIT at the mid, walked to the bid, crossed at the deadline its urgency sets."""
+        await self._refresh_exit_book(pos.instrument, now)
+        attempt = self._exit_attempts.get(pos.id, 0)
+        bid, ask, _, _ = self._touch(pos.instrument.scrip_code, now)
+        deadline = self.limit_policy.exit_deadline(decision.reason)
+        limit = exit_limit(bid, ask, 0.0, deadline, pos.instrument.tick_size or 0.05)
+        if limit is None:
+            await self._exit_market(pos, decision, now)  # no bid to rest against: the market path decides
+            return
+        intent = OrderIntent(
+            strategy=pos.strategy, instrument=pos.instrument, side=OrderSide.SELL, qty=decision.qty, purpose=Purpose.EXIT,
+            signal_id=pos.signal_id, client_order_id=exit_client_order_id(pos, decision, attempt), reason=decision.note,
+            position_id=pos.id, ref_price=decision.ref_price, limit_price=limit,
+        )
+        res = self.gateway.place_limit(intent)
+        if res.decision is not Decision.RESTING:
+            await self.ledger.insert_order(_order_json(res.order), res.decision.value)
+            self._exit_attempts[pos.id] = attempt + 1  # its id is spent: the next pass sends a fresh one
+            return
+        r = Resting(intent=intent, kind="exit", limit=limit, placed_ts=now, deadline_s=deadline, signal_ts=now,
+                    ref=decision.ref_price, why=f"{decision.reason.value}: the mid, walked to the bid, crossed after {deadline:g} s",
+                    book_at_place=(bid, ask), last_check=now, ctx=(pos, decision, attempt))
+        r.order = res.order
+        self._resting[intent.client_order_id] = r
+        log.info("limit.placed", kind="exit", strategy=pos.strategy, symbol=pos.underlying.symbol, limit=limit, bid=bid, ask=ask,
+                 reason=decision.reason.value, deadline_s=deadline)
+        await self._advance_one(r, now, first=True)
+
+    async def _exit_filled(self, r: Resting, result: Any, audit: dict[str, Any]) -> None:
+        pos, decision, attempt = r.ctx
+        await self.ledger.insert_order(_order_json(result.order, audit), result.decision.value)
+        if pos.status != "OPEN" or pos.qty_remaining <= 0:
+            log.warning("limit.exit_after_close", position=pos.id)
+            return
+        await self._book_exit(pos, decision, result, result.fill.ts, attempt, audit)
+
+    async def _exit_cross(self, r: Resting, now: float, bid: float | None, ask: float | None) -> None:
+        """The deadline: sell through the book at the bid, so an exit is never left working."""
+        self._resting.pop(r.intent.client_order_id, None)
+        pos, decision, attempt = r.ctx
+        if pos.status != "OPEN" or pos.qty_remaining <= 0:
+            return
+        qty = min(r.intent.qty, pos.qty_remaining)
+        cross = replace(r.intent, client_order_id=exit_client_order_id(pos, decision, attempt, cross=True), limit_price=None, qty=qty)
+        result = await self._submit(cross, verdict_ok=True, verdict_reason="")
+        fill = result.fill
+        audit = r.audit(crossedTs=now, bookAtCross={"bid": bid, "ask": ask}, filledTs=fill.ts if fill else None,
+                        fillPrice=fill.price if fill else None, waitS=round(now - r.placed_ts, 3),
+                        outcome=f"crossed at the bid after {r.deadline_s:g} s" if fill else f"cross failed: {result.order.note}")
+        await self.ledger.insert_order(_order_json(result.order, audit), result.decision.value)
+        if fill is None:
+            n = attempt + 1
+            self._exit_attempts[pos.id] = n
+            self._exit_retry_at[pos.id] = now + min(2.0**n, 30.0)
+            log.error("exit.cross_failed", position=pos.id, symbol=pos.underlying.symbol, reason=result.order.note)
+            return
+        await self._book_exit(pos, replace(decision, qty=qty), result, now, attempt, audit)
+
+    async def _exit_market(self, pos: Position, decision: Any, now: float) -> None:
+        if self.mode() is Mode.PAPER:
+            await self._refresh_exit_book(pos.instrument, now)
+        attempt = self._exit_attempts.get(pos.id, 0)
         intent = OrderIntent(
             strategy=pos.strategy,
             instrument=pos.instrument,
@@ -2190,13 +4145,15 @@ class Engine:
             qty=decision.qty,
             purpose=Purpose.EXIT,
             signal_id=pos.signal_id,
-            client_order_id=exit_client_order_id(pos, decision),
+            client_order_id=exit_client_order_id(pos, decision, attempt),
             reason=decision.note,
             position_id=pos.id,
             ref_price=decision.ref_price,
         )
+        placed = time.time()
         result = await self._submit(intent, verdict_ok=True, verdict_reason="")
-        await self.ledger.insert_order(_order_json(result.order), result.decision.value)
+        audit = self._market_audit("exit", now, placed, result, pos.instrument.scrip_code)
+        await self.ledger.insert_order(_order_json(result.order, audit), result.decision.value)
         if result.decision is Decision.SHADOW_OK:
             # SHADOW places nothing, so a position carried in from a PAPER run can never close.
             # That is the mode working as intended — say so once, not once a second, and never as
@@ -2212,27 +4169,54 @@ class Engine:
                 )
             return
         if result.fill is None:
+            if result.decision in _DEFINITIVE_REJECTIONS:
+                # Nothing reached a venue, or the venue said no: the same exit may go again under a
+                # fresh id — after a pause, so a contract nobody is bidding for cannot fire twelve
+                # rejections in twelve seconds and trip the engine-wide breaker.
+                n = attempt + 1
+                self._exit_attempts[pos.id] = n
+                self._exit_retry_at[pos.id] = now + min(2.0**n, 30.0)
             log.error(
                 "exit.failed",
                 position=pos.id,
                 symbol=pos.underlying.symbol,
                 reason=result.order.note,
+                attempt=attempt,
             )
             self.telegram.fire_and_forget(
                 f"⚠️ EXIT FAILED {pos.strategy} {pos.underlying.symbol}: {result.order.note}",
                 key=f"exitfail:{pos.id}",
             )
             return
+        await self._book_exit(pos, decision, result, now, attempt, audit)
 
+    async def _book_exit(self, pos: Position, decision: Any, result: Any, now: float, attempt: int, audit: dict[str, Any]) -> None:
+        """A filled exit, immediate or from a resting limit: the slice is booked, the wallet
+        released, the trade written when the position is done."""
+        pos.exec_log.setdefault("exits", []).append({**audit, "reason": decision.reason.value, "qty": int(result.fill.qty)})
+        filled = max(0, min(decision.qty, int(result.fill.qty)))
+        if filled < decision.qty:
+            # The book took part of it (a one-level book truncates at the touch). Book what filled
+            # and leave the rest OPEN; it goes again at once under a new id, since the old one is
+            # spent. Booking decision.qty "sold" 1,950 PNBHOUSING contracts that never traded.
+            self._exit_attempts[pos.id] = attempt + 1
+            self._exit_retry_at.pop(pos.id, None)
+            log.warning("exit.partial", position=pos.id, symbol=pos.underlying.symbol,
+                        asked=decision.qty, filled=filled)
+        else:
+            self._exit_attempts.pop(pos.id, None)
+            self._exit_retry_at.pop(pos.id, None)
+        done = ExitDecision(decision.position_id, decision.reason, decision.ref_price, filled, decision.note)
         entry_before = pos.qty_remaining
         gross = apply_exit(
-            pos, decision, fill_price=result.fill.price, charges=result.fill.charges, now=now
+            pos, done, fill_price=result.fill.price, charges=result.fill.charges, now=now
         )
         wallet = self.wallets[pos.strategy]
-        wallet.release(pos.entry * min(decision.qty, entry_before) * pos.instrument.multiplier, now)
+        wallet.release(pos.entry * min(filled, entry_before) * pos.instrument.multiplier, now)
         wallet.apply_charges(result.fill.charges, now)
         wallet.apply_close(gross, now)
-        tripped = wallet.check_breakers(self.limits, now)
+        # each wallet against ITS OWN book's limits — not the parent's for everyone
+        tripped = wallet.check_breakers(self.limits_for(pos.strategy), now)
         if tripped:
             self.telegram.fire_and_forget(f"🛑 {pos.strategy} wallet halted: {tripped}")
 
@@ -2274,6 +4258,19 @@ class Engine:
             if p.status == "OPEN"
         ]
         self.tape.sample(time.time(), self.quotes, held)
+        try:
+            self.fulltape.sample(time.time(), self.quotes)
+        except Exception as exc:  # noqa: BLE001 - the recorder may never cost the clock its depth sync
+            self.fulltape.errors += 1
+            self.fulltape.last_error = str(exc)[:200]
+
+    def _fulltape_skip(self, code: str) -> bool:
+        """MCX stays off the full tape; an unknown code (India VIX) is kept."""
+        hit = self._fulltape_skip_cache.get(code)
+        if hit is None:
+            inst = self.catalogue_loader.catalogue.get(code)
+            hit = self._fulltape_skip_cache[code] = inst is not None and inst.segment is Segment.MCX_FO
+        return hit
 
     def depth_wanted(self) -> set[str]:
         """Every scrip code whose ORDER BOOK something is about to read: an open position's
@@ -2382,18 +4379,57 @@ class Engine:
                 log.exception("clock.failed", error=str(exc))
             await asyncio.sleep(1.0)
 
+    async def _feed_watchdog(self, now: float) -> None:
+        """A socket can read "connected" and deliver nothing — after a sleep/wake (the Mac slept at
+        noon on 2026-09-25) the peer is gone and the 25 s ping + 45 s timeout takes up to 70 s to
+        notice. In a session, with 200+ names subscribed, FEED_SILENCE_S without one frame is a
+        dead feed: drop it and let the run loop reconnect. At most once a minute."""
+        fh = self.feed.health
+        if (
+            fh.connected
+            and fh.connected_since is not None
+            and now - fh.connected_since > FEED_SILENCE_S * 2
+            and fh.last_message_ts is not None
+            and now - fh.last_message_ts > FEED_SILENCE_S
+            and now - self._last_silence_reconnect > 60
+            and any(is_open(g.segment, now, self.calendar) for g in self.groups.values())
+        ):
+            self._last_silence_reconnect = now
+            self._silence_reconnects += 1
+            await self.feed.reconnect(reason=f"silent {now - fh.last_message_ts:.0f}s in session")
+
     async def _housekeeping(self) -> None:
         last_reconcile = 0.0
         last_snapshot = 0.0
         last_archive = time.time()
+        last_fulltape = time.time()
         last_day = ist_day(time.time()).isoformat()
         while not self._stop.is_set():
             now = time.time()
             try:
                 day = ist_day(now).isoformat()
+                if (
+                    not self.booting
+                    and now - float(self.last_fudkii_scan.get("ts") or 0) > 300
+                    and (self._fudkii_scan_task is None or self._fudkii_scan_task.done())
+                ):
+                    self._fudkii_scan_task = asyncio.create_task(self.scan_fudkii(), name="fudkii-rescan")
+                if len(self._decided) != self._decided_saved:
+                    await asyncio.to_thread(self._save_decided)
+                if self.alerts.dirty and self.alerts.store_dir is not None:
+                    snap = self.alerts.snapshot()  # on the loop, where the rings are mutated
+                    await asyncio.to_thread(self.alerts.write, snap)
                 if now - last_archive > self.s.archive_flush_s:
                     last_archive = now
                     await asyncio.to_thread(self.archive.flush)
+                if now - last_fulltape > self.s.tape_full_flush_s:
+                    last_fulltape = now
+                    rows = self.fulltape.take()  # handed over here, in the loop that appends to it
+                    if rows:
+                        try:
+                            await asyncio.to_thread(self.fulltape.write, rows)
+                        except Exception as exc:  # noqa: BLE001 - never costs the housekeeping after it
+                            log.warning("tape_full.write_failed", error=str(exc)[:120])
 
                 # The nightly research loop, once per day after its hour, only with every segment
                 # closed — it runs six backtests in a worker thread and spends Claude calls.
@@ -2408,19 +4444,18 @@ class Engine:
                     self._alerts_reset_done.clear()
                     self._zone_cache.clear()
                     self._daily_due = self._legs_due = True
+                    self._legs_reanchor_done.clear()
                     self._daily_refresh_done.clear()
-                    for w in self.wallets.values():
-                        w.rollover(now)
+                    self._handled_signals.clear()
                     if self.s.has_credentials and self.s.engine_enabled:
                         await self.catalogue_loader.ensure()
 
                 if self.reconciler_positions is not None and now - last_reconcile > 60:
                     last_reconcile = now
-                    if self.mode() in (Mode.LIVE, Mode.LIVE_CAPPED):
-                        await self.reconciler_positions.run(
-                list(self.positions.values()),
-                at_venue=self.mode() in (Mode.LIVE, Mode.LIVE_CAPPED),
-            )
+                    # LIVE every minute; PAPER only while frozen, so a failed boot read (the broker
+                    # slow at 09:00) heals on the next clean one instead of halting every book all day
+                    if self.mode() in LIVE_MODES or self.reconciler_positions.frozen:
+                        await self.reconciler_positions.run(self._venue_positions(), at_venue=self.mode() in LIVE_MODES)
 
                 # The socket was opened with a token that dies at 23:59:59 IST. Once it has, drop
                 # the socket so the run loop reconnects with a fresh login — otherwise it can sit
@@ -2432,6 +4467,8 @@ class Engine:
                     and now > self.feed.token_expires_at + 60
                 ):
                     await self.feed.reconnect(reason="token expired")
+
+                await self._feed_watchdog(now)
 
                 # Periodic REST sweep of the finer frames: the fidelity metric, and exact chart bars.
                 if (
@@ -2472,6 +4509,11 @@ class Engine:
                     if hm >= slot and stamp not in self._daily_refresh_done:
                         self._daily_refresh_done.add(stamp)
                         self._daily_due = True
+                for slot in self.s.legs_reanchor_hm:
+                    stamp = f"{day} {slot}"
+                    if hm >= slot and stamp not in self._legs_reanchor_done:
+                        self._legs_reanchor_done.add(stamp)
+                        self._legs_reanchor_due = True
                 if (
                     self.reconciler_ready
                     and self.underlyings
@@ -2479,11 +4521,17 @@ class Engine:
                     and (
                         self._daily_due
                         or self._legs_due
+                        or self._legs_reanchor_due
                         or now - self._last_pivot_repair > self.s.pivot_repair_interval_s
                     )
                 ):
                     self._last_pivot_repair = now
                     self._pivot_repair_task = asyncio.create_task(self._pivot_repair())
+                await self._wallet_upkeep(now)
+                for book in self.gateway.take_new_trips():
+                    await self.ledger.event("gateway.book_breaker", {"book": book, "rejects": self.gateway.rejects_by_book.get(book)})
+                    self.telegram.fire_and_forget(f"🛑 {BOOK_LABELS.get(book, book)}: order breaker tripped — its entries stop until reset")
+                    log.error("gateway.book_breaker", book=book)
                 if now - last_snapshot > 300:
                     last_snapshot = now
                     await self._persist_wallets()
@@ -2505,6 +4553,74 @@ class Engine:
                 else Wallet.new(key.value, INITIAL_INR.get(key, self.s.paper_initial_inr))
             )
         await self._persist_wallets()
+
+    async def _wallet_upkeep(self, now: float, *, boot: bool = False) -> None:
+        """Every wallet made true from its OWN record, at boot and on every housekeeping tick —
+        all three steps are idempotent, so running them often costs nothing:
+
+        * **the day** — ``rollover`` compares today with the day the wallet last recorded. The old
+          trigger was a day change seen by the running process, seeded with the boot day, so a
+          process (re)started after midnight never rolled over that day: yesterday's daily halt
+          and day P&L carried through it (audit, 2026-09-26). The closed day is logged with its
+          opening and closing balance;
+        * **both breakers** — re-read against the book's own limits, so a halt a book earned while
+          the process was down, or before this fix, is on record before its first entry;
+        * **deployed money** — matched to what the book actually holds (``_reconcile_deployed``)."""
+        for key, w in self.wallets.items():
+            changed = False
+            closed = w.rollover(now)
+            if closed is not None:
+                changed = True
+                await self.ledger.event("wallet.rollover", {"strategy": key, **closed, "newDay": w.day, "atBoot": boot})
+                log.info("wallet.rollover", strategy=key, at_boot=boot, **closed)
+            tripped = w.check_breakers(self.limits_for(key), now)
+            if tripped:
+                changed = True
+                await self.ledger.event("wallet.halted", {"strategy": key, "reason": tripped, "atBoot": boot})
+                self.telegram.fire_and_forget(f"🛑 {key} wallet halted: {tripped}")
+            if self._reconcile_deployed(key, w, now, boot=boot):
+                changed = True
+                await self.ledger.event("wallet.deployed_corrected", {"strategy": key, **self._deployed_fix.pop(key, {}), "atBoot": boot})
+            if changed:
+                await self.ledger.upsert_wallet(key, w.to_json())
+
+    def _deployed_expected(self, key: str, w: Wallet) -> float:
+        """What ``deployed`` should read: the cost still held in the book's open positions (the
+        entry path commits ``entry × qty``, each exit releases ``entry × qty sold``) plus the
+        provisional hold of each of its resting entries."""
+        held = sum(p.entry * p.qty_remaining * p.instrument.multiplier
+                   for p in self.positions.values() if p.status == "OPEN" and p.strategy == key)
+        holds = sum(r.ctx.outlay for r in self._resting.values()
+                    if r.kind == "entry" and getattr(r.ctx, "wallet", None) is w)
+        flying = sum(h for ww, h in self._inflight_holds.values() if ww is w)
+        return held + holds + flying
+
+    def _reconcile_deployed(self, key: str, w: Wallet, now: float, *, boot: bool) -> bool:
+        """Correct a ``deployed`` that disagrees with the book's holdings. At boot at once (no
+        order is in flight: resting orders do not survive a restart). While running, only when the
+        SAME drift is seen twice at least 30 s apart — an entry between its hold and its position
+        is a few milliseconds, never 30 s. RT-X/RT-N/RT-Y carried ₹24,326.25 from 2026-09-24
+        09:45 to this fix: SBILIFE's twins were copied from a parent already closed, born CLOSED
+        with their cost committed and never released (the copy was fixed on 2026-09-25; the money
+        it stranded never was)."""
+        drift = round(w.deployed - self._deployed_expected(key, w), 2)
+        if abs(drift) < 1.0:
+            self._deployed_drift.pop(key, None)
+            return False
+        seen = self._deployed_drift.get(key)
+        if not boot:
+            if seen is None or abs(seen[0] - drift) >= 1.0:
+                self._deployed_drift[key] = (drift, now)
+                return False
+            if now - seen[1] < 30.0:
+                return False
+        was = w.deployed
+        w.deployed = max(0.0, round(w.deployed - drift, 2))
+        w.updated_ts = now
+        self._deployed_drift.pop(key, None)
+        self._deployed_fix[key] = {"was": round(was, 2), "now": w.deployed, "drift": drift}
+        log.warning("wallet.deployed_corrected", strategy=key, was=round(was, 2), now=w.deployed, drift=drift, at_boot=boot)
+        return True
 
     async def _persist_wallets(self) -> None:
         for w in self.wallets.values():
@@ -2568,7 +4684,8 @@ class Engine:
                 self.reconciler_positions is None or not self.reconciler_positions.frozen,
                 detail=self.reconciler_positions.freeze_reason if self.reconciler_positions else "",
             ),
-            Check("breaker", not self.gateway.breaker_tripped),
+            Check("breaker", not self.gateway.breaker_tripped,
+                  detail=", ".join(f"{BOOK_LABELS.get(b, b)} tripped" for b in sorted(self.gateway.tripped_books))),
             Check(
                 "bars_warm",
                 sum(1 for sym in self.underlyings if self.store.count(sym, DECISION_TF) >= 21)
@@ -2576,6 +4693,18 @@ class Engine:
                 if self.underlyings
                 else True,
                 detail="fewer than half the universe has 21+ decision bars",
+            ),
+            # TORNTPHARM 2026-09-25: one 30m bucket closed — and was decided — 22 times. The
+            # aggregator no longer reopens a bucket it closed and the decision path takes each
+            # (symbol, bucket) once; this says so if either guard ever has to act.
+            Check(
+                "bars_close_once",
+                self._duplicate_closes == 0,
+                value=float(self._duplicate_closes),
+                detail=(
+                    f"{self._duplicate_closes} repeated 30m closes dropped since boot; "
+                    f"{self.aggregator.late_ticks} ticks arrived for an already-closed bucket"
+                ),
             ),
             Check(
                 "pivots_ready",
@@ -2607,7 +4736,7 @@ class Engine:
                 "silence_s": fh.silence_s,
                 "subscriptions": fh.subscriptions,
             },
-            "bars": self.aggregator.stats() | self.store.stats(),
+            "bars": self.aggregator.stats() | self.store.stats() | {"duplicate_closes": self._duplicate_closes},
             "gateway": self.gateway.stats(),
             "rest": self.rest.stats(),
             "catalogue": self.catalogue_loader.catalogue.stats(),
@@ -2621,6 +4750,7 @@ class Engine:
             "option_oi_tracked": len(self.option_oi),
             "archive": self.archive.stats(),
             "tape": self.tape.stats(),
+            "tape_full": self.fulltape.stats(),
             "depth": {
                 "following": len(self._depth_following),
                 "pinned_for_archive": len(self._depth_pinned),
@@ -2630,6 +4760,7 @@ class Engine:
                 "cap": self.s.depth_max_subscriptions,
             },
             "telegram": self.telegram.stats(),
+            "booting": self.booting,
             "positions_open": len([p for p in self.positions.values() if p.status == "OPEN"]),
             "positions_stale_quote": len(self._stale_positions),
             "boot_notes": self.boot_notes,
@@ -2681,8 +4812,11 @@ def _instrument_from(d: dict[str, Any]) -> Instrument:
     )
 
 
-def _order_json(o: Any) -> dict[str, Any]:
+def _order_json(o: Any, audit: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The order row; ``audit`` is its trail — signal, limit placed, reprices, filled/crossed/
+    cancelled, and the book at each (exec/resting.py)."""
     return {
+        **({"exec": audit} if audit else {}),
         "id": o.id,
         "client_order_id": o.client_order_id,
         "strategy": o.strategy,
@@ -2706,13 +4840,32 @@ def _order_json(o: Any) -> dict[str, Any]:
     }
 
 
-def exit_client_order_id(pos: Position, decision: Any) -> str:
+#: rejections after which nothing is working on the order anywhere, so a retry is a new order
+_DEFINITIVE_REJECTIONS = frozenset({
+    Decision.REJECTED_BOOK, Decision.REJECTED_BROKER, Decision.REJECTED_CAP,
+    Decision.REJECTED_RISK, Decision.REJECTED_HALT,
+})
+
+
+def exit_client_order_id(pos: Position, decision: Any, attempt: int = 0, *, cross: bool = False) -> str:
     """Idempotency key for an exit: the same position, rung and reason must always produce the
     same id (a retry is the same order), and two positions must never share one. It was keyed on
     the signal — and the RT twin carries its parent's signal id, so on 2026-09-23 14:35 the twin's
     SL-EQ exit collided with the parent's and was refused as a duplicate, every second, 800 times,
-    while the underlying sat through the stop."""
-    return f"{pos.id}|EXIT|{pos.targets_hit}|{decision.reason.value}"
+    while the underlying sat through the stop.
+
+    ``attempt`` counts DEFINITIVE rejections of this exit. An order a venue refused, or one the
+    paper matcher never priced, is not working anywhere, so its retry is a new order and needs a
+    new id; an order whose fate is unknown keeps the same id and stays blocked."""
+    ref = (pos.exec_log or {}).get("ref")
+    if ref:
+        # "FII-RTX-260926-192510-007-SLE0R1X-HINDUNILVR-1960CE-L4": the position's own entry ref, what
+        # the exit is and at which rung, the retry and the cross — all inside the broker's 38 characters
+        code = EXIT_CODES.get(decision.reason, str(decision.reason.value)[:3].upper())
+        return f"{ref}-{code}{pos.targets_hit}{f'R{attempt}' if attempt else ''}{'X' if cross else ''}-{_contract_tag(pos.instrument, pos.qty)}"
+    base = f"{pos.id}|EXIT|{pos.targets_hit}|{decision.reason.value}"  # a position opened before readable ids
+    base = f"{base}|r{attempt}" if attempt else base
+    return f"{base}|X" if cross else base
 
 
 def _position_json(p: Position) -> dict[str, Any]:
@@ -2757,7 +4910,14 @@ def _position_json(p: Position) -> dict[str, Any]:
         "t_close_ok": p.t_close_ok,
         "sustained_idx": p.sustained_idx,
         "option_edm": p.option_edm,
+        "peak_mid": p.peak_mid,
+        "trail_dwell": p.trail_dwell,
+        "breach_since": p.breach_since,
+        "realised_gross": p.realised_gross,
+        "entry_charges": p.entry_charges,
+        "pnl": p.pnl,
         "line_breach_since": p.line_breach_since,
+        "exec_log": p.exec_log,
     }
 
 
@@ -2798,14 +4958,23 @@ def _position_from_json(d: dict[str, Any]) -> Position:
         t_close_ok=bool(d.get("t_close_ok", False)),
         sustained_idx=int(d.get("sustained_idx", -1)),
         option_edm=float(d.get("option_edm", 0)),
+        peak_mid=float(d.get("peak_mid") or 0.0),
+        trail_dwell=int(d.get("trail_dwell") or 0),
+        breach_since=d.get("breach_since"),
+        realised_gross=float(d.get("realised_gross") or 0.0),
+        entry_charges=float(d.get("entry_charges") or 0.0),
         line_breach_since=d.get("line_breach_since"),
+        exec_log=dict(d.get("exec_log") or {}),
     )
 
 
 def _trade_from(p: Position, now: float) -> Trade:
     exit_price = p.exit_price or 0.0
-    gross = (exit_price - p.entry) * p.dir_sign * p.qty * p.instrument.multiplier
-    net = gross - p.charges
+    # The slices as they filled. The last fill's price times the whole quantity booked RT-X's
+    # HEROMOTOCO (+₹1,015 real) as -₹552 on 2026-09-25. Positions saved before the slices were kept
+    # fall back to the old figure.
+    gross = p.realised_gross if p.realised_gross else (exit_price - p.entry) * p.dir_sign * p.qty * p.instrument.multiplier
+    net = gross - p.charges - p.entry_charges
     r = net / (p.r_unit * p.qty * p.instrument.multiplier) if p.r_unit > 0 else 0.0
     return Trade(
         id=new_id("trd"),
@@ -2820,7 +4989,7 @@ def _trade_from(p: Position, now: float) -> Trade:
         entry=p.entry,
         exit=p.exit_price or 0.0,
         gross=round(gross, 2),
-        charges=round(p.charges, 2),
+        charges=round(p.charges + p.entry_charges, 2),
         net=round(net, 2),
         r_multiple=round(r, 3),
         mfe_r=round(p.mfe_r, 3),

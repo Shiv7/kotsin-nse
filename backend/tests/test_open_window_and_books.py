@@ -40,17 +40,44 @@ def test_eleven_rejects_are_tolerated_and_the_twelfth_trips_the_breaker(settings
     g = e.gateway
     assert g.caps.breaker_consecutive_rejects == 12, "the setting reaches the live gateway"
 
-    for i in range(11):
-        g.consecutive_rejects = i + 1
-        g.breaker_tripped = g.consecutive_rejects >= g.caps.breaker_consecutive_rejects
-        assert not g.breaker_tripped, f"reject {i + 1} must not trip it"
-    g.consecutive_rejects = 12
-    g.breaker_tripped = g.consecutive_rejects >= g.caps.breaker_consecutive_rejects
-    assert g.breaker_tripped, "the twelfth does"
-    # and a tripped breaker is what halts the whole engine — the reason the fuse was lengthened
-    assert e.halted()[0] and "breaker" in e.halted()[1]
-    g.reset_breaker()
-    assert not e.halted()[0]
+    from kotsin_nse.config import Segment
+    from kotsin_nse.domain import (
+        Instrument,
+        InstrumentKind,
+        OptionType,
+        OrderIntent,
+        OrderSide,
+        Purpose,
+    )
+    from kotsin_nse.exec.gateway import Decision, Mode
+
+    opt = Instrument("1", "X", Segment.NSE_FO, InstrumentKind.OPTION, lot_size=100, strike=100.0, option_type=OptionType.CE, underlying="X")
+    n = iter(range(1000))
+
+    def reject(book: str, decision: Decision = Decision.REJECTED_BOOK, purpose: Purpose = Purpose.ENTRY) -> None:
+        intent = OrderIntent(strategy=book, instrument=opt, side=OrderSide.BUY, qty=100, purpose=purpose, signal_id="s",
+                             client_order_id=f"{book}-{next(n)}", reason="t")
+        g._reject(g._order_for(intent, Mode.PAPER), decision, "no book")
+
+    # operator, 2026-09-26: "each fudkii variant, parent or twins required 12 consecutive rejection to
+    # trigger a halt. not total 12" — four books rejected once per trigger each: nobody trips
+    for _ in range(11):
+        for book in ("FUDKII", "FUDKII_RT_X", "FUDKII_RT_N", "FUDKII_RT_Y"):
+            reject(book)
+    assert not g.breaker_tripped, "44 rejections in all, 11 per book: no book trips"
+    reject("FUDKII_RT_X")
+    assert g.book_tripped("FUDKII_RT_X") and not g.book_tripped("FUDKII"), "the twelfth of ONE book trips THAT book"
+    assert g.take_new_trips() == ["FUDKII_RT_X"] and g.take_new_trips() == []
+    assert e.halted() == (False, ""), "a book's breaker is not an engine halt"
+    # only a real failure counts: a halt, a cap, a duplicate or an exit never does
+    for _ in range(30):
+        reject("FUDKII_CT_X", Decision.REJECTED_HALT)
+        reject("FUDKII_CT_X", Decision.REJECTED_CAP)
+        reject("FUDKII_CT_X", Decision.DUP_BLOCKED)
+        reject("FUDKII_CT_X", purpose=Purpose.EXIT)
+    assert not g.book_tripped("FUDKII_CT_X")
+    g.reset_breaker("FUDKII_RT_X")
+    assert not g.breaker_tripped and g.rejects_by_book["FUDKII"] == 11, "a reset is one book's"
 
 
 # -- the depth window ---------------------------------------------------------------------------
@@ -112,7 +139,7 @@ def test_the_commodity_book_takes_mcx_only_and_the_others_take_the_rest():
 
 
 @pytest.mark.asyncio
-async def test_an_nse_trigger_never_reaches_the_commodity_books_page(settings, equity):
+async def test_an_nse_trigger_never_reaches_the_commodity_books_page(settings, equity, midday):
     """The card page reads every FUDKII trigger of the day; each book must see only its own."""
     from kotsin_nse.domain import Direction
     from kotsin_nse.strategy.base import Signal
@@ -235,9 +262,13 @@ def test_a_snapshot_quote_becomes_a_one_level_book_rather_than_a_guessed_price(s
     big = OrderIntent(strategy="FUDKII", instrument=option, side=OrderSide.BUY, qty=9_000,
                       purpose=Purpose.ENTRY, signal_id="s2", client_order_id="c2", reason="r")
     assert m.fill(big, b, now=now).qty == 5_000 and m.truncated == 1
-    # a one-sided or sizeless quote is not a book, and is refused rather than invented
-    assert book_from_quote("1", bid=0.0, ask=7.0, bid_qty=0, ask_qty=10, ts=now) is None
-    assert book_from_quote("1", bid=6.9, ask=7.0, bid_qty=0, ask_qty=10, ts=now) is None
+    # A one-sided quote is a one-sided book: the side that exists, nothing invented. A sizeless
+    # side is dropped. (Phase 2: requiring both sides left a quiet put's SELL with no book at all —
+    # TATASTEEL 185 PE, 2026-09-25 14:45-14:47.) A SELL against it is refused, a BUY fills at the ask.
+    one = book_from_quote("1", bid=0.0, ask=7.0, bid_qty=0, ask_qty=10, ts=now)
+    assert one is not None and one.bids == [] and one.asks == [(7.0, 10)]
+    assert book_from_quote("1", bid=6.9, ask=7.0, bid_qty=0, ask_qty=10, ts=now).bids == []
+    assert book_from_quote("1", bid=0.0, ask=0.0, bid_qty=0, ask_qty=0, ts=now) is None
 
 
 @pytest.mark.asyncio

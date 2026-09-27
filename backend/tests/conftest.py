@@ -33,6 +33,33 @@ def _isolate_config_from_the_box() -> object:
     os.environ.update(saved)
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _never_the_operators_charges_file() -> object:
+    """Tests cost trades from Settings, never from ``<data_dir>/charges.toml`` — deploy.sh runs the
+    suite inside the live folder, where that file is the operator's (see risk/charge_rates.py)."""
+    from kotsin_nse.risk import charge_rates
+
+    before = charge_rates.AUTO_FILE
+    charge_rates.AUTO_FILE = False
+    yield None
+    charge_rates.AUTO_FILE = before
+
+
+@pytest.fixture
+def midday(monkeypatch) -> list[float]:
+    """``time.time()`` pinned to 11:00 IST today. A test that reads "today's" cards must not run
+    into yesterday when the suite runs just after midnight — deploy.sh runs it at any hour, and
+    "now − 10 min" at 00:02 IST is the previous session (2026-09-27)."""
+    import time as _time
+    from datetime import time as dtime
+
+    from kotsin_nse.market.session import ist_today
+
+    now = [datetime.combine(ist_today(), dtime(11, 0), tzinfo=IST).timestamp()]
+    monkeypatch.setattr(_time, "time", lambda: now[0])
+    return now
+
+
 @pytest.fixture
 def settings(tmp_path) -> Settings:
     return Settings(
@@ -40,6 +67,9 @@ def settings(tmp_path) -> Settings:
         data_dir=tmp_path,
         db_url=f"sqlite+aiosqlite:///{tmp_path}/test.db",
         engine_enabled=False,
+        # the existing suite tests the immediate walk of the book; the limit-order path
+        # (exec/resting.py) has its own tests, which switch it on
+        paper_limit_orders=False,
     )
 
 

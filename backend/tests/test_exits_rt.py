@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from kotsin_nse.risk.exits import ExitEngine, MarketView
 from kotsin_nse.risk.limits import RT_X_LIMITS, RiskLimits
 
@@ -390,40 +392,254 @@ def test_rt_n_arms_on_a_minute_close_over_its_own_r1_not_on_a_touch():
     assert pos.armed_ts == 2065.0 and pos.ratchet_sl == 20.0
 
 
-def test_rt_y_does_not_arm_until_the_option_has_made_half_a_days_expected_move():
-    """KEI and GRASIM armed at breakeven and were retested through it: arming waits for the option
-    to have moved 0.5 × its expected daily move, on the equity trigger and on its own rungs alike."""
+def test_rt_y_arms_at_plus_5pct_when_it_has_no_own_rung_over_it_and_not_before():
+    """The expected-move threshold asked an intraday trade for half of a whole DAY's move. On
+    2026-09-24 the four RT-Y positions needed +43 %, +49 %, +54 % and +72 % to arm, reached +5.7 %
+    at best, and not one of them ever armed. +5 % on the premium paid is the minimum T1."""
     from kotsin_nse.risk.limits import RT_Y_LIMITS
 
     e = ExitEngine(RT_Y_LIMITS)
-    pos = _own(strategy="FUDKII_RT_Y", option_edm=1.0)  # a day's move = 100 % of premium → arm at 30.00
-    assert e.evaluate(pos, _view(option_ltp=22.0, option_mid=22.0, underlying_ltp=1020.0, now=2000.0)) is None
-    assert e.evaluate(pos, _view(option_ltp=24.5, option_mid=24.5, now=2001.0)) is None, "its own T1 at 24 is under the threshold"
+    pos = _own(strategy="FUDKII_RT_Y", option_edm=1.0, option_t1=0.0, option_targets=())  # no own rung
+    assert e.evaluate(pos, _view(option_ltp=20.9, option_mid=20.9, now=2000.0)) is None, "under +5 %"
     assert pos.armed_by == ""
-    d = e.evaluate(pos, _view(option_ltp=30.0, option_mid=30.0, underlying_ltp=1020.0, now=2010.0))
-    assert d is not None and pos.option_targets == (30.0, 32.0, 36.0) and pos.ratchet_sl == 20.0
+    d = e.evaluate(pos, _view(option_ltp=21.0, option_mid=21.0, now=2001.0))
+    assert d is not None and d.qty == 100, "the arm pays one lot, not the position"
+    assert "entry +5% (21.00)" in d.note
+    assert pos.option_targets == (21.0,) and pos.option_t1 == 21.0
+    assert pos.armed_by == "option" and pos.ratchet_sl == 20.0, "the T1 staircase: SL to breakeven"
 
 
-def test_rt_y_keeps_the_sl_one_rung_behind_and_every_post_arm_stop_needs_the_sustain():
-    """T1 sustained arms the band but leaves the SL at breakeven (one rung behind), and a breach
-    of the line must hold 75 s: KEI's breakeven fired on a one-minute wick at 10:31 with the
-    underlying up, two hours before a +143 % move."""
+def test_rt_y_an_own_t1_over_plus_5pct_is_t1_itself():
+    """Operator, 2026-09-26: "treat +5% as a floor, not as where lot 1 actually sells". Own T1 24.00
+    on a 20.00 entry: +5 % (21.00) sells nothing; lot 1 goes at 24.00, where its sell also rests."""
     from kotsin_nse.risk.limits import RT_Y_LIMITS
 
     e = ExitEngine(RT_Y_LIMITS)
-    pos = _own(strategy="FUDKII_RT_Y", option_edm=0.4)  # threshold 24.00 = T1
-    _sustain_t1(e, pos)
-    assert pos.sustained_idx == 0 and pos.armed_ts == 2076.0 and pos.ratchet_sl == 20.0, "armed, SL still at breakeven"
-    # band = max(10 %, 0.25 × 40 %) = 10 % off the 24.50 peak → 22.05, above the 20.00 rung SL
-    assert e._band_level(pos, _view(now=2076.0)) == 22.05
-    assert e.evaluate(pos, _view(option_ltp=21.5, option_mid=21.5, now=2100.0)) is None, "one read through the band is not an exit"
-    assert pos.line_breach_since == 2100.0
-    assert e.evaluate(pos, _view(option_ltp=22.5, option_mid=22.5, now=2130.0)) is None
-    assert pos.line_breach_since is None, "back over the line: the clock resets"
-    assert e.evaluate(pos, _view(option_ltp=21.5, option_mid=21.5, now=2140.0)) is None
-    assert e.evaluate(pos, _view(option_ltp=21.5, option_mid=21.5, now=2214.0)) is None, "74 s is not 75"
-    d = e.evaluate(pos, _view(option_ltp=21.5, option_mid=21.5, now=2216.0))
-    assert d is not None and d.reason.value == "TRAIL" and "[sustain]" in d.note and d.qty == pos.qty_remaining
+    pos = _own(strategy="FUDKII_RT_Y")  # own ladder 24 / 28 / 32 / 36 on a 20.00 entry
+    for k, px in enumerate((21.0, 22.5, 23.9)):
+        assert e.evaluate(pos, _view(option_ltp=px, option_mid=px, now=2000.0 + k)) is None, f"{px}: over +5 %, under its own T1"
+    assert pos.armed_by == "" and pos.targets_hit == 0 and pos.option_targets == (24.0, 28.0, 32.0, 36.0)
+    assert e.resting_target(pos) == (0, 24.0, 100), "the resting sell is at the same T1"
+    d = e.evaluate(pos, _view(option_ltp=24.0, option_mid=24.0, now=2010.0))
+    assert d is not None and d.qty == 100 and "its own rung" in d.note
+    assert pos.armed_by == "option" and pos.ratchet_sl == 20.0
+
+
+def test_rt_y_a_near_own_t1_waits_for_the_5pct_minimum():
+    """Operator, 2026-09-25: +5 % is the minimum before arming. A rung 2.5 % over entry must not arm
+    the trade and step the SL to breakeven — that is how KEI and GRASIM were stopped. It is dropped
+    and the minimum becomes T1, the higher rungs following."""
+    from kotsin_nse.risk.limits import RT_Y_LIMITS
+
+    e = ExitEngine(RT_Y_LIMITS)
+    pos = _own(strategy="FUDKII_RT_Y", option_t1=20.5, option_targets=(20.5, 28.0, 32.0, 36.0))
+    assert e.evaluate(pos, _view(option_ltp=20.6, option_mid=20.6, now=2000.0)) is None, "its T1 is under +5 %"
+    assert pos.armed_by == "" and pos.ratchet_sl == 0.0, "no arm, no breakeven stop"
+    d = e.evaluate(pos, _view(option_ltp=21.0, option_mid=21.0, now=2001.0))
+    assert d is not None and "entry +5% (21.00)" in d.note
+    assert pos.option_targets == (21.0, 28.0, 32.0, 36.0), "the rung below the minimum is dropped"
+
+
+def test_rt_y_the_equity_t1_also_waits_for_the_5pct_minimum():
+    """With no own T1 at or over +5 %, the minimum is T1: the underlying at its T1 sells lot 1 once
+    the option is at least +5 %."""
+    from kotsin_nse.risk.limits import RT_Y_LIMITS
+
+    e = ExitEngine(RT_Y_LIMITS)
+    pos = _own(strategy="FUDKII_RT_Y", option_t1=20.5, option_targets=(20.5, 28.0, 32.0, 36.0))
+    assert e.evaluate(pos, _view(option_ltp=20.4, option_mid=20.4, underlying_ltp=1020.0, now=2000.0)) is None
+    assert pos.armed_by == "", "the underlying is at its T1 but the option is only +2 %"
+    d = e.evaluate(pos, _view(option_ltp=21.2, option_mid=21.2, underlying_ltp=1020.0, now=2001.0))
+    assert d is not None and pos.armed_by == "equity" and pos.option_targets[0] == 21.2
+
+
+def test_rt_y_the_equity_t1_never_sells_below_an_own_t1_over_5pct():
+    """T1 = max(own T1, +5 %) on every route (operator, 2026-09-26: "treat +5% as a floor, not as
+    where lot 1 actually sells"; review: this route sold lot 1 at 21.50 with the own T1 at 24.00)."""
+    from kotsin_nse.risk.limits import RT_Y_LIMITS
+
+    e = ExitEngine(RT_Y_LIMITS)
+    pos = _own(strategy="FUDKII_RT_Y")  # own ladder 24/28/32/36 on a 20.00 entry
+    assert e.evaluate(pos, _view(option_ltp=21.5, option_mid=21.5, underlying_ltp=1020.0, now=2000.0)) is None
+    assert pos.armed_by == "" and pos.option_targets == (24.0, 28.0, 32.0, 36.0), "T1 is still its own 24.00"
+    assert e.resting_target(pos) == (0, 24.0, 100), "and its sell rests there"
+    d = e.evaluate(pos, _view(option_ltp=24.0, option_mid=24.0, underlying_ltp=1020.0, now=2001.0))
+    assert d is not None and d.qty == 100 and pos.armed_by == "option", "the option at its own T1: lot 1 goes there"
+
+
+def test_rt_x_the_equity_t1_still_sells_where_the_option_stands():
+    """A book without the +5 % floor is unchanged: the underlying at its T1 makes the option's price T1."""
+    from kotsin_nse.risk.limits import RT_X_LIMITS
+
+    e = ExitEngine(RT_X_LIMITS)
+    pos = _own()
+    d = e.evaluate(pos, _view(option_ltp=21.5, option_mid=21.5, underlying_ltp=1020.0, now=2000.0))
+    assert d is not None and pos.armed_by == "equity" and pos.option_targets[0] == 21.5
+
+
+def test_rt_y_with_no_own_rung_rests_its_t1_at_the_5pct_minimum():
+    """Review, 2026-09-26: with no own ladder nothing rested and lot 1 went at market on the first
+    print over +5 %. The minimum is T1, so its sell rests there — one lot, the band carries the rest."""
+    from kotsin_nse.risk.limits import RT_X_LIMITS, RT_Y_LIMITS
+
+    e = ExitEngine(RT_Y_LIMITS)
+    pos = _own(strategy="FUDKII_RT_Y", option_t1=0.0, option_targets=())
+    assert e.resting_target(pos) == (0, 21.0, 100)
+    d = e.resting_target_filled(pos, 2000.0, 21.0, 21.0)
+    assert d.qty == 100 and pos.option_targets == (21.0,) and pos.armed_by == "option"
+    assert ExitEngine(RT_X_LIMITS).resting_target(_own(option_t1=0.0, option_targets=())) is None, "RT-X has no floor: nothing to rest"
+
+
+def test_rt_y_a_jump_through_both_arms_on_the_real_rung_and_keeps_the_ladder():
+    """When one print clears the minimum AND an own rung above it, the rung is the arm."""
+    from kotsin_nse.risk.limits import RT_Y_LIMITS
+
+    e = ExitEngine(RT_Y_LIMITS)
+    pos = _own(strategy="FUDKII_RT_Y", option_t1=22.0, option_targets=(22.0, 28.0, 32.0, 36.0))
+    d = e.evaluate(pos, _view(option_ltp=22.5, option_mid=22.5, now=2000.0))
+    assert d is not None and "T1 22.00 touched" in d.note and "its own rung" in d.note
+    assert pos.option_targets == (22.0, 28.0, 32.0, 36.0)
+
+
+def test_rt_y_with_no_own_rungs_still_arms_and_keeps_lots_back_for_the_band():
+    """BANKNIFTY gapped 1.53 % on 2026-09-24. Its option ladder, anchored on the previous close,
+    carried nothing above entry, so the book had no T1, could never arm and could never trail. The
+    percentage arms it; because there is no rung above the synthetic T1, the arm must still pay only
+    its tranche and leave the rest to the give-back band."""
+    from kotsin_nse.risk.limits import RT_Y_LIMITS
+
+    e = ExitEngine(RT_Y_LIMITS)
+    pos = _own(strategy="FUDKII_RT_Y", option_t1=0.0, option_targets=())
+    assert e.evaluate(pos, _view(option_ltp=20.9, option_mid=20.9, now=2000.0)) is None
+    d = e.evaluate(pos, _view(option_ltp=21.5, option_mid=21.5, now=2001.0))
+    assert d is not None and d.qty == 100, "one lot out, not all four"
+    assert pos.option_targets == (21.5,) and pos.option_t1 == 21.5
+
+
+#: BANKNIFTY 29 SEP 2026 PE 55300, 2026-09-24, from the tick tape: (IST second, ltp, bid, ask).
+_BN_TAPE = [
+    ("09:45:03", 206.05, 205.0, 205.9), ("09:45:04", 206.4, 206.4, 207.05), ("09:45:05", 208.65, 207.9, 208.75),
+    ("09:45:06", 212.0, 211.2, 212.1), ("09:45:07", 210.5, 209.7, 210.55), ("09:45:09", 211.25, 210.7, 211.5),
+    ("09:45:10", 210.65, 210.85, 211.5), ("09:45:11", 212.0, 210.95, 211.6), ("09:45:12", 213.0, 212.55, 213.15),
+    ("09:45:13", 213.95, 213.55, 214.05), ("09:45:15", 214.5, 213.95, 214.45), ("09:45:16", 215.8, 216.25, 217.2),
+    ("09:45:17", 216.4, 216.45, 217.35), ("09:45:18", 216.2, 215.75, 216.7), ("09:45:20", 216.9, 216.5, 217.0),
+    ("09:45:22", 217.45, 217.2, 218.1), ("09:45:23", 216.6, 216.2, 217.0), ("09:45:24", 217.7, 216.25, 217.15),
+    ("09:45:26", 215.25, 214.35, 215.0), ("09:45:27", 215.6, 215.3, 216.45), ("09:45:28", 216.6, 216.0, 216.9),
+    ("09:45:29", 214.8, 212.3, 213.2), ("09:45:31", 209.7, 209.5, 210.3), ("09:45:32", 210.4, 209.3, 210.25),
+    ("09:45:33", 209.7, 208.5, 209.45), ("09:45:34", 208.2, 208.0, 208.75), ("09:45:35", 208.3, 207.3, 208.15),
+]
+
+
+def test_rt_y_banknifty_2026_09_24_on_the_tape_arms_at_216_and_leaves_on_the_3pct_line():
+    """The trade that set the rule. The PE filled at 205.93; the old threshold wanted 293.85
+    (+42.7 %) and nothing armed. It crossed +5 % (216.23) at 09:45:17, peaked at 217.70 and was
+    back under +5 % nine seconds later — so arming must switch the band on AT the touch. A 75 s
+    sustain never completed and the rest went at breakeven (tape replay: 201.00, gross -128). With
+    the band live at the touch the rest leave on the 3 % line off the 217.65 peak (208.50, +547)."""
+    from datetime import datetime, timedelta, timezone
+
+    from kotsin_nse.config import Segment
+    from kotsin_nse.domain import Direction, Instrument, InstrumentKind, OptionType
+    from kotsin_nse.risk.exits import apply_exit
+    from kotsin_nse.risk.limits import RT_Y_LIMITS
+
+    ist = timezone(timedelta(hours=5, minutes=30))
+
+    def ts(hms: str) -> float:
+        return datetime.strptime(f"2026-09-24 {hms}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=ist).timestamp()
+
+    pe = Instrument(
+        scrip_code="69776", symbol="BANKNIFTY", segment=Segment.NSE_FO, kind=InstrumentKind.OPTION,
+        name="BANKNIFTY 29 SEP 2026 PE 55300.00", lot_size=30, tick_size=0.05, multiplier=1,
+        expiry="2026-09-29", strike=55300.0, option_type=OptionType.PE, underlying="BANKNIFTY",
+    )
+    pos = _own(
+        strategy="FUDKII_RT_Y", instrument=pe, qty=120, entry=205.93, opened_ts=ts("09:45:03"),
+        direction=Direction.BEARISH, equity_entry=55480.0, equity_sl=55676.35, equity_targets=(55275.95,),
+        option_sl=136.98, option_t1=0.0, option_targets=(), option_edm=0.853,
+    )
+    e = ExitEngine(RT_Y_LIMITS)
+    tape = {ts(h): (ltp, bid, ask) for h, ltp, bid, ask in _BN_TAPE}
+    out, last = [], None
+    for sec in range(int(ts("09:45:03")), int(ts("09:45:35")) + 1):
+        last = tape.get(float(sec), last)
+        ltp, bid, ask = last
+        mid = (bid + ask) / 2
+        d = e.evaluate(pos, _view(option_ltp=ltp, option_mid=mid, underlying_ltp=55480.0,
+                                  spread_pct=(ask - bid) / mid, now=float(sec)))
+        if d is not None:
+            fill = bid
+            out.append((datetime.fromtimestamp(sec, ist).strftime("%H:%M:%S"), d.reason.value, d.qty, fill, d.note))
+            apply_exit(pos, d, fill_price=fill, charges=0, now=float(sec))
+        if pos.qty_remaining == 0:
+            break
+    assert [o[:4] for o in out] == [
+        ("09:45:17", "TARGET", 30, 216.45),
+        ("09:45:33", "TRAIL", 90, 208.5),
+    ], out
+    assert "entry +5% (216.23)" in out[0][4]
+    assert "give-back line 211.12 off the 217.65 peak" in out[1][4] and "[dwell]" in out[1][4]
+    assert sum((f - 205.93) * q for _, _, q, f, _ in out) == pytest.approx(547.2, abs=0.5)
+
+def _touch_t1_y(e, pos, *, t0=2000.0, level=24.5):
+    """RT-Y's T1 touch: one lot out, SL to breakeven, and the band armed at that instant."""
+    from kotsin_nse.risk.exits import apply_exit
+
+    d = e.evaluate(pos, _view(option_ltp=level, option_mid=level, now=t0))
+    assert d is not None and d.reason.value == "TARGET"
+    apply_exit(pos, d, fill_price=level, charges=0, now=t0)
+    assert pos.armed_ts == t0 and pos.peak_mid == level, "armed at the touch, not after a sustain"
+    return d
+
+
+def test_rt_y_keeps_the_sl_one_rung_behind_and_exits_the_rest_on_a_3pct_giveback():
+    """T1's touch arms the band and leaves the SL at breakeven (one rung behind). The band is 3 %
+    off the peak and confirms over three one-second reads — prompt, but one print cannot end it."""
+    from kotsin_nse.risk.limits import RT_Y_LIMITS
+
+    e = ExitEngine(RT_Y_LIMITS)
+    pos = _own(strategy="FUDKII_RT_Y", option_edm=0.4)
+    _touch_t1_y(e, pos)
+    assert pos.ratchet_sl == 20.0, "SL at breakeven"
+    assert e._band_level(pos, _view(now=2000.0)) == 23.77, "3 % off the 24.50 peak, over the 20.00 SL"
+    assert e.evaluate(pos, _view(option_ltp=23.7, option_mid=23.7, now=2100.0)) is None, "one read is not an exit"
+    assert pos.trail_dwell == 1
+    assert e.evaluate(pos, _view(option_ltp=24.0, option_mid=24.0, now=2101.0)) is None
+    assert pos.trail_dwell == 0, "back over the line: the dwell resets"
+    assert e.evaluate(pos, _view(option_ltp=23.7, option_mid=23.7, now=2102.0)) is None
+    assert e.evaluate(pos, _view(option_ltp=23.7, option_mid=23.7, now=2103.0)) is None
+    d = e.evaluate(pos, _view(option_ltp=23.7, option_mid=23.7, now=2104.0))
+    assert d is not None and d.reason.value == "TRAIL" and "[dwell]" in d.note and d.qty == pos.qty_remaining
+
+
+def test_rt_y_the_3pct_band_sits_above_the_lagged_rung_sl_at_every_rung():
+    """Because the rung SL lags a whole rung behind, the 3 % band is always the higher line once
+    armed: it is the band that ends an RT-Y trade, the rung SL the floor beneath it."""
+    from kotsin_nse.risk.exits import apply_exit
+    from kotsin_nse.risk.limits import RT_Y_LIMITS
+
+    e = ExitEngine(RT_Y_LIMITS)
+    pos = _own(strategy="FUDKII_RT_Y", option_edm=0.4)
+    _touch_t1_y(e, pos)
+    d = e.evaluate(pos, _view(option_ltp=28.0, option_mid=28.0, now=2100.0))
+    apply_exit(pos, d, fill_price=28.0, charges=0, now=2100.0)
+    assert pos.ratchet_sl == 24.0, "the SL lags one rung behind T2"
+    assert e._band_level(pos, _view(now=2100.0)) == 27.16, "3 % off the 28.00 peak, well over the 24.00 SL"
+    for t in (2200.0, 2201.0):
+        assert e.evaluate(pos, _view(option_ltp=27.0, option_mid=27.0, now=t)) is None
+    d = e.evaluate(pos, _view(option_ltp=27.0, option_mid=27.0, now=2202.0))
+    assert d is not None and d.reason.value == "TRAIL" and "[dwell]" in d.note
+    assert "give-back line 27.16 off the 28.00 peak" in d.note and d.qty == pos.qty_remaining
+
+
+def test_ct_y_inherits_the_rt_y_arming_and_giveback_exactly():
+    from kotsin_nse.risk.limits import CT_Y_LIMITS, RT_Y_LIMITS
+
+    assert CT_Y_LIMITS.arm_at_pct == RT_Y_LIMITS.arm_at_pct == 5.0
+    assert CT_Y_LIMITS.peak_giveback_pct == RT_Y_LIMITS.peak_giveback_pct == 3.0
+    assert CT_Y_LIMITS.band_exit == RT_Y_LIMITS.band_exit == "dwell"
+    assert CT_Y_LIMITS.giveback_move_frac == RT_Y_LIMITS.giveback_move_frac == 0.0
+    assert CT_Y_LIMITS.dried_volume_v is None, "the wall rule is the fade's own filter"
 
 
 def test_rt_y_t2_touch_steps_the_sl_to_t1_and_t2_sustained_leaves_it_there():
@@ -432,7 +648,7 @@ def test_rt_y_t2_touch_steps_the_sl_to_t1_and_t2_sustained_leaves_it_there():
 
     e = ExitEngine(RT_Y_LIMITS)
     pos = _own(strategy="FUDKII_RT_Y", option_edm=0.4)
-    _sustain_t1(e, pos)
+    _touch_t1_y(e, pos)
     d = e.evaluate(pos, _view(option_ltp=28.0, option_mid=28.0, now=2100.0))
     assert d is not None and "T2 28.00 touched" in d.note
     apply_exit(pos, d, fill_price=28.0, charges=0, now=2100.0)

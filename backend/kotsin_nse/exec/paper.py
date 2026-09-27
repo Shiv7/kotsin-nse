@@ -97,9 +97,13 @@ def book_from_quote(
     the degraded last-price-plus-slippage path. It is one level, so a large order truncates rather
     than walking — which is honest, and is what the touch could actually absorb.
     """
-    if bid <= 0 or ask <= 0 or bid_qty <= 0 or ask_qty <= 0:
+    # One side is still a book: an exit only needs the bid. Requiring both left a quiet put's
+    # sell with no book at all (TATASTEEL 185 PE, 2026-09-25 14:45-14:47, seven rejections).
+    bids = [(bid, bid_qty)] if bid > 0 and bid_qty > 0 else []
+    asks = [(ask, ask_qty)] if ask > 0 and ask_qty > 0 else []
+    if not bids and not asks:
         return None
-    return BookSnapshot(scrip_code=str(scrip_code), bids=[(bid, bid_qty)], asks=[(ask, ask_qty)], ts=ts)
+    return BookSnapshot(scrip_code=str(scrip_code), bids=bids, asks=asks, ts=ts)
 
 
 class PaperMatcher:
@@ -140,12 +144,17 @@ class PaperMatcher:
         inst: Instrument = intent.instrument
         buy = intent.side is OrderSide.BUY
 
-        if book is None or not (book.asks if buy else book.bids):
+        if book is not None and not (book.asks if buy else book.bids):
+            # A book we can see with nobody on our side: there is no one to trade with. Filling
+            # at the last print here sold with no bid at all.
+            raise NoBook(f"{inst.symbol}: no {'offer' if buy else 'bid'} to trade against")
+        if book is None:
             if fallback_ltp is None or fallback_ltp <= 0:
                 raise NoBook(f"no book and no LTP for {inst.symbol} ({inst.scrip_code})")
             # Degraded path: fill at LTP plus the configured slippage allowance, and SAY so on the
-            # fill so the audit can separate these from real book fills.
-            slip_bps = self.costs.s.slippage_bps_default
+            # fill so the audit can separate these from real book fills. This is the ONLY place the
+            # slippage allowance applies — every fill with a book trades against the book.
+            slip_bps = self.costs.slippage_bps_default
             price = fallback_ltp * (1 + slip_bps / 1e4 * (1 if buy else -1))
             charges = self.costs.leg(inst, intent.side, price, intent.qty).total
             self.fills += 1

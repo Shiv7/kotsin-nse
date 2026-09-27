@@ -245,3 +245,58 @@ async def test_depth_and_the_tape_never_disagree_about_what_is_wanted(settings, 
     before = e.depth_drops
     await e._sync_depth()
     assert e.depth_drops == before, "no flapping: nothing just subscribed is handed straight back"
+
+
+@pytest.mark.asyncio
+async def test_an_entry_fetches_its_own_ladder_and_a_slow_broker_cannot_stall_it(settings, option, monkeypatch):
+    """The chosen strike must carry its own previous-session ladder, or an own-ladder book opens
+    with no T1 (BANKNIFTY 55300 PE, 2026-09-24). The fetch sits in front of the order, so it is
+    bounded: a broker that hangs costs LEG_ENSURE_TIMEOUT_S and a log line, never the entry."""
+    import asyncio
+
+    import kotsin_nse.engine as engine_mod
+    from kotsin_nse.engine import Engine
+    from kotsin_nse.instrument.legs import LegPivots
+
+    e = Engine(settings)
+    asked: list[str] = []
+
+    async def fetched(inst, today):
+        asked.append(inst.scrip_code)
+        e.leg_pivots.by_code[inst.scrip_code] = object.__new__(LegPivots)
+        return e.leg_pivots.by_code[inst.scrip_code]
+
+    monkeypatch.setattr(e.leg_pivots, "ensure", fetched)
+    await e._ensure_leg_ladder(option)
+    assert asked == [option.scrip_code] and e.leg_pivots.for_code(option.scrip_code) is not None
+    await e._ensure_leg_ladder(option)
+    assert asked == [option.scrip_code], "a ladder already held is not fetched again"
+
+    async def hangs(inst, today):
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(engine_mod, "LEG_ENSURE_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(e.leg_pivots, "ensure", hangs)
+    other = option.model_copy(update={"scrip_code": "99999"}) if hasattr(option, "model_copy") else None
+    if other is None:
+        from dataclasses import replace as dc_replace
+        other = dc_replace(option, scrip_code="99999")
+    t0 = asyncio.get_running_loop().time()
+    await e._ensure_leg_ladder(other)   # must return, not raise, and quickly
+    assert asyncio.get_running_loop().time() - t0 < 1.0
+    assert e.leg_pivots.for_code("99999") is None, "a miss leaves the book on the percentage arm"
+
+
+def test_the_leg_reanchor_is_on_the_clock_after_the_open_and_fetches_only_the_new_strikes():
+    """The bulk set is banded on the previous close at boot; the re-anchor re-bands it on the
+    live spot after the open. It must be a 'missing' pass, not a two-thousand-call reload."""
+    import inspect
+
+    from kotsin_nse.config import Settings
+    from kotsin_nse.engine import Engine
+
+    slots = Settings(_env_file=None).legs_reanchor_hm
+    assert slots and min(slots) > "09:15", "after the open, when the gap is known"
+    src = inspect.getsource(Engine._pivot_repair)
+    assert "todo = legs if self._legs_due else self.leg_pivots.missing(legs)" in src
+    assert "self._legs_reanchor_due" in src

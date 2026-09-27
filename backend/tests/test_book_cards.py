@@ -83,8 +83,9 @@ async def test_operator_take_and_skip_go_through_the_ordinary_paths_and_are_audi
         e._signals_today[sig.signal_id] = sig
         handled = []
 
-        async def capture(s, bar):
+        async def capture(s, bar, **kw):
             handled.append(s)
+            return {}
 
         e._handle_signal = capture  # type: ignore[method-assign]
         out = await e.operator_take("FUDKII_RT_X", sig.signal_id)
@@ -114,3 +115,166 @@ async def test_operator_take_and_skip_go_through_the_ordinary_paths_and_are_audi
         assert kinds.count("operator.take") == 1 and kinds.count("operator.skip") == 1
     finally:
         await e.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_fade_book_describes_its_own_side_never_the_triggers_contract(settings):
+    """NAM-INDIA, 2026-09-25 14:45: a bullish trigger, routed COUNTER, no PE fade plan. The CT-Y card
+    showed the trigger's CE contract, stop and targets as if CT-Y would buy them. A fade book now
+    shows the fade's own side and levels, and with no fade it shows no contract at all."""
+    e = Engine(settings)
+    await e.start()
+    try:
+        ts = int(datetime.combine(ist_today(), dtime(14, 15), tzinfo=IST).timestamp())
+        trig = _sig(ts, symbol="NAM-INDIA", entry=1157.5, stop=1150.0, targets=(1180.0,))
+        await e.ledger.insert_signal(trig.to_json(), "NO_INSTRUMENT", "no tradeable strike")
+        await e.ledger.event("counter.route", {"signal_id": trig.signal_id, "symbol": "NAM-INDIA", "route": "COUNTER",
+                                               "reason": "at-pivot", "summary": "at-pivot", "wall": {"members": []}, "reads": []})
+        # 1. no fade plan: the CT card is red (the side it WOULD trade), and shows no contract
+        for book in ("FUDKII_CT_X", "FUDKII_CT_Y"):
+            c = next(x for x in (await e.book_cards(book, ist_today()))["cards"] if x["symbol"] == "NAM-INDIA")
+            assert c["state"] == "COUNTER_NO_PLAN" and c["side"] == "PE" and c["rtCard"] is None and c["plan"] is None
+            assert c["describes"] == "trigger" and c["triggerDirection"] == "BULLISH"
+        # the in-trend books keep the trigger's side
+        r = next(x for x in (await e.book_cards("FUDKII_RT_Y", ist_today()))["cards"] if x["symbol"] == "NAM-INDIA")
+        assert r["side"] == "CE" and r["direction"] == "BULLISH"
+        # 2. with a fade: the CT card carries the FADE's direction and levels
+        fade = _sig(ts, strategy=StrategyKey.FUDKII_CT_X, symbol="NAM-INDIA", direction=Direction.BEARISH, entry=1157.5,
+                    stop=1163.0, targets=(1140.0,), source_signal_id=trig.signal_id, reason="fade at the 1156.50 cluster")
+        await e.ledger.insert_signal(fade.to_json(), "NO_INSTRUMENT", "no tradeable strike")
+        c = next(x for x in (await e.book_cards("FUDKII_CT_Y", ist_today()))["cards"] if x["symbol"] == "NAM-INDIA")
+        assert c["describes"] == "fade" and c["direction"] == "BEARISH" and c["side"] == "PE"
+        assert c["stop"] == 1163.0 and c["targets"] == [1140.0] and c["triggerDirection"] == "BULLISH"
+    finally:
+        await e.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_card_that_cannot_be_taken_still_names_its_option_greyed_out_with_the_reason(settings):
+    """NAM-INDIA, 2026-09-25 14:45 — the operator's ask: "the CTA should be the option but then grey
+    it out / disable and then below that give a reason". RT-Y (trigger side) found no tradeable CE;
+    CT-Y (fade side) had no fade plan. Both buttons now name the contract they are about."""
+    from datetime import timedelta
+
+    from kotsin_nse.bars.unified import BarSource, UnifiedBar
+    from kotsin_nse.instrument.select import Quote
+
+    e = Engine(settings)
+    await e.start()
+    try:
+        exp = (ist_today() + timedelta(days=5)).isoformat()
+        und = Instrument("357", "NAM-INDIA", Segment.NSE_EQ, InstrumentKind.EQUITY, name="NAM-INDIA", tick_size=0.05, underlying="NAM-INDIA")
+        def opt(code, k, ot):
+            return Instrument(code, "NAM-INDIA", Segment.NSE_FO, InstrumentKind.OPTION, name=f"NAM-INDIA {exp} {ot.value} {k:.2f}",
+                              lot_size=800, tick_size=0.05, expiry=exp, strike=k, option_type=ot, underlying="NAM-INDIA")
+        chain = [opt(f"C{k}", float(k), OptionType.CE) for k in (1140, 1160, 1180, 1200)] + [opt(f"P{k}", float(k), OptionType.PE) for k in (1100, 1120, 1140, 1160)]
+        cat = e.catalogue_loader.catalogue
+        cat.equity_by_symbol["NAM-INDIA"] = und
+        cat.by_code[und.scrip_code] = und
+        for i in chain:
+            cat.by_code[i.scrip_code] = i
+            cat.options_by_symbol.setdefault("NAM-INDIA", []).append(i)
+        e.underlyings["NAM-INDIA"] = und
+        base = int(datetime.combine(ist_today(), dtime(9, 15), tzinfo=IST).timestamp())
+        e.store.seed("NAM-INDIA", "30m", [  # an ATR for the strike picker: 30m bars ~20 wide
+            UnifiedBar("NAM-INDIA", "357", "30m", base - (20 - n) * 1800, 1150.0 + n, 1160.0 + n, 1140.0 + n, 1152.0 + n, 1000.0,
+                       source=BarSource.REST, complete=True)
+            for n in range(20)
+        ])
+        now = time.time()
+        for i in chain:  # every strike one-sided: nothing is tradeable
+            e.quotes[i.scrip_code] = Quote(ltp=5.0, bid=0.0, ask=5.0, ts=now)
+        ts = int(datetime.combine(ist_today(), dtime(14, 15), tzinfo=IST).timestamp())
+        trig = _sig(ts, symbol="NAM-INDIA", entry=1157.5, stop=1150.0, targets=(1180.0,))
+        await e.ledger.insert_signal(trig.to_json(), "NO_INSTRUMENT", "no tradeable strike")
+        await e.ledger.event("counter.route", {"signal_id": trig.signal_id, "symbol": "NAM-INDIA", "route": "COUNTER",
+                                               "reason": "at-pivot", "summary": "at-pivot 1.43", "wall": {"members": []}, "reads": []})
+        await e.ledger.event("counter.no_plan", {"signal_id": trig.signal_id, "symbol": "NAM-INDIA", "grade": "F", "rr": 0.81,
+                                                 "reason": "fade graded F: first target 1150 is 7.50 away, stop 1166.7 is 9.20 away — RR 0.81"})
+
+        ry = next(x for x in (await e.book_cards("FUDKII_RT_Y", ist_today()))["cards"] if x["symbol"] == "NAM-INDIA")
+        cta = ry["cta"]
+        assert cta["enabled"] is False and cta["type"] == "CE" and cta["contract"] and "CE" in cta["contract"]
+        assert "one-sided" in cta["reason"] and ":" not in cta["reason"].split("strike:")[-1].split(",")[0].strip()
+
+        cy = next(x for x in (await e.book_cards("FUDKII_CT_Y", ist_today()))["cards"] if x["symbol"] == "NAM-INDIA")
+        cta = cy["cta"]
+        assert cta["enabled"] is False and cta["type"] == "PE" and "PE" in (cta["contract"] or "")
+        assert float(cta["strike"]) < 1157.5, "the fade's put is out of the money below the trigger"
+        assert "RR 0.81" in cta["reason"] and "COUNTER-TREND" in cta["reason"], "the planner's real refusal, not a generic one"
+    finally:
+        await e.stop()
+
+
+@pytest.mark.asyncio
+async def test_every_card_shows_which_books_bought_the_trigger_and_which_still_hold_it(settings):
+    """The operator, 2026-09-26: "with a coloured glow circle, show all strategies that bought that
+    trade" — and an EXITED label on a trade that is over. The `books` row resolves each book's
+    position on the trigger the way its own card does: the trigger's id for the in-trend books, the
+    fade's id for the counter books."""
+    from kotsin_nse.domain import ExitDecision, ExitReason
+    from kotsin_nse.engine import _trade_from, _trade_json
+    from kotsin_nse.risk.exits import apply_exit
+
+    e = Engine(settings)
+    await e.start()
+    try:
+        ts = int(datetime.combine(ist_today(), dtime(11, 15), tzinfo=IST).timestamp())
+        sig = _sig(ts)
+        await e.ledger.insert_signal(sig.to_json(), "PAPER_FILLED", sig.reason)
+        e.underlyings["RELIANCE"] = Instrument("2885", "RELIANCE", Segment.NSE_EQ, InstrumentKind.EQUITY, underlying="RELIANCE")
+        opt = Instrument("45678", "RELIANCE", Segment.NSE_FO, InstrumentKind.OPTION, lot_size=250, strike=1520.0, option_type=OptionType.CE, underlying="RELIANCE")
+        und = e.underlyings["RELIANCE"]
+
+        def pos(pid, book, sid, inst=opt, direction=Direction.BULLISH):
+            return Position(id=pid, strategy=book, instrument=inst, underlying=und, side=PosSide.LONG, qty=250, entry=20.0,
+                            opened_ts=ts + 1805, signal_id=sid, direction=direction, equity_entry=1500.0, equity_sl=1490.0, option_sl=16.0)
+
+        parent, rtx, rty = pos("p-par", "FUDKII", sig.signal_id), pos("p-x", "FUDKII_RT_X", sig.signal_id), pos("p-y", "FUDKII_RT_Y", sig.signal_id)
+        for closed, px in ((parent, 23.0), (rty, 18.0)):
+            apply_exit(closed, ExitDecision(closed.id, ExitReason.SL_OP, px, 250, "stop"), fill_price=px, charges=20.0, now=ts + 2400)
+            await e.ledger.insert_trade(_trade_json(_trade_from(closed, ts + 2400)))
+        for p in (parent, rtx, rty):
+            e.positions[p.id] = p
+            await e.ledger.upsert_position(_position_json(p))
+
+        cards = (await e.book_cards("FUDKII_RT_X", ist_today()))["cards"]
+        rows = {b["book"]: b for b in cards[0]["books"]}
+        assert [b["book"] for b in cards[0]["books"]] == ["FUDKII", "FUDKII_RT_X", "FUDKII_RT_N", "FUDKII_RT_Y", "FUDKII_CT_X", "FUDKII_CT_Y"]
+        assert rows["FUDKII_RT_X"]["status"] == "OPEN" and rows["FUDKII_RT_X"]["side"] == "CE" and rows["FUDKII_RT_X"]["label"] == "RT-X"
+        assert rows["FUDKII"]["status"] == "EXITED" and rows["FUDKII_RT_Y"]["status"] == "EXITED"
+        assert rows["FUDKII_RT_Y"]["exitReason"] and rows["FUDKII_RT_Y"]["pnl"] == pytest.approx(250 * (18.0 - 20.0) - 20.0)
+        assert rows["FUDKII_RT_N"]["status"] == rows["FUDKII_CT_X"]["status"] == rows["FUDKII_CT_Y"]["status"] == "NONE"
+        assert rows["FUDKII_RT_N"]["side"] is None and rows["FUDKII_RT_N"]["closedTs"] is None
+        # every book's card carries the same row: RT-Y's own card reads it as EXITED
+        y = (await e.book_cards("FUDKII_RT_Y", ist_today()))["cards"][0]
+        assert {b["book"]: b["status"] for b in y["books"]} == {b: r["status"] for b, r in rows.items()}
+
+        # a fade: CT-X holds the PE under the FADE's id, and the trigger's card shows it
+        fade = _sig(ts, strategy=StrategyKey.FUDKII_CT_X, direction=Direction.BEARISH, entry=1500.0, stop=1508.0,
+                    targets=(1485.0,), source_signal_id=sig.signal_id, reason="fade at the wall")
+        await e.ledger.insert_signal(fade.to_json(), "PAPER_FILLED", fade.reason)
+        pe = Instrument("45679", "RELIANCE", Segment.NSE_FO, InstrumentKind.OPTION, lot_size=250, strike=1480.0, option_type=OptionType.PE, underlying="RELIANCE")
+        ctx = pos("p-ctx", "FUDKII_CT_X", fade.signal_id, inst=pe, direction=Direction.BEARISH)
+        e.positions[ctx.id] = ctx
+        await e.ledger.upsert_position(_position_json(ctx))
+        rows = {b["book"]: b for b in (await e.book_cards("FUDKII_RT_X", ist_today()))["cards"][0]["books"]}
+        assert rows["FUDKII_CT_X"]["status"] == "OPEN" and rows["FUDKII_CT_X"]["side"] == "PE"
+        assert rows["FUDKII_CT_Y"]["status"] == "NONE"
+    finally:
+        await e.stop()
+
+
+def test_the_cards_spread_is_a_percent_not_a_hundred_times_it():
+    """Quote.spread_pct is already in percent; the plan preview and the disabled button multiplied it
+    by 100 again, so a 3.5 % spread read 350 % (found by the Sep 1-25 replay, 2026-09-26)."""
+    from kotsin_nse.instrument.select import Quote
+
+    q = Quote(ltp=10.0, bid=9.825, ask=10.175, ts=0.0)
+    assert round(q.spread_pct, 2) == 3.5
+    import inspect
+
+    from kotsin_nse.engine import Engine
+
+    src = inspect.getsource(Engine._plan_preview) + inspect.getsource(Engine._aim_contract)
+    assert "spread_pct * 100" not in src

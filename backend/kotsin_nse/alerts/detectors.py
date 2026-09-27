@@ -98,6 +98,18 @@ class Alert:
             "firedAt": self.fired_at,
         }
 
+    @classmethod
+    def from_json(cls, d: dict[str, Any]) -> Alert:
+        """The inverse of ``to_json`` — how a saved session comes back after a restart."""
+        return cls(
+            book=d["book"], symbol=d["symbol"], scrip_code=str(d.get("scripCode") or ""), tf=d["tf"],
+            ts=int(d["ts"]), direction=d["direction"], score=float(d.get("score") or 0.0),
+            reason=d.get("reason") or "", price=float(d.get("price") or 0.0),
+            evidence=dict(d.get("evidence") or {}), kind=d.get("kind") or "TRIGGER", plan=d.get("plan"),
+            cta=dict(d.get("cta") or {}), company=d.get("company") or "", exchange=d.get("exchange") or "N",
+            bar_close=int(d.get("barClose") or 0), card=d.get("card"), fired_at=float(d.get("firedAt") or 0.0),
+        )
+
 
 class Cooldown:
     """Per-symbol suppression window, in the bar clock rather than wall time."""

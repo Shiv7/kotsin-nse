@@ -190,18 +190,18 @@ BOOKS: tuple[Book, ...] = (
         label="FUDKII-RT-Y",
         tf="30m entry, 1s exit",
         summary=(
-            "FUDKII's entries under the third RT vertical: arm only once the option has made half "
-            "a day's expected move, the SL one rung behind, a give-back in the option's own "
-            "volatility units, and every post-arm stop needing the 75 s sustain."
+            "FUDKII's entries under the third RT vertical: arm once the option is +5 % on the "
+            "premium paid, never sooner, a nearer own T1 waiting for it; the SL one rung behind; "
+            "once armed, every lot left exits on a 3 % fall from the highest price since arming."
         ),
         status="live",
         params={
-            "ladder_mode": "mtf (rungs at least 0.5x the expected daily move above entry)",
-            "arm_min_move": "0.5 x expected daily move",
+            "ladder_mode": "mtf (every own daily+weekly rung above entry)",
+            "arm_at_pct": "5.0 (the minimum before any arm; own T1s below it wait; set 2026-09-25)",
             "sl_lag": "true (breakeven until T2 touches, then T1, ...)",
-            "peak_giveback_pct": "max(10.0, 0.25 x expected daily move)",
-            "band_exit": "sustain (75 s continuous breach)",
-            "post_arm_sustain": "true (the rung SL needs the 75 s too)",
+            "peak_giveback_pct": "3.0 (all remaining lots out on a 3 % fall from the post-arm peak)",
+            "band_exit": "dwell (3 consecutive one-second reads)",
+            "post_arm_sustain": "true (the rung SL keeps its 75 s sustain)",
             "dried_volume_skip": "no mirror when surgeT and surgeT-1 are both < 0.85x the T-2..T-7 volume baseline, on the equity or its front future",
         },
         have=(
@@ -211,9 +211,11 @@ BOOKS: tuple[Book, ...] = (
         ),
         source="kotsin_nse/risk/exits.py (own-ladder branch); market/iv.py expected_move_frac",
         note=(
-            "Replayed to +19.7k gross on 2026-09-23's sixteen signals against RT-X's -14.9k: nine "
-            "of the sixteen die at entry under every policy; the lever is arming late enough that "
-            "the KEI/GRASIM retest does not stop the trade at breakeven. Paper, beside the other two."
+            "Rule changed 2026-09-24. The expected-move arm never fired: that day's four RT-Y "
+            "positions needed +43 % to +72 % to arm and peaked at +5.7 %. BANKNIFTY's PE, filled at "
+            "205.93 and peaking at 217.70, wanted 293.85. Replayed on the tick tape under the new "
+            "rule it arms at the 216.23 touch, pays one lot at 216.45 and leaves the rest on the "
+            "3 % line at 208.50: gross +547 where the old rule ended at breakeven. Paper."
         ),
     ),
     Book(
@@ -251,6 +253,29 @@ BOOKS: tuple[Book, ...] = (
         have=("30m/1m bars on the session grid", "MTF pivot zones + confluence stop/targets", "per-name ATM implied vol (market/iv.py)"),
         source="kotsin_nse/strategy/counter.py; kotsin_nse/risk/exits.py (own-ladder branch)",
         note="Mirrored from CT-X's fill at the same price and instant, so only the exit differs.",
+    ),
+    Book(
+        key="FUDKII_RT_Y_W1",
+        label="RT-Y · wide stop (shadow)",
+        tf="30m entry, 1s exit",
+        summary=(
+            "A shadow of RT-Y: every RT-Y entry, the same contract, size, price and instant, under "
+            "RT-Y's exits with one change — the equity stop 1 % further from entry, and the option "
+            "stop re-projected for it. It answers whether the \"1 % past\" stop beats the touch."
+        ),
+        status="live",
+        params={
+            "equity_stop_buffer_pct": "1.0 (bullish: stop x 0.99; bearish: stop x 1.01)",
+            "entries": "RT-Y's only — a trigger RT-Y's gates skip is never in this book",
+            "exits": "RT-Y policy (arm +5 %, SL one rung behind, 3 % give-back, 75 s sustain, hard floor 9 % under the option stop)",
+        },
+        have=("30m/1m bars on the session grid", "MTF pivot zones + confluence stop/targets"),
+        source="kotsin_nse/engine.py (_open_shadow_twins); kotsin_nse/risk/limits.py RT_Y_W1_LIMITS",
+        note=(
+            "Sep 1–25 replay on gate-B trades: 1–18 Sep +0.43 % against the touch's +1.14 %, "
+            "19–25 Sep +6.30 % against +3.90 %; over the month +0.44 ± 1.86 points — unproven, "
+            "and the worst trade was −41 % against −35 %. Paper, shown on the Shadow page."
+        ),
     ),
     Book(
         key="FUDKII_RT",

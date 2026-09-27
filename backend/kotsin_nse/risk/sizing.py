@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ..config import Segment
 from ..domain import Instrument, InstrumentKind
 from .costs import CostModel
 from .limits import RiskLimits
@@ -31,6 +32,10 @@ class SizingResult:
     risk_inr: float  # loss if the option stop is hit
     cost_pct_of_target: float | None
     reason: str = ""
+    #: why it came to nothing: "input" (the contract or its stop), "wallet" (this book's purse or
+    #: its limits — the risk budget, the position budget), "cost" (charges against the move to T1).
+    #: A parent declined for "wallet" still feeds its twins; they size from their own purses.
+    declined: str = ""
 
     @property
     def ok(self) -> bool:
@@ -51,13 +56,15 @@ def size_position(
 ) -> SizingResult:
     per_unit_risk = max(0.0, premium - option_stop)
     if premium <= 0 or balance <= 0 or per_unit_risk <= 0:
-        return SizingResult(0, 0, 0.0, 0.0, None, "invalid inputs (premium/stop)")
+        return SizingResult(0, 0, 0.0, 0.0, None, "invalid inputs (premium/stop)", declined="input")
 
     step = instrument.qty_step
     unit_cost = premium * step * instrument.multiplier
     if unit_cost <= 0:
-        return SizingResult(0, 0, 0.0, 0.0, None, "unknown contract size — declined, not guessed")
+        return SizingResult(0, 0, 0.0, 0.0, None, "unknown contract size — declined, not guessed", declined="input")
 
+    if limits.fixed_lots_under_inr is not None and instrument.segment is not Segment.MCX_FO:  # never MCX (operator, 2026-09-27)
+        return _fixed_lots(instrument, premium, per_unit_risk, option_target1, available, limits, costs, max_cost_share_of_target)
     risk_budget = balance * limits.risk_per_trade_pct / 100
     by_risk = int(risk_budget // (per_unit_risk * step * instrument.multiplier))
     budget = min(limits.position_budget(balance), available)
@@ -75,7 +82,7 @@ def size_position(
             if by_risk < 1
             else f"budget ₹{budget:,.0f} below one lot at ₹{unit_cost:,.0f}"
         )
-        return SizingResult(0, 0, 0.0, 0.0, None, why)
+        return SizingResult(0, 0, 0.0, 0.0, None, why, declined="wallet")
 
     qty = lots * step
     outlay = premium * qty * instrument.multiplier
@@ -94,6 +101,7 @@ def size_position(
                 risk_inr,
                 cost_share,
                 f"costs are {cost_share:.0%} of the move to T1 (cap {max_cost_share_of_target:.0%})",
+                declined="cost",
             )
 
     return SizingResult(
@@ -104,6 +112,34 @@ def size_position(
         cost_share,
         f"ok (lot cap {limits.max_lots})" if capped_by_lots else "ok",
     )
+
+
+def _fixed_lots(
+    instrument: Instrument, premium: float, per_unit_risk: float, option_target1: float | None, available: float,
+    limits: RiskLimits, costs: CostModel, max_cost_share_of_target: float,
+) -> SizingResult:
+    """Exactly ``max_lots`` lots, if they cost less than ``fixed_lots_under_inr`` and the purse holds
+    the money; the costs-against-T1 test as for any size."""
+    lots = limits.max_lots or 1
+    cap = float(limits.fixed_lots_under_inr or 0)
+    qty = lots * instrument.qty_step
+    outlay = premium * qty * instrument.multiplier
+    risk_inr = per_unit_risk * qty * instrument.multiplier
+    if outlay >= cap:
+        return SizingResult(0, 0, outlay, risk_inr, None, f"{lots} lots cost ₹{outlay:,.0f} — not under ₹{cap:,.0f}",
+                            declined="wallet")
+    if outlay > available:
+        return SizingResult(0, 0, outlay, risk_inr, None, f"{lots} lots cost ₹{outlay:,.0f} > ₹{available:,.0f} left in the purse",
+                            declined="wallet")
+    cost_share: float | None = None
+    if option_target1 and option_target1 > premium:
+        charges = costs.round_trip(instrument, premium, option_target1, qty).total
+        gain_to_t1 = (option_target1 - premium) * qty * instrument.multiplier
+        cost_share = charges / gain_to_t1 if gain_to_t1 > 0 else None
+        if cost_share is not None and cost_share > max_cost_share_of_target:
+            return SizingResult(0, 0, outlay, risk_inr, cost_share,
+                                f"costs are {cost_share:.0%} of the move to T1 (cap {max_cost_share_of_target:.0%})", declined="cost")
+    return SizingResult(qty, lots, outlay, risk_inr, cost_share, f"ok ({lots} lots, ₹{outlay:,.0f} < ₹{cap:,.0f})")
 
 
 def lots_of(instrument: Instrument, qty: int) -> int:

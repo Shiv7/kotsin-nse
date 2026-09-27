@@ -12,7 +12,19 @@ type Order = { ts: number; avg_price: number | null; filled: number | null; qty:
 type Level = { label: string; price: number }
 type ExitRow = { kind: 'target' | 'stop' | 'trail' | 'time'; at: string; action: string; qty: number | null }
 type Plan = { ok: boolean; reason?: string; contract?: string; strike?: number; type?: string; premium?: number; bid?: number | null; ask?: number | null; spreadPct?: number | null; delta?: number; lots?: number; qty?: number; outlay?: number; lotSize?: number; optionSl?: number; ladder?: number[]; edm?: number; ladderNote?: string; exitPlan?: { policy: string; rows: ExitRow[] } | null }
+type BookRow = { book: string; label: string; status: 'OPEN' | 'EXITED' | 'NONE'; side: 'CE' | 'PE' | 'LONG' | 'SHORT' | null; openedTs: number | null; closedTs: number | null; exitReason: string | null; pnl: number | null }
+type Verdict = { action: string; state?: string; gate?: string | null; why: string[] | string; side?: string; stop?: number | null; targets?: number[]; rr?: number | null; grade?: string | null }
+type TargetEv = { rung: number; limit: number; qty: number; placedTs: number; ts: number; outcome: string }
 type Card = {
+  verdicts?: { rtY: Verdict | null; ctY: Verdict | null }
+  pending?: (ExecA & { restingS?: number; contract?: string; forTwins?: boolean; parentWhy?: string }) | null
+  execLog?: { entry?: ExecA; exits?: (ExecA & { reason?: string; qty?: number })[]; targets?: TargetEv[] } | null
+  // the next target SELL resting in advance (fills on a touch; any other exit cancels it first)
+  restingTarget?: { rung: number; limit: number; qty: number; lots: number; placedTs: number } | null
+  side?: 'CE' | 'PE' | 'LONG' | 'SHORT'
+  breadth?: { share: number | null; names: number; efficiency?: number; volBand?: string | null; gapDatr?: number; pivotsAhead?: string[]; openBar?: boolean } | null
+  books?: BookRow[]
+  cta?: { action: 'take' | 'skip' | 'taken'; enabled: boolean; contract: string | null; type?: string | null; bid?: number | null; ask?: number | null; spreadPct?: number | null; reason: string | null }
   signalId: string; symbol: string; direction: 'BULLISH' | 'BEARISH'; ts: number; grade: string | null; rr: number | null; reason: string
   entry: number; stop: number; targets: number[] | null; stopPct: number
   confluence: { stop_zone?: string; target_zones?: string[]; fortress?: number; room_ratio?: number; note?: string }
@@ -26,7 +38,7 @@ type Card = {
   futLevels: { close: number; atr: number | null; surgeT: number | null; surgeT1: number | null; volume: string; behind: Level | null; ahead: Level[] } | null
   plan: Plan | null; exitPlan: { policy: string; rows: ExitRow[] } | null
   position: { id: string; entry: number; qty: number; qty_remaining: number; opened_ts: number; closed_ts: number | null; option_sl: number; option_targets: number[]; targets_hit: number; instrument: { name: string; lot_size: number; strike: number; option_type: string }; note: string; exit_reason?: string; exit_price?: number } | null
-  trade: { net: number; gross: number; exit: number; exit_reason: string; mfe_r: number; mae_r: number; duration_s: number } | null
+  trade: { net: number; gross: number; charges?: number; exit: number; exit_reason: string; mfe_r: number; mae_r: number; duration_s: number } | null
   exits: Order[]
   live: { mid: number; quoteOk: boolean | null; peak: number; line: number; optionSl: number; armedBy: string; armedTs: number | null; targetsHit: number; qtyRemaining: number; qty: number; ladder: number[]; edm: number; underlying: number | null; unrealised: number | null; realised: number } | null
   rtCard: { confidence?: { score: number }; odds?: { pT1: number | null; note?: string }; wallAhead?: { price: number; strength: number; members: string[] } | null; wallBehind?: { price: number; strength: number; members: string[] } | null; stop?: { equityStop: number; optionStop: number; delta: number } } | null
@@ -40,28 +52,42 @@ export const BOOK_TABS: [string, string][] = [
 ]
 const BOOK_LABEL = Object.fromEntries(BOOK_TABS)
 
-type Tone = 'emerald' | 'amber' | 'rose' | 'fuchsia' | 'slate' | 'indigo' | 'sky'
+type Tone = 'emerald' | 'amber' | 'rose' | 'orange' | 'slate' | 'sky'
 const TONE: Record<Tone, { chip: string; bar: string; text: string; soft: string }> = {
   emerald: { chip: 'border-emerald-400/40 bg-emerald-400/10 text-emerald-200', bar: 'bg-emerald-400', text: 'text-emerald-300', soft: 'bg-emerald-400/5' },
   amber: { chip: 'border-amber-400/40 bg-amber-400/10 text-amber-200', bar: 'bg-amber-400', text: 'text-amber-300', soft: 'bg-amber-400/5' },
   rose: { chip: 'border-rose-400/40 bg-rose-400/10 text-rose-200', bar: 'bg-rose-400', text: 'text-rose-300', soft: 'bg-rose-400/5' },
-  fuchsia: { chip: 'border-fuchsia-400/40 bg-fuchsia-400/10 text-fuchsia-200', bar: 'bg-fuchsia-400', text: 'text-fuchsia-200', soft: 'bg-fuchsia-400/5' },
+  orange: { chip: 'border-orange-400/40 bg-orange-400/10 text-orange-200', bar: 'bg-orange-400', text: 'text-orange-200', soft: 'bg-orange-400/5' },
   slate: { chip: 'border-slate-600/60 bg-slate-800/70 text-slate-300', bar: 'bg-slate-600', text: 'text-slate-400', soft: 'bg-slate-800/40' },
-  indigo: { chip: 'border-indigo-400/40 bg-indigo-400/10 text-indigo-200', bar: 'bg-indigo-400', text: 'text-indigo-200', soft: 'bg-indigo-400/5' },
   sky: { chip: 'border-sky-400/40 bg-sky-400/10 text-sky-200', bar: 'bg-sky-400', text: 'text-sky-200', soft: 'bg-sky-400/5' },
+}
+// one order's trail (exec/resting.py): signal → limit placed (book) → reprices → filled / crossed / missed
+type ExecA = {
+  kind?: string; signalTs?: number | null; placedTs?: number | null; limit?: number | null; ref?: number | null; why?: string
+  bookAtPlace?: { bid?: number | null; ask?: number | null }; reprices?: [number, number][]
+  filledTs?: number | null; fillPrice?: number | null; cancelledTs?: number | null; crossedTs?: number | null; waitS?: number | null; outcome?: string
+  // the momentum rule's reads (30 s racing check, 60 s trade-or-skip) and why an order was cancelled
+  momentum?: { atS: number; runPct?: number | null; runAtr?: number; note: string }[]; cancelReason?: string
 }
 const STATE: Record<string, { label: string; tone: Tone }> = {
   OPEN: { label: 'OPEN · live', tone: 'amber' }, TRADED: { label: 'TRADED · closed', tone: 'emerald' },
-  SKIPPED: { label: 'SKIPPED', tone: 'rose' }, NO_FILL: { label: 'NO FILL TO MIRROR', tone: 'slate' },
-  NOT_MIRRORED: { label: 'NOT MIRRORED', tone: 'slate' }, IN_TREND: { label: 'IN TREND · no fade', tone: 'slate' },
-  COUNTER_NO_PLAN: { label: 'COUNTER · no plan', tone: 'fuchsia' }, NO_ROUTE: { label: 'NO ROUTE', tone: 'slate' },
+  SKIPPED: { label: 'SKIPPED', tone: 'rose' }, NO_FILL: { label: 'NO ENTRY', tone: 'slate' },
+  NOT_MIRRORED: { label: 'NO ENTRY', tone: 'slate' }, IN_TREND: { label: 'IN TREND · no fade', tone: 'slate' },
+  STOP_BREACHED: { label: 'STOP ALREADY BREACHED', tone: 'rose' }, WALLET: { label: 'NO MONEY LEFT', tone: 'slate' },
+  ALREADY_RESTING: { label: 'ENTRY ALREADY WORKING', tone: 'slate' },
+  COUNTER_NO_PLAN: { label: 'COUNTER · no plan', tone: 'orange' }, NO_ROUTE: { label: 'NO ROUTE', tone: 'slate' },
   PAPER_FILLED: { label: 'FILLED · paper', tone: 'emerald' }, LIVE_FILLED: { label: 'FILLED · live', tone: 'emerald' },
   SHADOW_OK: { label: 'SHADOW', tone: 'slate' }, NO_INSTRUMENT: { label: 'NO INSTRUMENT', tone: 'slate' },
   REJECTED_BOOK: { label: 'REJECTED · book', tone: 'rose' }, NOT_SIZED: { label: 'NOT SIZED', tone: 'slate' },
   EXPOSURE: { label: 'EXPOSURE', tone: 'slate' }, WALLET_HALTED: { label: 'WALLET HALTED', tone: 'rose' },
+  PENDING: { label: 'PENDING · limit resting', tone: 'amber' }, LIMIT_UNFILLED: { label: 'MISSED · limit not filled', tone: 'slate' },
+  PARENT_HALTED_TWINS_FED: { label: 'HALTED · twins traded', tone: 'amber' },
+  PARENT_HALTED_TWINS_MISSED: { label: 'HALTED · twins missed', tone: 'slate' },
+  PARENT_SKIPPED_TWINS_FED: { label: 'PARENT SKIPPED · twins traded', tone: 'amber' },
+  PARENT_SKIPPED_TWINS_MISSED: { label: 'PARENT SKIPPED · twins missed', tone: 'slate' },
 }
 const stateOf = (s: string) => STATE[s] ?? { label: s.replace(/_/g, ' '), tone: 'slate' as Tone }
-const routeTone = (l: string | null): Tone => (l === 'COUNTER-TREND' ? 'fuchsia' : l === 'SKIP' ? 'rose' : l === 'IN TREND' ? 'sky' : 'slate')
+const routeTone = (l: string | null): Tone => (l === 'COUNTER-TREND' ? 'orange' : l === 'SKIP' ? 'rose' : l === 'IN TREND' ? 'sky' : 'slate')
 
 const ist = (ts: number, secs = true) => {
   const parts = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).formatToParts(new Date(ts * 1000))
@@ -69,6 +95,18 @@ const ist = (ts: number, secs = true) => {
   return secs ? `${g('hour')}:${g('minute')}:${g('second')}` : `${g('hour')}:${g('minute')}`
 }
 const f = (v: number | null | undefined, d = 2) => (v === null || v === undefined || Number.isNaN(v) ? '—' : v.toFixed(d))
+// "signal 09:45:00 · placed 09:45:01 @ 17.10 (book 16.95/17.25) · filled 09:45:23 @ 17.10 · 22 s"
+const trail = (a: ExecA | null | undefined) => {
+  if (!a) return '—'
+  const bk = a.bookAtPlace ? ` (book ${f(a.bookAtPlace.bid)}/${f(a.bookAtPlace.ask)})` : ''
+  const parts = [a.signalTs ? `signal ${ist(a.signalTs)}` : null,
+    a.placedTs ? `placed ${ist(a.placedTs)} @ ${a.limit == null ? 'market' : f(a.limit)}${bk}` : null,
+    a.reprices && a.reprices.length ? `repriced ${a.reprices.length}× → ${f(a.reprices[a.reprices.length - 1][1])}` : null,
+    a.momentum && a.momentum.length ? a.momentum.map((m) => `${f(m.atS, 0)} s: ${m.note}`).join(' · ') : null,
+    a.filledTs ? `filled ${ist(a.filledTs)} @ ${f(a.fillPrice)}` : a.cancelledTs ? `missed ${ist(a.cancelledTs)}${a.cancelReason ? ` (${a.cancelReason})` : ''}` : null,
+    a.waitS != null ? `${f(a.waitS, 0)} s` : null, a.outcome && a.outcome !== 'filled at the limit' && a.outcome !== 'filled' ? a.outcome : null]
+  return parts.filter(Boolean).join(' · ')
+}
 const inr = (v: number | null | undefined) => (v === null || v === undefined ? '—' : `${v < 0 ? '−' : v > 0 ? '+' : ''}₹${Math.abs(v).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`)
 const inr0 = (v: number | null | undefined) => (v === null || v === undefined ? '—' : `₹${Math.abs(v).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`)
 const pct = (a: number | null | undefined, b: number) => (a === null || a === undefined || !b ? '—' : `${(((a - b) / b) * 100).toFixed(2)}%`)
@@ -155,7 +193,7 @@ function Levels({ c }: { c: Card }) {
           <tr className="bg-slate-950/70 text-[11px] uppercase tracking-wider text-slate-400">
             <th className="w-[92px] px-3 py-2 text-left font-semibold">{bull ? 'long' : 'short'} bias</th>
             <th className="px-3 py-2 text-left font-semibold"><span className="inline-flex items-center gap-1.5"><I d={IC.chart} className="text-sky-300" />Equity</span></th>
-            <th className="px-3 py-2 text-left font-semibold"><span className="inline-flex items-center gap-1.5"><I d={IC.activity} className="text-indigo-300" />Future</span>{fut ? <span className="ml-2 normal-case tracking-normal text-slate-500">vol {f(fut.surgeT)}× / {f(fut.surgeT1)}×</span> : null}</th>
+            <th className="px-3 py-2 text-left font-semibold"><span className="inline-flex items-center gap-1.5"><I d={IC.activity} className="text-sky-300" />Future</span>{fut ? <span className="ml-2 normal-case tracking-normal text-slate-500">vol {f(fut.surgeT)}× / {f(fut.surgeT1)}×</span> : null}</th>
             <th className="px-3 py-2 text-left font-semibold"><span className="inline-flex items-center gap-1.5"><I d={IC.ticket} className="text-amber-300" />Option</span><span className="ml-2 normal-case tracking-normal text-slate-500">{optHead}</span></th>
           </tr>
         </thead>
@@ -194,8 +232,8 @@ function ExitPlan({ plan }: { plan: { policy: string; rows: ExitRow[] } }) {
 }
 
 function Timeline({ c }: { c: Card }) {
-  const rows: { ts: number; what: string; detail: string; tone: Tone }[] = [{ ts: c.ts + 1800, what: 'fired', detail: `${c.reason} · grade ${c.grade ?? '—'} rr ${f(c.rr)}`, tone: 'indigo' }]
-  if (c.route) rows.push({ ts: c.route.ts ?? c.ts + 1800, what: `route ${c.route.route}`, detail: c.route.reason, tone: c.route.route === 'COUNTER' ? 'fuchsia' : 'slate' })
+  const rows: { ts: number; what: string; detail: string; tone: Tone }[] = [{ ts: c.ts + 1800, what: 'fired', detail: `${c.reason} · grade ${c.grade ?? '—'} rr ${f(c.rr)}`, tone: 'sky' }]
+  if (c.route) rows.push({ ts: c.route.ts ?? c.ts + 1800, what: `route ${c.route.route}`, detail: c.route.reason, tone: c.route.route === 'COUNTER' ? 'orange' : 'slate' })
   if (c.skip) rows.push({ ts: c.skip.ts, what: 'skipped', detail: c.skip.reason, tone: 'rose' })
   if (c.position) rows.push({ ts: c.position.opened_ts, what: 'filled', detail: `${c.position.qty} × @ ${f(c.position.entry)} · ${c.position.instrument.name}`, tone: 'amber' })
   for (const o of c.exits) rows.push({ ts: o.ts, what: 'exit', detail: `${o.filled ?? o.qty} @ ${f(o.avg_price)} — ${o.reason}`, tone: 'emerald' })
@@ -227,7 +265,7 @@ function Reads({ r }: { r: Route | null }) {
             <td className="px-2 py-1.5 text-slate-200">{x.members.join(',')} {f(x.level)} <span className="text-slate-500">({f(x.strength, 1)})</span></td>
             <td className="px-2 py-1.5 text-slate-200">{f(x.distAtr)} · {x.crossedAtr >= 0 ? '+' : ''}{f(x.crossedAtr)} ATR{x.rejected ? ' · rejected' : ''}</td>
             <td className={`px-2 py-1.5 ${x.volume === 'dried' ? 'text-rose-300' : x.volume === 'surge' ? 'text-emerald-300' : 'text-slate-300'}`}>{x.volume} {x.surgeT !== null ? `${f(x.surgeT)}/${f(x.surgeT1)}` : ''}</td>
-            <td className={`px-2 py-1.5 ${x.score >= 0.5 ? 'text-fuchsia-200' : 'text-slate-300'}`}>{f(x.score)}</td>
+            <td className={`px-2 py-1.5 ${x.score >= 0.5 ? 'text-orange-200' : 'text-slate-300'}`}>{f(x.score)}</td>
           </tr>
         ))}
       </tbody>
@@ -239,14 +277,16 @@ function Cta({ book, c, onDone }: { book: string; c: Card; onDone: () => void })
   const [busy, setBusy] = useState<string | null>(null)
   const [msg, setMsg] = useState<string | null>(null)
   const held = c.state === 'OPEN'
-  const canTake = !held && !['TRADED', 'PAPER_FILLED', 'LIVE_FILLED'].includes(c.state) && !!c.plan?.ok
+  const canTake = !held && !['TRADED', 'PAPER_FILLED', 'LIVE_FILLED'].includes(c.state) && !!c.plan?.ok && (c.cta?.enabled ?? true)
   const act = async (kind: 'take' | 'skip') => {
     const verb = kind === 'take' ? `Enter ${BOOK_LABEL[book] ?? book} on ${c.symbol} now — ${c.plan?.lots} lots of ${c.plan?.contract} at the market (≈ ${inr0(c.plan?.outlay)})?` : `Close ${BOOK_LABEL[book] ?? book}'s ${c.symbol} position now, at the market?`
     if (!window.confirm(verb)) return
     setBusy(kind); setMsg(null)
     try {
       const r = await postJson<Record<string, unknown>>(`/api/books/${book}/${kind}`, { signal_id: c.signalId })
-      setMsg(kind === 'take' ? (r.entered ? 'entered' : 'not entered — see the ledger decision') : 'closing')
+      // the book's own decision and why — never a silent "not entered" (audit, 2026-09-26)
+      const how = [r.decision, r.reason].filter(Boolean).join(' — ')
+      setMsg(kind === 'take' ? (r.entered ? `entered — ${how}` : r.decision === 'RESTING' ? `limit resting — ${r.reason}` : `not entered — ${how || 'see the ledger decision'}`) : 'closing')
       onDone()
     } catch (e) { setMsg(e instanceof Error ? e.message : String(e)) } finally { setBusy(null) }
   }
@@ -255,10 +295,74 @@ function Cta({ book, c, onDone }: { book: string; c: Card; onDone: () => void })
       {held ? (
         <button disabled={busy !== null} onClick={() => act('skip')} className="inline-flex items-center gap-2 rounded-xl bg-rose-500 px-4 py-2 text-[13.5px] font-bold text-slate-950 shadow-[0_6px_20px_-8px_rgba(251,113,133,0.8)] hover:bg-rose-400 disabled:opacity-40"><I d={IC.x} />SKIP · close {c.live?.qtyRemaining ?? c.position?.qty_remaining} at market</button>
       ) : (
-        <button disabled={!canTake || busy !== null} onClick={() => act('take')} className="inline-flex items-center gap-2 rounded-xl bg-emerald-400 px-4 py-2 text-[13.5px] font-bold text-slate-950 shadow-[0_6px_20px_-8px_rgba(52,211,153,0.8)] hover:bg-emerald-300 disabled:opacity-30 disabled:shadow-none"><I d={IC.check} />{c.plan?.ok ? `TAKE · ${c.plan.lots} lots (${c.plan.qty}) · ${inr0(c.plan.outlay)}` : c.state === 'TRADED' || c.state === 'PAPER_FILLED' ? 'TAKEN' : `TAKE — ${c.plan?.reason ?? 'no plan'}`}</button>
+        canTake ? (
+          <button disabled={busy !== null} onClick={() => act('take')} className="inline-flex items-center gap-2 rounded-xl bg-emerald-400 px-4 py-2 text-[13.5px] font-bold text-slate-950 shadow-[0_6px_20px_-8px_rgba(52,211,153,0.8)] hover:bg-emerald-300 disabled:opacity-40"><I d={IC.check} />TAKE {c.plan?.contract} · {c.plan?.lots} lots ({c.plan?.qty}) · {inr0(c.plan?.outlay)}</button>
+        ) : (
+          // Not takeable: still name the contract, greyed out, with the reason underneath.
+          <button disabled aria-disabled className="inline-flex cursor-not-allowed items-center gap-2 rounded-xl border border-slate-700 bg-slate-800 px-4 py-2 text-[13.5px] font-bold text-slate-500"><I d={IC.check} />{c.cta?.action === 'taken' || c.state === 'TRADED' ? 'TAKEN' : 'TAKE'} {c.cta?.contract ?? c.plan?.contract ?? `${c.symbol} ${c.cta?.type ?? c.side ?? ''} — no listed contract`}</button>
+        )
       )}
-      {c.plan?.ok && !held && <span className="text-[12px] text-slate-500">{c.plan.contract} · ask {f(c.plan.ask)} · spread {f(c.plan.spreadPct, 1)}% · δ {f(c.plan.delta)}</span>}
+      {canTake && <span className="text-[12px] text-slate-500">ask {f(c.plan?.ask)} · spread {f(c.plan?.spreadPct, 1)}% · δ {f(c.plan?.delta)}</span>}
       {msg && <span className="text-[12px] text-amber-300">{msg}</span>}
+      {!held && c.cta?.reason && (
+        <div className={`basis-full text-[12px] ${canTake ? 'text-amber-300/80' : 'text-slate-400'}`}>
+          {canTake ? '' : 'Why disabled: '}{c.cta.reason}
+          {!canTake && c.cta.bid != null && <span className="text-slate-500"> · bid {f(c.cta.bid)} / ask {f(c.cta.ask)}{c.cta.spreadPct != null ? ` · spread ${f(c.cta.spreadPct, 1)}%` : ''}</span>}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Every book on this trigger at a glance: a glowing circle (green CE / long, red PE / short) while it
+ *  holds the trade, a dim filled one once it has exited, a hollow one when it never bought. */
+// Gate B and the 09:45 gap fade, on EVERY book's card (operator, 2026-09-26: "mention on all respective
+// strategies as label"). Rose = RT-Y stands aside, emerald = RT-Y takes, amber = CT-Y fades.
+function VerdictChips({ v }: { v: { rtY: Verdict | null; ctY: Verdict | null } }) {
+  const y = v.rtY
+  const c = v.ctY
+  const yWhy = y ? (Array.isArray(y.why) ? y.why : [y.why]).filter(Boolean).join(' · ') : ''
+  const yLabel = y ? `RT-Y: ${y.action}${y.state && y.state.startsWith('would') ? ' (would)' : ''}${y.action !== 'TAKE' && yWhy ? ` — ${yWhy}` : ''}` : ''
+  const cPlan = c && c.action !== 'NONE'
+    ? `CT-Y: ${c.action} ${c.side ?? ''} · stop ${f(c.stop)} · T1 ${f(c.targets?.[0])} · RR ${f(c.rr, 1)}${c.grade ? ` (${c.grade})` : ''}`
+    : ''
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-2 text-[11.5px] font-semibold">
+      {y ? (
+        <span title={yWhy} className={`rounded-md border px-2 py-0.5 ${y.action === 'SKIP' ? 'border-rose-400/40 bg-rose-400/10 text-rose-200' : y.action === 'TAKE' ? 'border-emerald-400/40 bg-emerald-400/10 text-emerald-200' : 'border-slate-500/50 bg-slate-800/70 text-slate-300'}`}>{yLabel}</span>
+      ) : null}
+      {c && c.action !== 'NONE' ? (
+        <span title={Array.isArray(c.why) ? c.why.join(' · ') : c.why} className="rounded-md border border-amber-400/40 bg-amber-400/10 px-2 py-0.5 text-amber-200">{cPlan}</span>
+      ) : c ? (
+        <span title={Array.isArray(c.why) ? c.why.join(' · ') : c.why} className="rounded-md border border-slate-600/60 bg-slate-800/70 px-2 py-0.5 text-slate-400">CT-Y: no fade — {Array.isArray(c.why) ? c.why.join(' · ') : c.why}</span>
+      ) : null}
+    </div>
+  )
+}
+
+function BookDots({ books, current }: { books: BookRow[]; current: string }) {
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5">
+      {books.map((b) => {
+        const long = b.side === 'CE' || b.side === 'LONG'
+        const dot = b.status === 'OPEN'
+          ? long ? 'animate-pulse bg-emerald-400 shadow-[0_0_10px_2px_rgba(52,211,153,0.75)]' : 'animate-pulse bg-rose-500 shadow-[0_0_10px_2px_rgba(244,63,94,0.75)]'
+          : b.status === 'EXITED'
+            ? long ? 'bg-emerald-400/35' : 'bg-rose-500/35'
+            : 'border border-slate-600 bg-transparent'
+        const tip = [
+          `${b.label}: ${b.status === 'NONE' ? 'did not buy' : b.status === 'OPEN' ? 'holding' : 'exited'}`,
+          b.side ?? '',
+          b.openedTs ? `in ${ist(b.openedTs)}` : '',
+          b.closedTs ? `out ${ist(b.closedTs)}${b.exitReason ? ` (${b.exitReason})` : ''}` : '',
+          b.pnl !== null && b.pnl !== undefined ? inr(b.pnl) : '',
+        ].filter(Boolean).join(' · ')
+        return (
+          <span key={b.book} title={tip} className={`inline-flex items-center gap-1.5 text-[11.5px] ${b.book === current ? 'font-bold text-slate-100' : b.status === 'NONE' ? 'text-slate-500' : 'text-slate-300'}`}>
+            <span className={`inline-block h-2.5 w-2.5 rounded-full ${dot}`} />{b.label}
+          </span>
+        )
+      })}
     </div>
   )
 }
@@ -278,14 +382,23 @@ function TriggerCard({ book, c, open, onToggle, refresh }: { book: string; c: Ca
     if (c.live) return <>Open · mid <b className="text-slate-100">{f(c.live.mid)}</b> ({pct(c.live.mid, c.position!.entry)}) · peak {f(c.live.peak)} · line {f(Math.max(c.live.line, c.live.optionSl))} · {c.live.armedBy ? `armed by ${c.live.armedBy}` : 'not armed'} · {c.live.qtyRemaining}/{c.live.qty} left</>
     if (c.trade) return <>{c.exits.map((o, i) => <span key={i}>{ist(o.ts)} · {o.filled ?? o.qty} @ {f(o.avg_price)} <span className="text-slate-500">{o.reason.split(' — ')[0].slice(0, 64)}</span>{i < c.exits.length - 1 ? ' → ' : ''}</span>)}</>
     if (c.skip) return <>Declined at {ist(c.skip.ts)}: {c.skip.reason}</>
-    if (c.state === 'NO_FILL') return <>Nothing to mirror — the parent: {c.parentDecision} · {c.parentReason}</>
+    if (c.state === 'NO_FILL') return <>No entry — the trigger: {c.parentDecision} · {c.parentReason}</>
     if (c.state === 'IN_TREND') return <>Routed IN TREND — the fade books stay flat. {c.route?.summary}</>
     if (c.fade && !c.position) return <>Fade {c.fade.direction} planned (stop {f(c.fade.stop)}, T1 {f(c.fade.targets?.[0])}) — {c.fade.decision ?? 'pending'} {c.fade.decision_reason ?? ''}</>
     return <>{c.parentDecision} · {c.parentReason}</>
   })()
+  const mine = c.books?.find((b) => b.book === book)
+  const heldOpen = c.state === 'OPEN' || mine?.status === 'OPEN'
+  const exited = !heldOpen && (mine?.status === 'EXITED' || c.state === 'TRADED')
+  const exitWhy = mine?.exitReason ?? c.trade?.exit_reason ?? c.position?.exit_reason ?? ''
   return (
     <article className={`relative overflow-hidden rounded-2xl border bg-gradient-to-b from-slate-900 to-slate-900/60 shadow-[0_14px_40px_-20px_rgba(0,0,0,0.8)] ${open ? 'border-sky-400/60' : 'border-slate-800'}`}>
-      <div className={`absolute bottom-0 left-0 top-0 w-1.5 ${TONE[st.tone].bar}`} />
+      {/* the side this book trades: CE / long green, PE / short red — never the state's colour */}
+      <div className={`absolute bottom-0 left-0 top-0 w-1.5 ${c.side === 'CE' || c.side === 'LONG' ? 'bg-emerald-400' : c.side === 'PE' || c.side === 'SHORT' ? 'bg-rose-500' : 'bg-slate-600'}`} />
+      {/* this book's trade is over: a corner ribbon, the exit reason on hover */}
+      {exited && (
+        <div title={`exited ${mine?.closedTs ? ist(mine.closedTs) : ''} · ${exitWhy}`} className="absolute right-[-44px] top-[18px] z-10 w-[160px] rotate-45 bg-slate-500 py-1 text-center text-[11px] font-bold tracking-[0.2em] text-slate-950 shadow-[0_4px_12px_-4px_rgba(0,0,0,0.8)]">EXITED</div>
+      )}
       <div className="px-6 pb-5 pt-5">
         <button onClick={onToggle} className="block w-full text-left" aria-expanded={open}>
           <div className="flex items-start justify-between gap-4">
@@ -294,14 +407,17 @@ function TriggerCard({ book, c, open, onToggle, refresh }: { book: string; c: Ca
               <div className="flex flex-col gap-1">
                 <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
                   <span className="text-[26px] font-bold tracking-tight text-slate-50">{c.symbol}</span>
-                  <span className="font-mono text-[14px] text-slate-400">{c.position?.instrument.name ?? c.plan?.contract ?? (c.fade ? `fade · ${c.fade.direction}` : `${bull ? 'CE' : 'PE'} side`)}</span>
+                  <span className="font-mono text-[14px] text-slate-400">{c.position?.instrument.name ?? c.plan?.contract ?? c.cta?.contract ?? `${c.symbol} ${c.side ?? (bull ? 'CE' : 'PE')} — no listed contract`}</span>
                   <span className={`text-[13px] font-semibold ${bull ? 'text-emerald-300' : 'text-rose-300'}`}>{bull ? 'BULLISH · buy CE' : 'BEARISH · buy PE'}</span>
                 </div>
                 <div className="font-mono text-[12.5px] text-slate-400">trigger {ist(c.ts, false)}–{ist(c.ts + 1800, false)} · fired {ist(c.ts + 1800)}{c.position ? ` · filled ${ist(c.position.opened_ts)} (+${(c.position.opened_ts - c.ts - 1800).toFixed(1)} s)` : ''}</div>
               </div>
             </div>
-            <div className="flex flex-col items-end gap-2">
-              <div className="flex flex-wrap justify-end gap-1.5">
+            <div className={`flex flex-col items-end gap-2 ${exited ? 'pr-14' : ''}`}>
+              <div className="flex flex-wrap items-center justify-end gap-1.5">
+                {heldOpen && (
+                  <span title={`held since ${mine?.openedTs ? ist(mine.openedTs) : c.position ? ist(c.position.opened_ts) : ''}`} className="inline-flex animate-pulse items-center gap-1.5 rounded-full border border-amber-300/70 bg-amber-400/15 px-3 py-1 text-[13px] font-bold tracking-[0.18em] text-amber-200 shadow-[0_0_18px_rgba(251,191,36,0.55)]"><span className="h-2 w-2 rounded-full bg-amber-300 shadow-[0_0_8px_rgba(251,191,36,0.9)]" />OPEN</span>
+                )}
                 <Pill tone={st.tone} big>{st.label}</Pill>
                 {c.routeLabel && <Pill tone={routeTone(c.routeLabel)} icon={IC.route} big title={c.route?.reason ?? c.skip?.reason}>{c.routeLabel}</Pill>}
               </div>
@@ -309,6 +425,9 @@ function TriggerCard({ book, c, open, onToggle, refresh }: { book: string; c: Ca
             </div>
           </div>
         </button>
+
+        {c.books?.length ? <BookDots books={c.books} current={book} /> : null}
+        {c.verdicts?.rtY || c.verdicts?.ctY ? <VerdictChips v={c.verdicts} /> : null}
 
         <div className="mt-4 flex flex-wrap gap-2">
           <Tile icon={IC.activity} k="ATR 30m" v={f(c.atr)} />
@@ -318,7 +437,7 @@ function TriggerCard({ book, c, open, onToggle, refresh }: { book: string; c: Ca
           <Tile icon={IC.flag} k="fortress · room" v={`${f(conf.fortress, 1)} · ${f(conf.room_ratio, 1)} ATR`} tone={(conf.fortress ?? 0) >= 9 ? 'rose' : undefined} title="strength of the first wall ahead · distance to the next wall" />
           <Tile icon={IC.layers} k="pivot clusters" v={`${behind.length} behind · ${ahead.length} ahead`} title={c.clusters.map((z) => `${z.price.toFixed(2)} (${z.strength.toFixed(1)}) ${z.members.join(',')}`).join('\n')} />
           {c.stopPct > 0 && <Tile icon={IC.shield} k="stop distance" v={`${c.stopPct.toFixed(2)}%`} tone={c.stopPct < 0.2 ? 'rose' : undefined} title={c.stopPct < 0.2 ? 'inside one bar\'s noise' : ''} />}
-          {c.route?.wall?.members?.length ? <Tile icon={IC.flag} k="wall ahead" v={`${f(c.route.wall.strength, 1)} · ${c.route.wall.timeframes}`} tone="fuchsia" /> : null}
+          {c.route?.wall?.members?.length ? <Tile icon={IC.flag} k="wall ahead" v={`${f(c.route.wall.strength, 1)} · ${c.route.wall.timeframes}`} tone="orange" /> : null}
         </div>
 
         <div className="mt-4"><Levels c={c} /></div>
@@ -358,8 +477,30 @@ function Expanded({ book, c }: { book: string; c: Card }) {
           <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-3.5 text-[13px] leading-relaxed">
             <div><b className="text-emerald-300">For:</b> {c.pros.length ? c.pros.join(' · ') : '—'}</div>
             <div className="mt-1"><b className="text-rose-300">Against:</b> {c.cons.length ? c.cons.join(' · ') : '—'}</div>
+            {c.breadth && (
+              // descriptive labels, logged on every trigger for the A/B; neither gates anything
+              <div className="mt-1 text-slate-400"><b className="text-slate-300">Context:</b> trend efficiency {c.breadth.efficiency != null ? f(c.breadth.efficiency) : '—'} · own volatility {c.breadth.volBand ?? '—'} · gap {c.breadth.gapDatr != null ? `${f(c.breadth.gapDatr)} daily ATR` : '—'}{c.breadth.openBar ? ' · first bar (09:45)' : ''}</div>
+            )}
             {c.route && <div className="mt-1.5 text-slate-400">{c.route.reason}</div>}
           </div>
+          {(c.pending || c.execLog || c.restingTarget) && (
+            <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-3.5 text-[12.5px] leading-relaxed">
+              <div className="mb-1 text-[11px] uppercase tracking-wider text-slate-400">order trail · limit orders</div>
+              {c.restingTarget && (
+                <div className="text-emerald-300">RESTING · T{c.restingTarget.rung} sell {f(c.restingTarget.limit)} × {c.restingTarget.qty} ({c.restingTarget.lots} lot{c.restingTarget.lots === 1 ? '' : 's'}) since {ist(c.restingTarget.placedTs)} — fills on a touch</div>
+              )}
+              {c.pending && (
+                <div className="text-amber-300">PENDING · {c.pending.contract} · limit {f(c.pending.limit)} resting {f(c.pending.restingS, 0)} s · {trail(c.pending)} · {c.pending.why}</div>
+              )}
+              {c.execLog?.entry && <div><b className="text-slate-300">Entry:</b> {trail(c.execLog.entry)}</div>}
+              {(c.execLog?.exits ?? []).map((x, i) => (
+                <div key={i}><b className="text-slate-300">Exit {x.reason ?? ''}{x.qty ? ` ×${x.qty}` : ''}:</b> {trail(x)}</div>
+              ))}
+              {(c.execLog?.targets ?? []).filter((t) => t.outcome !== 'placed').map((t, i) => (
+                <div key={`t${i}`} className="text-slate-400"><b className="text-slate-300">T{t.rung} resting sell {f(t.limit)} ×{t.qty}:</b> placed {ist(t.placedTs)} · {t.outcome} {ist(t.ts)}</div>
+              ))}
+            </div>
+          )}
           {c.candle && (
             <div className="flex flex-wrap gap-2">
               <Tile icon={IC.chart} k="trigger 30m" v={`${f(c.candle.o)} → ${f(c.candle.c)}`} />
@@ -378,7 +519,7 @@ function Expanded({ book, c }: { book: string; c: Card }) {
                 <tr key={i} className={`font-mono tabular-nums ${z.wall ? 'text-slate-100' : 'text-slate-400'}`}>
                   <td className={`px-2 py-1.5 ${z.side === 'ahead' ? 'text-emerald-300' : 'text-rose-300'}`}>{z.side}</td>
                   <td className="px-2 py-1.5">{f(z.price)} <span className="text-slate-500">{pct(z.price, c.entry)}</span></td>
-                  <td className="px-2 py-1.5">{f(z.strength, 1)}{z.wall ? <span className="ml-1.5 rounded bg-fuchsia-400/15 px-1 text-[10px] text-fuchsia-200">WALL</span> : null}</td>
+                  <td className="px-2 py-1.5">{f(z.strength, 1)}{z.wall ? <span className="ml-1.5 rounded bg-orange-400/15 px-1 text-[10px] text-orange-200">WALL</span> : null}</td>
                   <td className="px-2 py-1.5 text-[11.5px]">{z.members.join(', ')}</td>
                 </tr>
               ))}
@@ -391,7 +532,7 @@ function Expanded({ book, c }: { book: string; c: Card }) {
               {c.rtCard.stop && <Tile icon={IC.shield} k="option stop (δ)" v={`${f(c.rtCard.stop.optionStop)} · δ ${f(c.rtCard.stop.delta)}`} tone="rose" />}
             </div>
           )}
-          {c.fade && <div className="rounded-xl border border-fuchsia-400/30 bg-fuchsia-400/5 p-3 text-[13px] text-fuchsia-100"><b>Fade plan (CT):</b> {c.fade.direction} · stop {f(c.fade.stop)} · T1 {f(c.fade.targets?.[0])} · grade {c.fade.grade} rr {f(c.fade.rr)}</div>}
+          {c.fade && <div className="rounded-xl border border-orange-400/30 bg-orange-400/5 p-3 text-[13px] text-orange-100"><b>Fade plan (CT):</b> {c.fade.direction} · stop {f(c.fade.stop)} · T1 {f(c.fade.targets?.[0])} · grade {c.fade.grade} rr {f(c.fade.rr)}</div>}
         </div>
         <div className="flex flex-col gap-3">
           <div className="flex items-center gap-2 text-[11px] uppercase tracking-wider text-slate-400"><I d={IC.wallet} />this book · {BOOK_LABEL[book] ?? book}</div>
@@ -408,7 +549,7 @@ function Expanded({ book, c }: { book: string; c: Card }) {
                 {c.live.edm ? <Tile icon={IC.activity} k="expected move" v={`${(c.live.edm * 100).toFixed(0)}% of premium`} tone="amber" /> : null}
               </>) : c.trade ? (<>
                 <Tile icon={IC.x} k="exit" v={`${f(c.trade.exit)} · ${c.trade.exit_reason}`} />
-                <Tile icon={IC.wallet} k="net · gross" v={`${inr(c.trade.net)} · ${inr(c.trade.gross)}`} tone={c.trade.net >= 0 ? 'emerald' : 'rose'} />
+                <Tile icon={IC.wallet} k="net · gross · charges" v={`${inr(c.trade.net)} · ${inr(c.trade.gross)} · ${inr0(c.trade.charges)}`} tone={c.trade.net >= 0 ? 'emerald' : 'rose'} />
                 <Tile icon={IC.activity} k="MFE · MAE" v={`${f(c.trade.mfe_r)}R · ${f(c.trade.mae_r)}R`} />
                 <Tile icon={IC.clock} k="held" v={`${Math.round(c.trade.duration_s / 60)} min`} />
               </>) : null}
@@ -441,7 +582,7 @@ export function BookCards({ book }: { book: string }) {
     <div>
       <div className="mb-4 flex flex-wrap items-end justify-between gap-4">
         <div>
-          <div className="text-[11px] uppercase tracking-wider text-indigo-300">book · {data.day}</div>
+          <div className="text-[11px] uppercase tracking-wider text-sky-300">book · {data.day}</div>
           <div className="text-[28px] font-bold tracking-tight text-slate-50">{BOOK_LABEL[book] ?? book}</div>
           <div className="mt-1 max-w-2xl text-[13px] text-slate-500">One card per FUDKII trigger. Every trigger is scored the same way whether this book traded it or not, so a skip reads as “skipped, because”. Take / Skip are operator overrides, written to the event log before they are attempted.</div>
         </div>

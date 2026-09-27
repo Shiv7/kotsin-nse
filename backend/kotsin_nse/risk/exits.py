@@ -20,9 +20,11 @@ Ordering matters and is deliberate:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, replace
 
-from ..domain import Direction, ExitDecision, ExitReason, Position
+from ..domain import Direction, ExitDecision, ExitReason, OptionType, Position
+from ..instrument.pricing import value_at
 from ..instrument.select import estimate_delta
 from .limits import RiskLimits
 
@@ -121,10 +123,13 @@ class ExitEngine:
             if (held := self._sustained_option_stop(pos, view, mid)) is not None:
                 return held
             if mid <= pos.option_sl:
-                return None  # breached, not yet sustained, equity unconfirmed — hold
+                # breached, not yet sustained, equity unconfirmed — hold the STOP, but never the
+                # backstops: returning None here used to skip the halt, the daily-loss exit and
+                # the 15:20 force-flat for as long as the option sat under its stop.
+                return self._backstops(pos, view, ltp)
         if ltp > 0 and pos.option_sl > 0 and ltp <= pos.option_sl:
             if lim.sustain_s is not None:
-                return None  # a sustain policy never exits on a bare touch
+                return self._backstops(pos, view, ltp)  # no exit on a bare touch; backstops still apply
             return ExitDecision(
                 pos.id,
                 ExitReason.SL_OP,
@@ -192,6 +197,11 @@ class ExitEngine:
             self._trail(pos, ltp)  # the RT policy's ratchet supersedes the legacy 3%/40% trail
 
         # 5. backstops ------------------------------------------------------------------------------
+        return self._backstops(pos, view, ltp)
+
+    def _backstops(self, pos: Position, view: MarketView, ltp: float) -> ExitDecision | None:
+        """Halt, daily loss, force-flat, time stop — the exits no stop policy may postpone."""
+        lim = self.limits
         if view.halted:
             return ExitDecision(pos.id, ExitReason.HALT, ltp, pos.qty_remaining, "halted")
         if view.daily_loss_hit:
@@ -211,6 +221,20 @@ class ExitEngine:
                 f"held {view.bars_held} bars ≥ {lim.time_stop_bars}",
             )
         return None
+
+    def evaluate_stale(self, pos: Position, view: MarketView) -> ExitDecision | None:
+        """The option's quote is too old to judge anything priced off the option. The underlying's
+        stop and the backstops do not need it, so they are still enforced — skipping the position
+        outright left TATASTEEL's confirmed equity stop unevaluated (2026-09-25 14:30 and 14:39)."""
+        if pos.status != "OPEN" or pos.qty_remaining <= 0:
+            return None
+        ltp = view.option_ltp
+        if self._equity_breached(pos, view):
+            return ExitDecision(
+                pos.id, ExitReason.SL_EQ, ltp, pos.qty_remaining,
+                f"underlying {view.underlying_ltp:.2f} breached {pos.equity_sl:.2f} (option quote stale)",
+            )
+        return self._backstops(pos, view, ltp)
 
     # -- state -----------------------------------------------------------------------------------
 
@@ -314,6 +338,15 @@ class ExitEngine:
             )
         )
         projected = max(0.05, pos.entry - abs(pos.equity_entry - pos.equity_sl) * delta)
+        if lim.priced_option_stop and view.option_mid and view.option_mid > 0 and pos.instrument.expiry:
+            priced = value_at(
+                option_price=view.option_mid, spot=view.underlying_ltp, target_spot=pos.equity_sl, strike=pos.instrument.strike,
+                expiry=pos.instrument.expiry, now=view.now, call=pos.instrument.option_type is OptionType.CE,
+            )
+            if priced is not None:
+                projected = max(0.05, priced)
+        if lim.max_premium_loss_pct is not None:
+            projected = max(projected, pos.entry * (1 - lim.max_premium_loss_pct / 100))
         if lim.min_stop_ticks:
             # never nearer than the floor: on a cheap contract the projection is a tick or two
             tick = pos.instrument.tick_size or 0.05
@@ -374,26 +407,46 @@ class ExitEngine:
             f"hard SL {line:.2f}: {what} traded through at {mid:.2f} [{mode}]; {pos.targets_hit} lot(s) already out",
         )
 
+    def _last_rung(self, pos: Position, targets: tuple[float, ...]) -> bool:
+        """Does a touch of the next rung take the rest of the position (not one lot)?"""
+        i = pos.targets_hit
+        lim = self.limits
+        if lim.trail_all_after_t1:
+            return False  # T1 sells one lot; every lot after it leaves on the give-back line or a stop
+        last = i >= len(targets) - 1
+        if last and i == 0 and len(targets) == 1 and lim.arm_at_pct is not None and lim.peak_giveback_pct is not None:
+            # arming synthesised T1 from the live price and there is no rung above it: pay the arm
+            # tranche and let the give-back band carry the remainder, rather than flattening here.
+            last = False
+        return last
+
     def _touch(self, pos: Position, view: MarketView, mid: float, by: str, why: str) -> ExitDecision:
+        return self._touch_at(pos, view.now, view.option_ltp, mid, by, why)
+
+    def _touch_at(self, pos: Position, now: float, ltp: float, mid: float, by: str, why: str) -> ExitDecision:
         """A rung touched: one lot out (the last rung takes the rest), the hard SL steps to the
         rung below (breakeven for T1), the sustain clock for this rung starts. Under the
         immediate policy the first touch is the arming itself."""
         i = pos.targets_hit
-        last = i >= len(pos.option_targets) - 1
+        last = self._last_rung(pos, pos.option_targets)
         floor = pos.entry if i == 0 else pos.option_targets[i - 1]
         pos.ratchet_sl = round(max(pos.ratchet_sl, floor), 2)
         pos.option_sl = round(max(pos.option_sl, pos.ratchet_sl), 2)
         if i == 0:
             pos.armed_by = by
-            if self.limits.arm_mode == "immediate":
-                pos.armed_ts = view.now
+            # arm_at_pct books arm the give-back band at the touch itself: "after 5 % is achieved,
+            # we arm it and trail". Waiting 75 s for a sustain meant BANKNIFTY's PE on 2026-09-24,
+            # nine seconds over +5 % before it broke, never armed and gave back to breakeven
+            # (tape replay: 3 lots at 201.00, -128) instead of leaving on the 3 % line (208.50, +547).
+            if self.limits.arm_mode == "immediate" or self.limits.arm_at_pct is not None or self.limits.trail_all_after_t1:
+                pos.armed_ts = now
                 pos.peak_mid = max(pos.peak_mid, mid)
                 pos.trail_dwell = 0
-        pos.t_touch_ts = view.now if mid >= pos.option_targets[i] else None
+        pos.t_touch_ts = now if mid >= pos.option_targets[i] else None
         pos.t_close_ok = False
         qty = pos.qty_remaining if last else self._tranche(pos)
         return ExitDecision(
-            pos.id, ExitReason.TARGET, view.option_ltp, qty,
+            pos.id, ExitReason.TARGET, ltp, qty,
             f"T{i + 1} {pos.option_targets[i]:.2f} touched by {by} ({why}) — {'the rest' if last else 'one lot'} out; "
             f"hard SL {pos.ratchet_sl:.2f}",
         )
@@ -426,26 +479,110 @@ class ExitEngine:
                 pos.peak_mid = max(pos.peak_mid, mid)
                 pos.trail_dwell = 0
 
+    def _arm_threshold(self, pos: Position) -> tuple[float, float]:
+        """``(threshold, pct_arm)``: the least the option must reach before T1 may arm, and the
+        ``arm_at_pct`` minimum itself (0 when the book has none)."""
+        lim = self.limits
+        if lim.arm_at_pct is not None:
+            # Operator's rule, 2026-09-25: +arm_at_pct on the premium paid is the MINIMUM before any
+            # arm. An own T1 or the equity T1 nearer than that waits for it — a rung 1 % over entry
+            # arming the trade and stepping the SL to breakeven is how KEI and GRASIM were stopped.
+            pct_arm = round(pos.entry * (1 + lim.arm_at_pct / 100), 2)
+            return pct_arm, pct_arm
+        threshold = pos.entry * (1 + lim.arm_min_move * pos.option_edm) if (lim.arm_min_move and pos.option_edm) else 0.0
+        return threshold, 0.0
+
+    # -- target sells placed in advance (operator, 2026-09-26) ---------------------------------------
+    #
+    # "upon approaching the target … why not place order in advance? … first come first serve has
+    # our name too and in case it is a touch-and-fall case, we at least make profit on lot 1". The
+    # books whose target is a TOUCH rest the next rung's sell in advance; the engine fills it on a
+    # touch (exec/resting.py) and books it with the same state changes as the touch would have made.
+
+    def resting_target(self, pos: Position) -> tuple[int, float, int] | None:
+        """The target sell to rest now: ``(rung index, limit, qty)``, or None. The base books' share
+        ladder (T{n}, ``target_ladder`` share); the own-ladder books (a lot per rung, the last the
+        rest; an ``arm_at_pct`` book's first rung no lower than entry + that %). RT-N
+        (``arm_mode="immediate"``) rests its own R1 too (operator, 2026-09-26: "yes RT-N to get
+        advance target sells too"): its T1 otherwise arms on a 1-minute CLOSE over R1, which a
+        resting order cannot wait for — so a touch of R1 now sells its first lot and arms it, as the
+        other books' touch does. An ``arm_at_pct`` book with no own rung at all rests its T1 at the
+        minimum itself (review, 2026-09-26: nothing rested and lot 1 went at market on the first
+        print over +5 %); any other position with no targets rests nothing."""
+        if pos.status != "OPEN" or pos.qty_remaining <= 0:
+            return None
+        lim = self.limits
+        i = pos.targets_hit
+        if lim.trail_all_after_t1 and i >= 1:
+            return None  # after T1 nothing more is sold at a rung: the rest rides the give-back line
+        if i >= len(pos.option_targets) or pos.option_targets[i] <= 0:
+            if not (lim.own_ladder and lim.arm_at_pct is not None and i == 0 and not pos.option_targets):
+                return None
+            price = 0.0  # the minimum below is T1
+        else:
+            price = pos.option_targets[i]
+        tick = pos.instrument.tick_size or 0.05
+        if not lim.own_ladder:
+            share = lim.target_ladder[i] if i < len(lim.target_ladder) else 0.0
+            qty = self._ladder_qty(pos, share)
+            return (i, _tick_up(price, tick), qty) if qty > 0 else None
+        targets = pos.option_targets
+        if i == 0:
+            threshold, pct_arm = self._arm_threshold(pos)
+            price = max(price, threshold)
+            if pct_arm and (not targets or targets[0] < pct_arm):  # own T1 below the minimum (or none): the minimum is T1
+                targets = (price, *[r for r in targets if r > price])[:4]
+        qty = pos.qty_remaining if self._last_rung(pos, targets) else self._tranche(pos)
+        return i, _tick_up(price, tick), qty
+
+    def resting_target_filled(self, pos: Position, now: float, price: float, mid: float | None) -> ExitDecision:
+        """A resting target sell filled at ``price``: the same state changes as the touch (the SL
+        steps, T1 arms the band), and the TARGET decision to book it with."""
+        lim = self.limits
+        i = pos.targets_hit
+        if not lim.own_ladder:
+            share = lim.target_ladder[i] if i < len(lim.target_ladder) else 0.0
+            return ExitDecision(pos.id, ExitReason.TARGET, price, self._ladder_qty(pos, share),
+                                f"T{i + 1} resting limit filled at {price:.2f} — taking {share:.0%}")
+        if i == 0:
+            _, pct_arm = self._arm_threshold(pos)
+            if pct_arm and (not pos.option_targets or pos.option_targets[0] < pct_arm):
+                # the minimum is T1 (as _own_ladder does when the price reaches it first)
+                pos.option_targets = (price, *[r for r in pos.option_targets if r > price])[:4]
+                pos.option_t1 = price
+        d = self._touch_at(pos, now, price, mid if mid and mid > 0 else price, "option", f"resting sell {price:.2f} filled")
+        return replace(d, note=f"T{i + 1} resting limit filled · {d.note}")
+
     def _own_ladder(self, pos: Position, view: MarketView, ltp: float, mid: float) -> ExitDecision | None:
         """The RT books' ladder. T1–T4 are the contract's own levels (which ones is the book's
         ``ladder_mode``). Touch → a lot out and the hard SL steps to the rung below; sustained → the
         SL steps to the rung (or stays behind, ``sl_lag``) and T1's sustain arms the band. Under
         ``arm_mode="immediate"`` the underlying touching its T1, or the option's 1-minute close over
         its own R1, arms at once. If the underlying reaches its own T1 first, the option's price at
-        that instant is T1 and the higher own rungs follow it — subject to ``arm_min_move``."""
+        that instant is T1 and the higher own rungs follow it. Books carrying ``arm_at_pct`` never arm
+        below the premium paid plus that percentage; nearer rungs wait for it."""
         lim = self.limits
         bucket = int(view.now // 60)
         prev = self._minute.get(pos.id)
         minute_close = prev[1] if prev is not None and prev[0] != bucket else None
         if ltp > 0:
             self._minute[pos.id] = (bucket, ltp)
+        if lim.trail_all_after_t1 and pos.targets_hit >= 1:
+            # after T1: no rung is sold and the SL steps no further than breakeven — the give-back
+            # line from the latest peak (``_own_hard_stop``) and the stops are the only exits
+            return None
         self._sustain(pos, view, mid, minute_close)
         i = pos.targets_hit
-        threshold = pos.entry * (1 + lim.arm_min_move * pos.option_edm) if (lim.arm_min_move and pos.option_edm) else 0.0
+        threshold, pct_arm = self._arm_threshold(pos)
+        own_t1_below = not pos.option_targets or pos.option_targets[0] < pct_arm
         if i == 0 and not pos.armed_by and view.underlying_ltp is not None and pos.equity_targets and ltp > 0:
             t1 = pos.equity_targets[0]
             hit = view.underlying_ltp >= t1 if pos.direction is Direction.BULLISH else view.underlying_ltp <= t1
-            if hit and ltp >= threshold:
+            # An arm_at_pct book's T1 is max(own T1, the minimum): with an own T1 at or over the
+            # minimum, the underlying reaching its T1 sells nothing — lot 1 waits for the option's own
+            # T1, where its sell rests (review, 2026-09-26: this path sold lot 1 at 21.50 with the
+            # own T1 at 24.00, cancelling the resting sell there).
+            if hit and ltp >= threshold and (not pct_arm or own_t1_below):
                 pos.option_targets = (ltp, *[r for r in pos.option_targets if r > ltp])[:4]
                 pos.option_t1 = ltp
                 return self._touch(
@@ -457,8 +594,27 @@ class ExitEngine:
             if pos.option_t1 > 0 and minute_close is not None and minute_close >= pos.option_t1:
                 return self._touch(pos, view, mid, "option", f"1m close {minute_close:.2f} ≥ its own R1 {pos.option_t1:.2f}")
             return None
-        if ltp > 0 and i < len(pos.option_targets) and ltp >= pos.option_targets[i] and (i > 0 or ltp >= threshold):
+        if (
+            ltp > 0 and i < len(pos.option_targets) and ltp >= pos.option_targets[i]
+            and (i > 0 or (ltp >= threshold and pos.option_targets[0] >= pct_arm))
+        ):
+            # at i == 0 an own rung arms only if it sits at or over the minimum itself — the case
+            # where the price jumps straight through both, and the real ladder is kept
             return self._touch(pos, view, mid, "option", f"option {ltp:.2f} ≥ its own rung")
+        if pct_arm and i == 0 and not pos.armed_by and ltp >= pct_arm and own_t1_below:
+            # The minimum is reached and there is no own rung at or over it: the minimum becomes T1.
+            # Own rungs below it are dropped and higher ones follow; with none at all (BANKNIFTY
+            # after its 1.53 % gap on 2026-09-24) the give-back band carries the rest. An own T1 AT
+            # OR OVER the minimum is T1 itself (operator, 2026-09-26: "treat +5% as a floor, not as
+            # where lot 1 actually sells") — this branch sold lot 1 at the first price over +5 %
+            # even then (HINDUNILVR 2026-09-25: own T1 4.72, lot 1 out at 3.90 while the resting
+            # T1 sell sat at 4.75, then walked to the bid over 45 s and filled at 3.62).
+            pos.option_targets = (ltp, *[r for r in pos.option_targets if r > ltp])[:4]
+            pos.option_t1 = ltp
+            return self._touch(
+                pos, view, mid, "option",
+                f"option {ltp:.2f} ≥ entry +{lim.arm_at_pct:g}% ({pct_arm:.2f})",
+            )
         return None
 
     def _mark(self, pos: Position, view: MarketView, mid: float) -> None:
@@ -516,6 +672,11 @@ class ExitEngine:
 
 
 
+def _tick_up(price: float, tick: float) -> float:
+    """A sell's limit on the exchange's tick, never below the level it is for."""
+    return round(math.ceil(price / tick - 1e-9) * tick, 4) if tick > 0 else round(price, 2)
+
+
 def apply_exit(
     pos: Position, decision: ExitDecision, *, fill_price: float, charges: float, now: float
 ) -> float:
@@ -527,6 +688,7 @@ def apply_exit(
     """
     qty = min(decision.qty, pos.qty_remaining)
     gross = (fill_price - pos.entry) * pos.dir_sign * qty * pos.instrument.multiplier
+    pos.realised_gross += gross
     pos.qty_remaining -= qty
     pos.charges += charges
     if decision.reason is ExitReason.TARGET:

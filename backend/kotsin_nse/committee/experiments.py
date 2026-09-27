@@ -35,6 +35,7 @@ from ..market.session import ist_day
 from ..research.backtest import Backtester, BacktestParams, BtTrade
 from ..research.history import HistoryStore
 from ..research.stats import day_clustered_mean, within_day_permutation
+from ..risk.costs import CostModel
 from .schemas import ParamChange
 
 PATCHABLE_ROOTS = ("fudkii", "fukaa", "limits", "slippage_bps", "position_budget_inr")
@@ -260,8 +261,11 @@ def run_experiment(
     patched = apply_changes(base, changes)
     t0 = time.time()
 
-    def arm(params: BacktestParams, s: Settings, start: date, end: date) -> list[BtTrade]:
-        return Backtester(s, params).run(store, syms, start=start, end=end).trades
+    def arm(params: BacktestParams, s: Settings, start: date, end: date, cost_overrides: dict[str, float] | None = None) -> list[BtTrade]:
+        bt = Backtester(s, params)
+        if cost_overrides:
+            bt.costs = CostModel(s, overrides=cost_overrides)
+        return bt.run(store, syms, start=start, end=end).trades
 
     is_base = arm(base, settings, split.train_start, split.train_end)
     is_pat = arm(patched, settings, split.train_start, split.train_end)
@@ -283,19 +287,15 @@ def run_experiment(
         "params_patched": patched.to_json(),
     }
     if cost_stress:
-        stressed = settings.model_copy(
-            update={
-                "cost_brokerage_per_order_inr": settings.cost_brokerage_per_order_inr
-                * STRESS_BROKERAGE_MULT
-            }
-        )
+        # the stress multiplies the brokerage IN FORCE — the charges file's, not a Settings default
+        stressed = {"brokerage_mult": STRESS_BROKERAGE_MULT}
         sb = arm(
             replace(base, slippage_bps=base.slippage_bps * STRESS_SLIPPAGE_MULT),
-            stressed, split.test_start, split.test_end,
+            settings, split.test_start, split.test_end, cost_overrides=stressed,
         )
         sp = arm(
             replace(patched, slippage_bps=patched.slippage_bps * STRESS_SLIPPAGE_MULT),
-            stressed, split.test_start, split.test_end,
+            settings, split.test_start, split.test_end, cost_overrides=stressed,
         )
         cs = grade(sb, sp)
         result["cost_stress"] = {

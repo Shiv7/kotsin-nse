@@ -220,7 +220,9 @@ class Ledger:
 
     # -- signals ------------------------------------------------------------------------------------
 
-    async def insert_signal(self, sig: dict[str, Any], decision: str, reason: str = "") -> None:
+    async def insert_signal(
+        self, sig: dict[str, Any], decision: str, reason: str = "", *, created_ts: float | None = None
+    ) -> None:
         async with self.engine.begin() as conn:
             await conn.execute(
                 sqlite_insert(signals)
@@ -234,10 +236,27 @@ class Ledger:
                     decision=decision,
                     decision_reason=reason,
                     json=_j({**sig, "decision": decision, "decision_reason": reason}),
-                    created_ts=time.time(),
+                    # a signal rebuilt after the fact is stamped when its bar closed — when it
+                    # would have fired — not when the rescan found it
+                    created_ts=created_ts if created_ts is not None else time.time(),
                 )
                 .on_conflict_do_nothing(index_elements=[signals.c.signal_id])
             )
+
+    async def settle_signal(self, sig: dict[str, Any], decision: str, reason: str = "") -> None:
+        """A signal whose decision arrives later — a paper limit entry is written RESTING when it
+        is placed and settled here when it fills or is missed. Inserts if absent, else rewrites the
+        decision (``insert_signal`` keeps the first decision on purpose; this is the one path
+        whose first decision is provisional)."""
+        async with self.engine.begin() as conn:
+            done = await conn.execute(
+                sa.update(signals).where(signals.c.signal_id == sig["signal_id"]).values(
+                    decision=decision, decision_reason=reason,
+                    json=_j({**sig, "decision": decision, "decision_reason": reason}),
+                )
+            )
+        if not done.rowcount:
+            await self.insert_signal(sig, decision, reason)
 
     async def insert_rejection(self, rej: dict[str, Any]) -> None:
         async with self.engine.begin() as conn:
@@ -321,8 +340,13 @@ class Ledger:
             )
 
     async def known_client_order_ids(self) -> set[str]:
+        """Ids a restart must never re-send: every order that was filled, submitted, or is
+        otherwise unaccounted for. A REJECTED order went nowhere and is left out — seeding it made
+        a rejected exit's retry a 'duplicate' forever, across restarts too."""
         async with self.engine.begin() as conn:
-            rows = (await conn.execute(sa.select(orders.c.client_order_id))).all()
+            rows = (await conn.execute(
+                sa.select(orders.c.client_order_id).where(orders.c.status != "REJECTED")
+            )).all()
         return {r[0] for r in rows}
 
     # -- events / health ----------------------------------------------------------------------------
@@ -357,7 +381,7 @@ class Ledger:
             "signals": (signals, "ts", ("decision", "decision_reason", "created_ts")),
             "positions": (positions, "opened_ts", ("status", "closed_ts")),
             "trades": (trades, "closed_ts", ()),
-            "orders": (orders, "ts", ("purpose", "status")),
+            "orders": (orders, "ts", ("purpose", "status", "decision")),
             "events": (events, "ts", ("kind", "ts")),
         }[name]
         cols = [table.c.json, *(table.c[c] for c in extra)]

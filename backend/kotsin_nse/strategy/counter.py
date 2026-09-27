@@ -306,6 +306,27 @@ def counter_route(legs: list[Leg], *, bullish: bool, st_flipped: bool, wall_min:
     )
 
 
+def fade_refusal(
+    sig: Signal, *, zones: list[Zone], atr: float, tick_size: float, policy: GradePolicy | None = None
+) -> dict:
+    """Why ``flipped_signal`` returned None, in the plan's own numbers. "No wall on the flipped side"
+    was logged for every refusal, but NAM-INDIA (2026-09-25 14:45) had a 14.4 wall 1.1 ATR below —
+    its fade was refused on RR: target 1150 against a stop at 1166.70, RR 0.81, graded F."""
+    bullish = sig.direction is not Direction.BULLISH
+    conf = compute_confluence(close=sig.entry, bullish=bullish, zones=zones, atr_value=atr, tick_size=tick_size, policy=policy)
+    out = {"grade": conf.grade, "rr": round(conf.rr, 2), "stop": conf.stop, "targets": list(conf.targets), "note": conf.note}
+    if not conf.targets:
+        out["reason"] = "no wall ahead on the fade's side to aim a target at" + (f" ({conf.note})" if conf.note else "")
+    elif conf.stop <= 0:
+        out["reason"] = "no level behind the close to put the fade's stop on"
+    else:
+        out["reason"] = (
+            f"fade graded {conf.grade}: first target {conf.targets[0]:g} is {abs(conf.targets[0] - sig.entry):.2f} away, "
+            f"stop {conf.stop:g} is {abs(conf.stop - sig.entry):.2f} away — RR {conf.rr:.2f}" + (f" ({conf.note})" if conf.note else "")
+        )
+    return out
+
+
 def flipped_signal(
     sig: Signal,
     *,

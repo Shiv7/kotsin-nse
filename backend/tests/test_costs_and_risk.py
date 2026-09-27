@@ -11,6 +11,8 @@ import math
 import time
 from itertools import pairwise
 
+import pytest
+
 from kotsin_nse.config import Segment, Settings
 from kotsin_nse.domain import (
     Direction,
@@ -38,38 +40,45 @@ def _settings() -> Settings:
 # -- costs ------------------------------------------------------------------------------------------
 
 
-def test_round_trip_on_nse_cash_at_33k_matches_the_measured_030_percent(equity):
-    """The number that decided this book's fate. 0.299% measured; the model must land on it."""
+def test_round_trip_on_nse_cash_at_33k_on_the_zerodha_schedule(equity):
+    """0.299% was measured at ₹40/order on the old account. On Zerodha's intraday line (brokerage
+    min(₹20, 0.03%), STT 0.025% on the sell) the same ₹33,000 round trip is about 0.11%."""
     costs = CostModel(_settings())
-    price, qty = 330.0, 100  # ₹33,000
-    pct = costs.round_trip_pct(equity, price, qty)
-    assert 0.28 <= pct <= 0.35, pct
+    pct = costs.round_trip_pct(equity, 330.0, 100)
+    assert 0.09 <= pct <= 0.13, pct
 
 
-def test_a_percentage_slab_does_not_silently_replace_the_flat_charge(equity):
-    """With the slab off (the default) the flat ₹40 is what is charged. Turning it on must only
-    ever reduce the charge, never be the reason a small position looks cheap."""
-    flat = CostModel(Settings(_env_file=None))
-    slab = CostModel(Settings(_env_file=None, cost_brokerage_pct=0.03))
-    assert flat.leg(equity, OrderSide.BUY, 330.0, 100).brokerage == 40.0
-    assert slab.leg(equity, OrderSide.BUY, 330.0, 100).brokerage < 40.0
-
-
-def test_flat_brokerage_dominates_the_round_trip_at_small_size(equity):
-    """81% of the round trip was ₹40/order × 2. That is why entries, not exits, were the binding
-    problem: a fixed cost does not scale down."""
+def test_intraday_brokerage_is_the_lower_of_the_flat_and_the_percentage_and_options_are_flat(equity, option):
     costs = CostModel(_settings())
-    ch = costs.round_trip(equity, 330.0, 330.0, 100)
-    assert ch.brokerage == 80.0  # ₹40 × 2 legs
-    assert ch.brokerage / ch.total > 0.70
+    assert costs.leg(equity, OrderSide.BUY, 330.0, 100).brokerage == pytest.approx(9.9)   # 0.03% of ₹33,000
+    assert costs.leg(equity, OrderSide.BUY, 330.0, 1000).brokerage == 20.0               # capped at ₹20
+    assert costs.leg(option, OrderSide.BUY, 2.0, 250).brokerage == 20.0                  # options: flat
+    assert costs.leg(option, OrderSide.BUY, 200.0, 2500).brokerage == 20.0
 
 
-def test_cost_share_collapses_at_larger_size(equity):
-    """Break-even needed ~₹1.3 lakh per position. The model must show that."""
+def test_flat_brokerage_dominates_a_small_option_round_trip(option):
+    """A fixed cost does not scale down: on ₹5,000 of premium the ₹20/order is most of the bill."""
     costs = CostModel(_settings())
-    small = costs.round_trip_pct(equity, 330.0, 100)  # ₹33k
-    large = costs.round_trip_pct(equity, 330.0, 400)  # ₹132k
+    ch = costs.round_trip(option, 10.0, 10.0, 500)
+    assert ch.brokerage == 40.0  # ₹20 × 2 legs
+    assert ch.brokerage / ch.total > 0.6
+
+
+def test_cost_share_collapses_at_larger_size(option):
+    costs = CostModel(_settings())
+    small = costs.round_trip_pct(option, 10.0, 500)    # ₹5,000 premium
+    large = costs.round_trip_pct(option, 10.0, 5000)   # ₹50,000 premium
     assert large < small / 2
+
+
+def test_four_lots_are_one_turnover_and_one_order(option):
+    """Operator, 2026-09-26: "the taxes is on turnover (total) not 4x if there are 4 lots"; brokerage
+    is per executed order (Zerodha) — 4 lots in one order are one ₹20."""
+    costs = CostModel(_settings())
+    one, four = costs.leg(option, OrderSide.SELL, 20.0, 250), costs.leg(option, OrderSide.SELL, 20.0, 1000)
+    assert four.brokerage == one.brokerage == 20.0
+    assert four.stt == pytest.approx(20.0 * 1000 * 0.15 / 100) == pytest.approx(one.stt * 4), "STT: 0.15% of the whole turnover, once"
+    assert four.exchange == pytest.approx(20.0 * 1000 * 0.03553 / 100)
 
 
 def test_option_charges_are_levied_on_premium_turnover_not_notional(option):
@@ -160,8 +169,9 @@ def test_sizing_shrinks_with_the_wallet(option):
 
 def test_wallet_day_rolls_on_the_ist_calendar_not_utc():
     w = Wallet.new("FUDKII", 1_000_000, now=ist_ts("2026-09-18", "10:00"))
-    assert w.rollover(ist_ts("2026-09-18", "23:00")) is False  # same IST day
-    assert w.rollover(ist_ts("2026-09-19", "09:30")) is True
+    assert w.rollover(ist_ts("2026-09-18", "23:00")) is None  # same IST day
+    closed = w.rollover(ist_ts("2026-09-19", "09:30"))
+    assert closed is not None and closed["day"] == "2026-09-18" and w.day == "2026-09-19"
 
 
 def test_daily_loss_breaker_trips_once_and_lifts_on_rollover():
@@ -361,15 +371,16 @@ def test_the_lot_cap_binds_alongside_the_rupee_cap_whichever_is_lower():
     uncapped = size_position(limits=RiskLimits(), **common)
     capped = size_position(limits=RT_X_LIMITS, **common)
 
-    assert uncapped.lots == 20, "the base book is unchanged — the rupee cap alone bound"
+    assert uncapped.lots == 20, "a book without the rule is unchanged — the rupee cap alone bound"
     assert capped.lots == 4
     assert capped.qty == 4 * 325
-    assert "lot cap 4" in capped.reason
+    assert capped.reason == "ok (4 lots, ₹19,838 < ₹75,000)"
     assert capped.outlay < uncapped.outlay
 
 
-def test_a_rupee_cap_tighter_than_the_lot_cap_still_wins():
-    """Whichever binds LOWER: a rich premium can seat fewer than four lots and that is the answer."""
+def test_four_lots_at_75000_or_more_are_declined_never_cut_to_fewer():
+    """Operator, 2026-09-27: "take 4 lots min as long as it is less than 75,000/-" — a rich premium
+    is not bought in fewer lots (the selector steps further OTM before it gets here)."""
     from kotsin_nse.risk.limits import RT_X_LIMITS
     from kotsin_nse.risk.sizing import size_position
 
@@ -377,8 +388,37 @@ def test_a_rupee_cap_tighter_than_the_lot_cap_still_wins():
         instrument=_option(lot_size=325), premium=120.0, option_stop=110.0, option_target1=180.0,
         balance=1_000_000.0, available=1_000_000.0, limits=RT_X_LIMITS, costs=CostModel(Settings(_env_file=None)),
     )
-    assert out.lots < 4, "Rs 1,00,000 does not seat four lots of a 120.00 premium"
-    assert out.reason == "ok", "the lot ceiling did not bind, so it is not reported"
+    assert not out.ok and out.reason == "4 lots cost ₹156,000 — not under ₹75,000"
+
+
+def test_the_75000_rule_is_never_applied_to_mcx():
+    """Operator, 2026-09-27: "₹75,000 cap does not apply to any MCX trade"."""
+    from dataclasses import replace
+
+    from kotsin_nse.engine import Engine
+    from kotsin_nse.risk.limits import (
+        CT_X_LIMITS,
+        CT_Y_LIMITS,
+        FIXED_LOTS_UNDER_INR,
+        RT_MCX_LIMITS,
+        RT_N_LIMITS,
+        RT_X_LIMITS,
+        RT_Y_LIMITS,
+        RT_Y_W1_LIMITS,
+    )
+    from kotsin_nse.risk.sizing import size_position
+
+    assert all(lim.fixed_lots_under_inr == FIXED_LOTS_UNDER_INR == 75_000
+               for lim in (RT_X_LIMITS, RT_N_LIMITS, RT_Y_LIMITS, CT_X_LIMITS, CT_Y_LIMITS, RT_Y_W1_LIMITS))
+    assert RT_MCX_LIMITS.fixed_lots_under_inr is None and RT_MCX_LIMITS.max_lots == 4
+    e = Engine(Settings(_env_file=None))
+    assert e._exits_by_strategy["FUDKII_RT_MCX"].limits.fixed_lots_under_inr is None, "RT-MCX sizes as it always did"
+    assert e.limits.fixed_lots_under_inr == 75_000, "the parent (and FUKAA) buy 4 lots under ₹75,000"
+    # and should an MCX contract ever meet the rule, sizing ignores it there
+    mcx = replace(_option(lot_size=100), segment=Segment.MCX_FO)
+    out = size_position(instrument=mcx, premium=300.0, option_stop=280.0, option_target1=360.0,
+                        balance=3_000_000.0, available=3_000_000.0, limits=RT_X_LIMITS, costs=CostModel(Settings(_env_file=None)))
+    assert out.ok and out.lots == 3 and "75,000" not in out.reason, "4 lots of ₹30,000 = ₹1.2 lakh: the old ₹1 lakh budget, not the rule"
 
 
 def test_the_rt_pool_is_thirty_slots_and_the_base_book_keeps_its_own():

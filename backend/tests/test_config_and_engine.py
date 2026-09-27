@@ -149,7 +149,7 @@ async def test_engine_boots_without_credentials_and_says_why(settings):
     try:
         assert e.mode() is Mode.SHADOW
         assert any("credentials" in n for n in e.boot_notes)
-        assert set(e.wallets) == {"FUDKII", "FUKAA", "FUDKII_RT_X", "FUDKII_RT_MCX", "FUDKII_RT_N", "FUDKII_RT_Y", "FUDKII_CT_X", "FUDKII_CT_Y"}
+        assert set(e.wallets) == {"FUDKII", "FUKAA", "FUDKII_RT_X", "FUDKII_RT_MCX", "FUDKII_RT_N", "FUDKII_RT_Y", "FUDKII_CT_X", "FUDKII_CT_Y", "FUDKII_RT_Y_W1"}
         assert e.wallets["FUDKII"].balance == settings.paper_initial_inr
     finally:
         await e.stop()
@@ -203,8 +203,9 @@ async def test_halt_and_reconcile_freeze_both_stop_entries(settings):
         await e.set_halt(True, "manual test")
         assert e.halted()[0] is True
         await e.set_halt(False)
-        e.gateway.breaker_tripped = True
-        assert "breaker" in e.halted()[1]
+        e.gateway.tripped_books.add("FUDKII")
+        assert e.halted() == (False, ""), "a book's order breaker stops that book, not the engine"
+        assert e.gateway.book_tripped("FUDKII") and not e.gateway.book_tripped("FUDKII_RT_X")
     finally:
         await e.stop()
 
@@ -297,6 +298,7 @@ async def test_signals_and_rejections_are_both_persisted(settings, monkeypatch):
 def test_strategy_key_is_the_only_registry():
     assert [k.value for k in StrategyKey] == [
         "FUDKII", "FUKAA", "FUDKII_RT_X", "FUDKII_RT_MCX", "FUDKII_RT_N", "FUDKII_RT_Y", "FUDKII_CT_X", "FUDKII_CT_Y",
+        "FUDKII_RT_Y_W1",
     ]
     assert Signal(
         strategy=StrategyKey.FUDKII, symbol="RELIANCE", direction=Direction.BULLISH,

@@ -67,6 +67,12 @@ class SymbolState:
     #: those that were also day extremes — the REST reconciler covers the rest.
     day_high: float = 0.0
     day_low: float = 0.0
+    #: the last bucket THIS aggregator closed, per timeframe. A tick stamped inside it arrived after
+    #: the clock closed it; re-opening the bucket for it (as happened 30 times to one TORNTPHARM bar
+    #: on 2026-09-25) closed the bucket again — a second decision, a second ``bars_held`` — and
+    #: the stub bar made of the late ticks alone replaced the full one in the store. A REST-seeded
+    #: bucket is not in here, so the live build still closes the bucket a mid-session boot joined.
+    closed_upto: dict[str, int] = field(default_factory=dict)
 
 
 class Aggregator:
@@ -115,6 +121,33 @@ class Aggregator:
                     f"subscribe the other for OI alone."
                 )
         self.state[instrument.scrip_code] = SymbolState(instrument=instrument)
+
+    def on_reconnect(self, now: float | None = None) -> int:
+        """The socket dropped and came back. What was built across the gap is not a bar:
+
+        * every intraday bar forming at the reconnect is missing the gap's ticks — PARTIAL, so the
+          decision takes the exchange's candle or nothing (``_reconcile_then_decide``);
+        * ``connected_since`` moves to now, so the first bucket after the gap is PARTIAL too;
+        * the volume baseline is re-primed. ``TotalQty`` is cumulative: the first frame after a
+          12-minute gap carries all 12 minutes of volume, and booking it into one 1m bar reads as
+          a volume surge that never happened.
+
+        The day bar keeps its source — it is not a decision bar, and pivots read its OHLC.
+        Returns the number of forming bars marked."""
+        now = now or time.time()
+        marked = 0
+        for st in self.state.values():
+            st.connected_since = now
+            st.last_total_qty = None
+            for tf in self.timeframes:
+                if tf == "1d":
+                    continue
+                cur = self.store.forming(st.instrument.symbol, tf)
+                if cur is not None and cur.source is not BarSource.PARTIAL:
+                    cur.source = BarSource.PARTIAL
+                    marked += 1
+        self.partial_bars += marked
+        return marked
 
     def set_oi(self, scrip_code: str, *, oi: int, change_pct: float, fut_code: str) -> None:
         """Stamp the underlying's OI from its front-month future.
@@ -227,6 +260,9 @@ class Aggregator:
             elif cur is not None and bucket < cur.ts:
                 self.late_ticks += 1  # a tick older than the bar we are on; count, do not rewrite
                 continue
+            if cur is None and bucket <= st.closed_upto.get(tf, -1):
+                self.late_ticks += 1  # its bucket is already closed; the reconciler owns it now
+                continue
             if cur is None:
                 cur = self._open_bar(st, tf, bucket, price, segment)
                 self.store.set_forming(cur)
@@ -263,6 +299,9 @@ class Aggregator:
         )
 
     async def _close(self, bar: UnifiedBar) -> None:
+        st = self.state.get(bar.scrip_code)
+        if st is not None:
+            st.closed_upto[bar.tf] = max(st.closed_upto.get(bar.tf, -1), bar.ts)
         self.store.close(bar)
         self.bars_closed += 1
         if self.on_bar_close is not None:

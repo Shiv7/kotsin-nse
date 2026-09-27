@@ -38,6 +38,10 @@ class StrategyKey(StrEnum):
     #: fade is traded with the opposite OTM — CT-X under RT-X's exits, CT-Y under RT-Y's.
     FUDKII_CT_X = "FUDKII_CT_X"
     FUDKII_CT_Y = "FUDKII_CT_Y"
+    #: A SHADOW of RT-Y: its entries, its exits, one difference — the equity stop 1 % further from
+    #: entry (the "1 % past" test, 2026-09-26). Its own wallet so the curve stands apart; kept off
+    #: the trading tabs and shown on the Shadow page.
+    FUDKII_RT_Y_W1 = "FUDKII_RT_Y_W1"
 
     @property
     def display_name(self) -> str:
@@ -50,6 +54,7 @@ class StrategyKey(StrEnum):
             StrategyKey.FUDKII_RT_Y: "FUDKII-RT-Y",
             StrategyKey.FUDKII_CT_X: "FUDKII-CT-X",
             StrategyKey.FUDKII_CT_Y: "FUDKII-CT-Y",
+            StrategyKey.FUDKII_RT_Y_W1: "RT-Y · wide stop (shadow)",
         }[self]
 
     @property
@@ -63,3 +68,9 @@ INITIAL_INR: dict[StrategyKey, float] = {
 }
 
 ALL_KEYS: tuple[StrategyKey, ...] = tuple(StrategyKey)
+
+#: Books that exist to be compared, not traded on their own entries: they mirror another book's
+#: fills with one rule changed, and live on the Shadow page rather than among the trading tabs.
+SHADOW_OF: dict[StrategyKey, StrategyKey] = {
+    StrategyKey.FUDKII_RT_Y_W1: StrategyKey.FUDKII_RT_Y,
+}

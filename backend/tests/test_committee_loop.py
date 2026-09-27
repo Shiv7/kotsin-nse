@@ -26,7 +26,7 @@ from kotsin_nse.committee.experiments import (
 from kotsin_nse.committee.forensics import blind_view, flat, forensics, from_backtest, render
 from kotsin_nse.committee.service import CommitteeService
 from kotsin_nse.config import Settings
-from kotsin_nse.domain import Direction, ExitReason
+from kotsin_nse.domain import Direction, ExitReason, OrderSide
 from kotsin_nse.engine import Engine
 from kotsin_nse.ops.archive import DailyArchive
 from kotsin_nse.research.backtest import Backtester, BacktestParams, BtTrade, OpenTrade
@@ -223,9 +223,13 @@ def test_daily_mode_adjusts_the_strategy_and_delivery_charges_stt_on_both_legs(s
     b = bar(ts + 1800, 100, 101.5, 99.5, 101)
     i = intraday._close(t, b, 101.0, ExitReason.TARGET, equity)
     d = Backtester(settings, BacktestParams(holding="delivery"))._close(t, b, 101.0, ExitReason.TARGET, equity)
-    rate = settings.cost_stt_pct_delivery_equity / 100
-    extra = 100 * 100 * rate + 101 * 100 * (rate - settings.cost_stt_pct_sell_equity / 100)
+    # delivery is costed on its own line of the charges table: STT on BOTH legs, its own stamp
+    # and brokerage — exactly the difference between the two lines for this round trip
+    costs = intraday.costs
+    leg = lambda side, px, dlv: costs.leg(equity, side, px, 100, delivery=dlv).total  # noqa: E731
+    extra = (leg(OrderSide.BUY, 100.0, True) + leg(OrderSide.SELL, 101.0, True)) - (leg(OrderSide.BUY, 100.0, False) + leg(OrderSide.SELL, 101.0, False))
     assert d.charges - i.charges == pytest.approx(extra, abs=0.02)
+    assert costs.leg(equity, OrderSide.BUY, 100.0, 100, delivery=True).stt > 0, "delivery pays STT on the buy leg too"
     assert d.net < i.net
 
 

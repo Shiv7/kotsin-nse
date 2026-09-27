@@ -25,6 +25,33 @@ class RiskLimits:
     #: said otherwise. FUDKII-RT's exit ladder is written in lots (one at T1, the rest on the
     #: trail), so for that book the count has to be the specified one.
     max_lots: int | None = None
+    #: Fixed size (operator, 2026-09-27: "take 4 lots min as long as it is less than 75,000/-"):
+    #: when set, a book buys exactly ``max_lots`` lots if they cost less than this, and nothing else
+    #: sizes it — no risk budget, no position budget. (A 1 % risk budget, never the operator's rule,
+    #: cut 25 of the 57 RT-X/RT-Y trades of 17-25 Sep below 4 lots.) A strike whose lots cost this or
+    #: more is passed over by the selector for its next choice (operator, 2026-09-22: "try
+    #: identifying far otm who's 4 lots rest within our cap").
+    fixed_lots_under_inr: float | None = None
+    #: After T1, sell nothing at the higher rungs and step the SL no further than breakeven: every lot
+    #: left rides the give-back line from the latest peak, armed at the T1 touch (operator,
+    #: 2026-09-27: "exit 1 lot and trail all for T2, T3, T4 or beyond till the 3% drop from the
+    #: current latest peak").
+    trail_all_after_t1: bool = False
+    #: The option stop is never more than this % below the premium paid — a cap on what one lot can
+    #: lose before the stock's own stop is reached (operator, 2026-09-27: "whenever the system detects
+    #: that the entire premium is at risk, we need to kick-in a rule to protect it"). Set at the fill
+    #: and held through every re-projection; the stop keeps the book's own confirmation (sustain,
+    #: hard floor). None = off.
+    max_premium_loss_pct: float | None = None
+    #: The option stop is the option PRICED with the underlying at its stop (Black–Scholes, the
+    #: option's own implied volatility, the time left) instead of the equity distance × a stand-in
+    #: delta drawn as a straight line, which overstates the loss of an OTM option and reads a whole
+    #: premium lost where the model keeps a quarter of it (instrument/pricing.py).
+    priced_option_stop: bool = False
+    #: a book that is not own-ladder could take its TARGETS from the option's own clustered ladder
+    #: instead of the equity levels projected through delta. No book does: the operator (2026-09-26)
+    #: — "the parents' targets come from that parent's own logic and strategy"
+    targets_from_own_ladder: bool = False
     #: POSITION COUNTS ARE PER BOOK. FUKAA is derived from FUDKII, so the two fire on the same
     #: underlying in the same batch; counting them together meant FUDKII always took the slot and
     #: FUKAA — funded, gate-counted and advertised — could never take a single trade. That is the
@@ -45,7 +72,10 @@ class RiskLimits:
     #: ceiling that sits above ``max_positions_per_strategy``; it never binds first.
     max_positions_all_books: int = 90
     max_underlying_exposure_pct: float = 20.0
-    daily_loss_limit_pct: float = 3.0
+    #: per WALLET, reset each morning (operator, 2026-09-26: "we agree on the 10% daily-loss halt for
+    #: each separate wallet, which resets every morning"; it was 3%)
+    daily_loss_limit_pct: float = 10.0
+    #: per wallet and persistent: stays on day after day until that wallet is reset
     max_drawdown_pct: float = 15.0
     #: new entries stop this many minutes before the segment's force-flat
     entry_cutoff_buffer_min: int = 45
@@ -83,6 +113,13 @@ class RiskLimits:
     #: the trail only arms once the position is this far in profit (user-locked at 3% in the old
     #: stack across every regime; kept as one number for the same reason)
     trail_arm_pct: float = 3.0
+    #: Own-ladder books: the minimum gain on the premium paid before ANY arm — own T1, equity T1 or
+    #: the percentage itself; a nearer rung waits for it (operator, 2026-09-25: a rung 1 % over entry
+    #: arming the trade and stepping the SL to breakeven is how KEI and GRASIM were stopped).
+    #: Replaces the expected-move threshold, which asked an intraday trade
+    #: for half of a whole DAY's move: on 2026-09-24 the four RT-Y positions needed +43 %, +49 %,
+    #: +54 % and +72 % to arm, reached +5.7 %, +3.8 %, 0 % and 0 %, and not one of them ever armed.
+    arm_at_pct: float | None = None
     #: a hard floor under the option premium: never let a win become a loss beyond this
     hard_floor_pct: float = 50.0
     #: The option carries its OWN classic ladder (R1–R4 from its previous session); nothing is
@@ -120,15 +157,44 @@ class RiskLimits:
     #: volume baseline (the reference router's dried-volume SKIP; NSE 0.85). SBILIFE 2026-09-23:
     #: FUT 0.79 / 0.51 into its daily S1, −5.9k.
     dried_volume_v: float | None = None
+    #: Market-breadth gate (the operator's paper A/B, 2026-09-25): enter only when MORE than this
+    #: share of the NSE universe trades beyond its own day open in the trade's direction at the
+    #: trigger. Sep 1–25 replay, RT-Y option trades: +0.72 % above 0.5 against −2.88 % at or below
+    #: it on the held-out half. None = no gate; an unmeasurable breadth never blocks.
+    breadth_min: float | None = None
+    #: Gate B (operator, 2026-09-26), both from the Sep 1–25 replay and both held in each half:
+    #: skip when a classic 1d/1wk/1mo key level sits within this many ATR30 AHEAD of the close
+    #: (−1.5 % / −1.6 % a trade against +0.1 % / +1.0 % without) ...
+    skip_pivot_ahead_atr: float | None = None
+    #: ... and skip a 09:45 trigger (the session's first 30m bar) whose open gapped this many
+    #: daily ATRs the trade's own way (−2.0 % / −5.7 % against −0.7 % / −1.3 %). None = off.
+    skip_open_gap_datr: float | None = None
+    #: The 09:45 gap fade (CT-Y only): fade a first-bar trigger that gapped this many daily ATRs
+    #: its own way — the opposite OTM, stop 1 ATR30 past the close. The replay's fade made +3.72 %
+    #: / +5.87 % in the two halves (40 trades, before costs). None = off.
+    gap_fade_datr: float | None = None
+    #: The gap fade's own RR is a label; set this to make it a floor. None = never blocks.
+    gap_fade_min_rr: float | None = None
+    #: A shadow twin's equity stop, moved this many percent further from entry than the book it
+    #: shadows (the "1 % past" test, operator 2026-09-26). The option stop is re-projected for the
+    #: wider level. None = the stop as planned.
+    equity_stop_buffer_pct: float | None = None
 
     def position_budget(self, balance: float) -> float:
         return min(balance * self.max_position_pct / 100, self.max_position_inr)
 
 
+#: The NSE books' fixed size (operator, 2026-09-27): exactly 4 lots when they cost less than this;
+#: the selector steps further OTM when they do not. Never MCX: "₹75,000 cap does not apply to any
+#: MCX trade" (RT-MCX has its own limits, and sizing skips the rule for an MCX contract).
+FIXED_LOTS_UNDER_INR = 75_000.0
+
+
 #: FUDKII-RT-X's exit policy. Everything else is the base book's; only the exit differs, which is
 #: the whole point of running the two side by side.
 RT_X_LIMITS = RiskLimits(
-    max_lots=4,                     # Rs 1,00,000 or 4 lots, whichever binds lower
+    max_lots=4,
+    fixed_lots_under_inr=FIXED_LOTS_UNDER_INR,  # 4 lots under ₹75,000 (operator, 2026-09-27)                     # Rs 1,00,000 or 4 lots, whichever binds lower
     max_positions_per_strategy=30,  # its own pool of slots
     #: a per-book ceiling above the pool (every book counts only its own positions since 2026-09-23)
     max_positions_all_books=90,
@@ -149,6 +215,12 @@ RT_X_LIMITS = RiskLimits(
 #: lot out at breakeven, then a 2 % give-back that needs three consecutive reads.
 RT_N_LIMITS = RiskLimits(
     max_lots=4,
+    fixed_lots_under_inr=FIXED_LOTS_UNDER_INR,  # 4 lots under ₹75,000 (operator, 2026-09-27)
+    # the option stop priced with the stock at its stop, never more than 35 % under the premium paid
+    # (operator, 2026-09-27: "fudkii-rt-n use only priced+35% logic" — RT-X, RT-Y, CT-X, CT-Y and the
+    # parent as they are). 1-25 Sep, fresh purses: RT-N −2,05,273 → −1,80,291 (option-stop exits 44 → 27)
+    priced_option_stop=True,
+    max_premium_loss_pct=35.0,
     max_positions_per_strategy=30,
     max_positions_all_books=90,
     time_stop_bars=None,
@@ -170,28 +242,48 @@ RT_N_LIMITS = RiskLimits(
 #: units, and every post-arm stop needing the 75 s sustain.
 RT_Y_LIMITS = RiskLimits(
     max_lots=4,
+    fixed_lots_under_inr=FIXED_LOTS_UNDER_INR,  # 4 lots under ₹75,000 (operator, 2026-09-27)
     max_positions_per_strategy=30,
     max_positions_all_books=90,
     time_stop_bars=None,
     sustain_s=75.0,
     hard_floor_below_stop_pct=9.0,
-    peak_giveback_pct=10.0,
+    peak_giveback_pct=3.0,
     trail_dwell_samples=3,
     peak_arm_after_s=90.0,
     own_ladder=True,
     reproject_stop_s=10.0,
     ladder_mode="mtf",
     arm_mode="touch",
-    arm_min_move=0.5,
+    arm_min_move=0.0,          # superseded by arm_at_pct (2026-09-24)
+    arm_at_pct=5.0,            # never arm below entry +5 %; nearer own rungs wait for it
     sl_lag=True,
-    giveback_move_frac=0.25,
-    band_exit="sustain",
+    giveback_move_frac=0.0,    # the expected-move band went with the expected-move arm
+    band_exit="dwell",         # 3 s of confirmation, not 75: a 3 % give-back is meant to be prompt
     post_arm_sustain=True,
     dried_volume_v=0.85,
     min_stop_ticks=8,
+    breadth_min=0.5,           # paper A/B: RT-Y gated, RT-X / RT-N not (2026-09-25)
+    skip_pivot_ahead_atr=0.5,  # gate B (2026-09-26): a key pivot within 0.5 ATR30 ahead
+    skip_open_gap_datr=0.3,    # gate B: a 09:45 trigger that gapped >= 0.3 daily ATR its own way
 )
+
+#: The commodity book: RT-X's policy with the sizing it always had — up to 4 lots within the risk
+#: and position budgets. The NSE books' fixed 4 lots under ₹75,000 is not for MCX (operator,
+#: 2026-09-27: "₹75,000 cap does not apply to any MCX trade").
+RT_MCX_LIMITS = replace(RT_X_LIMITS, fixed_lots_under_inr=None)
 
 #: The counter-trend books: RT-X's and RT-Y's exits on the fade. No dried-volume gate — the wall
 #: rule (strategy/counter.py) is the fade's own filter, as in the reference stack.
 CT_X_LIMITS = replace(RT_X_LIMITS, dried_volume_v=None)
-CT_Y_LIMITS = replace(RT_Y_LIMITS, dried_volume_v=None)
+CT_Y_LIMITS = replace(
+    RT_Y_LIMITS, dried_volume_v=None, breadth_min=None, skip_pivot_ahead_atr=None, skip_open_gap_datr=None,
+    gap_fade_datr=0.3,  # CT-Y fades the 09:45 gap-with triggers RT-Y stands aside from (2026-09-26)
+)
+
+#: The wide-stop shadow (operator, 2026-09-26: ""1% past" looks good this week — can we shadow
+#: this"): RT-Y's exits exactly, on RT-Y's own entries, with the equity stop 1 % further away.
+#: Sep 1–25 replay on gate-B trades: 1–18 Sep +0.43 % against +1.14 % on the touch, 19–25 Sep
+#: +6.30 % against +3.90 % — unproven (+0.44 ± 1.86 points over the month), worst trade −41 %
+#: against −35 %. It only mirrors RT-Y, so RT-Y's entry gates are its gates.
+RT_Y_W1_LIMITS = replace(RT_Y_LIMITS, equity_stop_buffer_pct=1.0)

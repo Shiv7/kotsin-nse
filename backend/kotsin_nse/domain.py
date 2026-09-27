@@ -264,6 +264,13 @@ class Position:
     option_edm: float = 0.0
     #: sustain clock for a post-arm line breach (RT-Y)
     line_breach_since: float | None = None
+    #: gross P&L of every exit slice so far — a tranche exit is several fills at several prices
+    realised_gross: float = 0.0
+    #: what the ENTRY fill cost in charges; exit charges accumulate in ``charges``
+    entry_charges: float = 0.0
+    #: the order trail: ``{"entry": {...}, "exits": [{...}, ...]}`` — signal, limit placed, each
+    #: reprice, filled/crossed, and the book at each (exec/resting.py)
+    exec_log: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.qty_remaining == 0:

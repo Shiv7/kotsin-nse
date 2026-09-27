@@ -209,3 +209,49 @@ def test_the_ladder_tolerance_is_a_parameter_and_a_narrow_cpr_merges_into_one_ru
     tight = [r for r in mtf_rungs(daily, None, above=0.5, tolerance_pct=1.0) if r["price"] < 0.9]
     merged = [r for r in mtf_rungs(daily, None, above=0.5, tolerance_pct=4.0) if r["price"] < 0.9]
     assert len(tight) == 3 and len(merged) == 1 and merged[0]["strength"] == 12.0
+
+
+def test_ensure_loads_the_one_strike_a_gap_left_outside_the_band(monkeypatch):
+    """BANKNIFTY, 2026-09-24: a 1.53 % gap put the traded 55300 PE eleven strikes below a leg set
+    banded on the previous close, so the RT books opened with no ladder. ``ensure`` fetches that
+    one contract on demand; it serves a held ladder without a call and never retries a refusal."""
+    import asyncio
+
+    import kotsin_nse.instrument.legs as legs_mod
+
+    monkeypatch.setattr(legs_mod, "RETRY_DELAYS_S", (0.0,))
+    today = date(2026, 9, 23)
+    rest = _FlakyRest(fail=0)
+    ld = LegPivotLoader(rest)
+    asyncio.run(ld.load([_leg("held")], today))
+
+    got = asyncio.run(ld.ensure(_leg("gap"), today))
+    assert got is not None and ld.for_code("gap") is got, "the missing strike is fetched and published"
+    assert rest.calls == {"held": 1, "gap": 1}
+
+    assert asyncio.run(ld.ensure(_leg("held"), today)) is ld.for_code("held")
+    assert rest.calls["held"] == 1, "a ladder already held costs no call"
+
+    ld.refused_codes.add("thin")
+    assert asyncio.run(ld.ensure(_leg("thin"), today)) is None
+    assert "thin" not in rest.calls, "a guard refusal is an answer, not a miss"
+
+
+def test_ensure_leaves_a_new_day_to_the_bulk_loader():
+    """One leg must not write into yesterday's map for the bulk load to wipe a moment later."""
+    import asyncio
+
+    rest = _FlakyRest(fail=0)
+    ld = LegPivotLoader(rest)
+    asyncio.run(ld.load([_leg("a")], date(2026, 9, 23)))
+    assert asyncio.run(ld.ensure(_leg("b"), date(2026, 9, 24))) is None and rest.calls == {"a": 1}
+
+
+def test_a_load_reports_what_it_fetched_itself_not_the_days_running_total():
+    """A re-anchor that fetched 3 new strikes logged "fetched 1,903" — the day's total."""
+    import asyncio
+
+    ld = LegPivotLoader(_FlakyRest(fail=0))
+    assert asyncio.run(ld.load([_leg(str(k)) for k in range(5)], date(2026, 9, 23))) == 5
+    assert asyncio.run(ld.load([_leg("100"), _leg("101")], date(2026, 9, 23))) == 2
+    assert ld.loaded == 7

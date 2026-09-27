@@ -79,6 +79,9 @@ export default function App() {
               {label}
             </NavLink>
           ))}
+          {/* a server-rendered page (like /temporary), so a plain link, not a client route */}
+          <a href="/shadow" className="block rounded px-2 py-1 text-sm text-slate-400 hover:text-white">Shadow</a>
+          <a href="/charges" className="block rounded px-2 py-1 text-sm text-slate-400 hover:text-white">Charges</a>
           <div className="px-2 pt-4 text-[10px] leading-relaxed text-slate-600">
             FUDKII · FUKAA
             <br />

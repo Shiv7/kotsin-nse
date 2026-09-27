@@ -63,7 +63,17 @@ class FudkiiConfig:
     #: 15 minutes to work before the force-flat
     eod_strong_only: bool = True
     eod_min_fortress: float = 10.0
-    grade_policy: GradePolicy = field(default_factory=GradePolicy)
+    #: The in-trend trigger's grading. Stop = the nearest WALL behind the close (operator,
+    #: 2026-09-26: "yes walls-only sl for fudkii's in-trend signals"). Sep 1-25 engine replay, fresh
+    #: purses, net of spread and charges: FUDKII −₹2.57 L → −₹1.56 L (−₹1,605 → −₹1,278 a trade),
+    #: RT-X −₹2.52 L → −₹1.44 L, RT-N −₹2.39 L → −₹1.57 L, RT-Y −₹9.9 k → −₹2.8 k; widening the
+    #: stop or filtering near stops did worse per trade.
+    grade_policy: GradePolicy = field(default_factory=lambda: GradePolicy(stop_requires_wall=True))
+    #: The counter-trend fade's grading (CT-X, CT-Y, the gap fade): a fade whose stop sits nearer
+    #: than 0.5 ATR30 to the close is graded F (operator, 2026-09-26: '"Filter 0.5 ATR" for all
+    #: countertrend signals'). Walls-only emptied CT-X in the same replay; the filter left CT-Y
+    #: +₹6.5 k on 10 trades — small samples, a paper test.
+    fade_grade_policy: GradePolicy = field(default_factory=lambda: GradePolicy(min_stop_atr_filter=0.5))
 
     @property
     def min_bars(self) -> int:

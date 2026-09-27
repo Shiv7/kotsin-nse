@@ -292,6 +292,7 @@ class LegPivotLoader:
             self.loaded = self.failed = self.refused = 0
         self.running = True
         began = time.time()
+        before = self.loaded
         try:
             await asyncio.gather(*(self._one(i, today) for i in legs))
         finally:
@@ -299,11 +300,28 @@ class LegPivotLoader:
         log.info(
             "legs.loaded",
             legs=len(legs),
+            this_call=self.loaded - before,
             ok=self.loaded,
             failed=self.failed,
             took_s=round(time.time() - began, 1),
         )
-        return self.loaded
+        # THIS call's count: the day's running total made every re-anchor log "fetched 1,900"
+        return self.loaded - before
+
+    async def ensure(self, inst: Instrument, today: date) -> LegPivots | None:
+        """Load ONE leg's ladder on demand — the strike we are about to trade.
+
+        The bulk load is anchored on the spot the engine held when it ran, so a gap can leave the
+        contract that actually trades outside the band it fetched. A refusal (thin or zero-range
+        previous session) is a correct answer and is not retried here; a plain absence is.
+        """
+        code = str(inst.scrip_code)
+        if (got := self.by_code.get(code)) is not None:
+            return got
+        if code in self.refused_codes or self.day != today.isoformat():
+            return None
+        await self._one(inst, today)
+        return self.by_code.get(code)
 
     def missing(self, legs: list[Instrument]) -> list[Instrument]:
         """Legs with no ladder that were not refused by a guard — what a repair pass refetches."""

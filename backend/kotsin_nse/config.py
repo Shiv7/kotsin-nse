@@ -133,6 +133,13 @@ class Settings(BaseSettings):
     #: the tick tape (``ops/tape.py``): the top of book of every held, considered and carded
     #: contract and of its equity and future legs, once a second on change, into ``quotes``
     tape_enabled: bool = True
+    #: the full tape (``ops/fulltape.py``): every NSE code on the feed, once a second on change, so a
+    #: coming day can be replayed against the real book (operator, 2026-09-27); ~100-150 MB a session
+    tape_full_enabled: bool = True
+    #: calendar days of full tape kept ("auto-delete tapes older than 60 days")
+    tape_full_keep_days: int = 60
+    #: seconds between part files (the rows wait in memory as tuples until then)
+    tape_full_flush_s: float = 120.0
 
     # ---- service ------------------------------------------------------------------------------
     api_host: str = "127.0.0.1"
@@ -160,6 +167,13 @@ class Settings(BaseSettings):
     #: the NSE close, so the official closing price lands the same evening, and before the MCX
     #: open, so a process that stayed up overnight starts the day on official candles.
     daily_refresh_hm: tuple[str, ...] = ("08:30", "15:45")
+    #: IST wall-clock slots at which the OTM leg set is re-anchored on the session's real spot.
+    #: The bulk load runs off the boot path, before the open, so it bands the strikes around the
+    #: PREVIOUS close. A gap moves the strikes that actually trade outside that band: on
+    #: 2026-09-24 BANKNIFTY gapped 1.53 % and the traded 55300 PE sat eleven strikes below the
+    #: loaded set, leaving the RT books with no own ladder at all. Only the newly in-band strikes
+    #: are fetched, so a pass costs a handful of calls, not the two thousand of a full reload.
+    legs_reanchor_hm: tuple[str, ...] = ("09:20", "12:30")
     #: IST wall-clock slot at which the alert rings are emptied for the coming session, so the
     #: page opens blank (``alerts/engine.py::reset_day``). After midnight rather than on the date
     #: roll, deliberately: 5paisa refuses logins for ~20 minutes past midnight IST, and the half
@@ -255,6 +269,8 @@ class Settings(BaseSettings):
         return [s.strip().upper() for s in self.depth_archive_symbols.split(",") if s.strip()]
 
     # ---- cost model ----------------------------------------------------------------------------
+    # SUPERSEDED 2026-09-26: every rate below now comes from <data_dir>/charges.toml (risk/charge_rates.py,
+    # per product, Zerodha's table). These fields stay only so an .env that sets KN_COST_* still boots.
     # Measured on this book, not assumed: at ₹33,000/position the NSE cash round trip was 0.299%,
     # of which 81% was flat brokerage (₹40/order × 2) — see kotsin-box/SESSION-PRIMER.md. These are
     # the numbers the backtester and the paper filler both use, so a strategy cannot look profitable
@@ -279,6 +295,41 @@ class Settings(BaseSettings):
     cost_stamp_pct_buy: float = 0.003
     cost_gst_pct: float = 18.0
     slippage_bps_default: float = 5.0
+    # ---- paper limit orders (exec/resting.py) ---------------------------------------------------
+    #: PAPER entries and exits as limit orders (operator, 2026-09-26): an entry rests at the signal
+    #: price if the book still straddles it, else at the mid, and is recorded as missed if unfilled
+    #: by its deadline; an exit rests at the mid, walks toward the bid and is crossed at its
+    #: deadline. False = the old immediate walk of the book. LIVE and SHADOW are unaffected.
+    paper_limit_orders: bool = True
+    #: the two halves of the policy, separately switchable — entries rest at the signal price / mid,
+    #: exits start at the mid (a replay can measure each alone)
+    paper_limit_entries: bool = True
+    paper_limit_exits: bool = True
+    paper_limit_entry_wait_s: float = 60.0
+    #: an entry not filled by the deadline takes the ask if the ask is within this % of the signal
+    #: price, else it is missed; None = always missed
+    paper_limit_entry_chase_pct: float | None = None
+    paper_limit_entry_recheck_s: float = 5.0
+    #: the entry rule (operator, 2026-09-26; exec/resting.py): the limit holds for `..._hold_s`, then
+    #: follows the mid; it never pays over the signal price + `..._cap_pct` %; unfilled at `..._wait_s`
+    #: it is missed. Sep 1-25 replay, all books, net of spread and charges, fresh purses each morning:
+    #: this rule −₹7.82 L (535 trades); the cap alone, following the mid from 0 s, −₹8.27 L; + a race
+    #: at 30 s (option +1 %, ask within the cap) −₹7.87 L; + taking the ask as soon as it is within the
+    #: cap after 30 s −₹9.00 L (832 trades — the 469 bought at the ask lost ₹5.57 L); live −₹9.29 L.
+    #: The race and the cross are OFF (None / False) and kept only as switches for a later test.
+    paper_limit_entry_hold_s: float = 30.0
+    paper_limit_entry_cap_pct: float | None = 3.0
+    paper_limit_entry_race_check_s: float = 30.0
+    paper_limit_entry_race_pct: float | None = None
+    paper_limit_entry_cross_after_hold: bool = False
+    paper_limit_exit_reprice_s: float = 5.0
+    paper_limit_exit_cross_stop_s: float = 15.0
+    paper_limit_exit_cross_urgent_s: float = 10.0
+    paper_limit_exit_cross_other_s: float = 45.0
+    #: target sells placed IN ADVANCE (operator, 2026-09-26): the books whose target is a touch rest
+    #: the next rung's SELL at the rung and fill on a touch; any other exit cancels it first.
+    #: False = targets sell when the exit engine sees the touch (the 15:12 behaviour).
+    paper_limit_rest_targets: bool = True
 
     @field_validator("max_universe", "committee_experiment_symbols", mode="before")
     @classmethod

@@ -13,20 +13,25 @@ works even when everything else is frozen.
 from __future__ import annotations
 
 import asyncio
+import html
+import re
 import time
+from dataclasses import asdict
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 import sqlalchemy as sa
 from fastapi import APIRouter, FastAPI, HTTPException, Query, WebSocket
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from ..bars.daily import previous_session
 from ..bars.indicators import atr, bollinger, supertrend
 from ..bars.unified import UnifiedBar
+from ..config import Segment
+from ..domain import Instrument, InstrumentKind, OptionType
 from ..engine import SELECTION_POLICY, Engine, _position_json
 from ..exec.gateway import Mode
 from ..hotstocks.service import HotStocksService
@@ -34,7 +39,7 @@ from ..ledger.db import events, rejections, signals, trades
 from ..market.session import IST, TF_SECONDS, ist_day, ist_hm, ist_today, to_ist
 from ..strategy.catalog import BOOKS, LIVE_KEYS
 from ..strategy.keys import ALL_KEYS, StrategyKey
-from . import daybook
+from . import daybook, export, shadow
 from .ws import Hub, handle, pump
 
 
@@ -521,6 +526,18 @@ def build_app(engine: Engine) -> FastAPI:
             "now_ist": ist_hm(time.time()),
         }
 
+    @api.get("/fudkii/today")
+    async def fudkii_today() -> dict[str, Any]:
+        """Every FUDKII signal of the session from 09:00 IST, as the ledger holds it — live ones
+        with what the books did, and the ones the rescan found with why nothing traded them."""
+        rows = await engine.fudkii_today()
+        return {"count": len(rows), "signals": rows, "lastScan": engine.last_fudkii_scan}
+
+    @api.post("/fudkii/scan")
+    async def fudkii_scan() -> dict[str, Any]:
+        """Run the rescan now rather than at its five-minute tick."""
+        return await engine.scan_fudkii()
+
     @api.get("/leg-pivots")
     async def leg_pivots() -> dict[str, Any]:
         """Previous-session pivots for the legs actually traded — future and OTM strikes."""
@@ -841,17 +858,18 @@ def build_app(engine: Engine) -> FastAPI:
 
     @api.post("/control/reconcile")
     async def reconcile() -> dict[str, Any]:
-        if engine.reconciler is None:
-            raise HTTPException(400, "no broker session")
-        report = await engine.reconciler.run(list(engine.positions.values()))
-        return report.to_json()
+        """The broker's positions against the LIVE books' (the position reconciler, not the bar one)."""
+        try:
+            return await engine.reconcile_now()
+        except RuntimeError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     @api.post("/control/acknowledge")
     async def acknowledge() -> dict[str, Any]:
-        if engine.reconciler is None:
-            raise HTTPException(400, "no broker session")
-        engine.reconciler.acknowledge()
-        return {"frozen": engine.reconciler.frozen}
+        try:
+            return await engine.acknowledge_reconcile()
+        except RuntimeError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     @api.post("/temporary")
     async def temporary_create(hours: float = Query(daybook.TTL_HOURS, gt=0, le=168)) -> dict[str, Any]:
@@ -870,9 +888,9 @@ def build_app(engine: Engine) -> FastAPI:
         return {"live": t is not None, **(t.to_json() if t else {})}
 
     @api.post("/control/reset-breaker")
-    async def reset_breaker() -> dict[str, Any]:
-        engine.gateway.reset_breaker()
-        return engine.gateway.stats()
+    async def reset_breaker(book: str | None = Query(None)) -> dict[str, Any]:
+        """Reset one book's order breaker (``?book=FUDKII_RT_X``), or every book's."""
+        return await engine.reset_breaker(book)
 
     app.include_router(api)
 
@@ -899,9 +917,164 @@ def build_app(engine: Engine) -> FastAPI:
     async def temporary_page() -> HTMLResponse:
         """The shareable day book. Renders from the ledger on every request, and is gone the first
         time it is asked for after its expiry — the read deletes the ticket, so nothing lingers."""
+        page = await _temporary_html()
+        if page is None:
+            return HTMLResponse(daybook.EXPIRED_HTML, status_code=410)
+        return HTMLResponse(page)
+
+    @app.get("/temporary.xlsx")
+    async def temporary_xlsx() -> Response:
+        """The same page as a workbook — one sheet per table, prose on a Notes sheet. Read off the
+        rendered HTML, so the download is exactly what the page shows (operator, 2026-09-25:
+        anything shared on /temporary must also download in a format that fits it)."""
+        page = await _temporary_html()
+        if page is None:
+            return HTMLResponse(daybook.EXPIRED_HTML, status_code=410)
+        title, _, _ = export.tables_from_html(page)
+        slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-") or "temporary"
+        return Response(
+            content=export.html_to_xlsx(page),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{slug}.xlsx"', "Cache-Control": "no-store"},
+        )
+
+    async def _shadow(day_s: str | None) -> shadow.ShadowData:
+        """Every shadow tab's data: one session's triggers with their labels — the day asked for,
+        else today, else the latest day that has any trigger — and the running tallies (the RT-Y
+        A/B, the wide stop, the gap fade, the labels) since the A/B began."""
+        today = ist_today()
+        lookback = datetime(today.year, today.month, today.day, tzinfo=IST).timestamp() - 21 * 86_400
+        recent = await engine.ledger.rows_between("signals", lookback, time.time() + 86_400)
+        days = sorted({ist_day(float(r["ts"])).isoformat() for r in recent if r.get("strategy") == "FUDKII"})
+        if day_s:
+            try:
+                day = date.fromisoformat(day_s)
+            except ValueError as exc:
+                raise HTTPException(400, f"day must be YYYY-MM-DD, not {day_s!r}") from exc
+        else:
+            day = today if (not days or today.isoformat() in days) else date.fromisoformat(days[-1])
+        start = datetime(day.year, day.month, day.day, tzinfo=IST).timestamp()
+        names = ("signals", "positions", "trades", "events")
+        sigs, positions, trades_, events_ = await asyncio.gather(
+            *(engine.ledger.rows_between(n, start, start + 86_400) for n in names)
+        )
+        lim_y = engine._exits_by_strategy[StrategyKey.FUDKII_RT_Y.value].limits
+        rows = shadow.shadow_rows(signals=sigs, positions=positions, trades=trades_, events=events_, lim_y=lim_y)
+        a = daybook.AB_START
+        since = datetime(a.year, a.month, a.day, tzinfo=IST).timestamp()
+        s_sigs, s_pos, s_trades, s_events = await asyncio.gather(
+            *(engine.ledger.rows_between(n, since, time.time() + 86_400) for n in names)
+        )
+        since_rows = shadow.shadow_rows(signals=s_sigs, positions=s_pos, trades=s_trades, events=s_events, lim_y=lim_y)
+        return shadow.ShadowData(
+            day=day, days=days, rows=rows,
+            ab=daybook.ab_summary(signals=s_sigs, positions=s_pos, trades=s_trades, events=s_events),
+            wide=shadow.wide_stop_summary(positions=s_pos, trades=s_trades),
+            gap=shadow.gap_fade_summary(signals=s_sigs, positions=s_pos, trades=s_trades, events=s_events),
+            labels=shadow.label_summary(since_rows),
+            volume=shadow.volume_summary(since_rows),
+        )
+
+    def _charges_status() -> dict[str, Any]:
+        """The charges file in force, and what a typical round trip costs under it per product."""
+        st = engine.costs.rates.status()
+        examples = []
+        for what, inst, px, qty in (
+            ("NSE option · ₹20 premium · 4 lots of 500 (₹40,000 premium)",
+             Instrument("0", "EX", Segment.NSE_FO, InstrumentKind.OPTION, lot_size=500, strike=0.0, option_type=OptionType.CE), 20.0, 2000),
+            ("NSE future · ₹1,500 · 1 lot of 500 (₹7.5 lakh)",
+             Instrument("0", "EX", Segment.NSE_FO, InstrumentKind.FUTURE, lot_size=500), 1500.0, 500),
+            ("NSE cash intraday · ₹1,500 × 20 shares (₹30,000)",
+             Instrument("0", "EX", Segment.NSE_EQ, InstrumentKind.EQUITY, lot_size=1), 1500.0, 20),
+        ):
+            ch = engine.costs.round_trip(inst, px, px, qty)
+            examples.append({"what": what, "product": engine.costs.product_of(inst), "charges": ch.to_json(),
+                             "pct_of_turnover": round(ch.total / (px * qty) * 100, 3)})
+        st["examples"] = examples
+        return st
+
+    @api.get("/charges")
+    async def charges_json() -> dict[str, Any]:
+        """Every charge rate in force, per product, the file it came from, and whether the last edit parsed."""
+        return _charges_status()
+
+    @app.get("/charges", response_class=HTMLResponse)
+    async def charges_page() -> HTMLResponse:
+        """Where the charges live (operator, 2026-09-26: "a separate area where all charges are
+        parked, that can be changed anytime"). Read-only here; the file is the place to edit."""
+        st = _charges_status()
+        esc = html.escape
+        keys = [f["key"] for f in st["fields"]]
+        head = "".join(f'<th title="{esc(f["unit"])} — {esc(f["about"])}">{esc(f["key"])}</th>' for f in st["fields"])
+        rows = "".join(
+            f'<tr><td class="l">{esc(p["title"])}<br><span class="dim">[{esc(p["product"])}]</span></td>'
+            + "".join(f"<td>{p[k]:g}</td>" for k in keys) + "</tr>"
+            for p in st["products"]
+        )
+        legend = "".join(f'<tr><td class="l">{esc(f["key"])}</td><td class="l">{esc(f["unit"])}</td><td class="l">{esc(f["about"])}</td></tr>'
+                         for f in st["fields"])
+        ex = "".join(
+            f'<tr><td class="l">{esc(e["what"])}</td><td>₹{e["charges"]["brokerage"]:,.2f}</td><td>₹{e["charges"]["stt"]:,.2f}</td>'
+            f'<td>₹{e["charges"]["exchange"]:,.2f}</td><td>₹{e["charges"]["sebi"]:,.2f}</td><td>₹{e["charges"]["stamp"]:,.2f}</td>'
+            f'<td>₹{e["charges"]["gst"]:,.2f}</td><td><b>₹{e["charges"]["total"]:,.2f}</b></td><td>{e["pct_of_turnover"]:.3f}%</td></tr>'
+            for e in st["examples"]
+        )
+        err = (f'<p class="refused" style="padding:10px 12px;border-radius:6px">The last edit did not apply — {esc(st["error"])}. '
+               f'The previous values are still in force.</p>') if st["error"] else ""
+        loaded = datetime.fromtimestamp(st["loadedAt"], IST).strftime("%d %b %H:%M:%S") if st["loadedAt"] else "never (defaults in force)"
+        basis = "per executed order, whatever the number of lots" if st["basis"] == "order" else "per lot"
+        page = f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Charges</title><style>{daybook._CSS}</style></head><body>
+<header><div><h1>Charges</h1><p class="dim">Every rate the engine costs a trade with — paper fills, the ledger, the backtests. Defaults from {esc(st["source"])}.</p></div></header>
+{err}
+<p>Edit <code>{esc(str(st["path"] or "—"))}</code> and save; the engine re-reads it within a second, no restart. Last read: {loaded}.
+Every percentage is charged ONCE on each leg's total turnover (price × total quantity) — four lots are one turnover.
+Brokerage is charged <b>{basis}</b> (<code>[brokerage] basis</code>). GST {st["gstPct"]:g}% on brokerage + exchange + SEBI.
+The bid/ask spread is not a charge: fills pay it by trading against the order book.</p>
+<h2>Rates in force, per product</h2>
+<div class="scroll"><table><thead><tr><th class="l">Product</th>{head}</tr></thead><tbody>{rows}</tbody></table></div>
+<h2>What one round trip costs (bought and sold at the same price)</h2>
+<div class="scroll"><table><thead><tr><th class="l">Example</th><th>Brokerage</th><th>STT/CTT</th><th>Exchange</th><th>SEBI</th><th>Stamp</th><th>GST</th><th>Total</th><th>% of turnover</th></tr></thead>
+<tbody>{ex}</tbody></table></div>
+<h2>What each column is</h2>
+<div class="scroll"><table><thead><tr><th class="l">Column</th><th class="l">Unit</th><th class="l">Meaning</th></tr></thead><tbody>{legend}</tbody></table></div>
+</body></html>"""
+        return HTMLResponse(page)
+
+    @app.get("/shadow", response_class=HTMLResponse)
+    async def shadow_page(day: str | None = Query(None)) -> HTMLResponse:
+        """Everything logged and labelled on each trigger — breadth, trend efficiency, own
+        volatility, the gap, the pivots ahead — what gate B and the 09:45 gap fade make of it, and
+        what every book did; the RT-Y A/B on top (operator, 2026-09-26). Always available locally."""
+        return HTMLResponse(shadow.render_shadow(await _shadow(day)), headers={"Cache-Control": "no-store"})
+
+    @app.get("/shadow.xlsx")
+    async def shadow_xlsx(day: str | None = Query(None)) -> Response:
+        """The Shadow page as a workbook — every tab's tables, and each brief on the Notes sheet —
+        read off the rendered page like /temporary.xlsx."""
+        data = await _shadow(day)
+        d = data.day
+        page = shadow.render_shadow(data)
+        return Response(
+            content=export.html_to_xlsx(page),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="shadow-{d.isoformat()}.xlsx"', "Cache-Control": "no-store"},
+        )
+
+    @api.get("/shadow")
+    async def shadow_json(day: str | None = Query(None)) -> dict[str, Any]:
+        """The same as JSON, for a daily read without opening the page."""
+        data = await _shadow(day)
+        return {
+            "day": data.day.isoformat(), "days": data.days, "ab": data.ab, "rows": data.rows,
+            "wideStop": data.wide, "gapFade": data.gap, "labels": data.labels, "volume": data.volume,
+            "tabs": [{"id": t.id, "title": t.title, "brief": asdict(t.brief)} for t in shadow.TABS],
+        }
+
+    async def _temporary_html() -> str | None:
         ticket = temp_page.read()
         if ticket is None:
-            return HTMLResponse(daybook.EXPIRED_HTML, status_code=410)
+            return None
         day = date.fromisoformat(ticket.day)
         start = datetime(day.year, day.month, day.day, tzinfo=IST).timestamp()
         names = ("signals", "positions", "trades", "events")
@@ -913,7 +1086,22 @@ def build_app(engine: Engine) -> FastAPI:
             market=_gap_market({s["symbol"] for s in signals if s.get("symbol")}, day),
             vix=engine.india_vix(),
         )
-        return HTMLResponse(daybook.render(rows, ticket))
+        return daybook.render(rows, ticket, await _ab())
+
+    async def _ab() -> dict[str, Any]:
+        """The RT-Y gate's A/B since it started — every session, not only the ticket's day."""
+        a = daybook.AB_START
+        start = datetime(a.year, a.month, a.day, tzinfo=IST).timestamp()
+        names = ("signals", "positions", "trades", "events")
+        signals, positions, trades, events = await asyncio.gather(
+            *(engine.ledger.rows_between(n, start, time.time() + 86_400) for n in names)
+        )
+        return daybook.ab_summary(signals=signals, positions=positions, trades=trades, events=events)
+
+    @api.get("/ab/rt-y")
+    async def ab_rt_y() -> dict[str, Any]:
+        """The same A/B as JSON, for a daily read without opening the page."""
+        return await _ab()
 
     # One socket of state diffs: every forming bar and every LTP, once a second. The chart's
     # live candle and the position LTPs come from here, not from polling the REST surface.

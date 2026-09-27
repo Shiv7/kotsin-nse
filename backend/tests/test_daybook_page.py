@@ -167,3 +167,109 @@ def test_open_interest_and_the_contract_reach_the_page():
     out = render(rows, Ticket(day="2026-09-24", created_ts=time.time(), expires_ts=time.time() + 60))
     for token in ("17,837,000", "1.40", "PE 980.00", "OI chg%", "Fut T1", "Eq T4", "OTM contract"):
         assert token in out, f"{token} missing"
+
+
+def test_the_page_downloads_as_a_workbook_of_exactly_what_it_shows():
+    """Operator, 2026-09-25: anything shared on /temporary must also download in a fitting format.
+    The workbook is read off the rendered page, so it can never disagree with it: one sheet per
+    table, numbers as numbers, percentages as percentages, the prose on a Notes sheet."""
+    import io
+    import xml.etree.ElementTree as ET
+    import zipfile
+
+    from kotsin_nse.api.daybook import Ticket
+    from kotsin_nse.api.export import html_to_xlsx, tables_from_html
+
+    rows = assemble(signals=[_signal()], positions=[_position()],
+                    trades=[{"position_id": "p1", "net": -15_748, "r_multiple": -1.84}],
+                    events=[_route()])
+    t = Ticket(day="2026-09-24", created_ts=time.time(), expires_ts=time.time() + 3600)
+    out = render(rows, t)
+    assert 'href="/temporary.xlsx"' in out, "the page offers its own download"
+
+    title, sheets, notes = tables_from_html(out)
+    assert title.startswith("FUDKII Day Book")
+    assert [s.name.split(" · ")[0] for s in sheets] == ["Signals", "Executions", "Twins that stood aside"]
+    sig = sheets[0]
+    assert len(sig.header) == 54 and sig.header[1] == "Symbol" and sig.rows[0][1] == "AUBANK"
+    assert len(notes) >= 5, "the footer's explanations travel with the numbers"
+
+    data = html_to_xlsx(out)
+    z = zipfile.ZipFile(io.BytesIO(data))
+    parts = z.namelist()
+    for name in parts:
+        ET.fromstring(z.read(name))  # every part well-formed
+    ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    wb = ET.fromstring(z.read("xl/workbook.xml"))
+    assert [s.get("name") for s in wb.findall(".//m:sheet", ns)] == [
+        "Signals", "Executions", "Twins that stood aside", "Notes"]
+    s1 = ET.fromstring(z.read("xl/worksheets/sheet1.xml"))
+    cells = {c.get("r"): c for c in s1.iter(f"{{{ns['m']}}}c")}
+    assert cells["B2"].get("t") == "inlineStr", "text stays text"
+    entry_col = sig.header.index("Entry") + 1
+    from kotsin_nse.api.export import _col
+
+    entry = cells[f"{_col(entry_col)}2"]
+    assert entry.get("t") is None and float(entry.find("m:v", ns).text) == 1000.9, "1,000.90 is a number"
+    atr_pct = cells[f"{_col(sig.header.index('ATR%') + 1)}2"]
+    assert atr_pct.get("s") == "2" and abs(float(atr_pct.find("m:v", ns).text) - 0.0077) < 1e-12, "0.77% is 0.0077"
+    assert s1.find("m:sheetViews/m:sheetView/m:pane", ns).get("state") == "frozen", "the header stays put"
+
+
+def test_sheet_names_obey_excels_rules():
+    from kotsin_nse.api.export import Sheet, _names
+
+    got = _names([Sheet("Signals · 26"), Sheet("a/b:c*d?[e]"), Sheet("x" * 40), Sheet("x" * 40)])
+    assert got[0] == "Signals" and all(len(n) <= 31 for n in got)
+    assert not any(ch in got[1] for ch in "/:*?[]")
+    assert got[2] != got[3], "duplicates are made unique"
+
+
+async def test_the_temporary_route_serves_the_xlsx_and_both_stop_when_the_ticket_does(settings):
+    import httpx
+
+    from kotsin_nse.api.routes import build_app
+    from kotsin_nse.engine import Engine
+
+    engine = Engine(settings)
+    await engine.ledger.init()
+    app = build_app(engine)
+    TemporaryPage(settings.data_dir).create(date(2026, 9, 24))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        page = await c.get("/temporary")
+        assert page.status_code == 200 and 'href="/temporary.xlsx"' in page.text
+        x = await c.get("/temporary.xlsx")
+        assert x.status_code == 200
+        assert x.headers["content-type"].startswith("application/vnd.openxmlformats-officedocument.spreadsheetml")
+        assert 'attachment; filename="fudkii-day-book-24-september-2026.xlsx"' == x.headers["content-disposition"]
+        assert x.content[:2] == b"PK", "a zip, i.e. a real workbook"
+        TemporaryPage(settings.data_dir).revoke()
+        assert (await c.get("/temporary.xlsx")).status_code == 410, "the download expires with the page"
+    await engine.ledger.close()
+
+
+def test_the_rt_y_ab_compares_the_books_on_the_same_triggers():
+    """Operator, 2026-09-26: "decide after about 50 trades but give updates every day"."""
+    from kotsin_nse.api.daybook import ab_summary, render_ab
+
+    t0 = 1790566200  # a Monday session
+    sig = lambda sid, k: {"signal_id": sid, "strategy": "FUDKII", "symbol": "X", "ts": t0 + k * 1800}  # noqa: E731
+    signals = [sig("A", 1), sig("B", 2), sig("C", 3)]
+    events = [
+        {"kind": "regime.breadth", "signal_id": s, "share": sh} for s, sh in (("A", 0.7), ("B", 0.3), ("C", 0.6))
+    ] + [{"kind": "rt_twin.skipped", "signal_id": "B", "book": "FUDKII_RT_Y", "gate": "breadth"}]
+    positions = [{"id": f"{b}-{s}", "strategy": b, "signal_id": s} for s in ("A", "B") for b in ("FUDKII_RT_X", "FUDKII_RT_N")]
+    positions += [{"id": "FUDKII_RT_Y-A", "strategy": "FUDKII_RT_Y", "signal_id": "A"}]
+    trades = [
+        {"position_id": "FUDKII_RT_X-A", "strategy": "FUDKII_RT_X", "net": 1000.0},
+        {"position_id": "FUDKII_RT_N-A", "strategy": "FUDKII_RT_N", "net": 400.0},
+        {"position_id": "FUDKII_RT_Y-A", "strategy": "FUDKII_RT_Y", "net": 700.0},
+        {"position_id": "FUDKII_RT_X-B", "strategy": "FUDKII_RT_X", "net": -900.0},
+        {"position_id": "FUDKII_RT_N-B", "strategy": "FUDKII_RT_N", "net": -300.0},
+    ]
+    ab = ab_summary(signals=signals, positions=positions, trades=trades, events=events)
+    t = ab["total"]
+    assert (t["triggers"], t["y_n"], t["y_win"], t["y_net"]) == (3, 1, 1, 700.0)
+    assert (t["x_on_y"], t["n_on_y"]) == (1000.0, 400.0), "the ungated books on RT-Y's own trades"
+    assert (t["gated"], t["x_on_gated"], t["n_on_gated"]) == (1, -900.0, -300.0), "what the gate kept RT-Y out of"
+    assert "1 of 50 RT-Y trades" in render_ab(ab)

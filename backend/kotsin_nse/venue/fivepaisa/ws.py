@@ -44,6 +44,8 @@ OPERATION = {"s": "Subscribe", "u": "Unsubscribe"}
 
 #: The broker's 20-level depth frames are large; a batch bigger than this is split.
 MAX_ENTRIES_PER_FRAME = 200
+#: a connection that lived this long was healthy: the next drop starts the backoff from 1 s again
+HEALTHY_CONNECTION_S = 60.0
 
 
 def build_frame(
@@ -130,8 +132,13 @@ class FivePaisaFeed:
         on_tick: Callable[[dict[str, Any]], Awaitable[None]],
         on_depth: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         on_oi: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        on_connect: Callable[[bool], Awaitable[None]] | None = None,
     ) -> None:
         self.s = settings
+        #: called after every connect with ``True`` when it is a RE-connect — the bars and volume
+        #: baselines that span the gap are the aggregator's to repair
+        self.on_connect = on_connect
+        self._connects = 0
         self.auth = auth
         self.on_tick = on_tick
         self.on_depth = on_depth
@@ -178,6 +185,7 @@ class FivePaisaFeed:
     async def run(self) -> None:
         backoff = 1.0
         while not self._stop.is_set():
+            attempt = time.time()
             try:
                 await self._connect_and_read()
                 backoff = 1.0
@@ -187,6 +195,12 @@ class FivePaisaFeed:
                 self.health.connected = False
                 self.health.last_error = str(exc)
                 self.health.reconnects += 1
+                # A socket that lived a healthy minute earns a fresh backoff. Only a CLEAN close
+                # used to reset it, so after one bad patch every later drop — hours apart — waited
+                # the full 60 s: a minute of blind tape per drop, in the middle of a session.
+                since = self.health.connected_since
+                if since is not None and since >= attempt and time.time() - since >= HEALTHY_CONNECTION_S:
+                    backoff = 1.0
                 log.warning("feed.reconnect", error=str(exc), backoff_s=round(backoff, 1))
                 await asyncio.sleep(backoff + random.uniform(0, 0.5))
                 backoff = min(backoff * 2, 60.0)
@@ -219,6 +233,13 @@ class FivePaisaFeed:
             for channel, wanted in self._desired.items():
                 if wanted:
                     await self._send_batched(channel, "s", list(wanted.values()))
+            again = self._connects > 0
+            self._connects += 1
+            if self.on_connect is not None:
+                try:
+                    await self.on_connect(again)
+                except Exception as exc:  # noqa: BLE001 - a repair hook never costs the socket
+                    log.warning("feed.on_connect_failed", error=str(exc)[:160])
             try:
                 async for raw in ws:
                     await self._handle(raw)

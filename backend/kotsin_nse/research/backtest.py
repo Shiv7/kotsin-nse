@@ -569,18 +569,12 @@ class Backtester:
     ) -> BtTrade:
         sign = t.sign()
         gross = (price - t.entry) * sign * t.qty * inst.multiplier
+        # overnight cash equity is costed on the delivery line (STT both legs, its own stamp and brokerage)
+        delivery = self.p.holding == "delivery" and inst.kind is InstrumentKind.EQUITY
         charges = (
-            self.costs.leg(inst, OrderSide.BUY if sign > 0 else OrderSide.SELL, t.entry, t.qty)
-            + self.costs.leg(inst, OrderSide.SELL if sign > 0 else OrderSide.BUY, price, t.qty)
+            self.costs.leg(inst, OrderSide.BUY if sign > 0 else OrderSide.SELL, t.entry, t.qty, delivery=delivery)
+            + self.costs.leg(inst, OrderSide.SELL if sign > 0 else OrderSide.BUY, price, t.qty, delivery=delivery)
         ).total
-        if self.p.holding == "delivery" and inst.kind is InstrumentKind.EQUITY:
-            # Overnight cash equity is delivery: STT on BOTH legs at the delivery rate; the cost
-            # model's intraday rate applies to the sell leg only. Added here, in the open, so an
-            # intraday and a delivery replay differ by exactly these lines.
-            rate = self.s.cost_stt_pct_delivery_equity / 100
-            buy_value = (t.entry if sign > 0 else price) * t.qty * inst.multiplier
-            sell_value = (price if sign > 0 else t.entry) * t.qty * inst.multiplier
-            charges += buy_value * rate + sell_value * (rate - self.s.cost_stt_pct_sell_equity / 100)
         net = gross - charges
         r_unit_money = t.r_unit * t.qty * inst.multiplier
         opt_net = opt_r = None

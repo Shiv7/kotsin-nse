@@ -178,7 +178,7 @@ function kindTone(k: Alert['kind']) {
 
 const CTA_TONE: Record<string, string> = {
   PRIMARY: 'border-emerald-500/50 bg-emerald-500/15 text-emerald-300',
-  HOLD: 'border-indigo-500/40 bg-indigo-500/10 text-indigo-300',
+  HOLD: 'border-sky-500/40 bg-sky-500/10 text-sky-300',
   OBSERVE: 'border-sky-500/40 bg-sky-500/10 text-sky-300',
   WAIT_PULLBACK: 'border-amber-500/40 bg-amber-500/10 text-amber-300',
   AVOID: 'border-rose-500/40 bg-rose-500/10 text-rose-300',
@@ -399,10 +399,10 @@ function RtPanel({ c }: { c: RtCard }) {
   const conf = c.confidence
   const sz = c.sizing
   return (
-    <div className="mt-2 space-y-2 rounded border border-indigo-500/25 bg-indigo-500/[0.04] p-2">
+    <div className="mt-2 space-y-2 rounded border border-sky-500/25 bg-sky-500/[0.04] p-2">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="text-[10px] uppercase tracking-wide text-indigo-300">FUDKII-RT</span>
-        <span className="rounded border border-indigo-500/40 bg-indigo-500/10 px-1.5 py-0.5 text-[11px] font-bold tabular-nums text-indigo-200">
+        <span className="text-[10px] uppercase tracking-wide text-sky-300">FUDKII-RT</span>
+        <span className="rounded border border-sky-500/40 bg-sky-500/10 px-1.5 py-0.5 text-[11px] font-bold tabular-nums text-sky-200">
           confidence {conf.score.toFixed(0)}
         </span>
         {c.odds.pT1 !== null && (
@@ -429,7 +429,7 @@ function RtPanel({ c }: { c: RtCard }) {
         )}
         {c.route && (
           <span
-            className={`rounded border px-1.5 py-0.5 text-[10px] ${c.route.route === 'COUNTER' ? 'border-fuchsia-500/50 bg-fuchsia-500/10 text-fuchsia-200' : 'border-slate-600/60 bg-slate-800/60 text-slate-400'}`}
+            className={`rounded border px-1.5 py-0.5 text-[10px] ${c.route.route === 'COUNTER' ? 'border-orange-500/50 bg-orange-500/10 text-orange-200' : 'border-slate-600/60 bg-slate-800/60 text-slate-400'}`}
             title={c.route.reason}
           >
             {c.route.route === 'COUNTER' ? 'COUNTER · faded by CT-X/CT-Y' : 'IN_TREND'} · {c.route.summary ?? `wall ${c.route.wall.strength.toFixed(1)}`}
@@ -635,7 +635,7 @@ function Row({ a }: { a: Alert }) {
           {a.company && <div className="truncate text-[11px] text-slate-600">{a.company}</div>}
           {a.kind !== 'TRIGGER' && a.evidence?.ageMinutes !== undefined && (
             <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px]">
-              <span className="rounded border border-indigo-500/30 bg-indigo-500/10 px-1.5 py-0.5 text-indigo-300">
+              <span className="rounded border border-sky-500/30 bg-sky-500/10 px-1.5 py-0.5 text-sky-300">
                 entered {ist(a.ts - Number(a.evidence.ageMinutes) * 60)} IST
               </span>
               <span className="text-slate-500">
@@ -771,7 +771,7 @@ export function Alerts() {
           <button
             key={k}
             onClick={() => setBookView(bookView === k ? null : k)}
-            className={`rounded px-2.5 py-1 text-xs ${bookView === k ? 'bg-indigo-500/20 text-indigo-100' : 'text-slate-400 hover:text-white'}`}
+            className={`rounded px-2.5 py-1 text-xs ${bookView === k ? 'bg-sky-500/20 text-sky-100' : 'text-slate-400 hover:text-white'}`}
           >
             {label}
           </button>

@@ -11,16 +11,18 @@ that does not scale down. Any strategy evaluated without this model is being eva
 that cannot be realised.
 
 Rates are configuration, not constants: they change by circular, differ by segment, and 5paisa's
-brokerage is a ``min(flat, percent)`` slab. Every default is stated in ``config.Settings`` with its
-source so a wrong number is visible rather than buried.
+brokerage is a ``min(flat, percent)`` slab. They live in ``<data_dir>/charges.toml`` (see
+``charge_rates``), re-read when edited; the defaults it starts from are stated in ``config.Settings``
+with their source, so a wrong number is visible rather than buried.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..config import Settings
+from ..config import Segment, Settings
 from ..domain import Instrument, InstrumentKind, OrderSide
+from .charge_rates import ChargeRates
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,8 +61,26 @@ class Charges:
 
 
 class CostModel:
-    def __init__(self, s: Settings) -> None:
+    def __init__(self, s: Settings, overrides: dict[str, float] | None = None) -> None:
+        """``overrides``: ``{"brokerage_mult": x}`` for a cost-stress replay."""
         self.s = s
+        #: the operator's charges file — every rate below is read from here, not from Settings
+        self.rates = ChargeRates(s, overrides=dict(overrides or {}))
+
+    @property
+    def slippage_bps_default(self) -> float:
+        return self.rates.current()["slippage_bps_default"]
+
+    @staticmethod
+    def product_of(instrument: Instrument, *, delivery: bool = False) -> str:
+        """Which line of the charges table a trade is costed on."""
+        if instrument.segment is Segment.MCX_FO:
+            return "commodity_options" if instrument.kind is InstrumentKind.OPTION else "commodity_futures"
+        if instrument.kind is InstrumentKind.OPTION:
+            return "fo_options"
+        if instrument.kind is InstrumentKind.FUTURE:
+            return "fo_futures"
+        return "equity_delivery" if delivery else "equity_intraday"
 
     def turnover(self, instrument: Instrument, price: float, qty: int) -> float:
         """For an option this is **premium turnover**, which is what every option charge is levied
@@ -68,33 +88,28 @@ class CostModel:
         return price * qty * instrument.multiplier
 
     def leg(
-        self, instrument: Instrument, side: OrderSide, price: float, qty: int
+        self, instrument: Instrument, side: OrderSide, price: float, qty: int, *, delivery: bool = False
     ) -> Charges:
-        s = self.s
+        """One order's charges. Every percentage is of THIS leg's turnover (price × total qty),
+        charged once — four lots are one turnover. Brokerage is per executed order (or per lot when
+        the file says ``basis = "lot"``), never per unit."""
+        r = self.rates.current()
+        p = r["products"][self.product_of(instrument, delivery=delivery)]
         t = self.turnover(instrument, price, qty)
         if t <= 0 or qty <= 0:
             return Charges()
 
-        brokerage = s.cost_brokerage_per_order_inr
-        if s.cost_brokerage_pct > 0:
-            brokerage = min(brokerage, t * s.cost_brokerage_pct / 100)
+        brokerage = p["brokerage_flat_inr"]
+        if r["basis"] == "lot":
+            brokerage *= max(1, -(-qty // max(1, instrument.lot_size)))  # lots, rounded up
+        if p["brokerage_pct"] > 0:
+            brokerage = min(brokerage, t * p["brokerage_pct"] / 100)
 
-        kind = instrument.kind
-        if kind is InstrumentKind.OPTION:
-            exch_pct = s.cost_exchange_txn_pct_option
-            stt_pct = s.cost_stt_pct_sell_option_premium
-        elif kind is InstrumentKind.FUTURE:
-            exch_pct = s.cost_exchange_txn_pct_future
-            stt_pct = s.cost_stt_pct_sell_future
-        else:
-            exch_pct = s.cost_exchange_txn_pct_equity
-            stt_pct = s.cost_stt_pct_sell_equity
-
-        stt = t * stt_pct / 100 if side is OrderSide.SELL else 0.0
-        exchange = t * exch_pct / 100
-        sebi = t * s.cost_sebi_pct / 100
-        stamp = t * s.cost_stamp_pct_buy / 100 if side is OrderSide.BUY else 0.0
-        gst = (brokerage + exchange + sebi) * s.cost_gst_pct / 100
+        stt = t * (p["stt_sell_pct"] if side is OrderSide.SELL else p["stt_buy_pct"]) / 100
+        exchange = t * p["exchange_pct"] / 100
+        sebi = t * p["sebi_pct"] / 100
+        stamp = t * p["stamp_buy_pct"] / 100 if side is OrderSide.BUY else 0.0
+        gst = (brokerage + exchange + sebi) * r["gst_pct"] / 100
         return Charges(
             brokerage=brokerage, stt=stt, exchange=exchange, sebi=sebi, stamp=stamp, gst=gst
         )
@@ -120,5 +135,5 @@ class CostModel:
         return self.round_trip_pct(instrument, price, qty)
 
     def slippage(self, price: float, qty: int, instrument: Instrument, *, bps: float | None = None) -> float:
-        b = self.s.slippage_bps_default if bps is None else bps
+        b = self.slippage_bps_default if bps is None else bps
         return self.turnover(instrument, price, qty) * b / 1e4

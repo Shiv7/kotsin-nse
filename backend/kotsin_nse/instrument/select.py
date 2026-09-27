@@ -37,6 +37,11 @@ class SelectionPolicy:
     #: option order because the reasoning is not strategy-specific.
     min_premium: float = 5.0
     max_premium: float | None = 400.0
+    #: fixed-size books (``RiskLimits.fixed_lots_under_inr``): a strike whose ``outlay_lots`` lots cost
+    #: ``outlay_under_inr`` or more is passed over for the next choice — further out, cheaper
+    #: (operator, 2026-09-22: "try identifying far otm who's 4 lots rest within our cap")
+    outlay_lots: int | None = None
+    outlay_under_inr: float | None = None
     #: reject a strike with no two-sided quote or a spread wider than this fraction of the mid
     max_spread_pct: float = 8.0
     #: how stale a chain snapshot may be before selection refuses to choose
@@ -273,6 +278,11 @@ def select_option(
         if spread is None:
             skipped.append(f"{inst.strike:g}:one-sided")
             continue
+        if pol.outlay_lots and pol.outlay_under_inr is not None:
+            cost = premium * inst.lot_size * inst.multiplier * pol.outlay_lots
+            if cost >= pol.outlay_under_inr:
+                skipped.append(f"{inst.strike:g}:{pol.outlay_lots}-lots-₹{cost:,.0f}≥₹{pol.outlay_under_inr:,.0f}")
+                continue
         if spread > pol.max_spread_pct:
             skipped.append(f"{inst.strike:g}:spread-{spread:.1f}%")
             continue

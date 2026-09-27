@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { BOOK_TABS } from '../components/BookCards'
 import { Card, ErrorLine, Stat, Table } from '../components/Ui'
 import { fmt, postJson, pnlColor } from '../lib/api'
 import { usePoll } from '../lib/usePoll'
@@ -51,7 +52,24 @@ export function Risk() {
   const health = usePoll<Health>('/api/health', 3000)
   const [armMinutes, setArmMinutes] = useState(60)
 
-  const caps = (health.data?.gateway as { caps?: Record<string, unknown> } | undefined)?.caps ?? {}
+  const gw = health.data?.gateway as
+    | {
+        caps?: Record<string, unknown>
+        rejects_by_book?: Record<string, number>
+        tripped_books?: string[]
+        live_orders_by_book?: Record<string, number>
+      }
+    | undefined
+  const caps = gw?.caps ?? {}
+  const tripAt = Number(caps.breaker_consecutive_rejects ?? 12)
+  const tripped = new Set(gw?.tripped_books ?? [])
+  // every book the engine knows, plus any the gateway has counted (FUKAA, the wide-stop shadow)
+  const books: [string, string][] = [
+    ...BOOK_TABS,
+    ...Object.keys(gw?.rejects_by_book ?? {})
+      .filter((b) => !BOOK_TABS.some(([k]) => k === b))
+      .map((b): [string, string] => [b, b]),
+  ]
 
   return (
     <div className="space-y-4 p-4">
@@ -127,10 +145,38 @@ export function Risk() {
           <div className="space-y-2">
             <Confirm label="reconcile now" onRun={() => postJson('/api/control/reconcile', {})} />
             <Confirm label="acknowledge mismatch (resume entries)" onRun={() => postJson('/api/control/acknowledge', {})} />
-            <Confirm label="reset order-gateway breaker" onRun={() => postJson('/api/control/reset-breaker', {})} />
           </div>
         </Card>
       </div>
+
+      <Card title="Order breakers, per book" right={`a book stops entering after ${tripAt} consecutive rejected entries`}>
+        <Table head={['Book', 'Rejected in a row', 'State', 'Live orders today', '']}>
+          {books.map(([k, label]) => {
+            const n = gw?.rejects_by_book?.[k] ?? 0
+            const hit = tripped.has(k)
+            return (
+              <tr key={k} className="border-b border-slate-900">
+                <td className="px-2 py-1.5 text-xs">{label}</td>
+                <td className="px-2 py-1.5 font-mono text-[11px]">
+                  {n} / {tripAt}
+                </td>
+                <td className={'px-2 py-1.5 text-xs ' + (hit ? 'text-rose-400' : 'text-emerald-400')}>
+                  {hit ? 'TRIPPED — no entries' : 'clear'}
+                </td>
+                <td className="px-2 py-1.5 font-mono text-[11px]">{gw?.live_orders_by_book?.[k] ?? 0}</td>
+                <td className="px-2 py-1.5">
+                  {(hit || n > 0) && (
+                    <Confirm
+                      label="reset"
+                      onRun={() => postJson(`/api/control/reset-breaker?book=${encodeURIComponent(k)}`, {})}
+                    />
+                  )}
+                </td>
+              </tr>
+            )
+          })}
+        </Table>
+      </Card>
 
       <Card title="LIVE_CAPPED caps" right="these bound an armed engine; they are not the mode itself">
         <Table head={['Cap', 'Value']}>

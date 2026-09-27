@@ -11,8 +11,13 @@ would make ``signals`` stop meaning "something the gateway saw".
 
 from __future__ import annotations
 
+import asyncio
+import json
+import os
 import time
 from collections import deque
+from collections.abc import Callable, Iterable, Sequence
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -66,6 +71,11 @@ class AlertEngine:
         self.refreshes = 0
         #: the session the rings were last emptied for; "" until the first reset
         self.reset_day_stamp = ""
+        #: Where the session is saved so a restart does not blank the page. None keeps it in
+        #: memory only (tests, previews). Set by the engine; written by its housekeeping loop.
+        self.store_dir: Path | None = None
+        #: something worth saving has changed since the last save
+        self.dirty = False
 
     # -- plumbing ---------------------------------------------------------------------------------
 
@@ -290,16 +300,23 @@ class AlertEngine:
             ).to_json(),
         }
 
-    def _emit(self, a: Alert) -> None:
+    def _emit(self, a: Alert, *, replayed: bool = False) -> None:
         # Stamped here rather than in the detector: the detector is a pure function of the bars
         # it is handed and may not read a clock, or it would not replay identically.
-        a.fired_at = time.time()
         a.bar_close = int(a.ts + TF_SECONDS.get(a.tf, 0))
+        if replayed:
+            # Rebuilt at boot for a bar that closed while the process was down: it is stamped at
+            # its bar's close — the instant it would have fired — and says it was rebuilt.
+            a.fired_at = float(a.bar_close)
+            a.evidence = {**(a.evidence or {}), "replayed": True}
+        else:
+            a.fired_at = time.time()
         ring = self.alerts.setdefault(a.book, deque(maxlen=RING))
         ring.appendleft(a)
         self.counts[a.book] = self.counts.get(a.book, 0) + 1
+        self.dirty = True
         log.info(
-            "alert",
+            "alert.replayed" if replayed else "alert",
             book=a.book,
             symbol=a.symbol,
             direction=a.direction,
@@ -346,20 +363,26 @@ class AlertEngine:
         except Exception as exc:  # noqa: BLE001 - an advisory row may not stall the entry
             log.warning("alerts.failed", book="FUDKII_RT", symbol=bar.symbol, tf=bar.tf, error=str(exc))
 
-    def mark_entered(self, signal_id: str, *, ts: float, price: float, qty: int) -> None:
-        """The twin filled: put the actual fill — time to the millisecond, price, quantity — on
-        the ENTRY row's card. What was modelled at fire time becomes what happened."""
+    def mark_entered(self, signal_id: str, *, ts: float, price: float, qty: int, book: str = "") -> None:
+        """A book filled: put the actual fill — time to the millisecond, price, quantity — on the
+        ENTRY row's card, EACH book's under its own name (every book places its own order since
+        2026-09-26, and one ``entered`` slot showed whichever book filled last). ``entered`` stays the
+        first fill. What was modelled at fire time becomes what happened."""
         for a in self.alerts.get("FUDKII_RT", ()):
             if a.kind == "ENTRY" and (a.evidence or {}).get("signalId") == signal_id:
                 card = a.card if a.card is not None else {}
-                card["entered"] = {
+                fill = {
                     "ts": ts,
                     "ist": to_ist(ts).strftime("%H:%M:%S.%f")[:-3],
                     "price": price,
                     "qty": qty,
                     "lagFromFiredS": round(ts - a.fired_at, 3) if a.fired_at else None,
                 }
+                card.setdefault("entered", {**fill, "book": book})
+                if book:
+                    card.setdefault("entries", {})[book] = fill
                 a.card = card
+                self.dirty = True
                 return
 
     def mark_route(self, signal_id: str, *, decision: dict[str, Any]) -> None:
@@ -370,6 +393,7 @@ class AlertEngine:
                 card = a.card if a.card is not None else {}
                 card["route"] = decision
                 a.card = card
+                self.dirty = True
                 return
 
     def mark_skipped(self, signal_id: str, *, book: str, reason: str) -> None:
@@ -380,6 +404,7 @@ class AlertEngine:
                 card = a.card if a.card is not None else {}
                 card.setdefault("skipped", []).append({"book": book, "reason": reason})
                 a.card = card
+                self.dirty = True
                 return
 
     # -- the bar path -----------------------------------------------------------------------------
@@ -403,9 +428,17 @@ class AlertEngine:
                     self._emit(a)
             return
 
-        history = self.engine.store.bars(bar.symbol, bar.tf, LOOKBACK)
+        for a in self._book_alerts(bar, self.engine.store.bars(bar.symbol, bar.tf, LOOKBACK)):
+            self._emit(a)
+
+    def _book_alerts(self, bar: UnifiedBar, history: Sequence[UnifiedBar]) -> list[Alert]:
+        """Every advisory book on one closed bar, given the bars up to and including it. Returns
+        the enriched alerts rather than emitting them, so the boot replay can run the same code
+        on history cut at each past bar."""
+        out: list[Alert] = []
+        history = list(history)
         if len(history) < 25:
-            return
+            return out
         exch = self._segment_exch(bar.symbol)
 
         for det in self.bb:
@@ -419,14 +452,14 @@ class AlertEngine:
             a = det.on_bar(bar, history)
             if a:
                 self._enrich(a, bar, history)
-                self._emit(a)
+                out.append(a)
 
         if bar.tf == "30m":
             self._seen("FUDKOI")
             a = self.fudkoi.on_bar(bar, history, exch=exch)
             if a:
                 self._enrich(a, bar, history)
-                self._emit(a)
+                out.append(a)
 
             self._seen("PIVOTBOSS")
             levels, avg = self._cpr_for(bar.symbol)
@@ -442,7 +475,164 @@ class AlertEngine:
             )
             if pb:
                 self._enrich(pb, bar, history)
-                self._emit(pb)
+                out.append(pb)
+        return out
+
+    # -- the session across a restart ---------------------------------------------------------------
+
+    FILE = "alerts.json"
+
+    def snapshot(self) -> dict[str, Any]:
+        """Everything the page shows, as JSON. Built on the event loop, where the rings live, so
+        it never iterates a ring mid-append; only the file write goes to a thread."""
+        self.dirty = False
+        return {
+            "version": 1,
+            "saved_ts": time.time(),
+            "reset_day": self.reset_day_stamp,
+            "counts": dict(self.counts),
+            "evaluated": dict(self.evaluated),
+            "rings": {book: [a.to_json() for a in ring] for book, ring in self.alerts.items()},
+        }
+
+    def write(self, snap: dict[str, Any]) -> Path | None:
+        """Atomically replace the saved session. Safe off the loop: it touches only ``snap``."""
+        if self.store_dir is None:
+            return None
+        self.store_dir.mkdir(parents=True, exist_ok=True)
+        path = self.store_dir / self.FILE
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(snap, default=str, separators=(",", ":")), encoding="utf-8")
+        os.replace(tmp, path)
+        return path
+
+    def save(self) -> Path | None:
+        return self.write(self.snapshot())
+
+    def restore(self, since_ts: float) -> int:
+        """Bring back the session saved before a restart — but only if it was saved after the last
+        00:30 IST reset, so yesterday's page never comes back. Returns the alerts restored."""
+        if self.store_dir is None:
+            return 0
+        path = self.store_dir / self.FILE
+        try:
+            snap = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return 0
+        except (OSError, ValueError) as exc:
+            log.warning("alerts.restore_unreadable", path=str(path), error=str(exc)[:120])
+            return 0
+        if float(snap.get("saved_ts") or 0) < since_ts:
+            log.info("alerts.restore_skipped", reason="saved before the last reset", saved_ts=snap.get("saved_ts"))
+            return 0
+        n = 0
+        for book, rows in (snap.get("rings") or {}).items():
+            ring: deque[Alert] = deque(maxlen=RING)
+            for row in rows:
+                try:
+                    ring.append(Alert.from_json(row))
+                except (KeyError, TypeError, ValueError):
+                    continue
+            if ring:
+                self.alerts[book] = ring
+                n += len(ring)
+        self.counts = {k: int(v) for k, v in (snap.get("counts") or {}).items()}
+        self.evaluated = {k: int(v) for k, v in (snap.get("evaluated") or {}).items()}
+        self.reset_day_stamp = snap.get("reset_day") or self.reset_day_stamp
+        log.info("alerts.restored", alerts=n, books=sorted(self.alerts))
+        return n
+
+    def has_signal(self, signal_id: str) -> bool:
+        return any((a.evidence or {}).get("signalId") == signal_id for a in self.alerts.get("FUDKII_RT", ()))
+
+    def adopt_rebuilt(
+        self, sig: dict[str, Any], bar: UnifiedBar, history: Sequence[UnifiedBar], *, skipped: str | None
+    ) -> bool:
+        """A FUDKII signal found after the fact: its ENTRY row, stamped at its bar's close and
+        marked rebuilt. ``skipped`` says why no book traded it; None for one that was handled
+        live and only lost its row (a restart before the session was saved). Never living: nothing
+        re-checks a trade that was never taken."""
+        if self.has_signal(sig["signal_id"]):
+            return False
+        a = self.rt.adopt(sig, float(bar.ts + TF_SECONDS.get(bar.tf, 0)), bar)
+        self.rt.living.pop(sig["signal_id"], None)
+        if a is None:
+            return False
+        try:
+            self._enrich(a, bar, list(history))
+        except Exception as exc:  # noqa: BLE001 - a row without its plan beats no row
+            log.warning("alerts.enrich_failed", symbol=bar.symbol, error=str(exc)[:120])
+        if skipped:
+            a.card = {**(a.card or {}), "skipped": [{"book": "ALL", "reason": skipped}]}
+        self._emit(a, replayed=True)
+        return True
+
+    @staticmethod
+    def _key(a: Alert) -> tuple[str, str, int, str, str]:
+        return (a.book, a.symbol, int(a.ts), a.kind, a.direction)
+
+    async def catch_up(
+        self,
+        bars: Iterable[UnifiedBar],
+        *,
+        history_of: Callable[[UnifiedBar], Sequence[UnifiedBar]],
+        fudkii: Callable[[UnifiedBar], Sequence[Any]] | None = None,
+        known_signal_ids: set[str] | frozenset[str] = frozenset(),
+        yield_every: int = 100,
+    ) -> dict[str, int]:
+        """Replay today's closed bars through fresh detectors, oldest first.
+
+        Two gaps close here. A restart used to blank the page — the rings lived only in memory —
+        and a process that was down at a boundary never evaluated it at all (2026-09-25: nothing
+        ran before 10:58, so 09:45, 10:15 and 10:45 were simply absent). The detectors are pure
+        functions of the bars handed to them, so running them on history cut at each past bar is
+        what they would have said then. Fresh detectors, because their caps and cooldowns must be
+        rebuilt from the open, not continued from whatever a restored ring implies.
+
+        Only alerts the page does not already hold are added, each stamped at its bar's close and
+        marked replayed. FUDKII triggers come back as ENTRY rows that say they were NOT traded;
+        signals the ledger already has were handled live and are left to it.
+        """
+        have = {self._key(a) for ring in self.alerts.values() for a in ring}
+        have_ids = {
+            str((a.evidence or {}).get("signalId") or "")
+            for a in self.alerts.get("FUDKII_RT", ())
+        } | set(known_signal_ids)
+        restored_eval = dict(self.evaluated)
+        self.bb = [BbBreakDetector(c) for c in BB_BOOKS]
+        self.fudkoi = FudkoiDetector()
+        self.pivotboss = PivotBossDetector()
+        self.evaluated = {}
+        added = {"books": 0, "fudkii": 0, "bars": 0}
+        for i, bar in enumerate(bars):
+            added["bars"] += 1
+            history = history_of(bar)
+            try:
+                for a in self._book_alerts(bar, history):
+                    if self._key(a) not in have:
+                        have.add(self._key(a))
+                        self._emit(a, replayed=True)
+                        added["books"] += 1
+                for sig in (fudkii(bar) if fudkii else ()):
+                    sj = sig.to_json() if hasattr(sig, "to_json") else dict(sig)
+                    if sj["signal_id"] in have_ids:
+                        continue
+                    have_ids.add(sj["signal_id"])
+                    if self.adopt_rebuilt(
+                        sj, bar, history,
+                        skipped="not traded — the engine was not running at this bar's close; rebuilt at boot",
+                    ):
+                        added["fudkii"] += 1
+            except Exception as exc:  # noqa: BLE001 - one bad bar must not cost the rest of the day
+                log.warning("alerts.catch_up_failed", symbol=bar.symbol, ts=bar.ts, error=str(exc)[:160])
+            if yield_every and i % yield_every == yield_every - 1:
+                await asyncio.sleep(0)  # let the page be served while the day replays
+        # a restored count may include 1m/15m evaluations the replay cannot redo; keep the larger
+        for book, n in restored_eval.items():
+            self.evaluated[book] = max(n, self.evaluated.get(book, 0))
+        self.counts = {book: len(ring) for book, ring in self.alerts.items()}
+        log.info("alerts.caught_up", **added)
+        return added
 
     # -- reads ------------------------------------------------------------------------------------
 
@@ -476,6 +666,7 @@ class AlertEngine:
         self.pivotboss = PivotBossDetector()
         self.rt = FudkiiRtDetector()
         self.reset_day_stamp = day
+        self.dirty = True  # the saved session must empty too, or a restart would bring it back
         log.info("alerts.reset_day", day=day, cleared=cleared)
         return cleared
 

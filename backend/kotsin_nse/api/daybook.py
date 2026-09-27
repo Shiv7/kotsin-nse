@@ -20,8 +20,17 @@ from typing import Any
 
 from ..market.session import IST
 from ..strategy.gapscore import f14_score, gap_open_class
+from ..strategy.keys import SHADOW_OF
+from ..strategy.regime_gates import MISSED_GATES
 
 TTL_HOURS = 24
+#: the RT-Y breadth gate's paper A/B: the first session after it went live (operator, 2026-09-26:
+#: "decide after about 50 trades but give updates every day")
+AB_START = date(2026, 9, 28)
+AB_TARGET_TRADES = 50
+#: RT-Y's gates (gate B, 2026-09-26), in the order they are checked, and how the tables name them
+RT_Y_GATES = ("breadth", "pivot_ahead", "open_gap")
+GATE_LABELS = {"breadth": "breadth", "pivot_ahead": "pivot ahead", "open_gap": "09:45 gap"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,6 +172,7 @@ def assemble(
                 "opt_stop_now": p.get("option_sl"), "opt_targets": p.get("option_targets") or [],
                 "status": p.get("status"), "exit_price": p.get("exit_price"),
                 "exit_reason": p.get("exit_reason"), "net": t.get("net"), "r": t.get("r_multiple"),
+                "exec": p.get("exec_log") or {},
             })
         fills.sort(key=lambda f: (f["book"] != "FUDKII", f["book"]))
 
@@ -207,6 +217,9 @@ def assemble(
 # -- rendering ------------------------------------------------------------------------------------
 
 _CSS = """
+.dl{display:inline-block;padding:7px 14px;border-radius:6px;background:#1f6feb;color:#fff;
+  font:600 12.5px/1 'IBM Plex Sans',system-ui,sans-serif;text-decoration:none;letter-spacing:.02em}
+.dl:hover{background:#388bfd}
 :root{--paper:#FAF8F5;--sunk:#F2EFE9;--line:#DCD6CB;--soft:#EBE6DD;--ink:#1D2026;--ink2:#4E5461;
 --ink3:#7C8494;--indigo:#3F4A73;--long:#1F6F52;--longbg:#E3F0E9;--short:#A8323F;--shortbg:#F8E4E5;
 --hold:#8A6413;--holdbg:#F7EBD3}
@@ -263,6 +276,94 @@ footer p{margin:0 0 8px}
 """
 
 
+def ab_summary(*, signals: list[dict], positions: list[dict], trades: list[dict], events: list[dict]) -> dict[str, Any]:
+    """RT-Y (breadth-gated) against RT-X and RT-N (ungated) on the SAME FUDKII triggers, per day and
+    in total. Pure: rows in, summary out. A trigger RT-Y stood aside from is judged by what the
+    ungated books made on it — the nearest thing to a counterfactual the ledger holds. Only closed
+    trades count; an open position joins the tally when it closes."""
+    parents = {s["signal_id"]: s for s in signals if s.get("strategy") == "FUDKII"}
+    breadth = {e["signal_id"]: e for e in events if e.get("kind") == "regime.breadth" and e.get("signal_id")}
+    gated = {e["signal_id"]: e["gate"] for e in events
+             if e.get("kind") == "rt_twin.skipped" and e.get("book") == "FUDKII_RT_Y" and e.get("gate") in RT_Y_GATES}
+    # RT-Y's other outcomes, counted apart: an entry attempted and missed is not the gate at work
+    missed = {e["signal_id"] for e in events
+              if e.get("kind") == "rt_twin.skipped" and e.get("book") == "FUDKII_RT_Y" and e.get("gate") in MISSED_GATES}
+    sig_of = {ps["id"]: (ps["strategy"], ps["signal_id"]) for ps in positions}
+    net: dict[tuple[str, str], float] = {}
+    for t in trades:
+        book, sid = sig_of.get(t.get("position_id"), (t.get("strategy"), None))
+        if sid in parents and book in ("FUDKII_RT_X", "FUDKII_RT_N", "FUDKII_RT_Y"):
+            net[(book, sid)] = net.get((book, sid), 0.0) + float(t.get("net") or 0.0)
+    days: dict[str, dict[str, Any]] = {}
+    for sid, sg in parents.items():
+        if sid not in breadth:  # NSE triggers only, and only those the gate could read
+            continue
+        day = datetime.fromtimestamp(float(sg["ts"]), IST).date().isoformat()
+        d = days.setdefault(day, {"day": day, "triggers": 0, "y_n": 0, "y_win": 0, "y_net": 0.0, "x_on_y": 0.0, "n_on_y": 0.0,
+                                  "gated": 0, "x_on_gated": 0.0, "n_on_gated": 0.0, "x_all": 0.0, "n_all": 0.0, "y_missed": 0,
+                                  **{f"gate_{g}": 0 for g in RT_Y_GATES}})
+        d["triggers"] += 1
+        d["x_all"] += net.get(("FUDKII_RT_X", sid), 0.0)
+        d["n_all"] += net.get(("FUDKII_RT_N", sid), 0.0)
+        if ("FUDKII_RT_Y", sid) in net:
+            d["y_n"] += 1
+            d["y_win"] += net[("FUDKII_RT_Y", sid)] > 0
+            d["y_net"] += net[("FUDKII_RT_Y", sid)]
+            d["x_on_y"] += net.get(("FUDKII_RT_X", sid), 0.0)
+            d["n_on_y"] += net.get(("FUDKII_RT_N", sid), 0.0)
+        elif sid in missed:
+            d["y_missed"] += 1
+        elif sid in gated:
+            d["gated"] += 1
+            d[f"gate_{gated[sid]}"] += 1
+            d["x_on_gated"] += net.get(("FUDKII_RT_X", sid), 0.0)
+            d["n_on_gated"] += net.get(("FUDKII_RT_N", sid), 0.0)
+    rows = [days[k] for k in sorted(days)]
+    keys = ("triggers", "y_n", "y_win", "y_net", "x_on_y", "n_on_y", "gated", "x_on_gated", "n_on_gated", "x_all", "n_all", "y_missed",
+            *(f"gate_{g}" for g in RT_Y_GATES))
+    total = {k: sum(r[k] for r in rows) for k in keys}
+    return {"since": AB_START.isoformat(), "target": AB_TARGET_TRADES, "days": rows, "total": total}
+
+
+def render_ab(ab: dict[str, Any]) -> str:
+    """The A/B as one table: a row per session and a running total, with which gate kept RT-Y out."""
+    inr = lambda v: f"{'−' if v < 0 else '+'}₹{abs(v):,.0f}"  # noqa: E731
+    def row(r: dict[str, Any], label: str) -> str:
+        win = f"{r['y_win'] / r['y_n'] * 100:.0f}%" if r["y_n"] else "—"
+        which = " · ".join(f"{GATE_LABELS[g]} {r['gate_' + g]}" for g in RT_Y_GATES if r.get("gate_" + g)) or "—"
+        return (f"<tr><td class=\"l\">{label}</td><td>{r['triggers']}</td><td>{r['y_n']}</td><td>{win}</td><td>{inr(r['y_net'])}</td>"
+                f"<td>{inr(r['x_on_y'])}</td><td>{inr(r['n_on_y'])}</td><td>{r['gated']}</td>"
+                f"<td class=\"l\">{which}</td><td>{inr(r['x_on_gated'])}</td>"
+                f"<td>{inr(r['n_on_gated'])}</td><td>{r.get('y_missed', 0)}</td><td>{inr(r['x_all'])}</td><td>{inr(r['n_all'])}</td></tr>")
+    body = "".join(row(r, r["day"]) for r in ab["days"]) + row(ab["total"], "<b>total</b>")
+    t = ab["total"]
+    return f"""<h2>RT-Y gate · paper A/B since {ab["since"]} · {t["y_n"]} of {ab["target"]} RT-Y trades</h2>
+<div class="scroll"><table><thead><tr><th class="l">Session</th><th>Triggers</th><th>RT-Y trades</th><th>RT-Y win</th><th>RT-Y net</th>
+<th>RT-X on RT-Y's trades</th><th>RT-N on RT-Y's trades</th><th>Gated out</th><th class="l">Which gate</th><th>RT-X on gated-out</th><th>RT-N on gated-out</th>
+<th>RT-Y missed</th><th>RT-X all</th><th>RT-N all</th></tr></thead><tbody>{body}</tbody></table></div>
+<p class="dim">RT-Y enters only when more than half of the NSE universe trades beyond its own 09:15 open in the trigger's direction,
+no key pivot sits within 0.5 ATR ahead of the close, and a 09:45 trigger did not gap its own way (gate B); RT-X and RT-N take every trigger. "Gated out" is what the gate kept RT-Y out of, judged by what the ungated books made on those same
+triggers. Closed trades only, net of charges.</p>"""
+
+
+def _exec_cells(a: dict[str, Any] | None, ist: Any, *, how: bool) -> str:
+    """The order trail (exec/resting.py): the signal, the limit placed, its price and the book it
+    rested against, the fill and the wait — the operator's timestamps, entry and exit alike."""
+    n = 6 if how else 5
+    if not a:
+        return '<td class="dim">—</td>' * n
+    book = a.get("bookAtPlace") or {}
+    lim = "market" if a.get("limit") is None else _fmt(a.get("limit"))
+    cells = [
+        f'<td>{ist(a.get("signalTs"))}</td>', f'<td>{ist(a.get("placedTs"))}</td>',
+        f'<td class="l">{lim} · {_fmt(book.get("bid"))}/{_fmt(book.get("ask"))}</td>',
+        f'<td>{ist(a.get("filledTs") or a.get("cancelledTs"))}</td>', f'<td>{_fmt(a.get("waitS"), 1)}</td>',
+    ]
+    if how:
+        cells.append(f'<td class="dim l">{html.escape(str(a.get("outcome") or ""))}</td>')
+    return "".join(cells)
+
+
 def _fmt(v: Any, dp: int = 2) -> str:
     if v is None or v == "":
         return "—"
@@ -276,16 +377,21 @@ def _bucket(decision: str) -> str:
 
 
 _LABEL = {"PAPER_FILLED": "filled", "WALLET_HALTED": "book halted",
-          "REJECTED_BOOK": "stale depth", "NO_INSTRUMENT": "no strike"}
+          "REJECTED_BOOK": "stale depth", "NO_INSTRUMENT": "no strike",
+          "PARENT_HALTED_TWINS_FED": "halted · twins traded", "PARENT_SKIPPED_TWINS_FED": "parent skipped · twins traded",
+          "PARENT_HALTED_TWINS_MISSED": "halted · twins missed", "PARENT_SKIPPED_TWINS_MISSED": "parent skipped · twins missed"}
 
 
-def render(rows: list[dict[str, Any]], ticket: Ticket) -> str:
+def render(rows: list[dict[str, Any]], ticket: Ticket, ab: dict[str, Any] | None = None) -> str:
     """The whole session as two wide, scrollable tables. Everything visible, nothing to click."""
     ist = lambda ts: datetime.fromtimestamp(ts, IST).strftime("%H:%M:%S") if ts else "—"  # noqa: E731
     counts = {"filled": 0, "refused": 0, "blocked": 0}
     for r in rows:
         counts[_bucket(r["decision"])] += 1
-    net = sum(f["net"] or 0 for r in rows for f in r["fills"] if f.get("net") is not None)
+    # a shadow book re-trades another book's entries with one rule changed — counting it would
+    # count those trades twice
+    shadows = {k.value for k in SHADOW_OF}
+    net = sum(f["net"] or 0 for r in rows for f in r["fills"] if f.get("net") is not None and f["book"] not in shadows)
     fills = [(r, f) for r in rows for f in r["fills"]]
 
     head = [
@@ -340,20 +446,25 @@ def render(rows: list[dict[str, Any]], ticket: Ticket) -> str:
         )
 
     fhead = ["Entry time", "Symbol", "Book", "OTM contract", "Lots", "Qty", "Premium", "Option SL",
-             "SL now", "Option targets", "Status", "Exit", "Exit time", "Reason", "Net", "R"]
+             "SL now", "Option targets", "Status", "Exit", "Exit time", "Reason", "Net", "R",
+             "Entry: signal", "Entry: limit placed", "Entry: limit · book", "Entry: filled", "Entry wait s",
+             "Exit: signal", "Exit: limit placed", "Exit: limit · book", "Exit: filled", "Exit wait s", "Exit how"]
     fbody = []
     for r, f in fills:
         net_cls = "neg" if (f.get("net") or 0) < 0 else "pos"
         fbody.append(
             f'<tr><td class="sym">{ist(f["opened_ts"])}</td><td class="sym l">{html.escape(r["symbol"])}</td>'
-            f'<td class="l">{html.escape(f["book"].replace("FUDKII_", "").replace("FUDKII", "PARENT"))}</td>'
+            f'<td class="l">{html.escape(f["book"].replace("FUDKII_", "").replace("FUDKII", "PARENT"))}{" (shadow)" if f["book"] in shadows else ""}</td>'
             f'<td class="l">{html.escape(f["contract"])}</td><td>{f["lots"]}</td><td>{f["qty"]:,}</td>'
             f'<td>{_fmt(f["premium"])}</td><td>{_fmt(f["opt_stop"])}</td><td>{_fmt(f["opt_stop_now"])}</td>'
             f'<td>{" · ".join(_fmt(t) for t in f["opt_targets"]) or "—"}</td>'
             f'<td class="dim">{html.escape(f["status"] or "")}</td><td>{_fmt(f["exit_price"])}</td>'
             f'<td>{ist(f["closed_ts"])}</td><td class="dim l">{html.escape(f["exit_reason"] or "—")}</td>'
             f'<td class="{net_cls}">{_fmt(f["net"], 0)}</td>'
-            f'<td class="{net_cls}">{_fmt(f["r"])}</td></tr>'
+            f'<td class="{net_cls}">{_fmt(f["r"])}</td>'
+            + _exec_cells((f.get("exec") or {}).get("entry"), ist, how=False)
+            + _exec_cells(((f.get("exec") or {}).get("exits") or [None])[-1], ist, how=True)
+            + "</tr>"
         )
 
     skips = [(r, s) for r in rows for s in r["skips"]]
@@ -378,6 +489,7 @@ def render(rows: list[dict[str, Any]], ticket: Ticket) -> str:
   columns.</p></div>
   <div style="display:flex;flex-direction:column;gap:9px;align-items:flex-end">
     <div class="expiry">Temporary link · deletes itself {html.escape(expires)}</div>
+    <a class="dl" href="/temporary.xlsx" download>Download .xlsx</a>
     <div class="tally">
       <div class="tal"><b>{len(rows)}</b><span>signals</span></div>
       <div class="tal"><b>{counts["filled"]}</b><span>filled</span></div>
@@ -394,6 +506,7 @@ def render(rows: list[dict[str, Any]], ticket: Ticket) -> str:
 <h2>Executions · {len(fills)}</h2>
 <div class="scroll"><table><thead><tr>{"".join(f'<th class="l">{h}</th>' if h in ("Symbol", "Book", "Contract", "Reason") else f"<th>{h}</th>" for h in fhead)}</tr></thead>
 <tbody>{"".join(fbody) or '<tr><td colspan="16" class="dim">nothing filled</td></tr>'}</tbody></table></div>
+{render_ab(ab) if ab and ab["days"] else ""}
 <h2>Twins that stood aside · {len(skips)}</h2>
 <div class="scroll"><table><thead><tr><th class="l">Symbol</th><th class="l">Book</th><th class="l">Reason</th></tr></thead>
 <tbody>{skip_html or '<tr><td colspan="3" class="dim">none</td></tr>'}</tbody></table></div>

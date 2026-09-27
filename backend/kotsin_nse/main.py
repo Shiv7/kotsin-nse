@@ -50,9 +50,18 @@ def load_settings() -> Settings:
 
 
 async def serve(settings: Settings) -> None:
+    """The pages open first, the market boots behind them.
+
+    Until 2026-09-25 the web server started only after the whole boot — catalogue, a sequential
+    backfill of ~480 series, the feed — so for about two and a half minutes after every start the
+    browser could not connect at all, and a restart read as "the alerts page is blank and not
+    working". Now the ledger, the books and the saved alerts load first (well under a second), the
+    server opens, and the market boot runs while it serves. A boot that fails still ends the
+    process with its error, exactly as before.
+    """
     engine = Engine(settings)
     app = build_app(engine)
-    await engine.start()
+    await engine.start_core()
 
     config = uvicorn.Config(
         app,
@@ -71,10 +80,26 @@ async def serve(settings: Settings) -> None:
 
     pid_file = settings.data_dir / "engine.pid"
     pid_file.write_text(str(os.getpid()))
-    log.info("serving", url=f"http://{settings.api_host}:{settings.api_port}", pid=os.getpid())
+    log.info("serving", url=f"http://{settings.api_host}:{settings.api_port}", pid=os.getpid(), booting=True)
 
     serve_task = asyncio.create_task(server.serve())
-    await stop.wait()
+    boot = asyncio.create_task(engine.start_market(), name="market-boot")
+    stopped = asyncio.create_task(stop.wait())
+    await asyncio.wait({boot, stopped}, return_when=asyncio.FIRST_COMPLETED)
+    boot_error: BaseException | None = None
+    if boot.done():
+        boot_error = boot.exception()
+        if boot_error is None:
+            log.info("engine.ready", url=f"http://{settings.api_host}:{settings.api_port}")
+            await stopped
+        else:
+            log.error("engine.boot_failed", error=str(boot_error)[:300])
+    else:
+        # stopped mid-boot: abandon the backfill rather than finish it for nobody
+        boot.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await boot
+    stopped.cancel()
     log.info("shutdown.begin")
     server.should_exit = True
     with contextlib.suppress(Exception):
@@ -82,6 +107,8 @@ async def serve(settings: Settings) -> None:
     await engine.stop()
     pid_file.unlink(missing_ok=True)
     log.info("shutdown.done")
+    if boot_error is not None:
+        raise boot_error
 
 
 # -- research ---------------------------------------------------------------------------------------

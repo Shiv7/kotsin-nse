@@ -34,9 +34,20 @@ class Wallet:
     wins: int = 0
     losses: int = 0
     deployed: float = 0.0  # premium currently at risk in open positions
+    #: ``daily_halt or drawdown_halt`` — kept as fields because every reader (pages, gateway,
+    #: ledger rows) reads these two; they are DERIVED by ``_sync_halt`` and never set directly
     halted: bool = False
     halt_reason: str = ""
     updated_ts: float = field(default_factory=time.time)
+    #: The two breakers have different lifetimes, so each has its own slot (operator, 2026-09-26:
+    #: "10% daily-loss halt for each separate wallet, which resets every morning. The 15% drawdown
+    #: halt ... stays on day after day until someone resets that particular wallet"). One shared
+    #: flag let the daily halt hide the drawdown one: ``check_breakers`` returned early on any
+    #: halt and ``rollover`` cleared a DAILY_LOSS reason — so a book that crossed 15% while
+    #: halted for the day woke up tradeable (audit probe: -10.5% then -7% more, halted=False
+    #: next morning).
+    daily_halt: str = ""
+    drawdown_halt: str = ""
 
     @classmethod
     def new(cls, strategy: str, initial: float, now: float | None = None) -> Wallet:
@@ -51,12 +62,32 @@ class Wallet:
             updated_ts=now,
         )
 
+    #: the slots are rebuilt from ``halt_reason`` on load and never stored: the stored row keeps the
+    #: exact shape the previous build reads (``cls(**d)``), so a rollback boots on a ledger this build
+    #: wrote (audit, 2026-09-26: "unexpected keyword argument 'daily_halt'" at boot)
+    _NOT_STORED = ("daily_halt", "drawdown_halt")
+
     @classmethod
     def from_json(cls, d: dict[str, Any]) -> Wallet:
-        return cls(**d)
+        known = {f for f in cls.__dataclass_fields__ if f not in cls._NOT_STORED}
+        w = cls(**{k: v for k, v in d.items() if k in known})
+        if w.halted:
+            # "DRAWDOWN 16.20% · DAILY_LOSS -10.40%", or one of the two, or an older row's lone reason
+            for part in (p.strip() for p in (w.halt_reason or "").split("·")):
+                if part.startswith("DRAWDOWN"):
+                    w.drawdown_halt = part
+                elif part:
+                    w.daily_halt = part
+            if not (w.daily_halt or w.drawdown_halt):
+                w.daily_halt = "DAILY_LOSS"
+        w._sync_halt()
+        return w
 
     def to_json(self) -> dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        for k in self._NOT_STORED:
+            d.pop(k, None)
+        return d
 
     # -- derived ---------------------------------------------------------------------------------
 
@@ -82,16 +113,26 @@ class Wallet:
 
     # -- mutations -------------------------------------------------------------------------------
 
-    def rollover(self, now: float) -> bool:
+    def rollover(self, now: float) -> dict[str, Any] | None:
+        """A new IST day for this wallet, decided by the day the WALLET last recorded — not by a
+        clock the process started with — so a restart after midnight rolls it over as surely as
+        a process that ran through midnight. Idempotent: called at boot and on every housekeeping
+        tick. Today's opening balance is the last closing balance; only the daily breaker clears.
+        Returns the day that closed ``{day, open, close, pnl, dailyHalt, drawdownHalt}``, or None."""
         d = ist_day(now).isoformat()
         if d == self.day:
-            return False
+            return None
+        closed = {
+            "day": self.day, "open": round(self.day_start_balance, 2), "close": round(self.balance, 2),
+            "pnl": round(self.balance - self.day_start_balance, 2), "dailyHalt": self.daily_halt,
+            "drawdownHalt": self.drawdown_halt,
+        }
         self.day = d
         self.day_start_balance = self.balance
-        if self.halted and self.halt_reason.startswith("DAILY_LOSS"):
-            self.halted, self.halt_reason = False, ""
+        self.daily_halt = ""
+        self._sync_halt()
         self.updated_ts = now
-        return True
+        return closed
 
     def reserve(self, amount: float, now: float) -> bool:
         """Ask whether this much can be deployed, and deploy it if so. A question asked BEFORE
@@ -140,15 +181,24 @@ class Wallet:
         self.updated_ts = now
 
     def check_breakers(self, limits: RiskLimits, now: float) -> str | None:
-        """Trip a halt on a breached limit. Returns the reason only when *newly* tripped, so the
-        caller alerts once rather than on every tick."""
-        if self.halted:
+        """Trip either breaker on a breached limit — BOTH are evaluated every time, whatever is
+        already halted, so the drawdown halt is recorded even on a day the daily one tripped
+        first. Returns the reasons newly tripped by this call (to alert once), else None."""
+        new = []
+        if not self.daily_halt and self.day_pnl_pct <= -limits.daily_loss_limit_pct:
+            self.daily_halt = f"DAILY_LOSS {self.day_pnl_pct:.2f}%"
+            new.append(self.daily_halt)
+        if not self.drawdown_halt and self.drawdown_pct >= limits.max_drawdown_pct:
+            self.drawdown_halt = f"DRAWDOWN {self.drawdown_pct:.2f}%"
+            new.append(self.drawdown_halt)
+        if not new:
             return None
-        if self.day_pnl_pct <= -limits.daily_loss_limit_pct:
-            self.halted, self.halt_reason = True, f"DAILY_LOSS {self.day_pnl_pct:.2f}%"
-        elif self.drawdown_pct >= limits.max_drawdown_pct:
-            self.halted, self.halt_reason = True, f"DRAWDOWN {self.drawdown_pct:.2f}%"
-        else:
-            return None
+        self._sync_halt()
         self.updated_ts = now
-        return self.halt_reason
+        return " · ".join(new)
+
+    def _sync_halt(self) -> None:
+        """``halted``/``halt_reason`` from the two slots — the drawdown (the one that persists)
+        named first."""
+        reasons = [r for r in (self.drawdown_halt, self.daily_halt) if r]
+        self.halted, self.halt_reason = bool(reasons), " · ".join(reasons)
