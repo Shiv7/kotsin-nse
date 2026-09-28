@@ -16,6 +16,7 @@ at 09:16 and lost the minute that often holds the day's extreme; a bar builder t
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from functools import lru_cache
@@ -193,6 +194,61 @@ def bucket_end(segment: Segment, bucket: float, tf: str) -> float:
 
 def is_boundary(segment: Segment, ts: float, tf: str) -> bool:
     return bucket_start(segment, ts, tf) == ts
+
+
+#: An NSE stock trades continuously until the closing auction, which starts at 15:15: its 15:15 bar
+#: is one auction print (and, fetched after the close, the whole auction's volume)
+NSE_EQ_CONTINUOUS_UNTIL = time(15, 15)
+
+
+def in_session(segment: Segment, ts: float) -> bool:
+    """Is ``ts`` inside the segment's session — the open included, the close not."""
+    day = ist_day(ts)
+    return session_open_ts(segment, day) <= ts < session_close_ts(segment, day)
+
+
+def on_session_grid(segment: Segment, ts: float, tf: str, *, until: time | None = None) -> bool:
+    """Is ``ts`` the start of a real ``tf`` bucket: at or after the session open, before the close
+    (or ``until``), and exactly on the grid anchored at the open.
+
+    A broker ROW is not judged by this: 5paisa stamps a 30m candle with the minute of its first
+    trade (09:16, 10:46; the closing auction 15:28), and such a row IS its bucket — snap it with
+    ``bucket_start`` after ``in_session``. This is for bars already on the grid."""
+    step = TF_SECONDS[tf]
+    day = ist_day(ts)
+    open_ts = session_open_ts(segment, day)
+    end = from_ist(datetime.combine(day, until, tzinfo=IST)) if until is not None else session_close_ts(segment, day)
+    return open_ts <= ts < end and (ts - open_ts) % step == 0
+
+
+def last_bucket_start(segment: Segment, d: date, tf: str, *, until: time | None = None) -> float:
+    """The last ``tf`` bucket of ``d``'s session that starts before the close (or ``until``):
+    14:45 for an NSE stock's continuous 30m session, 15:15 for its future."""
+    step = TF_SECONDS[tf]
+    open_ts = session_open_ts(segment, d)
+    end = from_ist(datetime.combine(d, until, tzinfo=IST)) if until is not None else session_close_ts(segment, d)
+    return open_ts + ((end - open_ts - 1) // step) * step
+
+
+def session_buckets_back(
+    segment: Segment, last: float, n: int, tf: str, calendar: TradingCalendar, *, until: time | None = None,
+    prev_day: Callable[[date], date] | None = None,
+) -> list[int]:
+    """The ``n`` bucket starts ending at ``last`` (inclusive), oldest first, walking back through
+    the session grid and across weekends and holidays — the slots a reading of ``n`` bars must hold.
+    ``prev_day`` replaces the (NSE) calendar's previous trading day for a segment it does not
+    describe — MCX trades evenings on some NSE holidays and closes on some NSE sessions."""
+    step = TF_SECONDS[tf]
+    out = [int(last)]
+    d = ist_day(last)
+    cur = last
+    while len(out) < n:
+        cur -= step
+        if cur < session_open_ts(segment, d):
+            d = prev_day(d) if prev_day is not None else calendar.previous_trading_day(d)
+            cur = last_bucket_start(segment, d, tf, until=until)
+        out.append(int(cur))
+    return out[::-1]
 
 
 @lru_cache(maxsize=64)

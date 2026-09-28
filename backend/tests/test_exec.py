@@ -65,7 +65,9 @@ def test_walk_stops_at_the_ten_percent_ceiling():
 
 
 def test_stale_book_refuses_to_fill(option):
-    m = PaperMatcher(CostModel(Settings(_env_file=None)), max_book_age_ms=1000)
+    # both windows at 1 s: the 09:00-09:55 open allows 10 s by default, and this test failed whenever
+    # the suite ran inside it (28 Sep, 09:3x)
+    m = PaperMatcher(CostModel(Settings(_env_file=None)), max_book_age_ms=1000, open_max_book_age_ms=1000)
     with pytest.raises(NoBook):
         m.fill(_intent(option), _book(age_s=5))
 

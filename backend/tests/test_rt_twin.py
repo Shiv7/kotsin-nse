@@ -180,21 +180,31 @@ async def test_a_restored_open_position_is_subscribed_even_when_off_the_shortlis
 # -- the dried-volume entry gate (RT-X and RT-Y only) -------------------------------------------
 
 
-def _bars30(symbol: str, code: str, vols: list[float]) -> list:
-    """30m bars ending at 09:15 IST today, in the store's own bucket-start convention."""
-    from datetime import datetime
+def _slots30(n: int, prev_last: str = "14:45") -> list[float]:
+    """``n`` 30m bucket starts ending at 09:15 IST today, the ones before it on the previous
+    session's grid — a stock's continuous session ends 14:45, a future's 15:15. A volume reading
+    reads its eight bars by slot, so the bars must sit where a real session puts them."""
+    from datetime import datetime, timedelta
+    from datetime import time as dtime
 
-    from kotsin_nse.bars.unified import BarSource, UnifiedBar
     from kotsin_nse.market.session import IST, ist_today
 
     t = ist_today()
+    prev = t - timedelta(days=1)
+    while prev.weekday() >= 5:  # the test settings hold no holiday list: weekdays trade
+        prev -= timedelta(days=1)
     end = datetime(t.year, t.month, t.day, 9, 15, tzinfo=IST).timestamp()
-    out = []
-    for i, v in enumerate(vols):
-        ts = end - (len(vols) - 1 - i) * 1800
-        out.append(UnifiedBar(symbol=symbol, scrip_code=code, tf="30m", ts=ts, open=100.0, high=101.0,
-                              low=99.0, close=100.0, volume=v, source=BarSource.REST, complete=True))
-    return out
+    last = datetime.combine(prev, dtime.fromisoformat(prev_last), tzinfo=IST).timestamp()
+    return [end if back == 0 else last - (back - 1) * 1800 for back in range(n - 1, -1, -1)]
+
+
+def _bars30(symbol: str, code: str, vols: list[float]) -> list:
+    """30m bars ending at 09:15 IST today, in the store's own bucket-start convention."""
+    from kotsin_nse.bars.unified import BarSource, UnifiedBar
+
+    return [UnifiedBar(symbol=symbol, scrip_code=code, tf="30m", ts=ts, open=100.0, high=101.0,
+                       low=99.0, close=100.0, volume=v, source=BarSource.REST, complete=True)
+            for ts, v in zip(_slots30(len(vols)), vols, strict=True)]
 
 
 async def _skips(e: Engine) -> dict[str, dict]:
@@ -222,7 +232,7 @@ async def test_dried_equity_volume_skips_rt_x_and_rt_y_but_not_the_control_book(
 async def test_a_dry_front_future_skips_even_when_the_equity_bar_is_live(settings):
     """SBILIFE 2026-09-23 09:45: equity surge 1.48 / 2.51 but the SEP future 0.79 / 0.51 closing on
     its daily S1 — the future is read too, from the broker's candles, up to the trigger bar only."""
-    from kotsin_nse.market.session import to_ist
+    from kotsin_nse.market.session import TradingCalendar, session_buckets_back, to_ist
 
     e = await _paper(settings)
     try:
@@ -235,8 +245,12 @@ async def test_a_dry_front_future_skips_even_when_the_equity_bar_is_live(setting
 
         async def candles(inst, tf, start, end):
             asked.append((inst.scrip_code, tf))
-            rows = [{"dt": to_ist(b.ts).strftime("%Y-%m-%dT%H:%M:00"), "o": 1, "h": 1, "l": 1, "c": 1, "v": v}
-                    for b, v in zip(eq, [10_000.0] * 6 + [5_100.0, 7_900.0], strict=True)]
+            # the future's own grid: it trades to 15:30, so the session before ends on a 15:15 bar
+            # the future's own grid, every slot a reading or its ATR reads (it trades to 15:30, so the
+            # session before ends on a 15:15 bar) — no gap for the 1m fill to mend
+            slots = session_buckets_back(Segment.NSE_FO, eq[-1].ts, 15, "30m", TradingCalendar())
+            rows = [{"dt": to_ist(ts).strftime("%Y-%m-%dT%H:%M:00"), "o": 1, "h": 1, "l": 1, "c": 1, "v": v}
+                    for ts, v in zip(slots, [10_000.0] * 13 + [5_100.0, 7_900.0], strict=True)]
             # the partial bar after the trigger, which must not be read as T
             rows.append({"dt": to_ist(eq[-1].ts + 1800).strftime("%Y-%m-%dT%H:%M:00"), "o": 1, "h": 1, "l": 1, "c": 1, "v": 90_000.0})
             return rows

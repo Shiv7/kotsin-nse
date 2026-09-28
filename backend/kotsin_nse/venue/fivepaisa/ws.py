@@ -145,6 +145,9 @@ class FivePaisaFeed:
         self.on_oi = on_oi
         self.health = FeedHealth()
         self._desired: dict[str, dict[str, Instrument]] = {"mf": {}, "md": {}, "oi": {}}
+        #: channel -> code -> when the code last JOINED the desired set: a value held from before is
+        #: from an earlier subscription, and nothing since says it still stands
+        self._since: dict[str, dict[str, float]] = {"mf": {}, "md": {}, "oi": {}}
         self._ws: Any = None
         self._stop = asyncio.Event()
         self._lock = asyncio.Lock()
@@ -155,14 +158,26 @@ class FivePaisaFeed:
 
     async def subscribe(self, channel: str, instruments: list[Instrument]) -> None:
         fresh = [i for i in instruments if i.scrip_code not in self._desired[channel]]
+        now = time.time()
         for i in fresh:
             self._desired[channel][i.scrip_code] = i
+            self._since.setdefault(channel, {})[i.scrip_code] = now
         self.health.subscriptions = {k: len(v) for k, v in self._desired.items()}
         if fresh and self._ws is not None:
             await self._send_batched(channel, "s", fresh)
 
+    def is_subscribed(self, channel: str, scrip_code: str) -> bool:
+        """Is ``scrip_code`` on ``channel`` in the desired set — what every (re)connect subscribes."""
+        return scrip_code in self._desired.get(channel, {})
+
+    def subscribed_since(self, channel: str, scrip_code: str) -> float | None:
+        """When ``scrip_code`` last joined ``channel``'s desired set; None when it is not on it."""
+        return self._since.get(channel, {}).get(scrip_code) if self.is_subscribed(channel, scrip_code) else None
+
     async def unsubscribe(self, channel: str, instruments: list[Instrument]) -> None:
         gone = [i for i in instruments if self._desired[channel].pop(i.scrip_code, None)]
+        for i in gone:
+            self._since.get(channel, {}).pop(i.scrip_code, None)
         self.health.subscriptions = {k: len(v) for k, v in self._desired.items()}
         if gone and self._ws is not None:
             await self._send_batched(channel, "u", gone)

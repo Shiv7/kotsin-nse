@@ -21,7 +21,6 @@ import asyncio
 import json
 import os
 import re
-import statistics
 import time
 from bisect import bisect_right
 from collections.abc import MutableMapping, Sequence
@@ -39,7 +38,7 @@ from .alerts.engine import AlertEngine
 from .bars.aggregator import Aggregator
 from .bars.daily import MIN_DAILY_BARS, REPAIR_BATCH, DailyCache, is_official, previous_session
 from .bars.daily import audit as audit_daily
-from .bars.indicators import atr, dried_volume, volume_surges
+from .bars.indicators import atr, dried_volume
 from .bars.micro import MicroAggregator
 from .bars.periods import monthly, previous_complete, weekly
 from .bars.pivots import (
@@ -54,6 +53,7 @@ from .bars.pivots import (
 from .bars.store import BarStore
 from .bars.unified import BarSource, UnifiedBar
 from .bars.verify import BarReconciler
+from .bars.volume_read import MarketVolume, VolBar, VolumeReading, market_volume, read_volume
 from .bus import Bus, Topic
 from .committee.service import CommitteeService
 from .config import Segment, Settings
@@ -115,15 +115,19 @@ from .market.iv import (
 )
 from .market.session import (
     IST,
+    NSE_EQ_CONTINUOUS_UNTIL,
     TF_SECONDS,
     TradingCalendar,
     bucket_start,
+    in_session,
     is_open,
     ist_day,
     ist_hm,
     ist_naive_to_ts,
     ist_today,
+    on_session_grid,
     past_force_flat,
+    session_buckets_back,
     session_open_ts,
     to_ist,
 )
@@ -197,6 +201,20 @@ LEG_ENSURE_TIMEOUT_S = 2.0
 #: changes, and a quiet put's perfectly good book ages into "stale" (TATASTEEL, 2026-09-25).
 HELD_QUOTE_MAX_AGE_S = 20.0
 HELD_QUOTE_POLL_S = 5.0
+#: A broker snapshot (V1/MarketFeed) carries no bid or ask; it may CONFIRM a held two-sided quote as
+#: current only while the feed has spoken within this many seconds (``_still_stands``)
+FEED_LIVE_S = 5.0
+#: at a trigger, how long the choice may wait for its candidate strikes' first live quote — a strike
+#: subscribed a moment ago has none until the feed's first frame (``_await_fresh_quotes``)
+QUOTE_WAIT_S = 5.0
+QUOTE_POLL_S = 0.1
+#: the 30m futures slots ending at a trigger that must be real bars: the volume reading's eight and the
+#: futures leg's 15-bar ATR (``_fill_fut_gaps``)
+FUT_GAP_SLOTS = 15
+#: the after-close audit of the day's 30m bars (``_audit_bars``), IST — NSE closes 15:30
+BAR_AUDIT_HM = "15:40"
+#: the audit alerts when more bars than this share (or this many) had to be repaired or added
+BAR_AUDIT_ALERT_SHARE, BAR_AUDIT_ALERT_MIN = 0.01, 5
 #: a feed with no frame for this long in an open session is dead, whatever its socket says
 FEED_SILENCE_S = 15.0
 
@@ -538,6 +556,21 @@ class Engine:
         self._zone_cache: dict[str, tuple[str, list[Zone]]] = {}
         #: the front future's candles per symbol for the current trigger bar (see _fut_context)
         self._fut_cache: dict[str, tuple[int, dict[str, Any] | None]] = {}
+        #: the choice's wait for fresh quotes (0 = never wait: the replay's frozen clock)
+        self.quote_wait_s = QUOTE_WAIT_S
+        #: snapshot rows with no bid/ask that confirmed / kept a held quote, and confirmed a held book
+        self.snapshot_confirmed = self.snapshot_kept = self.snapshot_book_confirmed = 0
+        #: snapshot rows that marked an open position's contract from the broker's last price
+        self.snapshot_held_marked = 0
+        #: code -> when a snapshot's last trade contradicted the held quote: that quote is known old,
+        #: and a choice waiting for fresh quotes waits for a newer one (``_await_fresh_quotes``)
+        self._quote_outdated: dict[str, float] = {}
+        #: the market-wide volume check, per 30m bar (``_market_volume``)
+        self._vol_market: dict[int, MarketVolume] = {}
+        #: the after-close bar audit (``_audit_bars``): the day it last ran, its task, its result
+        self._bar_audit_day = ""
+        self._bar_audit_task: asyncio.Task[None] | None = None
+        self._bar_audit: dict[str, Any] | None = None
         #: every signal handled today, by id — what an operator take re-enters from
         self._signals_today: dict[str, Signal] = {}
         #: market breadth measured at each trigger, by signal id — the RT-Y gate reads the number the
@@ -2547,18 +2580,10 @@ class Engine:
         20 names have a bar today (a gate reading None never blocks)."""
         start = session_open_ts(Segment.NSE_EQ, ist_today())
         agree = n = 0
-        mkt_t: list[float] = []
-        mkt_t1: list[float] = []
         for sym, und in self.underlyings.items():
             if und.segment is Segment.MCX_FO:
                 continue
             recent = self.store.bars(sym, DECISION_TF, 16)
-            if at_ts is not None and recent and int(recent[-1].ts) == int(at_ts):
-                # the market's own volume at the trigger's bar: is the whole tape quiet, or this stock?
-                v_t, v_t1, _ = volume_surges(self._continuous_volumes(sym, recent)[-14:], window=6, floor=1000.0)
-                if v_t and v_t1:
-                    mkt_t.append(v_t)
-                    mkt_t1.append(v_t1)
             today = [b for b in recent if b.ts >= start]
             forming = self.store.forming(sym, DECISION_TF)
             if forming is not None and forming.ts >= start and (not today or forming.ts > today[-1].ts):
@@ -2569,9 +2594,14 @@ class Engine:
             n += 1
             agree += (px > today[0].open) if direction is Direction.BULLISH else (px <= today[0].open)
         out: dict[str, Any] = {"share": round(agree / n, 3) if n >= 20 else None, "agree": agree, "names": n, "direction": direction.value, "ts": time.time()}
-        if len(mkt_t) >= 20:
-            out["mktSurgeT"] = round(statistics.median(mkt_t), 3)
-            out["mktSurgeT1"] = round(statistics.median(mkt_t1), 3)
+        if at_ts is not None:
+            # the market's own volume at the trigger's bar: is the whole tape quiet, or this stock?
+            mv = self._market_volume(int(at_ts))
+            if mv.names - mv.doubtful >= 20 and mv.median_t is not None and mv.median_t1 is not None:
+                out["mktSurgeT"] = round(mv.median_t, 3)
+                out["mktSurgeT1"] = round(mv.median_t1, 3)
+            if mv.alarm:
+                out["mktVolAlarm"] = mv.alarm
         return out
 
     def trigger_context(self, sig: Signal) -> dict[str, Any]:
@@ -2601,11 +2631,13 @@ class Engine:
         today = ist_today()
         start = session_open_ts(seg, today)
         out["openBar"] = int(sig.ts) == int(start)
-        recent = self.store.bars(sig.symbol, DECISION_TF, 16)
+        recent = self.store.bars(sig.symbol, DECISION_TF, 40)
         if recent and int(recent[-1].ts) == int(sig.ts):
-            v_t, v_t1, _ = volume_surges(self._continuous_volumes(sig.symbol, recent)[-14:], window=6, floor=1000.0)
-            if v_t is not None and v_t1 is not None:
-                out["volSurgeT"], out["volSurgeT1"] = round(v_t, 3), round(v_t1, 3)
+            vr = self._volume_reading(sig.symbol, sig.ts, recent)
+            if vr.ok:
+                out["volSurgeT"], out["volSurgeT1"] = round(vr.surge_t, 3), round(vr.surge_t1, 3)  # type: ignore[arg-type]
+            else:
+                out["volDoubt"] = vr.doubt
         dailies = list(self.store.bars(sig.symbol, "1d", 40))
         prev = previous_session(dailies, today)
         first = next((b for b in self.store.bars(sig.symbol, DECISION_TF, 20) if b.ts >= start), None)
@@ -2880,7 +2912,8 @@ class Engine:
             # the trigger bar and the underlying's path since, for the sparkline
             bars30 = self.store.bars(sgn["symbol"], DECISION_TF, 80)
             candle = next(({"o": b.open, "h": b.high, "l": b.low, "c": b.close, "v": b.volume} for b in bars30 if int(b.ts) == int(sgn["ts"])), None)
-            s_t, s_t1, base = volume_surges(self._continuous_volumes(sgn["symbol"], [b for b in bars30 if b.ts <= sgn["ts"]]), window=6, floor=1000.0)
+            vr = self._volume_reading(sgn["symbol"], sgn["ts"], [b for b in bars30 if b.ts <= sgn["ts"]])
+            s_t, s_t1, base = vr.surge_t, vr.surge_t1, vr.baseline
             m1 = [b for b in self.store.bars(sgn["symbol"], "1m", 400) if b.ts >= sgn["ts"] - 1800]
             step = max(1, len(m1) // 120)
             spark = [[int(b.ts), b.close] for b in m1[::step]]
@@ -3000,7 +3033,7 @@ class Engine:
                 "triggerDirection": sgn["direction"], "describes": "fade" if vs is not sgn else "trigger",
                 "stopPct": round(stop_pct, 2), "confluence": conf, "evidence": sgn.get("evidence") or {}, "gates": sgn.get("gates") or [],
                 "parentDecision": sgn.get("decision"), "parentReason": sgn.get("decision_reason"),
-                "candle": candle, "surgeT": s_t, "surgeT1": s_t1, "baseline": base, "spark": spark,
+                "candle": candle, "surgeT": s_t, "surgeT1": s_t1, "baseline": base, "volumeDoubt": vr.doubt or None, "spark": spark,
                 "route": route, "skip": skip, "operator": operator, "fade": fade, "state": state,
                 "position": ps, "trade": trades_by_pos.get(ps["id"]) if ps else None, "exits": exits_by_pos.get(ps["id"], []) if ps else [],
                 "live": live, "rtCard": rt_card, "pros": pros, "cons": cons, "cta": cta, "breadth": breadth, "books": books_row,
@@ -3481,7 +3514,8 @@ class Engine:
         from .market.session import to_ist
 
         eq_bars = self.store.bars(underlying.symbol, DECISION_TF, 60)
-        s_t, s_t1, _ = volume_surges(self._continuous_volumes(underlying.symbol, eq_bars), window=6, floor=1000.0)
+        vr = self._volume_reading(underlying.symbol, bar.ts, [b for b in eq_bars if b.ts <= bar.ts])
+        s_t, s_t1 = (vr.surge_t, vr.surge_t1) if vr.ok else (None, None)
         legs = [Leg(
             "equity", bar.open, bar.high, bar.low, bar.close, atr(eq_bars, 14) or 0.0,
             self._pivot_points(underlying.symbol), s_t, s_t1,
@@ -3498,7 +3532,8 @@ class Engine:
             max(b["h"] - b["l"], abs(b["h"] - a["c"]), abs(b["l"] - a["c"]))
             for a, b in zip(rows[-15:-1], rows[-14:], strict=False)
         ]
-        f_t, f_t1, _ = volume_surges([float(r["v"]) for r in rows], window=6, floor=1000.0)
+        fr = self._fut_volume_reading(rows, bar.ts)
+        f_t, f_t1 = (fr.surge_t, fr.surge_t1) if fr.ok else (None, None)
         today = ist_today()
         points: list[PivotPoint] = []
         got = levels_from_candles(ctx["rows1d"], today, min_volume=0.0)
@@ -3537,9 +3572,82 @@ class Engine:
         except Exception as exc:  # noqa: BLE001 — a route input must never fail the fill path
             log.warning("fut.context_unknown", symbol=underlying.symbol, error=str(exc)[:120])
             return None
-        ctx = {"front": front, "bars30": rows30, "rows1d": rows1d}
-        self._fut_cache[underlying.symbol] = (bucket, ctx)
+        # the future's rows on its session grid (its ATR, candle and volume all read them), and any
+        # bucket the broker returned nothing for rebuilt from the day's 1m candles
+        clean = self._snap_fut_rows(front, rows30)
+        fill_failed = False
+        if bucket:
+            clean, fill_failed = await self._fill_fut_gaps(front, clean, bucket)
+        ctx = {"front": front, "bars30": clean, "rows1d": rows1d}
+        if not fill_failed:  # a 1m call that failed is asked again by the next reader of this bar
+            self._fut_cache[underlying.symbol] = (bucket, ctx)
         return ctx
+
+    @staticmethod
+    def _snap_fut_rows(front: Instrument, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """The future's 30m rows on its session grid. 5paisa stamps a candle with the minute of its
+        first trade — TATAPOWER SEP 2026-09-07 ``10:46`` (146,450 shares) IS the 10:45 bucket; 19 %
+        of the futures rows in the Aug–Sep history are stamped so — and the readers compare ``dt``
+        against the trigger bucket as a string, so each in-session row is snapped to its bucket
+        start, ``dt`` rewritten (a bucket's own on-grid row wins, should both come). Rows outside the
+        session (a future trades 09:15–15:30) are not bars."""
+        by: dict[int, tuple[bool, dict[str, Any]]] = {}
+        for r in rows:
+            ts = ist_naive_to_ts(str(r["dt"]))
+            if not in_session(front.segment, ts):
+                continue
+            b = int(bucket_start(front.segment, ts, DECISION_TF))
+            on_grid = int(ts) == b
+            held = by.get(b)
+            if held is not None and held[0] and not on_grid:
+                continue
+            by[b] = (on_grid, r if on_grid else {**r, "dt": to_ist(b).strftime("%Y-%m-%dT%H:%M:%S"), "stamped": str(r["dt"])})
+        return [by[b][1] for b in sorted(by)]
+
+    async def _fill_fut_gaps(self, front: Instrument, rows: list[dict[str, Any]], t_ts: int) -> tuple[list[dict[str, Any]], bool]:
+        """A bucket among the ``FUT_GAP_SLOTS`` ending at the trigger (the volume reading's eight
+        and the futures leg's 15-bar ATR) that the broker returned NO row for — 0.46 % of the
+        session slots in the Aug–Sep history, once the first-trade stamps are snapped — is rebuilt
+        from that day's 1m candles, whose sums reproduce the broker's 30m bars (670 of 670 on
+        23–24 Sep). A slot the 1m candles hold nothing for either (no trade at all) stays missing
+        and the reading is doubtful rather than shifted. Returns the rows and whether a 1m call
+        failed (the caller then does not cache the context, so the next reader asks again)."""
+        need = session_buckets_back(front.segment, t_ts, FUT_GAP_SLOTS, DECISION_TF, self.calendar)
+        have = {int(ist_naive_to_ts(str(r["dt"]))): r for r in rows}
+        missing = {s for s in need if s not in have}
+        if not missing:
+            return rows, False
+        filled, failed = 0, False
+        for d in sorted({ist_day(s) for s in missing}):
+            try:
+                async with self._fut_sem:
+                    m1 = await self.rest.candles(front, "1m", d.isoformat(), d.isoformat())
+            except Exception as exc:  # noqa: BLE001 - a gap unfilled is a doubtful reading, never an error
+                failed = True
+                log.warning("fut.gap_fill_failed", symbol=front.symbol, day=d.isoformat(), error=str(exc)[:120])
+                continue
+            built: dict[int, dict[str, Any]] = {}
+            for r in m1:  # oldest first: the bucket's open is its first minute, its close its last
+                ts = ist_naive_to_ts(str(r["dt"]))
+                if not in_session(front.segment, ts):
+                    continue
+                b = int(bucket_start(front.segment, ts, DECISION_TF))
+                if b not in missing:
+                    continue
+                row = built.get(b)
+                if row is None:
+                    built[b] = {"dt": to_ist(b).strftime("%Y-%m-%dT%H:%M:%S"), "o": float(r["o"]), "h": float(r["h"]),
+                                "l": float(r["l"]), "c": float(r["c"]), "v": float(r["v"]), "src": "1m"}
+                else:
+                    row["h"], row["l"] = max(row["h"], float(r["h"])), min(row["l"], float(r["l"]))
+                    row["c"] = float(r["c"])
+                    row["v"] += float(r["v"])
+            for b, row in built.items():
+                have[b] = row
+                filled += 1
+        log.info("fut.gaps_filled", symbol=front.symbol, missing=len(missing), filled=filled,
+                 slots=[to_ist(s).strftime("%d %b %H:%M") for s in sorted(missing)][:6])
+        return [have[k] for k in sorted(have)], failed
 
     def _segment_of(self, symbol: str) -> Segment | None:
         """The underlying's segment, from the live universe. None when the name is not in it —
@@ -3581,39 +3689,175 @@ class Engine:
         """``surge_T`` / ``surge_T-1`` of the last two closed 30m bars against the T-2…T-7 baseline
         (``volume_surges``, floor 1000) — for the underlying from the store, and for its front
         future from the broker's candles, since the engine holds no futures bars. A leg the data
-        cannot answer for is left out: absent, not dried. Read at twin time only, so the parent's
-        fill path never waits on it."""
-        from .market.session import to_ist
-
+        cannot answer for is left out: absent, not dried — and so is a DOUBTFUL one
+        (``_volume_reading``: a missing, zero or flagged bar, or a market-wide alarm at the bar),
+        logged with its reason. Read at twin time only, so the parent's fill path never waits on it."""
         out: dict[str, tuple[float, float]] = {}
-        eq = self.store.bars(underlying.symbol, DECISION_TF, 14)
-        s_t, s_t1, _ = volume_surges(self._continuous_volumes(underlying.symbol, eq), window=6, floor=1000.0)
-        if s_t is not None and s_t1 is not None:
-            out["equity"] = (s_t, s_t1)
-        if underlying.segment is not Segment.NSE_EQ or not eq:
+        eq = self.store.bars(underlying.symbol, DECISION_TF, 40)
+        if not eq:
+            return out
+        t_ts = eq[-1].ts
+        vr = self._volume_reading(underlying.symbol, t_ts, eq)
+        if vr.ok:
+            out["equity"] = (vr.surge_t, vr.surge_t1)  # type: ignore[assignment]
+        else:
+            log.warning("volume.doubtful", symbol=underlying.symbol, leg="equity", why=vr.doubt)
+        if underlying.segment is not Segment.NSE_EQ:
             return out
         ctx = await self._fut_context(underlying)
         if ctx is None:
             return out
-        trigger = to_ist(eq[-1].ts).strftime("%Y-%m-%dT%H:%M")
-        # bars up to and including the trigger bar; the partial bar after it is not a reading
-        vols = [float(r["v"]) for r in ctx["bars30"] if str(r["dt"])[:16] <= trigger]
-        f_t, f_t1, _ = volume_surges(vols, window=6, floor=1000.0)
-        if f_t is not None and f_t1 is not None:
-            out["future"] = (f_t, f_t1)
+        fr = self._fut_volume_reading(ctx["bars30"], t_ts)
+        if fr.ok:
+            out["future"] = (fr.surge_t, fr.surge_t1)  # type: ignore[assignment]
+        else:
+            log.warning("volume.doubtful", symbol=underlying.symbol, leg="future", why=fr.doubt)
         return out
 
-    def _continuous_volumes(self, symbol: str, bars: Sequence[UnifiedBar]) -> list[float]:
-        """Volumes of the 30m bars that were continuously traded. An NSE stock's 15:15 bar is now
-        the closing auction — one print, and the broker's candle carries almost none of its volume
-        (HEROMOTOCO 2026-09-24: 55 shares, against 354,142 in the auction print on the tape). As
-        the bar BEFORE a 09:45 trigger it read 0.00x, so every 09:45 dried-volume check tested
-        the trigger bar alone (all four dried skips in the ledger: PNBHOUSING and RELIANCE, RT-X
-        and RT-Y, "0.53/0.00", "0.40/0.00"). Futures and MCX trade on through 15:30: unchanged."""
+    def _volume_reading(self, symbol: str, t_ts: float, bars: Sequence[UnifiedBar] | None = None) -> VolumeReading:
+        """The checked 30m volume reading of ``symbol`` at the bar starting ``t_ts``
+        (``bars/volume_read.py``): the eight session slots ending there, none missing, zero or
+        flagged — else doubtful, with the reason, and it decides nothing.
+
+        An NSE stock counts only its continuous session (09:15 … 14:45): its 15:15 bar is the
+        closing auction (HEROMOTOCO 2026-09-24: 55 shares in the broker's candle against 354,142
+        on the tape, so every 09:45 dried check once tested the trigger bar alone), and a day
+        fetched after the close also carries a 15:45 post-close bar (2026-09-25, HDFCBANK 3,203
+        shares) that read 0.00x as the bar before the next 09:45 trigger — 37 of 208 names read
+        "dried" on 2026-09-28. Futures, indices and MCX count their whole session. A bar the whole
+        market reads as broken (``_market_volume``) makes every reading at it doubtful."""
         inst = self.underlyings.get(symbol)
-        if inst is None or inst.segment is not Segment.NSE_EQ or inst.kind is not InstrumentKind.EQUITY:
-            return [b.volume for b in bars]
-        return [b.volume for b in bars if ist_hm(b.ts) != "15:15"]
+        seg = inst.segment if inst is not None else Segment.NSE_EQ
+        stock = inst is None or (seg is Segment.NSE_EQ and inst.kind is InstrumentKind.EQUITY)
+        if bars is None:
+            bars = self.store.bars(symbol, DECISION_TF, 40)
+        prev_day = None
+        if seg is Segment.MCX_FO:
+            # The holiday list is NSE's, and MCX trades evenings on some NSE holidays: a day before
+            # T counts as a session if the store holds MCX bars on it, OR the calendar says it
+            # trades — so a session missing from the store is a MISSING one (doubtful), never
+            # skipped over onto the session before it (review, 2026-09-28).
+            days = {ist_day(b.ts) for b in bars}
+
+            def prev_day(d: date) -> date:
+                cur = d - timedelta(days=1)
+                for _ in range(30):
+                    if cur in days or self.calendar.is_trading_day(cur):
+                        return cur
+                    cur -= timedelta(days=1)
+                return cur
+        r = read_volume(
+            [VolBar(int(b.ts), float(b.volume), str(b.extra.get("volume_doubt") or "")) for b in bars],
+            segment=seg, t_ts=t_ts, calendar=self.calendar, until=NSE_EQ_CONTINUOUS_UNTIL if stock else None,
+            prev_day=prev_day,
+        )
+        if r.ok and stock and seg is Segment.NSE_EQ:
+            mv = self._market_volume(int(t_ts))
+            if mv.alarm:
+                return VolumeReading(doubt=f"market-wide volume alarm at this bar: {mv.alarm}", kind="market")
+        return r
+
+    def _fut_volume_reading(self, rows: list[dict[str, Any]], t_ts: float) -> VolumeReading:
+        """The front future's reading at the trigger's bar, from the broker's candles — the same
+        checks; a future trades to 15:30, so its 15:15 bar is a real (15-minute) bar."""
+        bars = [VolBar(int(ist_naive_to_ts(str(r["dt"]))), float(r.get("v") or 0.0)) for r in rows]
+        return read_volume(bars, segment=Segment.NSE_FO, t_ts=t_ts, calendar=self.calendar)
+
+    def _market_volume(self, ts: int) -> MarketVolume:
+        """The market-wide check at one bar, once: every NSE stock's own reading there. A bar the
+        whole tape reads as impossible — a median T-1 of 0.002 (2026-09-28 09:45), or a third of
+        the names doubtful — is a data fault; it alarms once and no reading at it decides."""
+        if not on_session_grid(Segment.NSE_EQ, ts, DECISION_TF, until=NSE_EQ_CONTINUOUS_UNTIL) or ist_day(ts) != ist_today():
+            # the 15:15 auction bar is no reading, and an older session's bars are outside the
+            # 40-bar windows read here: not judged — no alarm, nothing cached
+            return MarketVolume(ts=ts)
+        hit = self._vol_market.get(ts)
+        if hit is not None:
+            return hit
+        readings = []
+        for sym, und in self.underlyings.items():
+            if und.segment is not Segment.NSE_EQ or und.kind is not InstrumentKind.EQUITY:
+                continue
+            bars = self.store.bars(sym, DECISION_TF, 40)
+            if not bars or int(bars[-1].ts) < ts:
+                continue  # this name has no bar at ts yet — not a reading
+            readings.append(read_volume(
+                [VolBar(int(b.ts), float(b.volume), str(b.extra.get("volume_doubt") or "")) for b in bars],
+                segment=Segment.NSE_EQ, t_ts=ts, calendar=self.calendar, until=NSE_EQ_CONTINUOUS_UNTIL,
+            ))
+        mv = market_volume(ts, readings)
+        if mv.names >= 50:  # too early in the bar's close to judge: judged again on the next ask
+            self._vol_market[ts] = mv
+            while len(self._vol_market) > 64:
+                self._vol_market.pop(next(iter(self._vol_market)))
+            if mv.alarm:
+                log.error("volume.market_alarm", bar=to_ist(ts).strftime("%d %b %H:%M"), **mv.to_json())
+                self.telegram.fire_and_forget(
+                    f"⚠️ Volume data alarm, {to_ist(ts).strftime('%H:%M')} bar: {mv.alarm}. "
+                    "No volume reading at this bar decides anything (dried-volume gate off, fade volume unknown).",
+                    key=f"volalarm:{ts}",
+                )
+                try:
+                    task = asyncio.get_running_loop().create_task(self.ledger.event("volume.market_alarm", mv.to_json()))
+                    self._decision_tasks.add(task)
+                    task.add_done_callback(self._decision_tasks.discard)
+                except RuntimeError:  # no loop (a synchronous caller): the log and the alert stand
+                    pass
+        return mv
+
+    async def _audit_bars(self, day: date) -> None:
+        """After the close: every NSE stock's continuous 30m bars of ``day`` against the broker's
+        candles fetched once more (``BarReconciler.audit_day``) — repaired or added where they
+        differ, and an alert past ``BAR_AUDIT_ALERT_*``. What the bar-close check missed (a
+        reconcile that timed out, a bucket never built) is fixed before the next session reads it."""
+        syms = [s for s, i in self.underlyings.items() if i.segment is Segment.NSE_EQ and i.kind is InstrumentKind.EQUITY]
+        try:
+            res = await self.reconciler.audit_day(
+                syms, day, keep=lambda inst, ts: on_session_grid(inst.segment, ts, DECISION_TF, until=NSE_EQ_CONTINUOUS_UNTIL),
+            )
+        except Exception as exc:  # noqa: BLE001 - an audit that fails is reported, never fatal
+            log.warning("bars.audit_failed", day=day.isoformat(), error=str(exc)[:160])
+            self._bar_audit = {"day": day.isoformat(), "error": str(exc)[:160], "ts": time.time()}
+            return
+        res["ts"] = time.time()
+        res["of"] = len(syms)
+        self._bar_audit = res
+        bad = res["repaired"] + res["added"]
+        log.info("bars.audit", **{k: v for k, v in res.items() if k != "examples"}, examples=res["examples"][:3])
+        await self.ledger.event("bars.audit", res)
+        if bad > max(BAR_AUDIT_ALERT_MIN, BAR_AUDIT_ALERT_SHARE * res["bars"]) or res["failed"] > 0.1 * max(1, len(syms)):
+            self.telegram.fire_and_forget(
+                f"⚠️ Bar audit {day:%d %b}: {res['repaired']} repaired, {res['added']} added of {res['bars']} bars; "
+                f"{res['failed']} of {len(syms)} names unanswered — " + "; ".join(res["examples"][:3]),
+                key=f"baraudit:{day.isoformat()}",
+            )
+
+    def _volume_check(self) -> Check:
+        """The health line for volume data: the latest judged NSE bar's market-wide check — red
+        while NSE is open and that bar alarmed, informational once it has closed (an alarm at 14:45
+        is not a fault all evening; the Telegram alert said so at the time)."""
+        mv = next(reversed(self._vol_market.values()), None) if self._vol_market else None
+        if mv is None:
+            return Check("volume_data", True, detail="no bar judged yet")
+        when = to_ist(mv.ts).strftime("%d %b %H:%M")
+        med = (f"median T {mv.median_t:.2f}x / T-1 {mv.median_t1:.2f}x" if mv.median_t is not None and mv.median_t1 is not None else "no median")
+        detail = f"{when} bar: ALARM — {mv.alarm}" if mv.alarm else f"{when} bar: {mv.names} names, {med}, {mv.doubtful} doubtful"
+        nse_open = is_open(Segment.NSE_EQ, time.time(), self.calendar)
+        return Check("volume_data", not mv.alarm or not nse_open, detail=detail if nse_open else f"NSE closed · {detail}")
+
+    def _bar_audit_check(self) -> Check:
+        a = self._bar_audit
+        if a is None:
+            return Check("bar_audit", True, detail="not run since boot (runs after 15:40)")
+        if a.get("error"):
+            return Check("bar_audit", False, detail=f"{a['day']}: failed — {a['error']}")
+        bad = a["repaired"] + a["added"]
+        # what was repaired is fixed data (the alert said how much); only an audit that could not
+        # look — too many names unanswered — leaves the day's bars unverified
+        return Check(
+            "bar_audit", a["failed"] <= 0.1 * max(1, a.get("of", 1)), value=float(bad),
+            detail=f"{a['day']}: {a['exact']} of {a['bars']} bars exact, {a['repaired']} repaired, {a['added']} added, {a['failed']} names unanswered",
+        )
 
     def expected_move(self, symbol: str, inst: Instrument, premium: float) -> float:
         """One day's expected move of the parent (its own IV, or its median) through delta, as a
@@ -3700,6 +3944,21 @@ class Engine:
         await self._ensure_quotes(chain, sig.entry, extra=watch)
         if tape:
             self.tape.follow(sig.symbol, [i.scrip_code for i in (watch or chain[:6])], now=now)
+            # The decision path only: a card preview never waits. And only for the strikes the choice
+            # prefers — the ATR-out and target candidates — not the whole span it may fall back
+            # through: one strike in it that never quotes (HDFCBANK OCT 650/660 PE, 2026-09-28, no
+            # quote all day) cost every trigger on the name the full wait (review, 2026-09-28).
+            otm_side = [i for i in chain if (i.strike > sig.entry) is (sig.direction is Direction.BULLISH)]
+            preferred: list[Instrument] = []
+            if watch:
+                preferred, _ = strike_candidates(
+                    otm=[i for i in watch if i in otm_side], spot=sig.entry, direction=sig.direction, atr=atr30,
+                    target1=sig.targets[0] if sig.targets else None, liquidity=self.liquidity_for(watch),
+                    delta_floor=pol.min_delta, oi_margin=pol.oi_margin,
+                )
+            wanted = preferred[:2] or sorted(otm_side, key=lambda i: abs(i.strike - sig.entry))[:2]
+            await self._await_fresh_quotes(wanted, pol.max_quote_age_s, symbol=sig.symbol)
+            now = time.time()
         sel = select_option(
             chain=chain,
             quotes=self.quotes,
@@ -3819,25 +4078,115 @@ class Engine:
 
     def _apply_snapshot(self, rows: dict[str, dict[str, Any]], now: float) -> None:
         """Install REST snapshot quotes: the quote, the LTP, and a one-level book wherever the real
-        book is missing or past the matcher's age limit. A live 20-level book is never replaced."""
+        book is missing or past the matcher's age limit. A live 20-level book is never replaced.
+
+        The broker's snapshot (V1/MarketFeed) carries the last price but NO bid or ask — all 47,448
+        replies logged by 2026-09-28 had both at 0. Installed as a quote, it wiped good two-sided
+        quotes the instant before a strike was chosen: HDFCBANK's 720 PE, 15.85 / 15.95 on the feed,
+        read "one-sided" at the 09:45 trigger, and all three triggers that day (19 more on 22–25 Sep)
+        were refused. So a snapshot without a two-sided price never replaces one. It CONFIRMS the
+        held quote — and book — as current only when ``_still_stands``: the feed sends only changes,
+        so silence on a live subscription whose last trade the broker agrees with is no change.
+
+        An OPEN position's contract is the exception, as it always was (review, 2026-09-28): when the
+        feed cannot vouch for its quote — disconnected, silent, or the broker has seen a trade the
+        quote has not — it is marked from the broker's last price, fresh, as before this change.
+        Kept at its old age instead, a feed outage over ``position_quote_max_age_s`` (25 Sep
+        12:23–12:31, 8 minutes) turned every open position stale — only the equity stop and the
+        backstops — and for the first minute its option mid was a price the broker had already
+        contradicted."""
         limit = self.matcher.age_limit_ms(now)
+        held_codes = {p.instrument.scrip_code for p in self.positions.values() if p.status == "OPEN"}
         for code, r in rows.items():
-            self.quotes[code] = Quote(ltp=r["ltp"], bid=r["bid"], ask=r["ask"], ts=r["ts"])
-            if r["ltp"] > 0:
-                self.ltps[code] = r["ltp"]
+            ltp, bid, ask = float(r.get("ltp") or 0), float(r.get("bid") or 0), float(r.get("ask") or 0)
+            two_sided = bid > 0 and ask > 0
+            held_q = self.quotes.get(code)
+            held_two_sided = held_q is not None and held_q.bid > 0 and held_q.ask > 0
+            if two_sided or not held_two_sided:
+                self.quotes[code] = Quote(ltp=ltp, bid=bid, ask=ask, ts=r["ts"])
+            elif self._still_stands(code, held_q.ts, held_q.ltp, ltp, "mf"):  # type: ignore[union-attr]
+                self.quotes[code] = Quote(ltp=held_q.ltp, bid=held_q.bid, ask=held_q.ask, ts=now)  # type: ignore[union-attr]
+                self.snapshot_confirmed += 1
+            elif code in held_codes and ltp > 0:
+                # a held contract the feed cannot vouch for: marked from the broker's last price
+                self.quotes[code] = Quote(ltp=ltp, bid=bid, ask=ask, ts=r["ts"])
+                self.snapshot_held_marked += 1
+            else:
+                self.snapshot_kept += 1  # held as it was: its own age says how old it is
+                if ltp > 0 and abs(ltp - held_q.ltp) > 1e-6:  # type: ignore[union-attr]
+                    # the broker has seen a trade the held quote has not (HCLTECH 1240 PE,
+                    # 2026-09-28 11:15:04: 44.85 held, 45.65 traded — the feed's frame came 0.1 s on)
+                    self._quote_outdated[code] = now
+            if ltp > 0:
+                self.ltps[code] = ltp
             if r.get("volume"):
                 self.option_volume[code] = float(r["volume"])
             held = self.books.get(code)
             if held is None or held.age_ms(now) > limit:
+                # a side the snapshot does carry still makes a (one-sided) book to sell or buy into
                 book = book_from_quote(
-                    code, bid=r["bid"], ask=r["ask"],
+                    code, bid=bid, ask=ask,
                     bid_qty=int(r.get("bid_qty") or 0), ask_qty=int(r.get("ask_qty") or 0), ts=r["ts"],
                 )
                 if book is not None:
                     self.books[code] = book
+                elif (held is not None and held.best_bid and held.best_ask and held_two_sided
+                      # a book that disagrees with the live quote is from another time, whatever
+                      # its subscription says (review, 2026-09-28: 12.00 / 12.20 beside 15.85 / 15.95)
+                      and held.best_bid <= held_q.ltp <= held.best_ask  # type: ignore[union-attr]
+                      and self._still_stands(code, held.ts, held_q.ltp, ltp, "md")):  # type: ignore[union-attr]
+                    self.books[code] = BookSnapshot(scrip_code=code, bids=held.bids, asks=held.asks, ts=now)
+                    self.snapshot_book_confirmed += 1
                 else:
-                    log.warning("snapshot.no_book", scrip=code, bid=r["bid"], ask=r["ask"],
-                                bid_qty=r.get("bid_qty"), ask_qty=r.get("ask_qty"))
+                    log.debug("snapshot.no_book", scrip=code, bid=bid, ask=ask)
+
+    def _still_stands(self, code: str, held_ts: float, held_ltp: float, rest_ltp: float, channel: str) -> bool:
+        """May a held quote (``mf``) or book (``md``) be read as current although the feed has sent
+        nothing for it lately? Only when the contract is on that live subscription AND has been
+        since before the value arrived — a value from an earlier subscription (depth drops a strike
+        30 minutes after the selector last looked, and ``self.books`` keeps its last book) is from
+        another time (review, 2026-09-28) — the feed has been connected since the value arrived (a
+        reconnect gap could hide a change) and has spoken within ``FEED_LIVE_S``, and the broker's
+        own last trade is the one we hold."""
+        fh = self.feed.health
+        since_of = getattr(self.feed, "subscribed_since", None)
+        since = since_of(channel, code) if since_of is not None else None
+        silence = fh.silence_s
+        return bool(
+            since is not None and held_ts >= since
+            and fh.connected and fh.connected_since is not None and held_ts >= fh.connected_since
+            and silence is not None and silence < FEED_LIVE_S
+            and rest_ltp > 0 and held_ltp > 0 and abs(rest_ltp - held_ltp) < 1e-6
+        )
+
+    async def _await_fresh_quotes(self, instruments: list[Instrument], max_age_s: float, *, symbol: str = "") -> None:
+        """At a trigger, before the strike is chosen: wait — at most ``quote_wait_s`` — until each
+        candidate carries a fresh two-sided quote. A strike subscribed a moment ago has none until
+        the feed's first frame (HDFCBANK's 710–670 PE, 2026-09-28: within 1.1 s of the trigger).
+        Triggers on different names decide in their own tasks, so one name's wait never holds up
+        another's. The wait is counted in polls, not read off the clock: it ends in a replay too."""
+        if not instruments or self.quote_wait_s <= 0:
+            return
+
+        def missing() -> list[Instrument]:
+            now = time.time()
+            return [i for i in instruments
+                    if not ((q := self.quotes.get(i.scrip_code)) is not None and q.bid > 0 and q.ask > 0 and now - q.ts <= max_age_s
+                            and q.ts > self._quote_outdated.get(i.scrip_code, 0.0))]
+
+        todo = missing()
+        if not todo:
+            return
+        t0 = time.time()
+        for _ in range(int(self.quote_wait_s / QUOTE_POLL_S)):
+            await asyncio.sleep(QUOTE_POLL_S)
+            todo = missing()
+            if not todo:
+                break
+        for i in instruments:  # a newer quote has answered the contradiction — or the wait is over
+            self._quote_outdated.pop(i.scrip_code, None)
+        log.info("quotes.awaited", symbol=symbol, waited_ms=round((time.time() - t0) * 1000),
+                 candidates=[i.strike for i in instruments], still_missing=[i.strike for i in todo])
 
     async def _keep_held_quotes(self) -> None:
         """Re-quote held contracts that have gone quiet, every few seconds, while their segment is
@@ -4491,6 +4840,27 @@ class Engine:
                     self._intraday_rebuild_day = day
                     self._decision_tasks.add(asyncio.create_task(self._intraday_universe_rebuild()))
 
+                # The market-wide volume check on every NSE bar, trigger or not — an alarm the minute
+                # the data breaks, not the next time a trigger happens to read it. The bar judged is
+                # the one that closed at least 20 s ago (its candles reconciled).
+                if self.reconciler_ready and self.underlyings and not self.booting:
+                    judged = int(bucket_start(Segment.NSE_EQ, now - 20, DECISION_TF)) - TF_SECONDS[DECISION_TF]
+                    if judged not in self._vol_market and on_session_grid(Segment.NSE_EQ, judged, DECISION_TF, until=NSE_EQ_CONTINUOUS_UNTIL) \
+                            and self.calendar.is_trading_day(ist_day(judged)) and ist_day(judged) == ist_day(now):
+                        self._market_volume(judged)
+                # After the NSE close, the day's decision bars against the broker's once more.
+                if (
+                    self.reconciler_ready
+                    and self.underlyings
+                    and not self.booting
+                    and self.calendar.is_trading_day(ist_day(now))
+                    and ist_hm(now) >= BAR_AUDIT_HM
+                    and self._bar_audit_day != day
+                    and (self._bar_audit_task is None or self._bar_audit_task.done())
+                ):
+                    self._bar_audit_day = day
+                    self._bar_audit_task = asyncio.create_task(self._audit_bars(ist_day(now)), name="bar-audit")
+
                 # Each name's own VIX, once a minute, from the quotes already in hand.
                 if self.reconciler_ready and self.groups and now - self._last_iv_refresh >= 60:
                     self._last_iv_refresh = now
@@ -4660,16 +5030,29 @@ class Engine:
         sess = self.auth.session
         daily = self.daily_audit()
         checks = [
+            # The detail says what IS, not what once went wrong: the last error stayed on a connected
+            # feed and the failure text on a fresh one (09:18, 28 Sep: "nodename nor servname…" and
+            # "no message for over 2 minutes" beside two passing checks).
             Check(
                 "feed_connected",
                 (fh.connected or not self.s.feed_enabled) if open_now else True,
-                detail=fh.last_error if open_now else "market closed",
+                detail=(
+                    "market closed" if not open_now
+                    else "feed disabled" if not self.s.feed_enabled
+                    else f"connected · {fh.reconnects} reconnects since boot" if fh.connected
+                    else f"disconnected — {fh.last_error or 'no error recorded'}"
+                ),
             ),
             Check(
                 "feed_fresh",
                 (fh.silence_s is None or fh.silence_s < 120) if open_now else True,
                 value=fh.silence_s,
-                detail="no message for over 2 minutes" if open_now else "market closed",
+                detail=(
+                    "market closed" if not open_now
+                    else "no message yet" if fh.silence_s is None
+                    else f"no message for {fh.silence_s:.0f} s (over 2 minutes)" if fh.silence_s >= 120
+                    else f"last message {fh.silence_s:.1f} s ago"
+                ),
             ),
             Check(
                 "broker_session",
@@ -4706,6 +5089,8 @@ class Engine:
                     f"{self.aggregator.late_ticks} ticks arrived for an already-closed bucket"
                 ),
             ),
+            self._volume_check(),
+            self._bar_audit_check(),
             Check(
                 "pivots_ready",
                 (daily.ready and not self._daily_failed and not self.leg_pivots.failed_codes)
@@ -4737,6 +5122,10 @@ class Engine:
                 "subscriptions": fh.subscriptions,
             },
             "bars": self.aggregator.stats() | self.store.stats() | {"duplicate_closes": self._duplicate_closes},
+            # broker snapshots with no bid/ask: held quotes confirmed as current / kept as they were
+            "quotes": {"snapshot_confirmed": self.snapshot_confirmed, "snapshot_kept": self.snapshot_kept,
+                       "snapshot_book_confirmed": self.snapshot_book_confirmed,
+                       "snapshot_held_marked": self.snapshot_held_marked},
             "gateway": self.gateway.stats(),
             "rest": self.rest.stats(),
             "catalogue": self.catalogue_loader.catalogue.stats(),

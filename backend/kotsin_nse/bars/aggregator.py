@@ -29,7 +29,14 @@ import structlog
 
 from ..config import Segment
 from ..domain import Instrument
-from ..market.session import TF_SECONDS, bucket_start, ist_day, session_close_ts, session_open_ts
+from ..market.session import (
+    TF_SECONDS,
+    bucket_start,
+    in_session,
+    ist_day,
+    session_close_ts,
+    session_open_ts,
+)
 from .store import BarStore
 from .unified import BarSource, UnifiedBar
 
@@ -93,6 +100,8 @@ class Aggregator:
         self.partial_bars = 0
         self.late_ticks = 0
         self.out_of_session_ticks = 0
+        #: broker history rows outside the session (pre-open, post-close) — never bars
+        self.rows_dropped = 0
 
     # -- registration ------------------------------------------------------------------------------
 
@@ -335,15 +344,34 @@ class Aggregator:
     def seed(
         self, instrument: Instrument, tf: str, rows: list[dict[str, Any]], *, ts_of: Callable[[str], float]
     ) -> int:
-        """Load REST history into the store. ``rows`` are the broker's oldest-first OHLCV dicts."""
+        """Load REST history into the store. ``rows`` are the broker's oldest-first OHLCV dicts.
+
+        5paisa stamps a candle with the minute of its first trade — 09:16, 10:46, the closing
+        auction at 15:28 — and such a row IS its bucket: it is snapped onto the grid (a bucket's
+        own on-grid row wins, should both ever come). Rows outside the session are not bars, the
+        same rule the tick path keeps: a pre-open print was clamped INTO 09:15, and a post-close
+        15:50 row opened a phantom 15:45 bucket (the bar that read 0.00x before the 2026-09-28
+        09:45 triggers)."""
         self.track(instrument)
         segment = instrument.segment
         bars: list[UnifiedBar] = []
         prev_day_close: float | None = None
         last_day = ""
+        dropped: list[str] = []
+        by_bucket: dict[int, tuple[bool, float, dict[str, Any]]] = {}
         for row in rows:
             ts = ts_of(row["dt"])
+            if tf != "1d" and not in_session(segment, ts):
+                dropped.append(str(row["dt"]))
+                continue
             bucket = int(bucket_start(segment, ts, tf))
+            on_grid = int(ts) == bucket
+            held = by_bucket.get(bucket)
+            if held is not None and held[0] and not on_grid:
+                continue
+            by_bucket[bucket] = (on_grid, ts, row)
+        for bucket in sorted(by_bucket):
+            _, ts, row = by_bucket[bucket]
             day = ist_day(ts).isoformat()
             if last_day and day != last_day and bars:
                 prev_day_close = bars[-1].close
@@ -365,6 +393,9 @@ class Aggregator:
                 )
             )
         _stamp_session_vwap(bars, segment)
+        if dropped:
+            self.rows_dropped += len(dropped)
+            log.info("backfill.rows_dropped", symbol=instrument.symbol, tf=tf, n=len(dropped), sample=dropped[-3:])
         return self.store.seed(instrument.symbol, tf, bars)
 
     def stats(self) -> dict[str, Any]:
@@ -374,6 +405,7 @@ class Aggregator:
             "partial_bars": self.partial_bars,
             "late_ticks": self.late_ticks,
             "out_of_session_ticks": self.out_of_session_ticks,
+            "rows_dropped": self.rows_dropped,
             "ticks": sum(s.ticks for s in self.state.values()),
             "with_oi": sum(1 for s in self.state.values() if s.oi is not None),
         }

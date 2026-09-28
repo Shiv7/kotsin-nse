@@ -37,8 +37,17 @@ from typing import Any
 
 import structlog
 
-from ..domain import Instrument
-from ..market.session import ist_day, ist_naive_to_ts
+from ..config import Segment
+from ..domain import Instrument, InstrumentKind
+from ..market.session import (
+    NSE_EQ_CONTINUOUS_UNTIL,
+    bucket_start,
+    in_session,
+    ist_day,
+    ist_naive_to_ts,
+    on_session_grid,
+    to_ist,
+)
 from .store import BarStore
 from .unified import BarSource, UnifiedBar
 
@@ -59,6 +68,8 @@ class BarCheck:
     live: dict[str, float] | None = None
     rest: dict[str, float] | None = None
     error: str = ""
+    #: the broker's volume and the live build's disagree past belief (``volume_doubt``)
+    volume_doubt: str = ""
 
     @property
     def diffs(self) -> dict[str, float]:
@@ -79,6 +90,7 @@ class BarCheck:
             "live": self.live,
             "rest": self.rest,
             "error": self.error,
+            "volumeDoubt": self.volume_doubt,
         }
 
 
@@ -97,6 +109,8 @@ class TfStats:
     #: partial bars installed from REST — corrections, not fidelity failures
     partial_replaced: int = 0
     partial_missing: int = 0
+    #: decision bars whose broker volume disagreed with the live build past belief
+    volume_doubts: int = 0
 
     def record(self, c: BarCheck) -> None:
         if c.error:
@@ -115,6 +129,8 @@ class TfStats:
             self.missing_from_rest += 1
             return
         self.compared += 1
+        if c.volume_doubt:
+            self.volume_doubts += 1
         if c.exact:
             self.exact += 1
         if c.replaced:
@@ -139,7 +155,33 @@ class TfStats:
             "rest_failures": self.rest_failures,
             "partial_replaced": self.partial_replaced,
             "partial_missing": self.partial_missing,
+            "volume_doubts": self.volume_doubts,
         }
+
+
+#: an NSE stock's broker candle and its live build disagree on volume by a median 6 % (12 % on the
+#: 09:15 bar, which the live build reads with the pre-open); the worst of 612 bars on 2026-09-28 was
+#: 37 %. Past half apart one of the two is broken, and nothing says which.
+VOLUME_DOUBT_APART = 0.5
+
+
+def volume_doubt(bar: UnifiedBar, rest_v: float, inst: Instrument | None) -> str:
+    """Why a decision bar's volume cannot be believed, or "". Judged only where it can be: an NSE
+    stock's continuous bars (the 15:15 auction differs by design), built end to end (a PARTIAL
+    build is expected to differ), and with a live count to judge against."""
+    if inst is None or inst.segment is not Segment.NSE_EQ or inst.kind is not InstrumentKind.EQUITY:
+        return ""
+    if bar.source is BarSource.PARTIAL or not on_session_grid(inst.segment, bar.ts, bar.tf, until=NSE_EQ_CONTINUOUS_UNTIL):
+        return ""
+    live_v = bar.volume
+    if live_v <= 0:
+        return ""
+    if rest_v <= 0:
+        return f"broker candle has no volume, live build {live_v:,.0f}"
+    apart = abs(live_v - rest_v) / rest_v
+    if apart > VOLUME_DOUBT_APART:
+        return f"broker {rest_v:,.0f} vs live build {live_v:,.0f} ({apart:.0%} apart)"
+    return ""
 
 
 def _ohlcv(b: UnifiedBar | dict[str, Any]) -> dict[str, float]:
@@ -209,7 +251,7 @@ class BarReconciler:
                     return c
             match = next((r for r in rows if int(ist_naive_to_ts(r["dt"])) == bar.ts), None)
             if match is not None:
-                c = self._install(bar, match)
+                c = self._install(bar, match, inst)
                 self._record(c)
                 return c
             if attempt == 0:
@@ -218,18 +260,27 @@ class BarReconciler:
         self._record(c)
         return c
 
-    def _install(self, bar: UnifiedBar, rest_row: dict[str, Any]) -> BarCheck:
+    def _install(self, bar: UnifiedBar, rest_row: dict[str, Any], inst: Instrument | None = None) -> BarCheck:
         live, rest = _ohlcv(bar), _ohlcv(rest_row)
         exact = live == rest
+        doubt = volume_doubt(bar, rest["v"], inst) if bar.tf == self.decision_tf and not exact else ""
         c = BarCheck(
             bar.symbol, bar.tf, bar.ts, found=True, exact=exact, live=live, rest=rest,
-            partial=bar.source is BarSource.PARTIAL,
+            partial=bar.source is BarSource.PARTIAL, volume_doubt=doubt,
         )
         if exact:
             # The build was right; just mark it exchange-confirmed.
             bar.extra["confirmed"] = True
             return c
-        replacement = UnifiedBar(
+        self.store.replace_closed(self._replacement(bar, rest, {"volume_doubt": doubt} if doubt else {}))
+        c.replaced = True
+        return c
+
+    @staticmethod
+    def _replacement(bar: UnifiedBar, rest: dict[str, float], extra: dict[str, Any]) -> UnifiedBar:
+        """``bar`` with the exchange's OHLCV, everything else kept; the live values alongside."""
+        live = _ohlcv(bar)
+        return UnifiedBar(
             symbol=bar.symbol,
             scrip_code=bar.scrip_code,
             tf=bar.tf,
@@ -247,17 +298,87 @@ class BarReconciler:
             oi=bar.oi,
             oi_change_pct=bar.oi_change_pct,
             fut_scrip_code=bar.fut_scrip_code,
-            extra={**bar.extra, "confirmed": True, "live": live, "live_source": bar.source.value},
+            extra={**bar.extra, "confirmed": True, "live": live, "live_source": bar.source.value, **extra},
         )
-        self.store.replace_closed(replacement)
-        c.replaced = True
-        return c
+
+    # -- after the close ------------------------------------------------------------------------
+
+    async def audit_day(
+        self, symbols: list[str], day: date, *, keep: Callable[[Instrument, int], bool], pace_s: float = 0.15,
+    ) -> dict[str, Any]:
+        """The day's decision bars against the broker's candles, fetched once more after the close:
+        a bar held differently is replaced, a bar not held is added. ``keep`` says which buckets
+        are judged (an NSE stock's continuous 09:15 … 14:45).
+
+        The second look catches what the bar-close check cannot: a reconcile that failed or timed
+        out (the live build stood), a candle revised after it answered, a bucket never built (the
+        engine down, the feed silent). It is not a second opinion from the same source at the same
+        moment — that would repeat whatever the first one got wrong."""
+        out: dict[str, Any] = {"day": day.isoformat(), "names": 0, "bars": 0, "exact": 0, "repaired": 0, "added": 0, "failed": 0, "examples": []}
+        for symbol in symbols:
+            inst = self.resolve(symbol)
+            if inst is None:
+                continue
+            async with self._sem:
+                try:
+                    rows = await self.rest.candles(inst, self.decision_tf, day.isoformat(), day.isoformat())
+                except Exception as exc:  # noqa: BLE001 - one name unanswered never stops the audit
+                    out["failed"] += 1
+                    log.warning("bars.audit_unanswered", symbol=symbol, error=str(exc)[:120])
+                    continue
+            if not rows:
+                out["failed"] += 1
+                continue
+            out["names"] += 1
+            held = {int(b.ts): b for b in self.store.bars(symbol, self.decision_tf) if ist_day(b.ts) == day}
+            prev_close = next(iter(held.values())).prev_close if held else None
+            # each row onto its bucket: the broker stamps a candle with its first trade's minute
+            # (09:16, 10:46), which IS the bucket; a bucket's own on-grid row wins
+            by: dict[int, tuple[bool, dict[str, Any]]] = {}
+            for r in rows:
+                t = ist_naive_to_ts(str(r["dt"]))
+                if not in_session(inst.segment, t):
+                    continue
+                b_ts = int(bucket_start(inst.segment, t, self.decision_tf))
+                held_row = by.get(b_ts)
+                if held_row is not None and held_row[0] and int(t) != b_ts:
+                    continue
+                by[b_ts] = (int(t) == b_ts, r)
+            for ts in sorted(by):
+                r = by[ts][1]
+                if not keep(inst, ts):
+                    continue
+                out["bars"] += 1
+                rest = _ohlcv(r)
+                b = held.get(ts)
+                if b is not None and _ohlcv(b) == rest:
+                    out["exact"] += 1
+                    continue
+                if b is None:
+                    self.store.replace_closed(UnifiedBar(
+                        symbol=symbol, scrip_code=inst.scrip_code, tf=self.decision_tf, ts=ts,
+                        open=rest["o"], high=rest["h"], low=rest["l"], close=rest["c"], volume=rest["v"],
+                        source=BarSource.REST, complete=True, prev_close=prev_close,
+                        extra={"confirmed": True, "audit": "added"},
+                    ))
+                    out["added"] += 1
+                    what = f"{symbol} {to_ist(ts):%H:%M} added (v {rest['v']:,.0f})"
+                else:
+                    self.store.replace_closed(self._replacement(b, rest, {"audit": "repaired", "volume_doubt": ""}))
+                    out["repaired"] += 1
+                    what = f"{symbol} {to_ist(ts):%H:%M} v {b.volume:,.0f}→{rest['v']:,.0f}"
+                if len(out["examples"]) < 8:
+                    out["examples"].append(what)
+            await asyncio.sleep(pace_s)
+        return out
 
     def _record(self, c: BarCheck) -> None:
         self.stats.setdefault(c.tf, TfStats()).record(c)
         self.recent.append(c)
         if c.replaced:
             log.info("bars.reconciled", symbol=c.symbol, tf=c.tf, ts=c.ts, diffs=c.diffs)
+        if c.volume_doubt:
+            log.warning("bars.volume_doubt", symbol=c.symbol, tf=c.tf, ts=c.ts, why=c.volume_doubt)
         elif c.error:
             log.warning("bars.reconcile_failed", symbol=c.symbol, tf=c.tf, ts=c.ts, error=c.error)
 
@@ -292,7 +413,7 @@ class BarReconciler:
                     row = by_ts.get(b.ts)
                     if row is None:
                         continue  # still forming, or the exchange has not published it yet
-                    self._record(self._install(b, row))
+                    self._record(self._install(b, row, inst))
                     checked += 1
                 await asyncio.sleep(0.05)
         self.sweeps += 1
