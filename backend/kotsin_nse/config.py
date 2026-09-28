@@ -236,6 +236,48 @@ class Settings(BaseSettings):
     #: ENGINE, not just the gateway, so it force-flattens every book — see exec/gateway.py.
     live_breaker_consecutive_rejects: int = 12
 
+    # ---- the live order manager (exec/live_orders.py) --------------------------------------------
+    #: in a LIVE mode every FUDKII book works REAL limit orders under the paper rules (the +3 % cap,
+    #: the 30 s hold, the mid follow, the 60 s miss; target sells resting at the broker; exits walked
+    #: to the bid and crossed). False = the old path: a live market order, waited on to a fill.
+    live_limit_orders: bool = True
+    #: seconds between the broker status looks at the working live orders (one call for all of them)
+    live_order_poll_s: float = 1.0
+    #: a live exit's cross is a SELL at the bid; unfilled after this many seconds it is cancelled and
+    #: sent again at the new bid
+    live_cross_retry_s: float = 5.0
+    #: after this many crosses at the bid, the next goes as a MARKET order
+    live_cross_market_after: int = 3
+    #: a cancel the broker has not confirmed after this long is asked again
+    live_cancel_resend_s: float = 3.0
+    #: a broker call that has not answered in this long is given up for this tick (the order is kept)
+    live_call_timeout_s: float = 5.0
+    #: the exit loop waits at most this long a tick for its live half (the broker's answers); the paper
+    #: half has already run, and a live half still busy is left to finish — never cut mid-order
+    live_tick_budget_s: float = 2.0
+    #: a cancel the broker refuses this many times running is alerted, and the book's new live
+    #: entries stop until that order is over
+    live_cancel_alert_after: int = 5
+    #: a target sell the broker refuses is sent again after 2, 4, 8 … seconds, at most this long
+    live_target_backoff_max_s: float = 60.0
+    #: the KILL waits at most this long for the SELLs being placed to register, and at most this long
+    #: again for its one round of cancels, before it sends the square-off (the rest is followed up)
+    live_kill_wait_s: float = 1.0
+    #: an UNCONFIRMED live order (its placement's answer lost) is resolved "never placed" by itself only
+    #: when True — after 120 s from its send and 3 running reads where the status call and the whole
+    #: order book both omit it. OFF until 5paisa's RemoteOrderID echo and order book are verified with a
+    #: real order: until then it stays tracked (its position's SELLs, and entries into its contract,
+    #: blocked), is alerted every minute, and only the operator releases it (review14c, lead's decision)
+    live_auto_resolve_unconfirmed: bool = False
+    #: the broker's whole order book (V4/OrderBook) is read at most this often — for orders its status call
+    #: does not answer for, unconfirmed ones and the late-appearance watch; the status call by
+    #: RemoteOrderID goes every refresh (review14d)
+    live_order_book_every_s: float = 5.0
+    #: LIVE_CAPPED only: a live book's entry buys at most this many lots — the real-money parity
+    #: test's one lot (its size otherwise, 4 lots under ₹75,000, is refused by the notional cap, never
+    #: cut). None = each book's own size
+    live_capped_lots: int | None = None
+
     # ---- paper fill realism ---------------------------------------------------------------------
     #: how stale a depth snapshot may be before a paper fill is refused, outside the opening window
     paper_max_book_age_ms: float = 6_000.0

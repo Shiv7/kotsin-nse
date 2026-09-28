@@ -107,19 +107,45 @@ so its own ref (`FII-RYW-…`) first appears on its exits; a position opened bef
 the old ones. A restart restores each book's order number from the day's orders and the positions'
 refs, so a number is never reused.
 
-## 8. LIVE mode (not armed)
+## 8. LIVE mode — the live order manager (built and reviewed; not armed)
 
-Only FUDKII's orders go to the broker until the live limit-order manager is built (the §4 rules exist
-only in PAPER; a live entry today is a market order). Every other book fills on paper against the same
-live book — entries AND exits. When all FUDKII books go live:
+Every FUDKII book — FUDKII, RT-X, RT-N, RT-Y, CT-X, CT-Y and RT-MCX — sends REAL orders under exactly
+the §4/§5 rules (operator, 27 Sep: "all live"); the RT-Y wide shadow stays on paper (it has no orders of
+its own). Code: `exec/live_orders.py` (the broker's side of each order) and the live paths in `engine.py`.
 
-* each book keeps its own orders and ids (§7) — its own order book — on the one broker account;
-* the broker reconcile compares the SUM of the live books per contract with the broker's net position;
-* the LIVE_CAPPED caps are each book's own: its positions, the live orders it SENT today (entries and
-  exits, refused by the broker or filled; restored after a restart; an exit is never refused by it), its
-  daily loss, ₹ per order;
-* a live entry is refused unless the broker account's free margin covers it (fails closed: no answer, or
-  no recognised margin field, refuses the entry — the field is confirmed on the first armed session).
-  Today the check is per entry against a 15-s snapshot, not net of other live entries sent in the same
-  second — the live limit-order manager (next phase) reserves margin per order;
-* the broker keeps 38 characters of an order id; the engine polls a live order by the id as sent.
+* **Entry**: BUY LIMIT at the option's signal price (else the mid), never above +3 %; unchanged 30 s,
+  then MODIFIED to follow the mid under the cap; CANCELLED at 60 s, on a halt, a tripped breaker or a
+  stock through its stop. The position is what the broker FILLED (a partial fill is a smaller position).
+* **Target sells** rest at the broker; when the ladder moves they are cancelled and replaced. Any other
+  exit cancels the resting sell FIRST and sends nothing until the broker confirms the cancel — never
+  two sells for the same lots, never more lots working than are held.
+* **Exits**: SELL LIMIT at the mid, walked to the bid, crossed at the deadline (15 / 10 / 45 s); a cross
+  the broker refuses backs off and is retried; after 3 tries it goes at market.
+* **Fills, quantities and prices come from the broker** (order status every refresh; the order book at
+  most every 5 s). An order whose state or traded quantity cannot be read is never crossed, re-sent or
+  forgotten — the engine holds and alerts (it fails closed).
+* **Unconfirmed orders** (the broker's answer to a placement was lost) are never resolved automatically
+  (`live_auto_resolve_unconfirmed = False`): the position's sells are blocked and an alert goes every
+  minute until the operator checks the broker's order book and releases it
+  (`POST /control/live-order/{cid}/release`). A released order is watched for the rest of the day —
+  cancelled at once if it appears — and live entries into its contract stay blocked until
+  `POST /control/live-order/{cid}/unwatch`.
+* Each book keeps its own orders and ids (§7) on the one broker account; the reconcile compares the SUM
+  of the live books per contract with the broker's net position (adding fills still being booked).
+* **LIVE_CAPPED caps** are each book's own: its open and working positions, the ENTRIES it sent today
+  (target and exit orders do not count), its daily loss, ₹ per order, and optionally `live_capped_lots`.
+* **Margin**: a live entry reserves its outlay (at the +3 % cap price) against the broker's free margin,
+  net of every other working live entry; no answer or no recognised field refuses it (fails closed).
+* **Routing by the position's venue**: a position opened on paper never sends an order to the broker; a
+  live position's exits still reach the broker after the LIVE arm expires.
+* **Restarts**: working orders are saved (`data/live_orders.json`) and re-adopted or cancelled at boot;
+  on shutdown working ENTRY orders are cancelled.
+* **KILL**: cancels every working live order first (all at once, bounded), then the broker's square-off,
+  then keeps cancelling for 60 s; killed positions send nothing more and are closed once the broker shows
+  them flat (`POST /control/live-position/{id}/close`). Resuming clears the kill.
+* The broker keeps 38 characters of an order id; orders are polled by the id as sent.
+
+**Not yet verified with a real order** (day-1 checklist of the 1-lot trial, from the broker's raw reply
+kept on every order): the status words, `TradedQty` / `AvgRate` / `PendingQty` in the status and
+order-book rows, the RemoteOrderID echo, whether a modify's `Qty` is the order's total, SquareOffAll's
+behaviour, the answer for an unknown order id, the account's rate limits and margin field names.

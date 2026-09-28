@@ -367,8 +367,12 @@ async def test_limit_orders_off_and_live_modes_keep_the_immediate_walk(settings,
         await e.stop()
     e2 = await _engine(settings, clock)
     try:
+        e2.mode = lambda: Mode.SHADOW  # type: ignore[method-assign]
+        assert e2._limit_mode() is False, "SHADOW places nothing, rests nothing"
+        # a LIVE session's PAPER books (the RT-Y wide shadow, FUKAA) keep the paper limit rules — a live
+        # book's orders go to the broker by their venue, never through this (tests/test_live_orders.py)
         e2.mode = lambda: Mode.LIVE  # type: ignore[method-assign]
-        assert e2._limit_mode() is False, "LIVE never rests a paper limit"
+        assert e2._limit_mode() is True
     finally:
         await e2.stop()
 
@@ -594,31 +598,37 @@ async def test_each_book_sizes_from_its_own_purse_and_places_its_own_order(setti
 
 
 @pytest.mark.asyncio
-async def test_a_live_session_sends_only_the_live_books_orders_to_the_broker(settings, clock):
-    """Every book now places its own order: in a LIVE mode only FUDKII's may reach the venue — the
-    others fill on paper (before, the twins' EXITS would have gone out for lots never bought there)."""
+async def test_a_live_session_sends_every_fudkii_books_own_order_to_the_broker(settings, clock):
+    """Operator, 2026-09-27: "all fudkii strategies are live … each must have its dedicated orderbook"
+    — in a LIVE mode each FUDKII book sends its OWN real order (its own id, its own fill); the RT-Y
+    wide shadow opens on RT-Y's fill and stays paper: its exit never reaches the broker."""
+    from .fake_broker import FakeBroker
+
     e = await _engine(settings, clock, limit_orders=False)
     try:
-        sent = []
-
-        async def live(intent, *, ctx):
-            sent.append(intent.strategy)
-            return e.gateway.submit_paper(intent)
-
-        e.gateway.submit_live = live  # type: ignore[method-assign]
-        e.mode = lambda: Mode.LIVE  # type: ignore[method-assign]
-
-        async def margin():
-            return {"NetAvailableMargin": 5_000_000.0}
-
-        e.rest.margin = margin  # type: ignore[method-assign]
+        fake = FakeBroker()
+        e.live_orders.rest = fake
+        e.rest.margin = fake.margin  # type: ignore[method-assign]
+        await e.set_mode(Mode.LIVE, armed_minutes=60)
         _book(e, 16.95, 17.25, clock[0])
         await e._handle_signal(_sig(clock), None, books=IN_TREND_BOOKS)
-        assert sent == ["FUDKII"], "one real order for one trigger"
-        assert {"FUDKII", "FUDKII_RT_X", "FUDKII_RT_N"} <= {p.strategy for p in e.positions.values()}
+        placed = [c[1] for c in fake.calls if c[0] == "place"]
+        assert sorted(cid.split("-")[1] for cid in placed) == ["P", "RTN", "RTX", "RTY"], "one real order per book"
+        for r in list(e._resting.values()):
+            fake.fill(r.intent.client_order_id, r.intent.qty, 17.10)
+        clock[0] += 1
+        await e._advance_resting(clock[0])
+        live = {p.strategy for p in e.positions.values() if p.venue == "live"}
+        assert live == {"FUDKII", "FUDKII_RT_X", "FUDKII_RT_N", "FUDKII_RT_Y"}
+        shadow = [p for p in e.positions.values() if p.strategy == "FUDKII_RT_Y_W1"]
+        assert shadow and all(p.venue == "paper" for p in shadow), "the wide shadow is paper-only"
+        n = len(fake.calls)
+        w1 = shadow[0]
+        await e._exit(w1, ExitDecision(w1.id, ExitReason.SL_EQ, 16.0, w1.qty, "SL-EQ"), clock[0])
+        assert w1.status == "CLOSED" and not [c for c in fake.calls[n:] if c[0] == "place"], "never at the venue"
         rtx = next(p for p in e.positions.values() if p.strategy == "FUDKII_RT_X")
         await e._exit(rtx, ExitDecision(rtx.id, ExitReason.SL_EQ, 16.0, rtx.qty, "SL-EQ"), clock[0])
-        assert sent == ["FUDKII"] and rtx.status == "CLOSED", "the twin's exit fills on paper, never at the venue"
+        assert [c[2] for c in fake.calls[n:] if c[0] == "place"] == ["SELL"], "a live book's exit goes to the broker"
     finally:
         await e.stop()
 
@@ -671,7 +681,8 @@ async def test_the_broker_reconcile_sums_the_live_books_per_contract_and_ignores
         for book, qty in (("FUDKII", 2750), ("FUDKII_RT_X", 11000)):
             e.positions[f"p-{book}"] = Position(id=f"p-{book}", strategy=book, instrument=OPT, underlying=UND, side=PosSide.LONG,
                                                 qty=qty, entry=17.0, opened_ts=now, signal_id="s", direction=Direction.BULLISH)
-        assert [p.strategy for p in e._venue_positions()] == ["FUDKII"], "only the LIVE book is at the broker"
+        e.positions["p-FUDKII"].venue = "live"  # bought at the broker; RT-X's lots are paper
+        assert [p.strategy for p in e._venue_positions()] == ["FUDKII"], "only the LIVE-venue lots are at the broker"
 
         class Rest:
             def __init__(self, rows):
@@ -683,7 +694,7 @@ async def test_the_broker_reconcile_sums_the_live_books_per_contract_and_ignores
         r = Reconciler(Rest([{"scrip_code": OPT.scrip_code, "net_qty": 2750, "symbol": "TATASTEEL"}]))
         rep = await r.run(e._venue_positions(), at_venue=True)
         assert not rep.mismatches and not r.frozen, "the paper RT-X position is no PHANTOM"
-        e.LIVE_BOOKS = frozenset({"FUDKII", "FUDKII_RT_X"})  # the day every FUDKII book trades live
+        e.positions["p-FUDKII_RT_X"].venue = "live"  # every FUDKII book trades live
         r2 = Reconciler(Rest([{"scrip_code": OPT.scrip_code, "net_qty": 13750, "symbol": "TATASTEEL"}]))
         rep2 = await r2.run(e._venue_positions(), at_venue=True)
         assert not rep2.mismatches, "2,750 + 11,000 on one strike = the broker's 13,750"

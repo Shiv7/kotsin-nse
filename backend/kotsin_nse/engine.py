@@ -24,7 +24,7 @@ import re
 import statistics
 import time
 from bisect import bisect_right
-from collections.abc import MutableMapping, Sequence
+from collections.abc import Awaitable, Callable, MutableMapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from itertools import pairwise
@@ -74,6 +74,7 @@ from .domain import (
 )
 from .exec.gateway import LIVE_MODES, Decision, Gateway, LiveCaps, LiveContext, Mode
 from .exec.live import LiveExecutor
+from .exec.live_orders import BrokerOrder, LiveOrderManager, TaskLock
 from .exec.paper import BookSnapshot, PaperMatcher, book_from_quote
 from .exec.reconcile import Reconciler
 from .exec.resting import (
@@ -171,6 +172,7 @@ from .strategy.fudkii import Fudkii, FudkiiConfig
 from .strategy.fukaa import Fukaa, FukaaConfig, select
 from .strategy.keys import ALL_KEYS, INITIAL_INR, SHADOW_OF, StrategyKey
 from .strategy.regime_gates import rt_gate_reasons, trigger_verdicts, volume_labels
+from .venue.base import VenueError
 from .venue.fivepaisa.auth import Authenticator
 from .venue.fivepaisa.rest import FivePaisaREST
 from .venue.fivepaisa.ws import FivePaisaFeed
@@ -290,6 +292,8 @@ class _EntryPlan:
     released: bool = False
     #: the entry's outcome so far ``(decision, reason)`` — what an operator take is told
     outcome: tuple[str, str] = ("", "")
+    #: "live" when the order goes to the broker (a LIVE mode, a live book), else "paper"
+    venue: str = "paper"
 
 
 @dataclass
@@ -504,6 +508,47 @@ class Engine:
             open_window_ist=(settings.paper_open_window_from_ist, settings.paper_open_window_to_ist),
         )
         self.live_exec: LiveExecutor | None = None
+        #: the live order manager: every FUDKII book's REAL limit orders in a LIVE mode (exec/live_orders.py)
+        self.live_orders = LiveOrderManager(
+            self.rest, poll_interval_s=settings.live_order_poll_s, store=settings.data_dir / "live_orders.json",
+            call_timeout_s=settings.live_call_timeout_s, auto_resolve=settings.live_auto_resolve_unconfirmed,
+            book_fallback_s=settings.live_order_book_every_s,
+        )
+        #: client id -> (₹ held against the broker's free margin, released at): a live entry at the broker
+        #: holds its outlay until a margin snapshot TAKEN AFTER it finished — so entries sent in the same
+        #: second never all pass on one snapshot (review, 2026-09-26)
+        self._live_reserved: dict[str, tuple[float, float | None]] = {}
+        self.live_orders.on_alert = lambda key, text: self.telegram.fire_and_forget(text, key=key)
+        #: position id -> the lock every live SELL of it is sent under (review14 A3)
+        self._sell_locks: dict[str, TaskLock] = {}
+        #: position id -> the operator's SKIP, standing until an exit for it is working (review14 A4)
+        self._pending_manual: dict[str, ExitDecision] = {}
+        #: position id -> an exit's next order (a cross, a resize) that waits for another SELL of the
+        #: position to be over and booked: (decision, cross_n, rung_taken)
+        self._pending_exit: dict[str, tuple[Any, int, bool]] = {}
+        #: live entries past the gateway and not yet over: client id -> book (its LIVE_CAPPED positions, A7)
+        self._live_entry_books: dict[str, str] = {}
+        #: book -> (client id, why): the book's new live entries are stopped — a cancel the broker keeps refusing (B6)
+        self._live_blocked_books: dict[str, tuple[str, str]] = {}
+        #: position id -> refused target placements, and when the next may go (review14 A10)
+        self._target_refusals: dict[str, int] = {}
+        self._target_retry_at: dict[str, float] = {}
+        #: the KILL switch was pressed: the engine sends no live SELL of its own any more (B9)
+        self._killed = False
+        self._kill_logged: set[str] = set()
+        #: every live order this run sent or adopted — the rest in the order manager are a previous
+        #: run's, settled by the exit loop (``_settle_unowned``)
+        self._live_owned: set[str] = set()
+        #: the live half of the exit loop, run beside the paper half within a time budget (B7)
+        self._live_phase: asyncio.Task[Any] | None = None
+        self._live_phase_overruns = 0
+        #: the live half's own tasks — the broker's news, each live position's turn, each live entry's
+        self._live_tasks: dict[str, asyncio.Task[Any]] = {}
+        #: tasks inside a live placement right now (the shutdown lets them finish, review14b N5)
+        self._live_sending: set[asyncio.Task[Any]] = set()
+        #: the KILL: when, what it found, what filled after it; its follow-up and its cancels still out
+        self._kill_state: dict[str, Any] = {}
+        self._kill_tasks: set[asyncio.Task[Any]] = set()
         self.reconciler_positions: Reconciler | None = None
         self.reconciler_ready = False
         self.gateway = Gateway(
@@ -611,6 +656,13 @@ class Engine:
         self._stop = asyncio.Event()
         self.started_ts = time.time()
         self.boot_notes: list[str] = []
+        unsupported = [n for n, v in (("paper_limit_entry_race_pct", settings.paper_limit_entry_race_pct),
+                                      ("paper_limit_entry_chase_pct", settings.paper_limit_entry_chase_pct),
+                                      ("paper_limit_entry_cross_after_hold", settings.paper_limit_entry_cross_after_hold)) if v]
+        if unsupported and settings.live_limit_orders:
+            # the live order manager follows the paper entry rules as they are by default: these three
+            # are paper-only — a live book would not follow them, and a LIVE session would differ from paper
+            self.boot_notes.append(f"{', '.join(unsupported)} set: PAPER entries only — the live books do not take the ask")
         #: true until the market boot (catalogue, backfill, feed) has finished. The web server
         #: opens before it, so the pages answer during the ~2.5 minutes the backfill takes.
         self.booting = True
@@ -901,6 +953,10 @@ class Engine:
     async def stop(self) -> None:
         self._stop.set()
         try:
+            await self._stop_live_orders()
+        except Exception as exc:  # noqa: BLE001 - a failed cancel must not block the shutdown
+            log.warning("live.stop_failed", error=str(exc)[:120])
+        try:
             self._save_decided()
         except Exception as exc:  # noqa: BLE001
             log.warning("decided.save_failed", error=str(exc)[:120])
@@ -960,6 +1016,10 @@ class Engine:
         self.gateway.live = self.live_exec
         self.reconciler_ready = True
         self.reconciler_positions = Reconciler(self.rest)
+        try:
+            await self._settle_left_behind_live_orders()
+        except Exception as exc:  # the boot goes on; the reconcile will show what is wrong
+            log.exception("live.left_behind_failed", error=str(exc))
 
         # Pass 1 — who is in the universe. scripFinder's rule: every root with a derivative.
         self.universe_builder = UniverseBuilder(
@@ -1033,19 +1093,42 @@ class Engine:
             options=n_opts, underlyings=len(universe),
         )
         if self.reconciler_positions is not None:
+            # the engine's side read at the instant the broker answers — never before its call (review14b N7)
             await self.reconciler_positions.run(
-                self._venue_positions(),
-                at_venue=self.mode() in (Mode.LIVE, Mode.LIVE_CAPPED),
+                self._venue_positions,
+                at_venue=self._at_venue(),
+                working=self._live_working_fills,
             )
+            await self._close_flat_killed()
 
     def _venue_positions(self) -> list[Position]:
-        """The positions that exist at the broker: the LIVE books' only. The paper books' positions
-        do not — counted, each one was a PHANTOM that froze every book within 60 s (audit,
+        """The positions that exist at the broker: the LIVE-venue ones, every live book's. The paper
+        positions do not — counted, each one was a PHANTOM that froze every book within 60 s (audit,
         2026-09-26). The reconciler sums them per contract: two live books on one strike are one
         net position at the broker."""
-        return [p for p in self.positions.values() if p.strategy in self.LIVE_BOOKS]
+        return [p for p in self.positions.values() if p.venue == "live"]
 
-    async def _live_funds_short(self, intent: OrderIntent) -> str | None:
+    def _live_working_fills(self) -> dict[str, tuple[int, str]]:
+        """Per contract, what the broker has filled of live orders not yet booked on a position — a
+        BUY's lots up, a SELL's down: the broker's net shows them already (review14 A9)."""
+        out: dict[str, tuple[int, str]] = {}
+        for bo in self.live_orders.orders.values():
+            unbooked = bo.filled_qty - bo.booked_qty
+            code = bo.scrip or None
+            if code is None and bo.position_id and (pos := self.positions.get(bo.position_id)) is not None:
+                code = pos.instrument.scrip_code
+            if unbooked <= 0 or code is None:
+                continue
+            qty, _ = out.get(code, (0, bo.symbol))
+            out[code] = (qty + (unbooked if bo.side == OrderSide.BUY.value else -unbooked), bo.symbol)
+        return out
+
+    def _at_venue(self) -> bool:
+        """Whether the engine's own positions are compared with the broker's: in a LIVE mode, and
+        after the arm expired while live lots are still open."""
+        return self.mode() in LIVE_MODES or any(p.venue == "live" and p.status == "OPEN" for p in self.positions.values())
+
+    async def _live_funds_short(self, intent: OrderIntent, worst_price: float | None = None) -> str | None:
         """None when the broker account has the money for this live entry, else why not. Every live
         book draws on the one account, so the paper purses prove nothing about it. Fails CLOSED: no
         answer from the broker, or no margin field recognised in it, refuses the entry.
@@ -1058,14 +1141,23 @@ class Engine:
             except Exception as exc:  # noqa: BLE001 — fail closed, and say why
                 return f"broker funds unknown ({str(exc)[:80]}) — live entry refused"
             self._margin_cache = (now, row)
-        row = self._margin_cache[1] or {}
+        snap_ts, row = self._margin_cache[0], self._margin_cache[1] or {}
         field = next((f for f in LIVE_MARGIN_FIELDS if f in row), None)
         if field is None:
             return f"no margin field in the broker's answer ({', '.join(sorted(row)[:8])}) — live entry refused"
-        avail = float(row[field] or 0.0)
-        need = (intent.ref_price or intent.limit_price or 0.0) * intent.qty * intent.instrument.multiplier
+        # From here to the reservation nothing awaits: the check and the hold are one step, so two
+        # entries in the same second cannot both pass on one snapshot. A hold stays until a snapshot
+        # taken AFTER its order finished (that snapshot shows the money used or freed).
+        self._live_reserved = {k: v for k, v in self._live_reserved.items() if v[1] is None or v[1] >= snap_ts}
+        held = sum(v[0] for v in self._live_reserved.values())
+        avail = float(row[field] or 0.0) - held
+        # at the most the order may pay (its cap), not the signal price (review14 B10)
+        need = (worst_price or intent.limit_price or intent.ref_price or 0.0) * intent.qty * intent.instrument.multiplier
         if need > avail:
-            return f"broker {field} ₹{avail:,.0f} < this entry's ₹{need:,.0f} — live entry refused"
+            return (f"broker {field} ₹{float(row[field] or 0.0):,.0f}"
+                    + (f" less ₹{held:,.0f} held for working live entries" if held else "")
+                    + f" < this entry's ₹{need:,.0f} — live entry refused")
+        self._live_reserved[intent.client_order_id] = (need, None)
         return None
 
     def _prev_close(self, symbol: str) -> float | None:
@@ -1305,6 +1397,12 @@ class Engine:
 
     async def set_halt(self, halted: bool, reason: str = "") -> None:
         self._halted, self._halt_reason = halted, reason
+        if not halted and self._killed:
+            # the operator resumes after a KILL: live entries may go again; the positions the KILL marked
+            # stay killed (``exec_log["killed"]``) until the broker shows them flat or the operator closes
+            # them — a position bought from now on has its exits (review14b N3)
+            self._killed = False
+            self._kill_logged.clear()
         await self.ledger.set_halt(halted, reason)
         await self.ledger.event("halt", {"halted": halted, "reason": reason})
         self.telegram.fire_and_forget(
@@ -1783,6 +1881,12 @@ class Engine:
         )
         if not sizing.ok:
             return await refuse("NOT_SIZED", f"{label}: {sizing.reason}")
+        cap_lots = self.s.live_capped_lots
+        if cap_lots and self.mode() is Mode.LIVE_CAPPED and book_key in self.LIVE_BOOKS and sizing.lots > cap_lots:
+            # the real-money test's size: the book's own decision, fewer lots
+            k = cap_lots / sizing.lots
+            sizing = replace(sizing, qty=sizing.qty // sizing.lots * cap_lots, lots=cap_lots, outlay=round(sizing.outlay * k, 2),
+                             risk_inr=round(sizing.risk_inr * k, 2))
         verdict = exposure.check(
             strategy=book_key,
             underlying=sig.symbol,
@@ -1819,12 +1923,17 @@ class Engine:
             sig=sig, underlying=underlying, inst=inst, option_sl=option_sl, option_targets=option_targets, delta=delta,
             outlay=sizing.outlay, wallet=wallet, book=book, book_limits=book_limits, decided_at=decided_at, ref=premium,
             key=book_key, owns_row=owns_row, order_ref=ref,
+            venue="live" if self._live_book_now(book_key) else "paper",
         )
         # Every entry ends in exactly one state: resting (the hold stays with the order), booked (the
         # hold became the position's cost) or released. Any error on the way releases a hold that
         # reached none of them (audit, 2026-09-26: an exception after the reserve leaked it).
         try:
-            if self._limit_mode() and self.s.paper_limit_entries:
+            if plan.venue == "live" and self.s.live_limit_orders:
+                # a REAL limit at the broker, under the paper rules (exec/live_orders.py)
+                await self._place_entry_limit(intent, plan)
+                return {"decision": plan.outcome[0] or "RESTING", "reason": plan.outcome[1]}
+            if plan.venue == "paper" and self._limit_mode() and self.s.paper_limit_entries:
                 await self._place_entry_limit(intent, plan)
                 return {"decision": plan.outcome[0] or "RESTING", "reason": plan.outcome[1]}
             submitted_at = time.time()
@@ -1878,11 +1987,17 @@ class Engine:
         rows = await self.ledger.rows_between("orders", start, start + 86_400)
         ids = [str(o.get("client_order_id") or "") for o in rows]
         ids += [str(p.exec_log.get("ref") or "") for p in self.positions.values()]
-        # a book's live orders today — those that reached the broker — so a restart does not
-        # hand it a fresh LIVE_CAPPED order allowance
+        # live orders a previous run left at the broker (and the ones it watches) have no ledger row yet:
+        # never reused either
+        for bo in [*self.live_orders.load_left_behind(), *self.live_orders._read_store()["watch"]]:
+            ids.append(bo.client_order_id)
+            self.gateway.remember(bo.client_order_id)
+        # a book's live ENTRIES today — those that reached the broker, filled, refused there or missed —
+        # so a restart does not hand it a fresh LIVE_CAPPED order allowance
         live = {m.value for m in LIVE_MODES}
+        sent = (Decision.SUBMITTED.value, Decision.REJECTED_BROKER.value, Decision.LIMIT_UNFILLED.value)
         for o in rows:
-            if o.get("mode") in live and o.get("decision") in (Decision.SUBMITTED.value, Decision.REJECTED_BROKER.value):
+            if o.get("mode") in live and o.get("purpose") == Purpose.ENTRY.value and o.get("decision") in sent:
                 b = str(o.get("strategy") or "")
                 self.gateway.live_orders_by_book[b] = self.gateway.live_orders_by_book.get(b, 0) + 1
         for cid in ids:
@@ -1927,7 +2042,9 @@ class Engine:
         a 500, and a freeze nobody could lift (review, 2026-09-26)."""
         if self.reconciler_positions is None:
             raise RuntimeError("no broker session")
-        report = await self.reconciler_positions.run(self._venue_positions(), at_venue=self.mode() in LIVE_MODES)
+        report = await self.reconciler_positions.run(self._venue_positions, at_venue=self._at_venue(),
+                                                     working=self._live_working_fills)
+        await self._close_flat_killed()
         return {**report.to_json(), "frozen": self.reconciler_positions.frozen,
                 "freeze_reason": self.reconciler_positions.freeze_reason}
 
@@ -2012,6 +2129,7 @@ class Engine:
             note=f"delta≈{plan.delta:.2f} (estimated)",
             entry_charges=round(result.fill.charges, 2),
             exec_log={"entry": audit, "exits": [], **({"ref": plan.order_ref} if plan.order_ref else {})},
+            venue=plan.venue,
         )
         self._protect_option_stop(pos, book_limits, plan.key, result.fill.ts)
         if book is not None and book_limits.own_ladder:
@@ -2063,7 +2181,11 @@ class Engine:
     # -- paper limit orders (exec/resting.py) ---------------------------------------------------------
 
     def _limit_mode(self) -> bool:
-        return self.mode() is Mode.PAPER and self.limit_policy.enabled
+        """Paper orders follow the paper limit rules: in a PAPER session, and a paper book's orders in a
+        LIVE one (the RT-Y wide shadow, FUKAA) — so a LIVE session's paper books are judged exactly as a
+        paper session's, not by immediate fills. A live book's orders never come here (``plan.venue``,
+        ``Position.venue``)."""
+        return self.mode() in (Mode.PAPER, *LIVE_MODES) and self.limit_policy.enabled
 
     def _touch(self, scrip_code: str, now: float) -> tuple[float | None, float | None, float | None, float | None]:
         """``(bid, ask, ltp, age_ms)`` — the depth book when it is fresh enough to trade on, else
@@ -2106,20 +2228,39 @@ class Engine:
     async def _ensure_resting_target(self, pos: Position, now: float) -> None:
         """Keep the next rung's SELL resting for a book whose target is a touch: placed when the
         position has none, replaced when its rung, price or size has moved on, cancelled when the
-        book no longer wants one. Never while another exit of the position is working."""
+        book no longer wants one. Never while another exit of the position is working. A live
+        position's target sell is placed under the position's SELL lock (review14 A3)."""
+        if pos.venue == "live":
+            async with self._sell_lock(pos.id):
+                await self._ensure_resting_target_now(pos, time.time())  # the clock as it is once the lock is had
+            return
+        await self._ensure_resting_target_now(pos, now)
+
+    async def _ensure_resting_target_now(self, pos: Position, now: float) -> None:
         want = None
+        live = pos.venue == "live"
+        cur = self._target_resting(pos.id)
         if (
-            self._limit_mode() and self.s.paper_limit_exits and self.limit_policy.rest_targets
+            # a live position rests its target sells AT THE BROKER, in any mode (its lots are real)
+            ((live and self.s.live_limit_orders) or (not live and self._limit_mode() and self.s.paper_limit_exits))
+            and self.limit_policy.rest_targets
             and pos.status == "OPEN" and pos.qty_remaining > 0 and self.positions.get(pos.id) is pos
             and pos.id not in self._exits_in_flight and self._exit_resting(pos.id) is None
             and now >= self._exit_retry_at.get(pos.id, 0.0)
+            # live: not while the operator's SKIP waits, after a KILL, in a refusal's back-off, or while
+            # any other SELL of the position may still be working at the broker
+            and (not live or (pos.id not in self._pending_manual and pos.id not in self._pending_exit and not self._live_killed(pos)
+                              and now >= self._target_retry_at.get(pos.id, 0.0)
+                              and not self._live_sells_working(pos, besides=cur.bo if cur is not None else None)))
         ):
             want = self._exits_by_strategy.get(pos.strategy, self.exits).resting_target(pos)
-        cur = self._target_resting(pos.id)
         if cur is not None:
             if want is not None and (cur.ctx[1], cur.limit, cur.intent.qty) == want:
                 return
-            await self._cancel_resting_target(pos, now, "replaced — the ladder moved on" if want else "no target to rest")
+            if not await self._cancel_resting_target(pos, now, "replaced — the ladder moved on" if want else "no target to rest"):
+                return  # a live sell: the new one rests once the broker confirms the old one is off
+            if live and (pos.status != "OPEN" or self._live_sells_working(pos) or self._exit_resting(pos.id) is not None):
+                return  # looked at again after the broker's answer: something else is selling now
         if want is None:
             return
         rung, price, qty = want
@@ -2135,21 +2276,44 @@ class Engine:
             signal_id=pos.signal_id, client_order_id=cid,
             reason=f"T{rung + 1} {price:g} target sell, placed in advance", position_id=pos.id, ref_price=price, limit_price=price,
         )
-        res = self.gateway.place_limit(intent)
+        bo: BrokerOrder | None = None
+        if live:
+            res, bo = await self._send_live(intent, now, kind="target", reason_code=ExitReason.TARGET.value, rung=rung)
+        else:
+            res = self.gateway.place_limit(intent)
         if res.decision is not Decision.RESTING:
             await self.ledger.insert_order(_order_json(res.order), res.decision.value)
             log.warning("target.not_placed", position=pos.id, rung=rung + 1, reason=res.order.note)
+            if live:
+                self._target_refused(pos, now, res.order.note or res.decision.value)
             return
+        if live:
+            self._target_refusals.pop(pos.id, None)
         bid, ask, _, _ = self._touch(pos.instrument.scrip_code, now)
+        if bo is not None:
+            now = bo.placed_ts  # the real moment it was sent, not the tick's (review14c)
         r = Resting(intent=intent, kind="target", limit=price, placed_ts=now, deadline_s=0.0, signal_ts=pos.opened_ts, ref=price,
-                    why=f"T{rung + 1} sell placed in advance — fills on a touch", book_at_place=(bid, ask), last_check=now,
-                    ctx=(pos, rung))
+                    why=(f"T{rung + 1} sell resting at the broker" if live else f"T{rung + 1} sell placed in advance — fills on a touch"),
+                    book_at_place=(bid, ask), last_check=now, ctx=(pos, rung), venue="live" if live else "paper", bo=bo)
         r.order = res.order
+        # registered the moment it is known at the broker (no await since): whatever the position did
+        # meanwhile, the tick manages it from here — a closed position's sell is cancelled
         self._resting[intent.client_order_id] = r
         self._target_trail(pos, r, now, "placed")
         await self.ledger.upsert_position(_position_json(pos))
         log.info("limit.placed", kind="target", strategy=pos.strategy, symbol=pos.underlying.symbol, rung=rung + 1, limit=price, qty=qty)
         await self._advance_one(r, now, first=True)
+
+    def _target_refused(self, pos: Position, now: float, why: str) -> None:
+        """A target sell the broker (or a gate) refused: sent again after 2, 4, 8 … s, never every tick,
+        and the operator told on the third refusal running (review14 A10)."""
+        n = self._target_refusals.get(pos.id, 0) + 1
+        self._target_refusals[pos.id] = n
+        self._target_retry_at[pos.id] = now + min(2.0 ** n, self.s.live_target_backoff_max_s)
+        if n == 3:
+            log.error("target.live_refused", position=pos.id, symbol=pos.underlying.symbol, refusals=n, reason=why[:160])
+            self.telegram.fire_and_forget(f"⚠️ LIVE target sell refused {n}× {pos.strategy} {pos.underlying.symbol}: {why[:160]}",
+                                          key=f"tgtrefused:{pos.id}")
 
     def _target_trail(self, pos: Position, r: Resting, now: float, outcome: str) -> None:
         """The resting target's life on the position's order trail: placed, filled, cancelled (why)."""
@@ -2157,11 +2321,16 @@ class Engine:
         trail.append({"rung": r.ctx[1] + 1, "limit": r.limit, "qty": r.intent.qty, "placedTs": r.placed_ts, "ts": now, "outcome": outcome})
         del trail[:-20]
 
-    async def _cancel_resting_target(self, pos: Position, now: float, why: str) -> None:
-        """Take the resting target sell off before any other exit — never two SELLs for the same lots."""
+    async def _cancel_resting_target(self, pos: Position, now: float, why: str) -> bool:
+        """Take the resting target sell off before any other exit — never two SELLs for the same lots.
+        True when it is off. A live sell is off only when the broker says so (and what it filled
+        meanwhile is booked): until then False, and the caller does not send anything."""
         r = self._target_resting(pos.id)
         if r is None:
-            return
+            return True
+        if r.venue == "live":
+            await self._live_cancel_now(r, now, why)  # a confirmed cancel — and any fill — is booked at once
+            return self._target_resting(pos.id) is None
         self._resting.pop(r.intent.client_order_id, None)  # before the first await: nothing can fill it now
         bid, ask, _, _ = self._touch(pos.instrument.scrip_code, now)
         res = self.gateway.cancel_resting(r.order, f"T{r.ctx[1] + 1} resting sell {r.limit:g} cancelled — {why}")
@@ -2172,6 +2341,7 @@ class Engine:
         if pos.status == "OPEN":
             await self.ledger.upsert_position(_position_json(pos))
         log.info("target.cancelled", position=pos.id, rung=r.ctx[1] + 1, limit=r.limit, why=why)
+        return True
 
     async def _target_filled(self, r: Resting, now: float, price: float, bid: float | None, ask: float | None, age: float | None) -> None:
         """A resting target sell was touched: booked as a TARGET exit with the same state changes the
@@ -2214,7 +2384,8 @@ class Engine:
 
     async def _place_entry_limit(self, intent: OrderIntent, plan: _EntryPlan) -> None:
         """BUY LIMIT at the signal price if the book still straddles it, else at the mid — never
-        over the cap (the signal price + ``entry_cap_pct``)."""
+        over the cap (the signal price + ``entry_cap_pct``). On paper the engine judges the fill; a
+        live entry (``plan.venue``) is the same order at the broker, and the broker reports it."""
         now = time.time()
         bid, ask, _, _ = self._touch(plan.inst.scrip_code, now)
         tick = plan.inst.tick_size or 0.05
@@ -2223,20 +2394,21 @@ class Engine:
         if limit is None:
             limit, why = plan.ref, "at the signal price — no book to read"
         intent = replace(intent, limit_price=limit)
-        res = self.gateway.place_limit(intent)
+        bo: BrokerOrder | None = None
+        if plan.venue == "live":
+            # the broker's money and the notional cap judged at the most this order may come to pay —
+            # the cap it may follow the mid up to, not the signal price (review14 B10)
+            res, bo = await self._send_live(intent, now, kind="entry", worst_price=max(limit, cap or limit))
+        else:
+            res = self.gateway.place_limit(intent)
         if res.decision is not Decision.RESTING:
-            if plan.wallet is not None:
-                plan.wallet.release(plan.outlay, now)
-            plan.released = True
-            plan.outcome = (res.decision.value, res.order.note or res.decision.value)
-            await self.ledger.insert_order(_order_json(res.order), res.decision.value)
-            if plan.owns_row:
-                await self.ledger.insert_signal(plan.sig.to_json(), res.decision.value, res.order.note or plan.sig.reason)
-            else:
-                await self._book_skip(plan.key, plan.sig, f"entry refused — {res.order.note or res.decision.value}", gate="order_refused")
+            await self._entry_refused(plan, res, now)
             return
+        if bo is not None:
+            now = bo.placed_ts  # its 30 s hold and 60 s deadline run from the real moment it was sent (review14c)
         r = Resting(intent=intent, kind="entry", limit=limit, placed_ts=now, deadline_s=self.limit_policy.entry_wait_s,
-                    signal_ts=plan.decided_at, ref=plan.ref, why=why, book_at_place=(bid, ask), last_check=now, ctx=plan)
+                    signal_ts=plan.decided_at, ref=plan.ref, why=why, book_at_place=(bid, ask), last_check=now, ctx=plan,
+                    venue=plan.venue, bo=bo)
         r.order = res.order
         self._resting[intent.client_order_id] = r
         plan.outcome = ("RESTING", f"limit {limit:g} {why}")
@@ -2249,17 +2421,293 @@ class Engine:
                  bid=bid, ask=ask, why=why)
         await self._advance_one(r, now, first=True)
 
+    async def _entry_refused(self, plan: _EntryPlan, res: Any, now: float) -> None:
+        """An entry order refused before it rested (a gateway gate, the broker, the broker's money):
+        the hold goes back, and the refusal is recorded where the book records its decisions."""
+        if plan.wallet is not None:
+            plan.wallet.release(plan.outlay, now)
+        plan.released = True
+        plan.outcome = (res.decision.value, res.order.note or res.decision.value)
+        await self.ledger.insert_order(_order_json(res.order), res.decision.value)
+        if plan.owns_row:
+            await self.ledger.insert_signal(plan.sig.to_json(), res.decision.value, res.order.note or plan.sig.reason)
+        else:
+            await self._book_skip(plan.key, plan.sig, f"entry refused — {res.order.note or res.decision.value}", gate="order_refused")
+
+    # -- the live order manager: the broker's side of every live order (exec/live_orders.py) -------------
+
+    def _live_book_now(self, book: str) -> bool:
+        """This book's NEW orders go to the broker: a LIVE mode is armed and the book is a live book."""
+        return self.mode() in LIVE_MODES and book in self.LIVE_BOOKS
+
+    def _order_venue(self, intent: OrderIntent) -> str:
+        """Where an order goes: an exit where its position's lots are; a new entry by the mode now."""
+        if intent.purpose is Purpose.EXIT:
+            pos = self.positions.get(intent.position_id or "")
+            if pos is not None:
+                return pos.venue
+        return "live" if self._live_book_now(intent.strategy) else "paper"
+
+    def _sell_lock(self, position_id: str) -> TaskLock:
+        """Every live SELL of one position — its target sell, its exit, the cross, a supersede — is
+        cancel-then-place under this lock: the operator's SKIP (an API task) and the exit loop can
+        never both find the position free of sells and both send one (review14 A3)."""
+        lock = self._sell_locks.get(position_id)
+        if lock is None:
+            lock = self._sell_locks[position_id] = TaskLock()
+        return lock
+
+    def _live_sells_working(self, pos: Position, *, besides: BrokerOrder | None = None) -> list[BrokerOrder]:
+        """The position's SELLs the broker may still be working — every one the order manager tracks
+        and has not seen settled: a resting target or exit, a cross, one a previous run left, a
+        placement whose answer was lost. A new SELL goes only when this is empty (review14 A2)."""
+        return [bo for bo in self.live_orders.working_for(pos.id) if bo is not besides]
+
+    def _live_held_for(self, pos: Position, bo: BrokerOrder) -> int:
+        """The lots ``bo`` may still sell: what the position holds less what its OTHER SELLs have filled at
+        the broker and the engine has not booked yet (review14d R4-1)."""
+        others = sum(max(0, b.filled_qty - b.booked_qty) for b in self.live_orders.working_for(pos.id) if b is not bo)
+        return max(0, pos.qty_remaining - others)
+
+    def _live_killed(self, pos: Position) -> bool:
+        killed = self._killed or bool(pos.exec_log.get("killed"))
+        if killed and pos.id not in self._kill_logged:
+            self._kill_logged.add(pos.id)
+            log.warning("exit.suppressed_after_kill", position=pos.id, symbol=pos.underlying.symbol)
+        return killed
+
+    def _live_ctx(self, intent: OrderIntent, verdict_ok: bool = True, verdict_reason: str = "", *,
+                  worst_price: float | None = None) -> LiveContext:
+        wallet = self.wallets.get(intent.strategy)
+        # each book's LIVE caps are its own (operator, 2026-09-26: "per-book caps"): its LIVE positions,
+        # and its live entries already at the broker — each may become one (review14 A7)
+        working = sum(1 for cid, book in self._live_entry_books.items() if book == intent.strategy and cid != intent.client_order_id)
+        return LiveContext(
+            balance=wallet.balance if wallet else 0.0,
+            open_positions=len([p for p in self.positions.values()
+                                if p.status == "OPEN" and p.strategy == intent.strategy and p.venue == "live"]) + working,
+            day_pnl_inr=wallet.day_pnl if wallet else 0.0,
+            now_hm_ist=ist_hm(time.time()),
+            segment=intent.instrument.segment.value,
+            exposure_ok=verdict_ok,
+            exposure_reason=verdict_reason,
+            worst_price=worst_price,
+        )
+
+    async def _send_live(self, intent: OrderIntent, now: float, *, kind: str, reason_code: str = "",
+                         worst_price: float | None = None, **meta: Any) -> tuple[Any, BrokerOrder | None]:
+        """A live order through every gate, then to the broker: for an entry the book's stop (a cancel
+        the broker keeps refusing) and the broker's free margin net of the live entries already
+        working, then the gateway (idempotency, halt, breaker, the book's LIVE_CAPPED caps — an exit
+        passes in any mode, its lots being real), then the order manager. ``(result, broker order)``:
+        RESTING + the order, or the refusal and None. An order refused before it reached the broker
+        holds no margin (review14 A8), whatever the failure (A5)."""
+        cid = intent.client_order_id
+        entry = intent.purpose is Purpose.ENTRY
+        if entry:
+            if self._killed:
+                return self.gateway.refused(intent, Decision.REJECTED_HALT, "KILL pressed — no live entry until the operator resumes"), None
+            if (blocked := self._live_blocked_books.get(intent.strategy)) is not None:
+                return self.gateway.refused(intent, Decision.REJECTED_HALT, f"live entries stopped — {blocked[1]}"), None
+            code = intent.instrument.scrip_code
+            doubt = next((bo for bo in [*self.live_orders.watch.values(),
+                                        *(b for b in self.live_orders.orders.values() if b.unconfirmed)] if bo.scrip == code), None)
+            if doubt is not None:
+                # an order of this contract may be at the broker unseen: nothing more goes into it until
+                # that is known (review14c R3-1/R3-4)
+                return self.gateway.refused(intent, Decision.REJECTED_HALT,
+                                            f"{doubt.client_order_id} of this contract is unconfirmed or watched — no new live entry into it"), None
+            if (short := await self._live_funds_short(intent, worst_price)) is not None:
+                return self.gateway.refused(intent, Decision.REJECTED_CAP, short), None
+        me = asyncio.current_task()
+        if me is not None:
+            self._live_sending.add(me)
+        try:
+            res = self.gateway.place_live(intent, ctx=self._live_ctx(intent, worst_price=worst_price), exit_any_mode=not entry)
+            if res.decision is not Decision.RESTING:
+                self._live_unhold(cid)
+                return res, None
+            if entry:
+                self._live_entry_books[cid] = intent.strategy
+            try:
+                bo = await self.live_orders.place(intent, limit=intent.limit_price, now=now, kind=kind, reason_code=reason_code, **meta)
+                self._live_owned.add(cid)
+            except VenueError as exc:
+                self._live_unhold(cid)
+                self._live_entry_books.pop(cid, None)
+                return self.gateway.live_rejected(res.order, f"broker refused: {str(exc)[:160]}"), None
+        except BaseException:
+            if cid not in self.live_orders.orders:  # never became an order at the broker
+                self._live_unhold(cid)
+                self._live_entry_books.pop(cid, None)
+            raise
+        finally:
+            if me is not None:
+                self._live_sending.discard(me)
+        return res, bo
+
+    def _live_unhold(self, client_order_id: str) -> None:
+        """An entry that never reached the broker: its margin hold goes at once."""
+        self._live_reserved.pop(client_order_id, None)
+
+    def _live_release(self, client_order_id: str, now: float) -> None:
+        """A live entry finished (filled, cancelled or refused): its margin hold lapses at the next
+        broker snapshot taken after now — the snapshot is what shows the money used or freed."""
+        held = self._live_reserved.get(client_order_id)
+        if held is not None and held[1] is None:
+            self._live_reserved[client_order_id] = (held[0], now)
+
+    def _live_settled(self, bo: BrokerOrder) -> None:
+        """A live order is over and booked: whatever it blocked is freed."""
+        blocked = self._live_blocked_books.get(bo.book)
+        if blocked is not None and blocked[0] == bo.client_order_id:
+            self._live_blocked_books.pop(bo.book, None)
+            log.warning("live.entries_resumed", book=bo.book, order=bo.client_order_id)
+
+    async def _live_request_cancel(self, r: Resting, now: float, why: str, *, then: str = "") -> None:
+        """Ask the broker to take a live order off. Nothing is assumed cancelled: the order stays on
+        the engine's book until the broker says it is over, and what filled meanwhile is booked then.
+        ``then``: what follows the confirmed cancel — "cross" sells the rest through the book."""
+        if not r.cancel_why:
+            r.cancel_why = why
+        if then:
+            r.after_cancel = then
+        elif not r.after_cancel:
+            r.after_cancel = "done"
+        await self._live_cancel_bo(r.bo, now)
+
+    async def _live_cancel_bo(self, bo: BrokerOrder, now: float) -> None:
+        """Send (or send again, every ``live_cancel_resend_s``) the cancel of a live order. A cancel the
+        broker keeps refusing is alerted and stops the book's new live entries until that order is over
+        (review14 B6) — nothing else is sold for the position meanwhile (the order may still be working)."""
+        now = time.time()  # the resend clock is the real one, whatever tick asked (review14c)
+        if bo.terminal or not (bo.cancel_requested_ts is None or now - bo.cancel_requested_ts >= self.s.live_cancel_resend_s):
+            return
+        if await self.live_orders.cancel(bo, now) or bo.cancel_failures < self.s.live_cancel_alert_after:
+            return
+        book = bo.book or "?"
+        if book not in self._live_blocked_books:
+            why = f"the broker refused {bo.cancel_failures} cancels of {bo.client_order_id}"
+            self._live_blocked_books[book] = (bo.client_order_id, why)
+            log.error("live.cancel_refused", book=book, order=bo.client_order_id, failures=bo.cancel_failures)
+            self.telegram.fire_and_forget(f"🚨 LIVE {book}: {why} — its new entries are stopped; check the order at the broker",
+                                          key=f"cancelrefused:{bo.client_order_id}")
+
+    async def _live_cancel_now(self, r: Resting, now: float, why: str, *, then: str = "") -> bool:
+        """Ask the broker to cancel, then look at once: when the broker already shows it over, what it
+        filled is booked and what follows (a missed entry, a cross) happens in this same tick, as on
+        paper. True when the order is off the engine's book."""
+        await self._live_request_cancel(r, now, why, then=then)
+        if r.bo.cancel_requested_ts is not None:
+            await self.live_orders.refresh(now, [r.bo], force=True)
+            if r.bo.settled and self._resting.get(r.intent.client_order_id) is r:
+                await self._advance_live(r, now)
+        return self._resting.get(r.intent.client_order_id) is not r
+
     async def _advance_resting(self, now: float) -> None:
-        """Every resting limit, once per exit-loop tick: filled, repriced, crossed or cancelled."""
+        """Every resting limit, once per exit-loop tick: filled, repriced, crossed or cancelled — the
+        paper ones, then the live ones (which first learn from the broker what became of them)."""
+        await self._advance_paper_resting(now)
+        await self._advance_live_resting(now)
+
+    async def _advance_paper_resting(self, now: float) -> None:
         for r in list(self._resting.values()):
+            if r.venue == "live":
+                continue
             try:
                 await self._advance_one(r, now)
             except Exception as exc:  # one order's fault must not stall the others
                 log.exception("limit.advance_failed", order=r.intent.client_order_id, error=str(exc))
 
+    async def _advance_live_resting(self, now: float) -> None:
+        """The live orders, one after the other (the exit loop runs them side by side, per position:
+        ``_live_phase_body``): one status call for all of them, then each order's turn, then the
+        orders no engine order of this run owns."""
+        if not self.live_orders.orders:
+            return
+        await self._live_refresh(now)
+        for r in list(self._resting.values()):
+            if r.venue != "live":
+                continue
+            try:
+                await self._advance_one(r, now)
+            except Exception as exc:  # one order's fault must not stall the others
+                log.exception("limit.advance_failed", order=r.intent.client_order_id, error=str(exc))
+        await self._live_unowned_turn(now)
+
+    async def _live_unowned_turn(self, now: float) -> None:
+        """The live orders no engine order of this run owns — a previous run's, one whose placement was
+        torn down mid-request, one taken as never placed that turned up after all: a working SELL of
+        an open live position is ADOPTED when nothing else of it rests; anything else is asked off until
+        the broker confirms, then what it filled is booked (or alerted) and it is forgotten."""
+        while self.live_orders.resurrected:
+            bo = self.live_orders.resurrected.pop()
+            self._live_owned.discard(bo.client_order_id)  # its own engine order was closed: it is unowned now
+        for bo in list(self.live_orders.orders.values()):
+            if bo.client_order_id in self._live_owned:
+                continue  # this run's: its own engine order books it
+            try:
+                pos = self.positions.get(bo.position_id) if bo.position_id else None
+                if pos is not None:
+                    async with self._sell_lock(pos.id):
+                        await self._settle_unowned(bo, now)
+                else:
+                    await self._settle_unowned(bo, now)
+            except Exception as exc:
+                log.exception("live.unowned_failed", order=bo.client_order_id, error=str(exc))
+
+    async def _settle_unowned(self, bo: BrokerOrder, now: float) -> None:
+        """A live order no engine order owns: a working SELL of an open live position is adopted if the
+        position has no other working order of the engine's; otherwise it is asked off until the
+        broker confirms, then what it filled is booked on its position (or alerted) and it is
+        forgotten — never before (review14 A2, review14b N5)."""
+        if bo.client_order_id not in self.live_orders.orders or bo.client_order_id in self._live_owned:
+            return
+        if not bo.settled:
+            if bo.terminal:
+                self._live_unresolved(bo)
+                return
+            pos = self.positions.get(bo.position_id) if bo.position_id else None
+            if (pos is not None and not bo.resurrected and bo.side == OrderSide.SELL.value and bo.kind in ("exit", "target")
+                    and pos.status == "OPEN"
+                    and pos.venue == "live" and not self._live_killed(pos)
+                    and self._exit_resting(pos.id) is None and self._target_resting(pos.id) is None):
+                self._adopt_live_order(bo, pos, now)
+                return
+            await self._live_cancel_bo(bo, now)
+            return
+        await self._book_unowned_fill(bo, now)
+        if bo.kind == "entry":
+            if bo.never_placed:
+                self._live_unhold(bo.client_order_id)
+            else:
+                self._live_release(bo.client_order_id, now)
+            self._live_entry_books.pop(bo.client_order_id, None)
+        self._live_settled(bo)
+        self.live_orders.forget(bo)
+
+    def _live_unresolved(self, bo: BrokerOrder) -> None:
+        self.live_orders.alert(bo, "unresolved", f"🚨 LIVE order {bo.client_order_id} is over at the broker ({bo.status_text!r}) but its "
+                                                 f"traded quantity cannot be read — nothing more is sold for its position; check the broker")
+
+    def _live_unbookable_fill(self, bo: BrokerOrder, qty: int, why: str) -> None:
+        """A broker fill the engine cannot book (review14 B11): never silent."""
+        self.live_orders.alert(bo, f"unbookable:{bo.filled_qty}", f"🚨 LIVE {bo.side} {bo.client_order_id} filled {qty} at the broker, "
+                                                                 f"not booked — {why}; the broker reconcile will show it")
+
     async def _advance_one(self, r: Resting, now: float, *, first: bool = False) -> None:
         key = r.intent.client_order_id
         if self._resting.get(key) is not r:
+            return
+        if r.venue == "live":
+            if r.kind == "entry":
+                await self._advance_live(r, now, first=first)
+                return
+            async with self._sell_lock(r.ctx[0].id):  # a live SELL's turn is the position's alone
+                if self._resting.get(key) is r:
+                    if self._live_killed(r.ctx[0]) and not r.bo.terminal and not r.after_cancel:
+                        await self._live_request_cancel(r, now, "KILL")  # every working order of a killed position comes off
+                    await self._advance_live(r, now, first=first)
             return
         code = r.intent.instrument.scrip_code
         buy = r.intent.side is OrderSide.BUY
@@ -2392,16 +2840,18 @@ class Engine:
         except Exception as exc:
             log.exception("entry.record_failed", book=plan.key, symbol=plan.sig.symbol, error=str(exc))
 
-    async def _entry_missed(self, r: Resting, now: float, bid: float | None, ask: float | None, why: str) -> None:
-        """No fill: the book's trigger is recorded as missed, with the book it was missed in."""
+    async def _entry_missed(self, r: Resting, now: float, bid: float | None, ask: float | None, why: str,
+                            *, result: Any = None) -> None:
+        """No fill: the book's trigger is recorded as missed, with the book it was missed in.
+        ``result``: a live entry the broker rejected (counted toward the breaker) instead of a cancel."""
         self._resting.pop(r.intent.client_order_id, None)
         plan: _EntryPlan = r.ctx
         if plan.wallet is not None:
             plan.wallet.release(plan.outlay, now)
         plan.released = True
         note = f"{why} — limit {r.limit:g}, book {bid if bid else '—'}/{ask if ask else '—'} at cancel"
-        plan.outcome = (Decision.LIMIT_UNFILLED.value, note)
-        res = self.gateway.cancel_resting(r.order, note)
+        res = result or self.gateway.cancel_resting(r.order, note)
+        plan.outcome = (res.decision.value, note)
         audit = r.audit(cancelledTs=now, cancelReason=why, bookAtCancel={"bid": bid, "ask": ask},
                         waitS=round(now - r.placed_ts, 3), outcome="missed")
         await self.ledger.insert_order(_order_json(res.order, audit), res.decision.value)
@@ -2413,6 +2863,516 @@ class Engine:
                                                  "book": r.intent.strategy, "limit": r.limit, "ref": r.ref, "why": why,
                                                  "bid": bid, "ask": ask, "wait_s": round(now - r.placed_ts, 3)})
         log.info("limit.missed", strategy=r.intent.strategy, symbol=plan.sig.symbol, limit=r.limit, why=why)
+
+    # -- live orders, tick by tick: the broker's word first, then the paper rules -------------------------
+
+    async def _advance_live(self, r: Resting, now: float, *, first: bool = False) -> None:
+        """A live order's turn. What the broker filled is booked (an entry once the order is over, an
+        exit slice by slice); then the paper rules decide the rest against the live book — a reprice
+        is a MODIFY at the broker, giving up a CANCEL, the exit deadline a new SELL at the bid. Nothing
+        here fills from the local book, and nothing is decided on a broker answer this engine cannot
+        read (review14 A1). Its clock is the real one at this moment — a turn that waited (a lock, a
+        slow broker) never judges a deadline on the tick's old time (review14c)."""
+        now = time.time()
+        bo: BrokerOrder = r.bo
+        if first:
+            await self.live_orders.refresh(now, [bo], force=True)  # the placement may have filled at once
+        bid, ask, ltp, age = self._touch(r.intent.instrument.scrip_code, now)
+        if bo.terminal and not bo.settled:
+            # over at the broker, but what it traded cannot be read: nothing is booked, crossed or sent
+            # again on a guess — the order stays tracked, and its position's SELLs stay blocked
+            self._live_unresolved(bo)
+            return
+        if r.kind == "entry":
+            await self._advance_live_entry(r, bo, now, bid, ask, ltp, age)
+        elif r.kind == "target":
+            await self._advance_live_target(r, bo, now, bid, ask, age)
+        else:
+            await self._advance_live_exit(r, bo, now, bid, ask, age)
+
+    @staticmethod
+    def _live_sync_limit(r: Resting, bo: BrokerOrder) -> None:
+        """The price the order WORKS at is the broker's: after a modify the broker ignored, the engine's
+        limit goes back to it, so the next reprice asks again instead of believing it moved."""
+        if bo.modify_asked is None and bo.limit and abs(bo.limit - r.limit) > 1e-9:
+            r.limit = bo.limit
+            r.intent = replace(r.intent, limit_price=bo.limit)
+
+    @staticmethod
+    def _broker_audit(bo: BrokerOrder) -> dict[str, Any]:
+        # ``row``: the broker's own last answer for the order, verbatim — the field names this path
+        # assumes (exec/live_orders.py ASSUMED_FIELDS) are confirmed from it on the first armed session
+        return {"broker": {"exchOrderId": bo.exch_order_id, "brokerOrderId": bo.broker_order_id, "state": bo.state,
+                           "filled": bo.filled_qty, "of": bo.qty, "avg": bo.avg_price or None, "reason": bo.reason,
+                           "modifiesIgnored": bo.modifies_ignored, "priceProvisional": not bo.avg_known, "row": dict(bo.raw)}}
+
+    def _live_price_unknown(self, r: Resting, bo: BrokerOrder, bid: float | None) -> float:
+        """A fill the broker reported with no average price and no limit to stand for it (a MARKET
+        cross): booked at the bid it was sent against, loudly — the contract note has the truth."""
+        px = bid or self.ltps.get(r.intent.instrument.scrip_code) or r.ref or 0.0
+        self.live_orders.alert(bo, "price-unknown", f"⚠️ LIVE fill {bo.client_order_id}: no price from the broker — booked at {px:g}, "
+                                                    f"PROVISIONAL; check the contract note")
+        return float(px)
+
+    def _live_fill(self, r: Resting, bo: BrokerOrder, qty: int, price: float, now: float,
+                   bid: float | None, ask: float | None, age: float | None) -> Any:
+        """A broker fill (a whole order, or one slice of it) as the gateway's fill. It pays its share of
+        the ORDER's charges: the order's charges on everything it has filled so far, less what is
+        already booked — the flat brokerage once per order, the percentages on each slice (review14 A12)."""
+        mid = (bid + ask) / 2 if bid and ask else None
+        # a second slice of the same order is its own record (one order row per slice would collide)
+        order = r.order if r.booked_qty == 0 else replace(r.order, id=new_id("ord"))
+        cum = r.booked_qty + qty
+        avg = (r.booked_value + price * qty) / cum if cum else price
+        charges = max(0.0, self.costs.leg(r.intent.instrument, r.intent.side, avg, cum).total - r.charged)
+        r.charged += charges
+        if not bo.avg_known:
+            # no average price in the broker's answer: booked at the limit (a limit order fills there or
+            # better) and flagged as provisional (review14 B2)
+            self.live_orders.alert(bo, "avg-unknown", f"⚠️ LIVE fill {bo.client_order_id}: the broker gave no average price — "
+                                                      f"booked at {price:g}, PROVISIONAL; check the contract note")
+        return self.gateway.live_filled(order, r.intent, price=price, qty=qty, now=now, mid=mid, book_age_ms=age,
+                                        broker_order_id=bo.exch_order_id or bo.broker_order_id, charges=charges)
+
+    @staticmethod
+    def _note_live_booked(pos: Position, cid: str, qty: int) -> None:
+        """What of a live order is booked on the position, written WITH the position (the same row, the
+        same write): a restart books only the rest, whenever it comes (review14 A11)."""
+        booked = pos.exec_log.setdefault("liveBooked", {})
+        booked[cid] = int(qty)
+        for k in list(booked)[:-40]:
+            booked.pop(k, None)
+
+    async def _advance_live_entry(self, r: Resting, bo: BrokerOrder, now: float, bid: float | None, ask: float | None,
+                                  ltp: float | None, age: float | None) -> None:
+        plan: _EntryPlan = r.ctx
+        key = r.intent.client_order_id
+        if bo.settled:
+            if self._resting.pop(key, None) is not r:
+                return
+            self._live_release(key, now)
+            self._live_entry_books.pop(key, None)
+            if bo.filled_qty > 0:
+                # whole, or the part filled before the cancel — the position is what the broker filled
+                result = self._live_fill(r, bo, bo.filled_qty, bo.avg_price or r.limit, now, bid, ask, age)
+                part = "" if bo.filled_qty >= r.intent.qty else f" — {bo.filled_qty} of {r.intent.qty}, the rest {bo.state}"
+                audit = r.audit(filledTs=now, fillPrice=result.fill.price, bookAtFill={"bid": bid, "ask": ask},
+                                waitS=round(now - r.placed_ts, 3), outcome=f"filled at the broker{part}", **self._broker_audit(bo))
+                log.info("limit.filled", kind="entry", venue="live", strategy=r.intent.strategy, symbol=r.intent.instrument.symbol,
+                         price=result.fill.price, qty=result.fill.qty, wait_s=round(now - r.placed_ts, 1))
+                bo.booked_qty = bo.filled_qty  # before the position exists: the reconcile never counts the lots twice
+                await self._entry_filled(r, result, audit)
+                self.live_orders.mark_booked(bo, bo.filled_qty, r.charged)
+                if self._killed:
+                    await self._kill_late_fill(bo)
+            elif bo.never_placed:
+                # it never reached the broker: nothing refused it, nothing is held for it (review14b N1)
+                self._live_unhold(key)
+                note = f"the order never reached the broker — {bo.reason}"
+                await self._entry_missed(r, now, bid, ask, note, result=self.gateway.cancel_resting(r.order, note))
+            elif bo.state == "rejected":
+                note = f"broker rejected — {bo.reason or 'no reason given'}"
+                await self._entry_missed(r, now, bid, ask, note, result=self.gateway.live_rejected(r.order, note))
+            else:
+                await self._entry_missed(r, now, bid, ask, r.cancel_why or f"cancelled at the broker — {bo.reason or 'no reason given'}")
+            self._live_settled(bo)
+            self.live_orders.forget(bo)  # only now, with the position (or the miss) recorded
+            return
+        if r.after_cancel:
+            await self._live_request_cancel(r, now, r.cancel_why)  # asked again until the broker confirms
+            return
+        # the paper entry's own guards, the same order: a halt, a tripped breaker, a breached stop
+        halted, why = self.halted()
+        if not halted and plan.wallet is not None and plan.wallet.halted:
+            halted, why = True, f"{BOOK_LABELS.get(plan.key, plan.key)} halted — {plan.wallet.halt_reason}"
+        if not halted and self.gateway.book_tripped(plan.key):
+            halted, why = True, f"{BOOK_LABELS.get(plan.key, plan.key)}'s order breaker is tripped"
+        dead = self._stop_breached(plan.sig, plan.underlying)
+        if halted or dead:
+            await self._live_cancel_now(r, now, dead or why)
+            return
+        self._live_sync_limit(r, bo)
+        elapsed = now - r.placed_ts
+        pol = self.limit_policy
+        tick = r.intent.instrument.tick_size or 0.05
+        if elapsed >= r.deadline_s:
+            run = option_run_pct(r.ref, bid, ask, ltp)
+            ran = f" — the option {run:+.1f}% on its signal price" if run is not None else ""
+            await self._live_cancel_now(r, now, f"limit not filled in {r.deadline_s:g} s{ran}")
+            return
+        if elapsed >= pol.entry_hold_s and now - r.last_check >= pol.entry_recheck_s:
+            # after the hold, a signal price that has left the book is followed to the mid, under the cap
+            r.last_check = now
+            if bid and ask and r.ref is not None and not (bid <= r.ref <= ask):
+                new, _ = entry_limit(r.ref, bid, ask, tick, entry_cap(r.ref, pol.entry_cap_pct, tick))
+                if new is not None and new != r.limit and await self.live_orders.modify(bo, new, now):
+                    r.limit = new
+                    r.intent = replace(r.intent, limit_price=new)
+                    r.reprices.append((now, new))
+
+    async def _advance_live_target(self, r: Resting, bo: BrokerOrder, now: float, bid: float | None, ask: float | None,
+                                   age: float | None) -> None:
+        pos, _rung = r.ctx
+        key = r.intent.client_order_id
+        if bo.settled:
+            if self._resting.get(key) is not r:
+                return
+            new = bo.filled_qty - r.booked_qty
+            held = self.positions.get(pos.id) is pos and pos.status == "OPEN"
+            if new > 0 and held:
+                try:
+                    await self._target_filled_live(r, bo, now, new, bid, ask, age)
+                except Exception as exc:  # noqa: BLE001 — logged and alerted (_live_booking_failed)
+                    self._live_booking_failed(bo, exc)
+                    if bo.booked_qty < bo.filled_qty:
+                        return  # not booked: the order stays on the engine's book, and is booked on the next tick
+            else:
+                if new > 0:
+                    self._live_unbookable_fill(bo, new, "its position is no longer open")
+                rejected = bo.state == "rejected"
+                outcome = (f"rejected by the broker — {bo.reason or 'no reason given'}" if rejected
+                           else f"cancelled — {r.cancel_why or bo.reason or 'at the broker'}")
+                if r.booked_qty == 0:
+                    res = self.gateway.live_rejected(r.order, outcome) if rejected else self.gateway.cancel_resting(r.order, outcome)
+                    audit = r.audit(cancelledTs=now, cancelReason=r.cancel_why or bo.reason, bookAtCancel={"bid": bid, "ask": ask},
+                                    waitS=round(now - r.placed_ts, 3), outcome=outcome, **self._broker_audit(bo))
+                    self._target_trail(pos, r, now, outcome)
+                    await self._live_record(bo, self.ledger.insert_order(_order_json(res.order, audit),
+                                                                         res.decision.value if rejected else "TARGET_CANCELLED"))
+                if rejected and held:
+                    self._target_refused(pos, now, bo.reason or "rejected by the broker")
+                if pos.status == "OPEN":
+                    await self._live_record(bo, self.ledger.upsert_position(_position_json(pos)))
+            # off the engine's book only now, with what it sold booked (review14e NEW-5b)
+            self._resting.pop(key, None)
+            self._live_settled(bo)
+            self.live_orders.forget(bo)
+            if new > 0 and held and pos.status == "OPEN":
+                await self._ensure_resting_target(pos, now)  # the next rung, at once (none while an exit is in flight)
+            return
+        if r.after_cancel:
+            await self._live_request_cancel(r, now, r.cancel_why)
+            return
+        if pos.status != "OPEN" or pos.qty_remaining <= 0 or self.positions.get(pos.id) is not pos:
+            await self._live_request_cancel(r, now, "the position is closed")
+        elif bo.qty - bo.filled_qty > (held := self._live_held_for(pos, bo)):
+            # more SELL resting than the lots held: off; the ladder rests the right size once it is (R4-1a)
+            await self._live_cancel_now(r, now, f"resting for {bo.qty - bo.filled_qty}, {held} held")
+
+    async def _live_record(self, bo: BrokerOrder, write: Awaitable[Any]) -> None:
+        """A ledger write of the live order path: a failure is alerted, and never stops what follows —
+        the booking, the next rung, the stop (review14e NEW-5b)."""
+        try:
+            await write
+        except Exception as exc:  # noqa: BLE001 — logged and alerted (_live_booking_failed)
+            self._live_booking_failed(bo, exc)
+
+    def _live_booking_failed(self, bo: BrokerOrder, exc: BaseException) -> None:
+        log.exception("live.record_failed", order=bo.client_order_id, error=str(exc)[:200])
+        self.live_orders.alert(bo, f"record-failed:{type(exc).__name__}",
+                               f"🚨 LIVE {bo.client_order_id}: recording its fill failed ({type(exc).__name__}: {str(exc)[:120]}) — "
+                               f"the position is booked in memory and its stop goes on; check the ledger (disk)")
+
+    async def _target_filled_live(self, r: Resting, bo: BrokerOrder, now: float, qty: int, bid: float | None,
+                                  ask: float | None, age: float | None) -> None:
+        """A resting target sell the broker filled (whole, or the part filled before a cancel): the
+        same state changes as the touch (risk/exits.py ``resting_target_filled``) at the broker's
+        price and quantity. An exit already being sent does not stop it — the lots are sold. Booked in
+        memory (the order's booked quantity, the position) before any write: a failed write can never
+        leave the fill unbooked and every SELL of the position blocked (review14e NEW-5b)."""
+        pos, rung = r.ctx
+        owned = pos.id not in self._exits_in_flight
+        if owned:
+            self._exits_in_flight.add(pos.id)
+        try:
+            take = min(qty, pos.qty_remaining)
+            if take < qty:
+                self._live_unbookable_fill(bo, qty - take, f"the broker sold {qty} of the {pos.qty_remaining} held")
+            price = bo.avg_price or r.limit
+            result = self._live_fill(r, bo, take, price, now, bid, ask, age)
+            mid = (bid + ask) / 2 if bid and ask else None
+            advance = pos.targets_hit == rung and r.booked_qty == 0
+            if advance:
+                decision = self._exits_by_strategy.get(pos.strategy, self.exits).resting_target_filled(pos, now, result.fill.price, mid)
+            else:  # the ladder moved on while it rested: the lots are sold all the same, the rung is not taken twice
+                decision = ExitDecision(pos.id, ExitReason.TARGET, result.fill.price, take,
+                                        f"T{rung + 1} resting sell filled at the broker after the ladder moved on")
+            decision = replace(decision, qty=int(take))
+            part = "" if qty >= r.intent.qty else f" — {qty} of {r.intent.qty}"
+            audit = r.audit(filledTs=now, fillPrice=result.fill.price, bookAtFill={"bid": bid, "ask": ask},
+                            waitS=round(now - r.placed_ts, 3), outcome=f"T{rung + 1} resting limit filled at the broker{part}",
+                            **self._broker_audit(bo))
+            self._target_trail(pos, r, now, "filled" + part)
+            log.info("limit.filled", kind="target", venue="live", strategy=pos.strategy, symbol=pos.underlying.symbol,
+                     rung=rung + 1, price=result.fill.price, qty=take)
+            r.booked_qty += qty
+            r.booked_value += price * qty
+            bo.booked_qty = r.booked_qty
+            self._note_live_booked(pos, bo.client_order_id, r.booked_qty)
+            self.live_orders.mark_booked(bo, r.booked_qty, r.charged)
+            hit = pos.targets_hit
+            try:
+                # the position booked in memory first (``_book_exit`` applies the exit before it writes)
+                await self._book_exit(pos, decision, result, now, self._exit_attempts.get(pos.id, 0), audit, keep_attempts=True)
+            finally:
+                if not advance and pos.targets_hit != hit:
+                    pos.targets_hit = hit
+                    if pos.status == "OPEN":
+                        await self._live_record(bo, self.ledger.upsert_position(_position_json(pos)))
+            result.order.charges = round(r.charged, 2)  # the order's one row carries the order's charges
+            await self._live_record(bo, self.ledger.insert_order(_order_json(result.order, audit), result.decision.value))
+        finally:
+            if owned:
+                self._exits_in_flight.discard(pos.id)
+
+    async def _advance_live_exit(self, r: Resting, bo: BrokerOrder, now: float, bid: float | None, ask: float | None,
+                                 age: float | None) -> None:
+        pos, decision, attempt = r.ctx
+        key = r.intent.client_order_id
+        new = bo.filled_qty - r.booked_qty
+        if new > 0:
+            if self.positions.get(pos.id) is pos and pos.status == "OPEN":
+                take = min(new, pos.qty_remaining)
+                if take < new:
+                    self._live_unbookable_fill(bo, new - take, f"the broker sold {new} of the {pos.qty_remaining} held")
+                # a slice, priced out of the broker's running average of the whole order
+                avg_all = bo.avg_price or r.limit or self._live_price_unknown(r, bo, bid)
+                price = (avg_all * bo.filled_qty - r.booked_value) / new if r.booked_qty else avg_all
+                if price <= 0:
+                    price = avg_all
+                price = round(price, 2)
+                result = self._live_fill(r, bo, take, price, now, bid, ask, age)
+                # a target is one rung, however many slices — and however many orders (a crossed rest, A6)
+                advance = not (decision.reason is ExitReason.TARGET and (r.booked_qty > 0 or r.rung_taken))
+                audit = r.audit(filledTs=now, fillPrice=result.fill.price, bookAtFill={"bid": bid, "ask": ask},
+                                waitS=round(now - r.placed_ts, 3), outcome=f"filled at the broker ({bo.filled_qty} of {bo.qty})",
+                                **self._broker_audit(bo))
+                hit = pos.targets_hit
+                r.booked_qty += new
+                r.booked_value += price * new
+                bo.booked_qty = r.booked_qty
+                self._note_live_booked(pos, bo.client_order_id, r.booked_qty)
+                log.info("limit.filled", kind="exit", venue="live", strategy=pos.strategy, symbol=pos.underlying.symbol,
+                         price=result.fill.price, qty=take, of=bo.qty)
+                await self._book_exit(pos, replace(decision, qty=take), result, now, attempt, audit, keep_attempts=True)
+                if not advance and pos.targets_hit != hit:
+                    pos.targets_hit = hit
+                    if pos.status == "OPEN":
+                        await self.ledger.upsert_position(_position_json(pos))
+                self.live_orders.mark_booked(bo, r.booked_qty, r.charged)
+            else:
+                self._live_unbookable_fill(bo, new, "its position is no longer open")
+        if bo.settled:
+            if self._resting.pop(key, None) is not r:
+                return
+            # the order's one ledger row: what the broker filled of it, at what average, for what charges
+            if r.booked_qty > 0:
+                r.order.status, r.order.filled = ("FILLED" if r.booked_qty >= r.intent.qty else "PARTIAL"), r.booked_qty
+                r.order.avg_price = round(r.booked_value / r.booked_qty, 2)
+                r.order.charges = round(r.charged, 2)
+            else:
+                r.order.status, r.order.note = ("REJECTED" if bo.state == "rejected" else "CANCELLED"), (bo.reason or r.cancel_why)
+            audit = r.audit(endedTs=now, outcome=f"{bo.state} at the broker — {r.booked_qty} of {r.intent.qty} sold", **self._broker_audit(bo))
+            # a failed write is alerted and never stops what follows — the cross, the stop (review14e NEW-5b)
+            await self._live_record(bo, self.ledger.insert_order(
+                _order_json(r.order, audit), Decision.SUBMITTED.value if r.booked_qty else ("REJECTED_BROKER" if bo.state == "rejected" else "CANCELLED")))
+            # the next order for this position goes under a fresh id — and a restart knows it
+            self._exit_attempts[pos.id] = attempt + 1
+            pos.exec_log["exitAttempt"] = max(int(pos.exec_log.get("exitAttempt", 0)), attempt + 1)
+            if bo.state == "rejected" and r.booked_qty == 0 and not bo.never_placed:
+                # (an order that never reached the broker was refused by nobody: the exit goes again at once)
+                self._exit_retry_at[pos.id] = now + min(2.0 ** (attempt + 1), 30.0)
+                log.error("exit.live_rejected", position=pos.id, symbol=pos.underlying.symbol, reason=bo.reason)
+                self.telegram.fire_and_forget(f"⚠️ LIVE EXIT REJECTED {pos.strategy} {pos.underlying.symbol}: {bo.reason}",
+                                              key=f"exitfail:{pos.id}")
+            remaining = r.intent.qty - r.booked_qty
+            rung_taken = r.rung_taken or (decision.reason is ExitReason.TARGET and r.booked_qty > 0)
+            self._live_settled(bo)
+            self.live_orders.forget(bo)  # only now, with every slice booked
+            if (r.after_cancel in ("cross", "resize") and remaining > 0 and pos.status == "OPEN" and self.positions.get(pos.id) is pos
+                    and bo.state != "rejected"):
+                # "cross": the rest through the book at the bid; "resize": the same step again, for no more
+                # than the lots now held (review14d R4-1a)
+                await self._place_live_exit(pos, replace(decision, qty=min(remaining, pos.qty_remaining)), now,
+                                            cross_n=r.cross_n + (1 if r.after_cancel == "cross" else 0), rung_taken=rung_taken)
+            elif pos.status == "OPEN":
+                await self.ledger.upsert_position(_position_json(pos))
+            return
+        if r.after_cancel:
+            await self._live_request_cancel(r, now, r.cancel_why)
+            return
+        if pos.status != "OPEN" or self.positions.get(pos.id) is not pos:
+            await self._live_request_cancel(r, now, "the position is closed")
+            return
+        if bo.qty - bo.filled_qty > (held := self._live_held_for(pos, bo)):
+            # more SELL working than the lots held (another order of the position sold some — one taken as
+            # never placed that turned up after all): taken off, and sent again at the right size once
+            # the broker confirms and the other's fill is booked — never more SELL working than is held
+            # (review14d R4-1a)
+            await self._live_cancel_now(r, now, f"working for {bo.qty - bo.filled_qty}, {held} held — resized", then="resize")
+            return
+        self._live_sync_limit(r, bo)
+        elapsed = now - r.placed_ts
+        if elapsed >= r.deadline_s:
+            # the deadline: take the rest off, then sell it through the book at the bid — once the
+            # broker has confirmed the cancel, never before
+            await self._live_cancel_now(r, now, f"not filled in {r.deadline_s:g} s — crossing", then="cross")
+            return
+        if r.cross_n == 0 and now - r.last_check >= self.limit_policy.exit_reprice_s:
+            r.last_check = now
+            new_px = exit_limit(bid, ask, elapsed, r.deadline_s, r.intent.instrument.tick_size or 0.05)
+            if new_px is not None and new_px != r.limit and await self.live_orders.modify(bo, new_px, now):
+                r.limit = new_px
+                r.intent = replace(r.intent, limit_price=new_px)
+                r.reprices.append((now, new_px))
+
+    async def _place_live_exit(self, pos: Position, decision: Any, now: float, *, cross_n: int = 0, rung_taken: bool = False) -> None:
+        """A live position's exit at the broker, the paper way: a SELL LIMIT at the mid walked to the
+        bid (``cross_n`` 0), and at its deadline the rest crossed — a SELL at the bid, sent again at
+        the new bid every ``live_cross_retry_s``, a MARKET order after ``live_cross_market_after``.
+        Under the position's SELL lock, and never while any other SELL of it may be working."""
+        async with self._sell_lock(pos.id):
+            now = time.time()  # the lock may have been waited for: act on the clock as it is now (review14c)
+            if self._live_killed(pos):
+                return
+            working = self._live_sells_working(pos)
+            if working or self._exit_resting(pos.id) is not None or self._target_resting(pos.id) is not None:
+                # never two SELLs for the same lots at the broker, whoever asked — the exit is kept, and sent
+                # (sized on what is then held) once nothing else of the position is working (review14d)
+                log.warning("exit.live_second_sell_deferred", position=pos.id, symbol=pos.underlying.symbol,
+                            reason=decision.reason.value, working=[bo.client_order_id for bo in working])
+                self._pending_exit[pos.id] = (decision, cross_n, rung_taken)
+                return
+            if pos.status != "OPEN" or pos.qty_remaining <= 0 or self.positions.get(pos.id) is not pos:
+                return
+            if decision.qty > pos.qty_remaining:
+                decision = replace(decision, qty=pos.qty_remaining)
+            await self._refresh_exit_book(pos.instrument, now)  # priced against a book fresh enough to trade on, as on paper
+            attempt = self._exit_attempts.get(pos.id, 0)
+            bid, ask, _, _ = self._touch(pos.instrument.scrip_code, now)
+            tick = pos.instrument.tick_size or 0.05
+            deadline = self.limit_policy.exit_deadline(decision.reason)
+            limit: float | None = None
+            if cross_n == 0:
+                limit = exit_limit(bid, ask, 0.0, deadline, tick)
+                if limit is None:
+                    cross_n = 1  # no bid to rest against: cross at once
+            if cross_n >= 1:
+                deadline = self.s.live_cross_retry_s
+                limit = exit_limit(bid, ask, 1.0, 1.0, tick) if (bid and cross_n <= self.s.live_cross_market_after) else None
+            intent = OrderIntent(
+                strategy=pos.strategy, instrument=pos.instrument, side=OrderSide.SELL, qty=decision.qty, purpose=Purpose.EXIT,
+                signal_id=pos.signal_id, client_order_id=exit_client_order_id(pos, decision, attempt, cross=cross_n >= 1),
+                reason=decision.note, position_id=pos.id, ref_price=decision.ref_price, limit_price=limit,
+            )
+            res, bo = await self._send_live(intent, now, kind="exit", reason_code=decision.reason.value, cross_n=cross_n,
+                                            rung_taken=rung_taken)
+            pos.exec_log["exitAttempt"] = max(int(pos.exec_log.get("exitAttempt", 0)), attempt + 1)  # a restart never re-sends this id
+            if bo is None:
+                await self.ledger.insert_order(_order_json(res.order), res.decision.value)
+                self._exit_attempts[pos.id] = attempt + 1
+                if res.decision in _DEFINITIVE_REJECTIONS:
+                    self._exit_retry_at[pos.id] = now + min(2.0 ** (attempt + 1), 30.0)
+                log.error("exit.live_refused", position=pos.id, symbol=pos.underlying.symbol, reason=res.order.note, attempt=attempt)
+                self.telegram.fire_and_forget(f"⚠️ LIVE EXIT REFUSED {pos.strategy} {pos.underlying.symbol}: {res.order.note}",
+                                              key=f"exitfail:{pos.id}")
+                await self.ledger.upsert_position(_position_json(pos))
+                return
+            why = (f"{decision.reason.value}: the mid, walked to the bid, crossed after {deadline:g} s" if cross_n == 0
+                   else f"{decision.reason.value}: cross {cross_n} — " + (f"SELL at the bid {limit:g}" if limit else "a MARKET order"))
+            now = bo.placed_ts  # its walk and its deadline run from the real moment it was sent (review14c)
+            r = Resting(intent=intent, kind="exit", limit=limit or 0.0, placed_ts=now, deadline_s=deadline, signal_ts=now,
+                        ref=decision.ref_price, why=why, book_at_place=(bid, ask), last_check=now, ctx=(pos, decision, attempt),
+                        venue="live", bo=bo, cross_n=cross_n, rung_taken=rung_taken)
+            r.order = res.order
+            self._resting[intent.client_order_id] = r
+            self._pending_exit.pop(pos.id, None)
+            if decision.reason is ExitReason.MANUAL:
+                self._pending_manual.pop(pos.id, None)  # the operator's SKIP is working at the broker now
+            await self.ledger.upsert_position(_position_json(pos))
+            log.info("limit.placed", kind="exit", venue="live", strategy=pos.strategy, symbol=pos.underlying.symbol, limit=limit,
+                     bid=bid, ask=ask, reason=decision.reason.value, deadline_s=deadline, cross=cross_n)
+            await self._advance_one(r, now, first=True)
+
+    async def _book_unowned_fill(self, bo: BrokerOrder, now: float) -> None:
+        """What a settled live order no engine order owns (a previous run's) filled beyond what is
+        booked: a SELL's lots on its open position; an entry's only reported — its plan died with the
+        run, and the broker reconcile shows the lots; anything else alerted (review14 B11)."""
+        pos = self.positions.get(bo.position_id) if bo.position_id else None
+        logged = int(((pos.exec_log.get("liveBooked") or {}).get(bo.client_order_id, 0)) if pos is not None else 0)
+        already = max(bo.booked_qty, logged)
+        new = bo.filled_qty - already
+        if new <= 0:
+            return
+        if bo.side == OrderSide.SELL.value and pos is not None and pos.status == "OPEN" and pos.venue == "live":
+            take = min(new, pos.qty_remaining)
+            if take < new:
+                self._live_unbookable_fill(bo, new - take, f"the broker sold {new} of the {pos.qty_remaining} held")
+            reason = ExitReason(bo.reason_code) if bo.reason_code in ExitReason._value2member_map_ else ExitReason.MANUAL
+            price = bo.avg_price or bo.limit or self.ltps.get(pos.instrument.scrip_code) or pos.entry
+            if not bo.avg_price or not bo.avg_known:
+                self.live_orders.alert(bo, "price-unknown", f"⚠️ LIVE fill {bo.client_order_id} booked at {price:g}, PROVISIONAL — "
+                                                            f"no average price from the broker; check the contract note")
+            intent = OrderIntent(strategy=pos.strategy, instrument=pos.instrument, side=OrderSide.SELL, qty=bo.qty, purpose=Purpose.EXIT,
+                                 signal_id=pos.signal_id, client_order_id=bo.client_order_id, reason="booked from the broker's report",
+                                 position_id=pos.id)
+            charges = max(0.0, self.costs.leg(pos.instrument, OrderSide.SELL, price, bo.filled_qty).total - bo.charged)
+            result = self.gateway.live_filled(self.gateway._order_for(intent, Mode.LIVE), intent, price=price, qty=take, now=now,
+                                              mid=None, book_age_ms=None, broker_order_id=bo.exch_order_id, charges=charges)
+            hit = pos.targets_hit
+            self._note_live_booked(pos, bo.client_order_id, already + new)
+            bo.booked_qty = already + new  # with the position, before any await: the reconcile counts it once (review14b N7)
+            await self._book_exit(pos, ExitDecision(pos.id, reason, result.fill.price, take, "filled at the broker, booked from its report"),
+                                  result, now, self._exit_attempts.get(pos.id, 0),
+                                  {"outcome": "booked from the broker's report", **self._broker_audit(bo)}, keep_attempts=True)
+            rung_once = already == 0 and not bo.rung_taken and (bo.kind != "target" or bo.rung == hit)
+            if reason is ExitReason.TARGET and not rung_once and pos.targets_hit != hit:
+                pos.targets_hit = hit
+                if pos.status == "OPEN":
+                    await self.ledger.upsert_position(_position_json(pos))
+            self.live_orders.mark_booked(bo, already + new, bo.charged + charges)
+        elif bo.kind == "entry" and bo.side == OrderSide.BUY.value:
+            if any(p.exec_log.get("ref") and bo.client_order_id.startswith(f"{p.exec_log['ref']}-") for p in self.positions.values()):
+                self.live_orders.mark_booked(bo, bo.filled_qty)  # its position was booked before the restart
+                return
+            log.error("live.orphan_entry", cid=bo.client_order_id, filled=new, avg=bo.avg_price, symbol=bo.symbol)
+            self.telegram.fire_and_forget(
+                f"🚨 LIVE entry {bo.client_order_id} filled {new} with no position booked — the broker holds it; the reconcile shows it",
+                key=f"orphan:{bo.client_order_id}")
+        else:
+            self._live_unbookable_fill(bo, new, "its position is no longer open")
+
+    def _adopt_live_order(self, bo: BrokerOrder, pos: Position, now: float) -> Resting:
+        """A SELL a previous run left working at the broker, taken back under the paper rules from
+        where it was (review14 A2/B8): an exit keeps walking and crosses at its deadline, a target
+        rests — and is replaced if the ladder wants another. Its booked quantity is the larger of the
+        order store's and the position's own record."""
+        already = max(bo.booked_qty, int((pos.exec_log.get("liveBooked") or {}).get(bo.client_order_id, 0)))
+        bo.booked_qty = already
+        reason = ExitReason(bo.reason_code) if bo.reason_code in ExitReason._value2member_map_ else ExitReason.MANUAL
+        intent = OrderIntent(strategy=pos.strategy, instrument=pos.instrument, side=OrderSide.SELL, qty=bo.qty, purpose=Purpose.EXIT,
+                             signal_id=pos.signal_id, client_order_id=bo.client_order_id, reason="adopted after a restart",
+                             position_id=pos.id, ref_price=bo.limit, limit_price=bo.limit)
+        order = self.gateway._order_for(intent, Mode.LIVE)
+        order.status, order.note = "RESTING", "adopted after a restart"
+        self.gateway.remember(bo.client_order_id)
+        ctx: Any
+        if bo.kind == "target":
+            ctx, deadline, kind = (pos, bo.rung if bo.rung >= 0 else pos.targets_hit), 0.0, "target"
+        else:
+            decision = ExitDecision(pos.id, reason, bo.limit or pos.entry, bo.qty, "adopted after a restart")
+            attempt = max(0, int(pos.exec_log.get("exitAttempt", 0)) - 1)
+            ctx, kind = (pos, decision, attempt), "exit"
+            deadline = self.s.live_cross_retry_s if bo.cross_n else self.limit_policy.exit_deadline(reason)
+        avg = bo.avg_price or bo.limit or 0.0
+        r = Resting(intent=intent, kind=kind, limit=bo.limit or 0.0, placed_ts=bo.placed_ts, deadline_s=deadline, signal_ts=bo.placed_ts,
+                    ref=bo.limit, why="adopted after a restart — it was working at the broker", last_check=now, ctx=ctx, venue="live",
+                    bo=bo, booked_qty=already, booked_value=avg * already, cross_n=bo.cross_n, rung_taken=bo.rung_taken, charged=bo.charged)
+        r.order = order
+        self._resting[bo.client_order_id] = r
+        self._live_owned.add(bo.client_order_id)
+        log.warning("live.adopted", cid=bo.client_order_id, kind=kind, position=pos.id, filled=bo.filled_qty, booked=already)
+        return r
 
     async def _load_leg_pivots(self, groups: Any) -> None:
         """Previous-session pivots for the future and eight OTM strikes of every F&O name.
@@ -2697,7 +3657,8 @@ class Engine:
                 await self.ledger.event("rt_twin.skipped", {"book": shadow_key.value, "signal_id": of.signal_id, "symbol": of.underlying.symbol, "reason": f"exposure: {verdict.reason}"})
                 continue
             # its own order ref: its exits are its own orders, never the source's ids
-            shadow = replace(of, id=new_id("pos"), strategy=shadow_key.value, note=f"{of.note} · shadow of {of.id}",
+            # a shadow's lots are never at the broker, whatever the book it mirrors does: venue paper
+            shadow = replace(of, id=new_id("pos"), strategy=shadow_key.value, note=f"{of.note} · shadow of {of.id}", venue="paper",
                              exec_log={"entry": dict(of.exec_log.get("entry") or {}), "exits": [],
                                        "ref": self._order_ref(shadow_key.value, ts)})
             self._widen_stop(shadow, engine_for.limits)
@@ -3888,31 +4849,37 @@ class Engine:
         if rows.get(code):
             self._apply_snapshot({code: rows[code]}, time.time())
 
-    #: the books whose orders go to the broker in a LIVE mode. Every other book — each now places its
-    #: own entry and exits — fills on PAPER against the same live book, so a LIVE session can never send
-    #: one real order per book for a single trigger (before 2026-09-26 the twins copied the parent's
-    #: fill, and their exits would have reached the broker for lots never bought there)
-    LIVE_BOOKS = frozenset({StrategyKey.FUDKII.value})
+    #: the books whose orders go to the broker in a LIVE mode — every FUDKII book, each on its own orders
+    #: and ids, its own LIVE_CAPPED caps (operator, 2026-09-27: "all fudkii strategies are live … each
+    #: must have its dedicated orderbook"). Not the RT-Y wide shadow: it opens on RT-Y's fill and has no
+    #: orders of its own, so its positions are paper; FUKAA fills on paper too. A position's exits go
+    #: where ITS lots are (``Position.venue``), whatever the mode is now.
+    LIVE_BOOKS = frozenset({
+        StrategyKey.FUDKII.value, StrategyKey.FUDKII_RT_X.value, StrategyKey.FUDKII_RT_N.value, StrategyKey.FUDKII_RT_Y.value,
+        StrategyKey.FUDKII_CT_X.value, StrategyKey.FUDKII_CT_Y.value, StrategyKey.FUDKII_RT_MCX.value,
+    })
 
     async def _submit(self, intent: OrderIntent, *, verdict_ok: bool, verdict_reason: str) -> Any:
+        """An immediate order. It goes where it belongs (``_order_venue``): a new entry to the broker
+        only for a live book in a LIVE mode, an exit to wherever its position's lots are — a paper
+        position never sends a real SELL after LIVE is armed, and a live one's still reaches the
+        broker after the arm expires (review, 2026-09-26)."""
         mode = self.mode()
-        if mode in (Mode.LIVE, Mode.LIVE_CAPPED) and intent.strategy not in self.LIVE_BOOKS:
-            return self.gateway.submit_paper(intent)
-        if mode in (Mode.LIVE, Mode.LIVE_CAPPED):
-            wallet = self.wallets[intent.strategy]
+        if self._order_venue(intent) == "live":
             if intent.purpose is Purpose.ENTRY and (short := await self._live_funds_short(intent)) is not None:
                 return self.gateway.refused(intent, Decision.REJECTED_CAP, short)
-            ctx = LiveContext(
-                balance=wallet.balance,
-                # each book's LIVE caps are its own (operator, 2026-09-26: "per-book caps")
-                open_positions=len([p for p in self.positions.values() if p.status == "OPEN" and p.strategy == intent.strategy]),
-                day_pnl_inr=wallet.day_pnl,
-                now_hm_ist=ist_hm(time.time()),
-                segment=intent.instrument.segment.value,
-                exposure_ok=verdict_ok,
-                exposure_reason=verdict_reason,
-            )
-            return await self.gateway.submit_live(intent, ctx=ctx)
+            res = None
+            try:
+                res = await self.gateway.submit_live(intent, ctx=self._live_ctx(intent, verdict_ok, verdict_reason),
+                                                     exit_any_mode=intent.purpose is Purpose.EXIT)
+                return res
+            finally:
+                if res is not None and res.decision in (Decision.SUBMITTED, Decision.REJECTED_BROKER):
+                    self._live_release(intent.client_order_id, time.time())  # it reached the broker
+                else:
+                    self._live_unhold(intent.client_order_id)  # refused before it went, or failed: no hold
+        if mode in LIVE_MODES:
+            return self.gateway.submit_paper(intent)
         return self.gateway.submit(intent)
 
     # -- exit path -----------------------------------------------------------------------------------
@@ -3938,107 +4905,236 @@ class Engine:
 
     async def _manage_positions(self) -> None:
         now = time.time()
-        # resting limit orders first: a fill here changes what the positions below are
-        await self._advance_resting(now)
+        # The paper half first, on its own: its resting limits (a fill here changes what the positions
+        # below are), then its positions. Nothing a broker does — or fails to do — can hold up a paper
+        # stop (review14 A5/B7). In a PAPER session this is the whole tick, in the order it always ran.
+        await self._advance_paper_resting(now)
         for pos in list(self.positions.values()):
-            if pos.status != "OPEN":
+            if pos.status != "OPEN" or pos.venue == "live":
                 continue
-            ltp = self.ltps.get(pos.instrument.scrip_code)
-            if ltp is None or ltp <= 0:
-                if pos.id not in self._stale_positions:
-                    # Was silent. A position whose contract never prints is not being managed at
-                    # all — no stop, no target, no force-flat — and nobody could tell.
-                    log.warning(
-                        "position.no_quote",
-                        position=pos.id,
-                        symbol=pos.underlying.symbol,
-                        instrument=pos.instrument.name or pos.instrument.scrip_code,
-                    )
-                    self.telegram.fire_and_forget(
-                        f"⚠️ {pos.strategy} {pos.underlying.symbol}: the contract has not printed "
-                        f"since boot — the position is not being evaluated",
-                        key=f"noquote:{pos.id}",
-                    )
-                self._stale_positions.add(pos.id)
-                continue
-            wallet = self.wallets[pos.strategy]
-            # Only an OPERATOR halt closes positions. The gateway breaker and the reconcile freeze
-            # stop new entries (self.halted() still reports them to the gateway), but they used to
-            # force-close every book — the 2026-09-24 09:45 cascade — for a fault in the order path.
-            halted = self._halted
-            forced = past_force_flat(pos.underlying.segment, now) or halted
-            engine_for = self._exits_by_strategy.get(pos.strategy, self.exits)
+            try:
+                await self._manage_one(pos, now)
+            except Exception as exc:  # one position's fault must not cost the others their stops
+                log.exception("position.manage_failed", position=pos.id, symbol=pos.underlying.symbol, error=str(exc))
+        if self._live_work():
+            self._start_live_half(now)
 
-            # An illiquid strike can stop ticking for minutes. Evaluating a stop against a price
-            # that old is worse than not evaluating it — but staleness must never trap a position
-            # past the force-flat, so a forced exit proceeds on the last known price and says so.
-            q = self.quotes.get(pos.instrument.scrip_code)
-            age = (now - q.ts) if q else None
-            if age is not None and age > self.s.position_quote_max_age_s and not forced:
-                if pos.id not in self._stale_positions:
-                    self._stale_positions.add(pos.id)
-                    log.warning(
-                        "position.quote_stale",
-                        position=pos.id,
-                        symbol=pos.underlying.symbol,
-                        instrument=pos.instrument.name or pos.instrument.scrip_code,
-                        age_s=round(age, 1),
-                    )
-                    self.telegram.fire_and_forget(
-                        f"⚠️ {pos.strategy} {pos.underlying.symbol}: no option quote for "
-                        f"{age:.0f}s — only the equity stop and the backstops are being enforced",
-                        key=f"stale:{pos.id}",
-                    )
-                stale_view = MarketView(
-                    option_mid=None, spread_pct=None, quote_ok=False, option_ltp=ltp,
-                    underlying_ltp=self.ltps.get(pos.underlying.scrip_code), now=now,
-                    bars_held=pos.bars_held, past_force_flat=past_force_flat(pos.underlying.segment, now),
-                    halted=halted, daily_loss_hit=bool(wallet.daily_halt),
+    def _live_work(self) -> bool:
+        # the late-appearance watch is live work: it is looked for every tick, positions or none (review14c R3-4)
+        return (bool(self.live_orders.orders) or bool(self.live_orders.watch)
+                or any(p.venue == "live" and p.status == "OPEN" for p in self.positions.values()))
+
+    def _start_live_half(self, now: float) -> None:
+        """The live half of the tick, in the BACKGROUND: the paper half never waits on it (review14b).
+        One live half coordinates at a time — a new one is not started while the last is still at
+        work — and inside it the broker's news and each live position's turn (and each live entry's)
+        are tasks of their own: a turn still busy from an earlier tick (a broker slow to answer, a SKIP
+        holding its position's lock) is not started again, and holds up no other (review14b N8)."""
+        if self._live_phase is not None and not self._live_phase.done():
+            self._live_phase_overruns += 1
+            if self._live_phase_overruns in (1, 10) or self._live_phase_overruns % 60 == 0:
+                log.warning("live.phase_overrun", ticks=self._live_phase_overruns)
+            return
+        self._live_phase_overruns = 0
+        task = self._live_phase = asyncio.create_task(self._live_phase_body(now))
+        task.add_done_callback(self._live_task_done)
+
+    @staticmethod
+    def _live_task_done(task: asyncio.Task[Any]) -> None:
+        """Every live task's end is looked at: a failure is logged, never lost with the task."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            log.error("live.task_failed", task=task.get_name(), error=f"{type(exc).__name__}: {exc}"[:300])
+
+    def _live_keyed(self, key: str, make: Callable[[], Awaitable[Any]]) -> asyncio.Task[Any] | None:
+        """Start ``key``'s task unless its last one is still at work. A finished one is dropped at once:
+        the table holds only the tasks at work (review14c R3-3)."""
+        cur = self._live_tasks.get(key)
+        if cur is not None and not cur.done():
+            return None
+        task = asyncio.create_task(make(), name=f"live:{key}")
+        task.add_done_callback(self._live_task_done)
+        task.add_done_callback(lambda t, key=key: self._live_tasks.pop(key, None) if self._live_tasks.get(key) is t else None)
+        self._live_tasks[key] = task
+        return task
+
+    async def _live_phase_body(self, now: float) -> None:
+        """One live half: the broker's news for every working order (one status call), then every
+        live position's turn and every live entry's, side by side. Each part is waited on at most
+        ``live_tick_budget_s``; one still at work then carries on by itself — never cut mid-order."""
+        for pending in (self._pending_manual, self._pending_exit):
+            for pid in [p for p in pending if (q := self.positions.get(p)) is None or q.status != "OPEN"]:
+                pending.pop(pid, None)
+        # the broker's news: a new status call, or the one still out from an earlier tick — waited on
+        # (briefly) either way, never started twice, never cut (review14b N4)
+        refresh = self._live_tasks.get("~refresh")
+        if refresh is None or refresh.done():
+            refresh = (self._live_keyed("~refresh", lambda: self._live_refresh(now))
+                       if self.live_orders.orders or self.live_orders.watch else None)
+        if refresh is not None:
+            await asyncio.wait({refresh}, timeout=self.s.live_tick_budget_s)
+        started = [t for t in (self._live_keyed(k, make) for k, make in self._live_turns(now).items()) if t is not None]
+        if started:
+            await asyncio.wait(started, timeout=self.s.live_tick_budget_s)
+
+    def _live_turns(self, now: float) -> dict[str, Callable[[], Awaitable[Any]]]:
+        turns: dict[str, Callable[[], Awaitable[Any]]] = {}
+        pids = [p.id for p in self.positions.values() if p.venue == "live" and p.status == "OPEN"]
+        pids += [r.ctx[0].id for r in self._resting.values() if r.venue == "live" and r.kind != "entry"]
+        for pid in dict.fromkeys(pids):
+            turns[f"pos:{pid}"] = lambda pid=pid: self._live_position_turn(pid, now)
+        for r in list(self._resting.values()):
+            if r.venue == "live" and r.kind == "entry":
+                turns[f"entry:{r.intent.client_order_id}"] = lambda r=r: self._advance_one(r, now)
+        if self.live_orders.orders:
+            turns["~unowned"] = lambda: self._live_unowned_turn(now)
+        return turns
+
+    async def _live_refresh(self, now: float) -> None:
+        """The broker's news for every working live order — bounded only by each call's own timeout,
+        never by the tick (review14b N4): the live half is its own task."""
+        await self.live_orders.refresh(now)
+
+    async def _live_position_turn(self, pid: str, now: float) -> None:
+        """One live position's turn: its working orders (target, exit, cross) first, then its own
+        evaluation — the stop, the targets, the operator's SKIP — or, after a KILL, nothing more."""
+        for r in [r for r in list(self._resting.values()) if r.venue == "live" and r.kind != "entry" and r.ctx[0].id == pid]:
+            try:
+                await self._advance_one(r, now)
+            except Exception as exc:  # one order's fault must not stall the others
+                log.exception("limit.advance_failed", order=r.intent.client_order_id, error=str(exc))
+        pos = self.positions.get(pid)
+        if pos is None or pos.status != "OPEN" or pos.venue != "live" or self._live_killed(pos):
+            return
+        now = time.time()  # judged on the clock as it is now, not the tick that started the turn (review14c)
+        try:
+            deferred = self._pending_exit.get(pos.id)
+            if deferred is not None and now < self._exit_retry_at.get(pos.id, 0.0):
+                return  # the broker refused it: sent again after the same back-off as any exit (review14e NEW-5a)
+            if deferred is not None and not self._live_sells_working(pos) and self._exit_resting(pos.id) is None:
+                decision, cross_n, rung_taken = deferred
+                await self._place_live_exit(pos, replace(decision, qty=pos.qty_remaining), now, cross_n=cross_n, rung_taken=rung_taken)
+                return
+            pending = self._pending_manual.get(pos.id)
+            if pending is not None:
+                # the operator's SKIP, sent again until an exit for it is working (review14 A4)
+                await self._exit(pos, replace(pending, qty=pos.qty_remaining), now)
+                return
+            await self._manage_one(pos, now)
+        except Exception as exc:
+            log.exception("position.manage_failed", position=pos.id, symbol=pos.underlying.symbol, error=str(exc))
+
+    async def _live_quiesce(self, limit_s: float = 30.0) -> None:
+        """Wait for the live half and every live task it started (tests, and the shutdown)."""
+        deadline = time.monotonic() + limit_s
+        while time.monotonic() < deadline:
+            busy = [t for t in [self._live_phase, *self._live_tasks.values()] if t is not None and not t.done()]
+            if not busy:
+                return
+            await asyncio.wait(busy, timeout=max(0.0, deadline - time.monotonic()))
+
+    async def _manage_one(self, pos: Position, now: float) -> None:
+        ltp = self.ltps.get(pos.instrument.scrip_code)
+        if ltp is None or ltp <= 0:
+            if pos.id not in self._stale_positions:
+                # Was silent. A position whose contract never prints is not being managed at
+                # all — no stop, no target, no force-flat — and nobody could tell.
+                log.warning(
+                    "position.no_quote",
+                    position=pos.id,
+                    symbol=pos.underlying.symbol,
+                    instrument=pos.instrument.name or pos.instrument.scrip_code,
                 )
-                if (stale_exit := engine_for.evaluate_stale(pos, stale_view)) is not None:
-                    await self._exit(pos, stale_exit, now)
-                continue
-            self._stale_positions.discard(pos.id)
-            q = self.quotes.get(pos.instrument.scrip_code)
-            mid = q.mid if q else None
-            spread = (q.spread_pct / 100) if (q and q.spread_pct is not None) else None
-            view = MarketView(
-                option_mid=mid,
-                spread_pct=spread,
-                quote_ok=bool(q and (now - q.ts) <= self.s.position_quote_max_age_s),
-                option_ltp=ltp,
-                underlying_ltp=self.ltps.get(pos.underlying.scrip_code),
-                now=now,
-                bars_held=pos.bars_held,
-                past_force_flat=past_force_flat(pos.underlying.segment, now),
-                halted=halted,
-                daily_loss_hit=bool(wallet.daily_halt),
+                self.telegram.fire_and_forget(
+                    f"⚠️ {pos.strategy} {pos.underlying.symbol}: the contract has not printed "
+                    f"since boot — the position is not being evaluated",
+                    key=f"noquote:{pos.id}",
+                )
+            self._stale_positions.add(pos.id)
+            return
+        wallet = self.wallets[pos.strategy]
+        # Only an OPERATOR halt closes positions. The gateway breaker and the reconcile freeze
+        # stop new entries (self.halted() still reports them to the gateway), but they used to
+        # force-close every book — the 2026-09-24 09:45 cascade — for a fault in the order path.
+        halted = self._halted
+        forced = past_force_flat(pos.underlying.segment, now) or halted
+        engine_for = self._exits_by_strategy.get(pos.strategy, self.exits)
+
+        # An illiquid strike can stop ticking for minutes. Evaluating a stop against a price
+        # that old is worse than not evaluating it — but staleness must never trap a position
+        # past the force-flat, so a forced exit proceeds on the last known price and says so.
+        q = self.quotes.get(pos.instrument.scrip_code)
+        age = (now - q.ts) if q else None
+        if age is not None and age > self.s.position_quote_max_age_s and not forced:
+            if pos.id not in self._stale_positions:
+                self._stale_positions.add(pos.id)
+                log.warning(
+                    "position.quote_stale",
+                    position=pos.id,
+                    symbol=pos.underlying.symbol,
+                    instrument=pos.instrument.name or pos.instrument.scrip_code,
+                    age_s=round(age, 1),
+                )
+                self.telegram.fire_and_forget(
+                    f"⚠️ {pos.strategy} {pos.underlying.symbol}: no option quote for "
+                    f"{age:.0f}s — only the equity stop and the backstops are being enforced",
+                    key=f"stale:{pos.id}",
+                )
+            stale_view = MarketView(
+                option_mid=None, spread_pct=None, quote_ok=False, option_ltp=ltp,
+                underlying_ltp=self.ltps.get(pos.underlying.scrip_code), now=now,
+                bars_held=pos.bars_held, past_force_flat=past_force_flat(pos.underlying.segment, now),
+                halted=halted, daily_loss_hit=bool(wallet.daily_halt),
             )
-            # The exact numbers the exit is judged against, published so the card shows these
-            # and not a second computation of them.
-            self.position_marks[pos.id] = {
-                "mid": mid,
-                "spread_pct": spread,
-                "quote_ok": view.quote_ok,
-                "option_sl": pos.option_sl,
-                "breach_since": pos.breach_since,
-                "peak_mid": pos.peak_mid,
-                "trail_dwell": pos.trail_dwell,
-                "armed_by": pos.armed_by,
-                "option_t1": pos.option_t1,
-                "ts": now,
-            }
-            decision = engine_for.evaluate(pos, view)
-            if decision is None:
-                await self._ensure_resting_target(pos, now)
-                continue
-            await self._exit(pos, decision, now)
+            if (stale_exit := engine_for.evaluate_stale(pos, stale_view)) is not None:
+                await self._exit(pos, stale_exit, now)
+            return
+        self._stale_positions.discard(pos.id)
+        q = self.quotes.get(pos.instrument.scrip_code)
+        mid = q.mid if q else None
+        spread = (q.spread_pct / 100) if (q and q.spread_pct is not None) else None
+        view = MarketView(
+            option_mid=mid,
+            spread_pct=spread,
+            quote_ok=bool(q and (now - q.ts) <= self.s.position_quote_max_age_s),
+            option_ltp=ltp,
+            underlying_ltp=self.ltps.get(pos.underlying.scrip_code),
+            now=now,
+            bars_held=pos.bars_held,
+            past_force_flat=past_force_flat(pos.underlying.segment, now),
+            halted=halted,
+            daily_loss_hit=bool(wallet.daily_halt),
+        )
+        # The exact numbers the exit is judged against, published so the card shows these
+        # and not a second computation of them.
+        self.position_marks[pos.id] = {
+            "mid": mid,
+            "spread_pct": spread,
+            "quote_ok": view.quote_ok,
+            "option_sl": pos.option_sl,
+            "breach_since": pos.breach_since,
+            "peak_mid": pos.peak_mid,
+            "trail_dwell": pos.trail_dwell,
+            "armed_by": pos.armed_by,
+            "option_t1": pos.option_t1,
+            "ts": now,
+        }
+        decision = engine_for.evaluate(pos, view)
+        if decision is None:
+            await self._ensure_resting_target(pos, now)
+            return
+        await self._exit(pos, decision, now)
 
     async def _exit(self, pos: Position, decision: Any, now: float) -> None:
         """One exit in flight per position. The operator's SKIP and the exit loop both call this;
         while one is awaiting the venue the other used to send a second SELL for the same lots —
         on paper a double-booked P&L, live a naked short. The second caller now stands down, and
         whoever holds the slot re-reads the position before sending anything."""
+        if pos.venue == "live":
+            await self._exit_live(pos, decision, now)
+            return
         if pos.id in self._exits_in_flight:
             log.warning("exit.in_flight", position=pos.id, symbol=pos.underlying.symbol, reason=getattr(decision.reason, "value", decision.reason))
             return
@@ -4067,9 +5163,73 @@ class Engine:
         finally:
             self._exits_in_flight.discard(pos.id)
 
+    async def _exit_live(self, pos: Position, decision: Any, now: float) -> None:
+        """A live position's exit: its lots are at the broker. The whole cancel-then-place runs under
+        the position's SELL lock, marked in flight before its first await; every broker answer is
+        followed by a fresh look at the position and at every SELL of it the broker may still be
+        working (review14 A3). The operator's SKIP is kept until an exit for it is working — a
+        target whose cancel confirms a tick later no longer loses it (A4)."""
+        if decision.reason is ExitReason.MANUAL and pos.status == "OPEN":
+            self._pending_manual[pos.id] = decision
+        if self._live_killed(pos):
+            return
+        if pos.id in self._exits_in_flight:
+            log.warning("exit.in_flight", position=pos.id, symbol=pos.underlying.symbol, reason=getattr(decision.reason, "value", decision.reason))
+            return
+        async with self._sell_lock(pos.id):
+            now = time.time()  # the lock may have been waited for: act on the clock as it is now (review14c)
+            if pos.status != "OPEN" or pos.qty_remaining <= 0 or self.positions.get(pos.id) is not pos:
+                self._pending_manual.pop(pos.id, None)
+                return
+            if pos.id in self._exits_in_flight:
+                return
+            self._exits_in_flight.add(pos.id)
+            try:
+                resting = self._exit_resting(pos.id)
+                if resting is not None:
+                    _, old, _ = resting.ctx
+                    urgent = self.limit_policy.exit_deadline(decision.reason) < resting.deadline_s
+                    if not (urgent or decision.qty > old.qty):
+                        return
+                    # replaced at the broker: taken off first, and the new exit goes only once the
+                    # broker has confirmed (and what the old one filled is booked)
+                    if not await self._live_cancel_now(resting, now, f"superseded by {decision.reason.value}: {decision.note}"):
+                        return
+                    if pos.status != "OPEN" or self._exit_resting(pos.id) is not None:
+                        return  # the old one had reached its deadline: its rest is already being crossed
+                    log.info("limit.superseded", position=pos.id, was=old.reason.value, now=decision.reason.value, qty=decision.qty,
+                             venue="live")
+                hit, left = pos.targets_hit, pos.qty_remaining
+                if not await self._cancel_resting_target(pos, now, f"{decision.reason.value}: {decision.note}"):
+                    return  # the target is off only when the broker says so: this exit goes on a later pass
+                if pos.status != "OPEN" or pos.qty_remaining <= 0:
+                    return
+                if (pos.targets_hit, pos.qty_remaining) != (hit, left):
+                    # a live target sell the broker had filled before the cancel reached it: booked just
+                    # now, so this decision was made on a position that is no longer there — the exit
+                    # engine decides again on the next pass (on paper the resting sell is judged before
+                    # the exit engine, so the same fill comes first there too)
+                    return
+                if working := self._live_sells_working(pos):
+                    log.warning("exit.waiting_on_broker", position=pos.id, orders=[bo.client_order_id for bo in working])
+                    return  # a SELL of it (a previous run's, a lost placement) may still be working
+                if decision.qty > pos.qty_remaining:
+                    decision = replace(decision, qty=pos.qty_remaining)
+                await self._exit_now(pos, decision, now)
+            finally:
+                self._exits_in_flight.discard(pos.id)
+
     async def _exit_now(self, pos: Position, decision: Any, now: float) -> None:
         if now < self._exit_retry_at.get(pos.id, 0.0):
             return  # backing off after a rejected exit; the decision is re-made next pass
+        if pos.venue == "live":
+            # its lots are at the broker: the exit goes there, whatever the mode is now (an expired
+            # arm reads PAPER, the lots are still real)
+            if self.s.live_limit_orders:
+                await self._place_live_exit(pos, decision, now)
+            else:
+                await self._exit_market(pos, decision, now)
+            return
         if self._limit_mode() and self.s.paper_limit_exits:
             await self._place_exit_limit(pos, decision, now)
             return
@@ -4190,12 +5350,16 @@ class Engine:
             return
         await self._book_exit(pos, decision, result, now, attempt, audit)
 
-    async def _book_exit(self, pos: Position, decision: Any, result: Any, now: float, attempt: int, audit: dict[str, Any]) -> None:
+    async def _book_exit(self, pos: Position, decision: Any, result: Any, now: float, attempt: int, audit: dict[str, Any],
+                         *, keep_attempts: bool = False) -> None:
         """A filled exit, immediate or from a resting limit: the slice is booked, the wallet
-        released, the trade written when the position is done."""
+        released, the trade written when the position is done. ``keep_attempts``: a live order's
+        slice — its order is still at the broker, so the exit-id counter is left alone."""
         pos.exec_log.setdefault("exits", []).append({**audit, "reason": decision.reason.value, "qty": int(result.fill.qty)})
         filled = max(0, min(decision.qty, int(result.fill.qty)))
-        if filled < decision.qty:
+        if keep_attempts:
+            pass
+        elif filled < decision.qty:
             # The book took part of it (a one-level book truncates at the touch). Book what filled
             # and leave the rest OPEN; it goes again at once under a new id, since the old one is
             # spent. Booking decision.qty "sold" 1,950 PNBHOUSING contracts that never traded.
@@ -4454,8 +5618,10 @@ class Engine:
                     last_reconcile = now
                     # LIVE every minute; PAPER only while frozen, so a failed boot read (the broker
                     # slow at 09:00) heals on the next clean one instead of halting every book all day
-                    if self.mode() in LIVE_MODES or self.reconciler_positions.frozen:
-                        await self.reconciler_positions.run(self._venue_positions(), at_venue=self.mode() in LIVE_MODES)
+                    if self._at_venue() or self.reconciler_positions.frozen:
+                        await self.reconciler_positions.run(self._venue_positions, at_venue=self._at_venue(),
+                                                            working=self._live_working_fills)
+                        await self._close_flat_killed()
 
                 # The socket was opened with a token that dies at 23:59:59 IST. Once it has, drop
                 # the socket so the run loop reconnects with a fresh login — otherwise it can sit
@@ -4627,6 +5793,261 @@ class Engine:
             await self.ledger.upsert_wallet(w.strategy, w.to_json())
             await self.ledger.snapshot_wallet(w.strategy, w.to_json())
 
+    async def _settle_left_behind_live_orders(self) -> None:
+        """Orders a previous run left at the broker (``data/live_orders.json``). A target or exit SELL
+        still working on its open live position is ADOPTED — it carries on under the paper rules from
+        where it was (review14 B8). Anything else still working (an entry, a SELL whose position is
+        gone) is cancelled — and stays tracked, the exit loop asking again, until the broker confirms;
+        never forgotten on a guess (A2). What a settled order filled is booked where it can be, or
+        alerted: an entry's lots cannot be rebuilt into a position (its plan died with the run) — the
+        broker reconcile shows them and freezes entries until the operator acknowledges."""
+        watched = self.live_orders.restore_watch()  # today's late-appearance watch goes on (review14c R3-4)
+        if watched:
+            log.warning("live.watch_restored", orders=watched)
+        left = self.live_orders.load_left_behind()
+        if not left:
+            return
+        now = time.time()
+        for bo in left:
+            self.live_orders.orders[bo.client_order_id] = bo
+            self.gateway.remember(bo.client_order_id)
+        await self.live_orders.refresh(now, left, force=True)
+        report = []
+        for bo in left:
+            pos = self.positions.get(bo.position_id) if bo.position_id else None
+            live_pos = pos is not None and pos.status == "OPEN" and pos.venue == "live"
+            if (bo.side == OrderSide.SELL.value and bo.kind in ("exit", "target") and not bo.terminal and live_pos and pos is not None
+                    and (self._exit_resting(pos.id) if bo.kind == "exit" else self._target_resting(pos.id)) is None
+                    and not self._live_killed(pos)):
+                self._adopt_live_order(bo, pos, now)
+                outcome = "adopted"
+            elif bo.settled:
+                if pos is not None:
+                    async with self._sell_lock(pos.id):
+                        await self._book_unowned_fill(bo, now)
+                else:
+                    await self._book_unowned_fill(bo, now)
+                self.live_orders.forget(bo)
+                outcome = "booked"
+            else:
+                await self._live_cancel_bo(bo, now)
+                outcome = "cancelling" if not bo.terminal else "unresolved"
+            report.append({"cid": bo.client_order_id, "kind": bo.kind, "state": bo.state, "filled": bo.filled_qty,
+                           "booked": bo.booked_qty, "outcome": outcome})
+        await self.ledger.event("live.left_behind", {"orders": report})
+        log.warning("live.left_behind_settled", orders=len(report), adopted=sum(1 for x in report if x["outcome"] == "adopted"))
+
+    async def _stop_live_orders(self) -> None:
+        """Shutting down: placements in flight are let finish (a placement torn down mid-request is
+        recorded unconfirmed, but one that finishes is known — review14b N5), then the live half and
+        its tasks; then the live ENTRIES still working are cancelled — a position bought after the
+        engine stopped would have no stop. Target and exit sells are left working: the next boot adopts
+        them (review14 B8). Best effort, bounded; the order store keeps every one."""
+        sending = [t for t in self._live_sending if not t.done() and t is not asyncio.current_task()]
+        if sending:
+            await asyncio.wait(sending, timeout=10.0)
+        try:
+            await self._live_quiesce(limit_s=5.0)
+        except Exception:  # noqa: BLE001
+            pass
+        entries = [bo for bo in self.live_orders.working() if bo.kind == "entry" and not bo.terminal]
+        if entries:
+            cancels = [asyncio.create_task(self.live_orders.cancel(bo, time.time())) for bo in entries]
+            _, late = await asyncio.wait(cancels, timeout=3.0)
+            for t in late:
+                t.cancel()
+            log.warning("live.stop_cancelled_entries", orders=[bo.client_order_id for bo in entries])
+        for t in [*self._kill_tasks, *self._live_tasks.values()]:
+            if not t.done():
+                t.cancel()
+
+    async def _pass_lock(self, position_id: str) -> None:
+        async with self._sell_lock(position_id):
+            pass
+
+    async def _kill_cancel_round(self, orders: list[BrokerOrder]) -> None:
+        """One round of cancels, all at once, waited on at most ``live_kill_wait_s``: a broker that does
+        not answer never holds the square-off back (review14b N6). Cancels still out carry on."""
+        now = time.time()
+        tasks = [asyncio.create_task(self.live_orders.cancel(bo, now)) for bo in orders if not bo.terminal]
+        for t in tasks:
+            self._kill_tasks.add(t)
+            t.add_done_callback(self._kill_tasks.discard)
+        if tasks:
+            await asyncio.wait(tasks, timeout=self.s.live_kill_wait_s)
+
+    async def kill(self) -> dict[str, Any]:
+        """The KILL switch: halt, and no live entry until the operator resumes; every live position
+        marked killed (the engine sends no SELL of its own for it again); the SELLs being placed at this
+        moment let finish and register — each live position's SELL lock waited on, all at once,
+        briefly (review14b N2); then every working live order asked off in ONE concurrent round, and
+        the broker's own square-off sent at once after it (N6). Afterwards, in the background, the
+        working orders are looked at again and cancelled again every second for a minute; the live half
+        cancels every working order of a killed position on every tick; an entry that fills after the
+        KILL is killed at once, alerted and reported. The engine's records of killed positions close
+        when the broker shows their contract flat (``_close_flat_killed``), or by the operator."""
+        await self.set_halt(True, "KILL")
+        self._killed = True
+        now = time.time()
+        killed: list[str] = []
+        for pos in list(self.positions.values()):
+            if pos.venue == "live" and pos.status == "OPEN":
+                pos.exec_log["killed"] = now
+                self._pending_manual.pop(pos.id, None)
+                killed.append(pos.id)
+        self._kill_state = {"ts": now, "positions": list(killed), "late_fills": [], "unconfirmed": []}
+        for pid in killed:
+            await self.ledger.upsert_position(_position_json(self.positions[pid]))
+        waits = [asyncio.create_task(self._pass_lock(pid)) for pid in {*killed, *(bo.position_id for bo in self.live_orders.working() if bo.position_id)}]
+        if waits:
+            await asyncio.wait(waits, timeout=self.s.live_kill_wait_s)
+        working = list(self.live_orders.working())
+        await self._kill_cancel_round(working)
+        squared, error = False, ""
+        if self.live_exec is not None and (self.mode() in LIVE_MODES or killed or working):
+            try:
+                await asyncio.wait_for(self.live_exec.square_off_all(), timeout=10.0)
+                squared = True
+            except Exception as exc:  # noqa: BLE001
+                error = str(exc)[:200] or type(exc).__name__
+                log.error("kill.square_off_failed", error=error)
+        # then verify — after the square-off, never before it: one look at the broker, briefly
+        look = asyncio.create_task(self.live_orders.refresh(time.time(), working, force=True))
+        self._kill_tasks.add(look)
+        look.add_done_callback(self._kill_tasks.discard)
+        await asyncio.wait({look}, timeout=self.s.live_kill_wait_s)
+        unconfirmed = [bo.client_order_id for bo in working if not bo.terminal]
+        self._kill_state.update({"orders": [bo.client_order_id for bo in working], "unconfirmed": unconfirmed,
+                                 "square_off": squared, "error": error})
+        follow = asyncio.create_task(self._kill_follow_up(now), name="live:kill-follow-up")
+        follow.add_done_callback(self._live_task_done)
+        self._kill_tasks.add(follow)
+        follow.add_done_callback(self._kill_tasks.discard)
+        await self.ledger.event("kill", dict(self._kill_state))
+        self.telegram.fire_and_forget(
+            f"🛑 KILL — {len(working)} live orders asked off" + (f" ({len(unconfirmed)} not yet confirmed)" if unconfirmed else "")
+            + (", square-off sent" if squared else (f", square-off FAILED: {error}" if error else "")))
+        return {"halted": True, "live_orders_cancelled": len(working) - len(unconfirmed), "cancels_unconfirmed": unconfirmed,
+                "square_off_requested": squared, "square_off_error": error, "live_positions_killed": killed}
+
+    async def _kill_follow_up(self, since: float, *, rounds: int = 60) -> None:
+        """After the square-off: every second for a minute the live orders are looked at again — a
+        SELL whose placement was in flight at the KILL, a cancel not yet confirmed — and asked off again."""
+        for _ in range(rounds):
+            await asyncio.sleep(1.0)
+            if not self._killed:
+                return
+            working = [bo for bo in self.live_orders.working() if not bo.terminal]
+            if not working:
+                break
+            await self.live_orders.refresh(time.time(), working, force=True)
+            again = [bo for bo in working if not bo.terminal and (bo.cancel_requested_ts is None
+                                                                 or time.time() - bo.cancel_requested_ts >= self.s.live_cancel_resend_s)]
+            await self._kill_cancel_round(again)
+        left = [bo.client_order_id for bo in self.live_orders.working() if not bo.terminal]
+        self._kill_state["unconfirmed"] = left
+        if left:
+            log.error("kill.orders_still_working", orders=left)
+            self.telegram.fire_and_forget(f"🚨 KILL: {len(left)} live orders still not confirmed off a minute later: {', '.join(left)[:300]}",
+                                          key="kill:left")
+
+    async def _kill_late_fill(self, bo: BrokerOrder) -> None:
+        """A live entry that filled after the KILL: its position is killed at once — no exits of the
+        engine's own — alerted and reported: the square-off may have gone before it (review14b N2)."""
+        pos = next((p for p in self.positions.values() if p.status == "OPEN" and p.exec_log.get("ref")
+                    and bo.client_order_id.startswith(f"{p.exec_log['ref']}-")), None)
+        if pos is not None:
+            pos.exec_log["killed"] = time.time()
+            await self.ledger.upsert_position(_position_json(pos))
+        self._kill_state.setdefault("late_fills", []).append({"order": bo.client_order_id, "filled": bo.filled_qty,
+                                                              "position": pos.id if pos else None})
+        log.error("kill.late_entry_fill", order=bo.client_order_id, filled=bo.filled_qty)
+        self.telegram.fire_and_forget(f"🚨 KILL: live entry {bo.client_order_id} filled {bo.filled_qty} AFTER the KILL — the broker "
+                                      f"holds it; square it off at the broker", key=f"kill:late:{bo.client_order_id}")
+
+    async def _close_flat_killed(self) -> None:
+        """A killed live position whose contract the broker now shows FLAT (the square-off went
+        through) is closed on the engine's side — at the last mid, PROVISIONAL, alerted: the
+        square-off's price is the broker's (review14b N3)."""
+        rec = self.reconciler_positions
+        venue, read_ts = (rec.last_venue, rec.last_venue_ts) if rec is not None else (None, 0.0)
+        if venue is None:
+            return
+        for pos in list(self.positions.values()):
+            # only a broker read taken AFTER this position was killed can say its square-off went through
+            # (review14c R3-2): an older read — the last good one before reads started failing — cannot
+            if (pos.venue == "live" and pos.status == "OPEN" and pos.exec_log.get("killed")
+                    and read_ts > float(pos.exec_log["killed"])
+                    and not venue.get(pos.instrument.scrip_code) and not self.live_orders.working_for(pos.id)
+                    and not any(bo.scrip == pos.instrument.scrip_code for bo in self.live_orders.working())):
+                await self._close_killed(pos, None, "the broker shows the contract flat after the KILL")
+
+    async def _close_killed(self, pos: Position, price: float | None, why: str) -> None:
+        async with self._sell_lock(pos.id):
+            if pos.status != "OPEN" or self.positions.get(pos.id) is not pos:
+                return
+            now = time.time()
+            mark = self.position_marks.get(pos.id, {})
+            px = float(price or mark.get("mid") or self.ltps.get(pos.instrument.scrip_code) or pos.entry)
+            qty = pos.qty_remaining
+            intent = OrderIntent(strategy=pos.strategy, instrument=pos.instrument, side=OrderSide.SELL, qty=qty, purpose=Purpose.EXIT,
+                                 signal_id=pos.signal_id, client_order_id=f"{pos.exec_log.get('ref') or pos.id}-KILLED-{new_id('k')}",
+                                 reason=why, position_id=pos.id)
+            result = self.gateway.live_filled(self.gateway._order_for(intent, Mode.LIVE), intent, price=px, qty=qty, now=now, mid=None,
+                                              book_age_ms=None, charges=self.costs.leg(pos.instrument, OrderSide.SELL, px, qty).total)
+            audit = {"outcome": why, "priceProvisional": True, "fillPrice": px, "closedTs": now}
+            await self.ledger.insert_order(_order_json(result.order, audit), "KILL_CLOSED")
+            await self._book_exit(pos, ExitDecision(pos.id, ExitReason.HALT, px, qty, why), result, now,
+                                  self._exit_attempts.get(pos.id, 0), audit, keep_attempts=True)
+            log.warning("kill.position_closed", position=pos.id, symbol=pos.underlying.symbol, price=px, why=why)
+            self.telegram.fire_and_forget(f"⚠️ {pos.strategy} {pos.underlying.symbol}: closed after the KILL at {px:g} — PROVISIONAL "
+                                          f"({why}); the broker's square-off price is on the contract note", key=f"killclose:{pos.id}")
+
+    async def close_killed_position(self, position_id: str, price: float | None = None) -> dict[str, Any]:
+        """The operator closes a killed live position's record — after checking the broker — at the
+        price given (else the last mid), flagged provisional."""
+        pos = self.positions.get(position_id)
+        if pos is None or pos.status != "OPEN" or pos.venue != "live":
+            raise KeyError(f"no open live position {position_id}")
+        if not pos.exec_log.get("killed"):
+            raise ValueError(f"{position_id} was not killed: its own exits close it")
+        if self.live_orders.working_for(pos.id):
+            raise ValueError(f"{position_id} still has live orders working at the broker")
+        await self._close_killed(pos, price, "closed by the operator after the KILL")
+        return {"positionId": position_id, "closed": pos.status == "CLOSED", "price": pos.exit_price}
+
+    async def release_live_order(self, client_order_id: str) -> dict[str, Any]:
+        """The operator, having checked the broker, releases an UNCONFIRMED live order: it is taken as
+        never placed — its position's SELLs go on, its holds are freed — and watched in the order book
+        for a late appearance (review14b N1)."""
+        bo = self.live_orders.orders.get(client_order_id)
+        if bo is None:
+            raise KeyError(f"no live order {client_order_id}")
+        if not bo.unconfirmed:
+            raise ValueError(f"{client_order_id} is known at the broker ({bo.state}): cancel it there, it is not released")
+        self.live_orders.resolve_never_placed(bo, "released by the operator after checking the broker")
+        await self.ledger.event("live.released", {"order": client_order_id, "position": bo.position_id, "kind": bo.kind})
+        return {"order": client_order_id, "released": True,
+                "note": f"live entries into {bo.symbol} {bo.scrip} are blocked for the rest of the day while it is watched"}
+
+    async def unwatch_live_order(self, client_order_id: str) -> dict[str, Any]:
+        """The operator ends the late-appearance watch of an order taken as never placed — and with it
+        the day's block on live entries into its contract (review14d R4-3). Refused while the order is
+        working or unconfirmed at the broker by the latest read: only a watched order can be unwatched."""
+        live = self.live_orders.orders.get(client_order_id)
+        if live is not None and not live.settled:
+            raise ValueError(f"{client_order_id} is {'unconfirmed' if live.unconfirmed else 'working'} at the broker by the latest "
+                             f"read — release or cancel it first")
+        bo = self.live_orders.unwatch(client_order_id)
+        if bo is None:
+            raise KeyError(f"{client_order_id} is not watched")
+        await self.ledger.event("live.unwatched", {"order": client_order_id, "contract": bo.scrip, "symbol": bo.symbol})
+        log.warning("live.unwatched", order=client_order_id, contract=bo.scrip)
+        self.telegram.fire_and_forget(f"⚠️ {client_order_id} no longer watched (operator) — live entries into {bo.symbol} "
+                                      f"{bo.scrip} may go again; if it turns up at the broker it will NOT be seen",
+                                      key=f"unwatch:{client_order_id}")
+        return {"order": client_order_id, "unwatched": True, "contract": bo.scrip}
+
     async def _load_positions(self) -> None:
         """Re-hydrate open positions from the ledger.
 
@@ -4640,6 +6061,10 @@ class Engine:
                 log.error("position.rehydrate_failed", id=row.get("id"), error=str(exc))
                 continue
             self.positions[pos.id] = pos
+            if pos.venue == "live":
+                # the next exit id past every one this position ever sent: a restart never re-sends an
+                # id that may still be working at the broker (review, 2026-09-26)
+                self._exit_attempts[pos.id] = int(pos.exec_log.get("exitAttempt", 0))
         if self.positions:
             log.warning("engine.rehydrated", positions=len(self.positions))
 
@@ -4751,6 +6176,9 @@ class Engine:
             "archive": self.archive.stats(),
             "tape": self.tape.stats(),
             "tape_full": self.fulltape.stats(),
+            "live_orders": {**self.live_orders.stats(), "entries_stopped": {b: w for b, (_, w) in self._live_blocked_books.items()},
+                            "pending_skips": sorted(self._pending_manual), "killed": self._killed,
+                            "phase_overruns": self._live_phase_overruns},
             "depth": {
                 "following": len(self._depth_following),
                 "pinned_for_archive": len(self._depth_pinned),
@@ -4918,6 +6346,7 @@ def _position_json(p: Position) -> dict[str, Any]:
         "pnl": p.pnl,
         "line_breach_since": p.line_breach_since,
         "exec_log": p.exec_log,
+        "venue": p.venue,
     }
 
 
@@ -4965,6 +6394,7 @@ def _position_from_json(d: dict[str, Any]) -> Position:
         entry_charges=float(d.get("entry_charges") or 0.0),
         line_breach_since=d.get("line_breach_since"),
         exec_log=dict(d.get("exec_log") or {}),
+        venue=str(d.get("venue") or "paper"),  # a row written before venues were kept is a paper position
     )
 
 

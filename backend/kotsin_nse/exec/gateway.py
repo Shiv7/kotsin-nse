@@ -86,6 +86,9 @@ class LiveContext:
     segment: str
     exposure_ok: bool = True
     exposure_reason: str = ""
+    #: the most the order may pay per unit (a live entry's +3 % cap): the notional cap is judged at it,
+    #: not at the signal price (review14 B10)
+    worst_price: float | None = None
 
 
 @dataclass(slots=True)
@@ -325,17 +328,20 @@ class Gateway:
             return f"past the {c.entry_cutoff_ist} IST entry cutoff"
         if ctx.day_pnl_inr <= -c.daily_loss_inr:
             return f"day P&L ₹{ctx.day_pnl_inr:,.0f} ≤ −₹{c.daily_loss_inr:,.0f}"
-        ref = intent.ref_price or self._ltp_for(inst.scrip_code) or 0.0
+        ref = ctx.worst_price or intent.ref_price or self._ltp_for(inst.scrip_code) or 0.0
         notional = inst.notional(ref, intent.qty)
         if notional > c.max_notional_inr:
             return f"notional ₹{notional:,.0f} > cap ₹{c.max_notional_inr:,.0f}"
         return None
 
-    async def submit_live(self, intent: OrderIntent, *, ctx: LiveContext) -> OrderResult:
+    async def submit_live(self, intent: OrderIntent, *, ctx: LiveContext, exit_any_mode: bool = False) -> OrderResult:
+        """A live MARKET order, waited on to a fill. ``exit_any_mode``: the exit of a position whose
+        lots are at the broker goes there even after the LIVE arm expired (the mode reads PAPER then,
+        the lots are still real)."""
         self._rollover()
         mode = self._mode()
-        order = self._order_for(intent, mode)
-        if mode not in LIVE_MODES:
+        order = self._order_for(intent, mode if mode in LIVE_MODES else Mode.LIVE)
+        if mode not in LIVE_MODES and not (exit_any_mode and intent.purpose is Purpose.EXIT):
             return self._reject(order, Decision.REJECTED_CONFIG, f"not in a live mode ({mode.value})")
         if self.live is None:
             return self._reject(
@@ -350,8 +356,10 @@ class Gateway:
                 return self._reject(order, Decision.REJECTED_CAP, why)
 
         # counted when SENT: a cap on the orders a book sends a day counts the ones the broker
-        # refused or never filled too, not only the fills (review, 2026-09-26)
-        self.live_orders_by_book[order.strategy] = self.live_orders_by_book.get(order.strategy, 0) + 1
+        # refused or never filled too, not only the fills (review, 2026-09-26) — its ENTRIES (an exit
+        # is never capped, and must not use up the allowance)
+        if intent.purpose is Purpose.ENTRY:
+            self.live_orders_by_book[order.strategy] = self.live_orders_by_book.get(order.strategy, 0) + 1
         res = await self.live.place(intent)
         if not res.ok or res.fill is None:
             return self._reject(order, Decision.REJECTED_BROKER, res.error or "no fill")
@@ -362,6 +370,59 @@ class Gateway:
         self._ok(order)
         self.orders_today += 1
         return OrderResult(Decision.SUBMITTED, order, res.fill)
+
+    # -- LIVE limit orders (exec/live_orders.py) ------------------------------------------------------
+
+    def place_live(self, intent: OrderIntent, *, ctx: LiveContext, exit_any_mode: bool = False) -> OrderResult:
+        """A LIVE order about to be sent to the broker by the live order manager: the idempotency,
+        halt, breaker and LIVE_CAPPED gates of ``submit_live``, and it counts as a live order sent.
+        RESTING = send it; anything else is the refusal. Modifies and cancels are the same order and
+        do not come through here."""
+        self._rollover()
+        mode = self._mode()
+        order = self._order_for(intent, mode if mode in LIVE_MODES else Mode.LIVE)
+        if mode not in LIVE_MODES and not (exit_any_mode and intent.purpose is Purpose.EXIT):
+            return self._reject(order, Decision.REJECTED_CONFIG, f"not in a live mode ({mode.value})")
+        pre = self._precheck(intent, order)
+        if pre is not None:
+            return pre
+        if mode is Mode.LIVE_CAPPED:
+            why = self.check_live_caps(intent, ctx)
+            if why:
+                return self._reject(order, Decision.REJECTED_CAP, why)
+        if intent.purpose is Purpose.ENTRY:
+            # the day cap counts ENTRIES sent: a trade's own sells (the target rungs, each replaced as
+            # the ladder moves, the walk and its crosses) are never capped and must not use it up
+            self.live_orders_by_book[order.strategy] = self.live_orders_by_book.get(order.strategy, 0) + 1
+        order.status, order.note = "RESTING", (f"limit {intent.limit_price}" if intent.limit_price else "market")
+        return OrderResult(Decision.RESTING, order)
+
+    def live_rejected(self, order: Order, note: str) -> OrderResult:
+        """The broker refused a live order (at placement, or later by status): a real failure, so it
+        counts toward the book's breaker for an entry (``_reject``)."""
+        return self._reject(order, Decision.REJECTED_BROKER, note)
+
+    def live_filled(
+        self, order: Order, intent: OrderIntent, *, price: float, qty: int, now: float, mid: float | None,
+        book_age_ms: float | None, broker_order_id: str = "", charges: float | None = None,
+    ) -> OrderResult:
+        """What the broker reports filled — the price and quantity are the broker's, never the book's.
+        ``charges``: a slice of an order pays its share of the ORDER's charges (the flat brokerage once
+        per order — the engine works it out); None = this fill is the whole order."""
+        if charges is None:
+            charges = self._matcher.costs.leg(intent.instrument, intent.side, price, qty).total
+        buy = intent.side is OrderSide.BUY
+        slip = (price - mid) / mid * 1e4 * (1 if buy else -1) if mid else None
+        fill = Fill(price=round(price, 2), qty=int(qty), ts=now, charges=charges,
+                    slippage_bps=round(slip, 2) if slip is not None else None,
+                    book_age_ms=round(book_age_ms) if book_age_ms is not None else None, levels=0)
+        order.status = "FILLED"
+        order.avg_price, order.filled = fill.price, fill.qty
+        order.charges, order.slippage_bps = fill.charges, fill.slippage_bps
+        order.broker_order_id = broker_order_id or order.broker_order_id
+        self._ok(order)
+        self.orders_today += 1
+        return OrderResult(Decision.SUBMITTED, order, fill)
 
     def refused(self, intent: OrderIntent, decision: Decision, note: str) -> OrderResult:
         """An order the engine refuses before it reaches the gateway (a live entry the broker account

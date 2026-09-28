@@ -6,15 +6,28 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+import httpx
+
 from ..domain import Instrument, OrderSide
 
 
 class VenueError(RuntimeError):
-    """Any broker-side failure. Carries the raw response so an audit row can hold the truth."""
+    """Any broker-side failure. Carries the raw response so an audit row can hold the truth.
 
-    def __init__(self, message: str, *, raw: Any = None) -> None:
+    ``maybe_sent``: the request may have reached the broker and been acted on (a timeout, a dropped
+    answer, a 5xx) — an order sent this way is tracked as unconfirmed, never taken as refused."""
+
+    def __init__(self, message: str, *, raw: Any = None, maybe_sent: bool = False) -> None:
         super().__init__(message)
         self.raw = raw
+        self.maybe_sent = maybe_sent
+
+
+def never_sent(exc: BaseException) -> bool:
+    """True when a failed call certainly never reached the broker: no connection was made (refused,
+    no route, no DNS, a connect timeout). Anything else after the request went out may have been
+    acted on."""
+    return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
 
 
 class Quote(Protocol):

@@ -24,7 +24,7 @@ import structlog
 
 from ...config import Segment, Settings
 from ...domain import Instrument, InstrumentKind, OptionType, OrderSide
-from ..base import VenueError
+from ..base import VenueError, never_sent
 from .auth import APIM_KEY, Authenticator
 
 log = structlog.get_logger(__name__)
@@ -58,6 +58,15 @@ class FivePaisaREST:
         sess = await self.auth.token()
         return {"Authorization": f"Bearer {sess.access_token}"}
 
+    async def ensure_session(self) -> None:
+        """A usable session, got BEFORE an order's send timeout starts (exec/live_orders.py ``place``):
+        a re-login can wait ~30 s for its TOTP window, and a timeout spent there — before the request
+        left — is an order never sent, not one that may be working (review14b N1)."""
+        try:
+            await self._bearer()
+        except Exception as exc:
+            raise VenueError(f"no session: {exc}", maybe_sent=False) from exc
+
     async def _post(
         self,
         path: str,
@@ -67,7 +76,15 @@ class FivePaisaREST:
         empty_ok: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         self.calls += 1
-        headers = await self._bearer()
+        try:
+            headers = await self._bearer()
+        except Exception as exc:
+            # no session and none to be had (the login itself failed: no network, the midnight
+            # window): nothing was sent — a VenueError like any broker failure, never a raw
+            # transport error escaping into the order path (review14 A5)
+            self.failures += 1
+            self.last_error = f"{path}: no session: {exc}"
+            raise VenueError(f"{path}: no session: {exc}", maybe_sent=False) from exc
         url = self.s.endpoints.rest + path
         try:
             r = await self.http.post(
@@ -78,7 +95,12 @@ class FivePaisaREST:
         except Exception as exc:
             self.failures += 1
             self.last_error = f"{path}: {exc}"
-            raise VenueError(f"{path} failed: {exc}") from exc
+            # The request went out and no answer came back (a timeout, a dropped connection, a 5xx):
+            # it may have been acted on. A 4xx is the server refusing it; a connection never made
+            # sent nothing. The live order manager tracks a maybe-sent order.
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            refused = status is not None and 400 <= int(status) < 500
+            raise VenueError(f"{path} failed: {exc}", maybe_sent=not (refused or never_sent(exc))) from exc
         head, resp = data.get("head") or {}, data.get("body") or {}
         status = str(head.get("status", head.get("Status", "0")))
         if status not in ("0", "None"):
@@ -232,7 +254,8 @@ class FivePaisaREST:
         return dict(rows[0]) if rows else {}
 
     async def order_book(self) -> list[dict[str, Any]]:
-        resp = await self._post("V4/OrderBook", {"ClientCode": self.s.fp_client_code})
+        # "No record found." is an empty book, not a dead session: never a re-login (review14 B3)
+        resp = await self._post("V4/OrderBook", {"ClientCode": self.s.fp_client_code}, empty_ok=NO_RECORDS)
         return list(resp.get("OrderBookDetail") or [])
 
     # -- orders -----------------------------------------------------------------------------------
@@ -253,6 +276,25 @@ class FivePaisaREST:
         ``price=0`` is a market order. ``remote_order_id`` is our idempotency key and the broker
         echoes it back, which is what makes reconciliation possible after a crash.
         """
+        resp = await self.place_order_raw(instrument, side, qty, price=price, intraday=intraday,
+                                          remote_order_id=remote_order_id, stop_trigger=stop_trigger)
+        # the id AS SENT when the broker does not echo one: the untrimmed id was polled for and
+        # never matched, so a filled order read as rejected (review, 2026-09-26)
+        return str(resp.get("RemoteOrderID") or remote_order_id[:REMOTE_ID_MAX])
+
+    async def place_order_raw(
+        self,
+        instrument: Instrument,
+        side: OrderSide,
+        qty: int,
+        *,
+        price: float = 0.0,
+        intraday: bool = True,
+        remote_order_id: str,
+        stop_trigger: float = 0.0,
+    ) -> dict[str, Any]:
+        """``place_order``, returning the broker's whole answer — the live order manager needs the
+        exchange order id (``ExchOrderID``) it may carry to modify or cancel the order later."""
         body: dict[str, Any] = {
             "ClientCode": self.s.fp_client_code,
             "Exchange": instrument.exch,
@@ -272,10 +314,7 @@ class FivePaisaREST:
         if stop_trigger > 0:
             body["StopLossPrice"] = instrument.round_price(stop_trigger)
             body["IsStopLossOrder"] = True
-        resp = await self._post("V1/PlaceOrderRequest", body)
-        # the id AS SENT when the broker does not echo one: the untrimmed id was polled for and
-        # never matched, so a filled order read as rejected (review, 2026-09-26)
-        return str(resp.get("RemoteOrderID") or remote_order_id[:REMOTE_ID_MAX])
+        return dict(await self._post("V1/PlaceOrderRequest", body))
 
     async def modify_order(self, exch_order_id: str, *, price: float, qty: int) -> None:
         await self._post(
@@ -305,6 +344,21 @@ class FivePaisaREST:
         )
         rows = resp.get("OrdStatusResLst") or []
         return dict(rows[0]) if rows else {}
+
+    async def order_status_many(self, orders: list[tuple[str, str]] | tuple[tuple[str, str], ...]) -> list[dict[str, Any]]:
+        """``V2/OrderStatus`` for several orders in one call: ``[(exch, remote_order_id), …]``. The
+        rows are the broker's; the live order manager matches them on ``RemoteOrderID``."""
+        if not orders:
+            return []
+        resp = await self._post(
+            "V2/OrderStatus",
+            {
+                "ClientCode": self.s.fp_client_code,
+                "OrdStatusReqList": [{"Exch": exch, "RemoteOrderID": rid[:REMOTE_ID_MAX]} for exch, rid in orders],
+            },
+            empty_ok=NO_RECORDS,  # nothing known yet is an empty answer, not a dead session (review14 B3)
+        )
+        return [dict(r) for r in (resp.get("OrdStatusResLst") or [])]
 
     async def square_off_all(self) -> None:
         await self._post("SquareOffAll", {"ClientCode": self.s.fp_client_code})

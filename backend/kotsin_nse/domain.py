@@ -271,6 +271,10 @@ class Position:
     #: the order trail: ``{"entry": {...}, "exits": [{...}, ...]}`` — signal, limit placed, each
     #: reprice, filled/crossed, and the book at each (exec/resting.py)
     exec_log: dict[str, Any] = field(default_factory=dict)
+    #: where the lots are: "paper" (simulated) or "live" (at the broker). A position's exits go where
+    #: its lots are, whatever the engine's mode is now: a paper position never sends a real SELL
+    #: after LIVE is armed, and a live position's exits still reach the broker after the arm expires
+    venue: str = "paper"
 
     def __post_init__(self) -> None:
         if self.qty_remaining == 0:

@@ -849,12 +849,42 @@ def build_app(engine: Engine) -> FastAPI:
         Uses the broker's square-off rather than our position list on purpose: the moment this
         button is pressed is exactly the moment our view of the book is least trustworthy.
         """
-        await engine.set_halt(True, "KILL")
-        flattened = 0
-        if engine.live_exec is not None and engine.mode() in (Mode.LIVE, Mode.LIVE_CAPPED):
-            await engine.live_exec.square_off_all()
-            flattened = len([p for p in engine.positions.values() if p.status == "OPEN"])
-        return {"halted": True, "square_off_requested": flattened}
+        # every working live order is cancelled FIRST, then the square-off; the engine sends no live
+        # SELL of its own afterwards (engine.kill, review14 B9)
+        return await engine.kill()
+
+    @api.post("/control/live-order/{client_order_id}/release")
+    async def release_live_order(client_order_id: str) -> dict[str, Any]:
+        """After checking the broker: an UNCONFIRMED live order (its placement's answer was lost) taken
+        as never placed, so its position's orders go on (review14b N1)."""
+        try:
+            return await engine.release_live_order(client_order_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @api.post("/control/live-order/{client_order_id}/unwatch")
+    async def unwatch_live_order(client_order_id: str) -> dict[str, Any]:
+        """End the late-appearance watch of an order taken as never placed, and with it the day's block on
+        live entries into its contract. Refused while it is working or unconfirmed at the broker (review14d)."""
+        try:
+            return await engine.unwatch_live_order(client_order_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @api.post("/control/live-position/{position_id}/close")
+    async def close_killed_position(position_id: str, price: float | None = Query(None, gt=0)) -> dict[str, Any]:
+        """After checking the broker: close a KILLED live position's record at ``price`` (else the last
+        mid), flagged provisional (review14b N3)."""
+        try:
+            return await engine.close_killed_position(position_id, price)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @api.post("/control/reconcile")
     async def reconcile() -> dict[str, Any]:

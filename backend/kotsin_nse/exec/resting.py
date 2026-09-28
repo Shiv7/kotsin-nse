@@ -209,6 +209,26 @@ class Resting:
     race_checked: bool = False
     #: the momentum rule's reads — ``{atS, runPct, note}`` — for the order's trail
     momentum: list[dict[str, Any]] = field(default_factory=list)
+    #: "paper" (the engine judges the fill from the book) or "live" (the broker reports it —
+    #: exec/live_orders.py; ``bo`` is the broker's order)
+    venue: str = "paper"
+    bo: Any = None
+    #: live: the broker-filled quantity already booked (an exit books each partial slice as it fills)
+    booked_qty: int = 0
+    #: live: the value (price x qty) of those booked slices — an exit's next slice is priced out of the
+    #: broker's running average
+    booked_value: float = 0.0
+    #: live: why a cancel was asked, and what follows once the broker confirms it ("cross": sell the
+    #: rest through the book; "" : nothing)
+    cancel_why: str = ""
+    after_cancel: str = ""
+    #: live exits: 0 = the limit at the mid walked to the bid; n >= 1 = the n-th cross at the bid
+    cross_n: int = 0
+    #: live TARGET exits: the rung was already taken by an earlier order of this exit (a partly filled
+    #: target exit that is then crossed takes its rung once — review14 A6)
+    rung_taken: bool = False
+    #: live: the charges booked so far for this order (a slice pays its share of the ORDER's charges)
+    charged: float = 0.0
 
     def audit(self, **more: Any) -> dict[str, Any]:
         bid, ask = self.book_at_place
