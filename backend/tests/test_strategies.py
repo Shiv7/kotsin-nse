@@ -333,5 +333,6 @@ def test_the_registry_is_an_enum_and_names_every_book_that_trades():
         StrategyKey.FUDKII_CT_X,
         StrategyKey.FUDKII_CT_Y,
         StrategyKey.FUDKII_RT_Y_W1,
+        StrategyKey.FUDKII_RT_Y_F,
     )
     assert StrategyKey.FUDKII.wallet_id == "strategy-wallet-FUDKII"

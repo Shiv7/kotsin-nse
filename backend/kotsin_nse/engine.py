@@ -23,7 +23,7 @@ import os
 import re
 import time
 from bisect import bisect_right
-from collections.abc import MutableMapping, Sequence
+from collections.abc import Awaitable, MutableMapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from itertools import pairwise
@@ -36,7 +36,14 @@ import structlog
 from .alerts.engine import LOOKBACK as ALERT_LOOKBACK
 from .alerts.engine import AlertEngine
 from .bars.aggregator import Aggregator
-from .bars.daily import MIN_DAILY_BARS, REPAIR_BATCH, DailyCache, is_official, previous_session
+from .bars.daily import (
+    MIN_DAILY_BARS,
+    REPAIR_BATCH,
+    DailyCache,
+    is_official,
+    one_per_session,
+    previous_session,
+)
 from .bars.daily import audit as audit_daily
 from .bars.indicators import atr, dried_volume
 from .bars.micro import MicroAggregator
@@ -92,6 +99,7 @@ from .instrument.legs import OPTION_CLUSTER_TOL_PCT, LegPivotLoader, otm_legs
 from .instrument.pricing import value_at
 from .instrument.select import (
     Quote,
+    Selection,
     SelectionPolicy,
     choose_expiry,
     estimate_delta,
@@ -119,6 +127,7 @@ from .market.session import (
     TF_SECONDS,
     TradingCalendar,
     bucket_start,
+    from_ist,
     in_session,
     is_open,
     ist_day,
@@ -129,6 +138,7 @@ from .market.session import (
     past_force_flat,
     session_buckets_back,
     session_open_ts,
+    spec,
     to_ist,
 )
 from .market.session import (
@@ -155,13 +165,14 @@ from .risk.limits import (
     RT_MCX_LIMITS,
     RT_N_LIMITS,
     RT_X_LIMITS,
+    RT_Y_F_LIMITS,
     RT_Y_LIMITS,
     RT_Y_W1_LIMITS,
     RiskLimits,
 )
 from .risk.sizing import size_position
 from .risk.wallet import Wallet
-from .strategy.base import Outcome, Signal
+from .strategy.base import Outcome, Signal, published
 from .strategy.counter import (
     KEY_LEVELS,
     NO_WALL,
@@ -173,7 +184,7 @@ from .strategy.counter import (
 )
 from .strategy.fudkii import Fudkii, FudkiiConfig
 from .strategy.fukaa import Fukaa, FukaaConfig, select
-from .strategy.keys import ALL_KEYS, INITIAL_INR, SHADOW_OF, StrategyKey
+from .strategy.keys import ALL_KEYS, INITIAL_INR, SHADOW_BOOKS, SHADOW_OF, StrategyKey
 from .strategy.regime_gates import rt_gate_reasons, trigger_verdicts, volume_labels
 from .venue.fivepaisa.auth import Authenticator
 from .venue.fivepaisa.rest import FivePaisaREST
@@ -189,7 +200,7 @@ SELECTION_POLICY = SelectionPolicy()
 #: option stop floored at MIN_STOP_TICKS below entry instead of the one-tick δ projection.
 NO_PREMIUM_FLOOR = frozenset({
     StrategyKey.FUDKII, StrategyKey.FUDKII_RT_X, StrategyKey.FUDKII_RT_N, StrategyKey.FUDKII_RT_Y,
-    StrategyKey.FUDKII_CT_X, StrategyKey.FUDKII_CT_Y, StrategyKey.FUDKII_RT_Y_W1,
+    StrategyKey.FUDKII_CT_X, StrategyKey.FUDKII_CT_Y, StrategyKey.FUDKII_RT_Y_W1, StrategyKey.FUDKII_RT_Y_F,
 })
 MIN_STOP_TICKS = 8
 #: How long an entry may wait for the chosen strike's own previous-session ladder. Bounded
@@ -204,10 +215,14 @@ HELD_QUOTE_POLL_S = 5.0
 #: A broker snapshot (V1/MarketFeed) carries no bid or ask; it may CONFIRM a held two-sided quote as
 #: current only while the feed has spoken within this many seconds (``_still_stands``)
 FEED_LIVE_S = 5.0
-#: at a trigger, how long the choice may wait for its candidate strikes' first live quote — a strike
-#: subscribed a moment ago has none until the feed's first frame (``_await_fresh_quotes``)
+#: at a trigger, how long the choice may wait for the strikes it could not price yet — a strike
+#: subscribed a moment ago has only the broker's snapshot (no bid, no ask) until the feed's first frame
+#: (``_choose_option``); each such strike gets STRIKE_GRACE_S of it (the feed answers in ~1 s), and in
+#: the session's first OPEN_SETTLE_S the books are still filling, so the choice may wait until then
 QUOTE_WAIT_S = 5.0
 QUOTE_POLL_S = 0.1
+STRIKE_GRACE_S = 2.0
+OPEN_SETTLE_S = 60.0
 #: the 30m futures slots ending at a trigger that must be real bars: the volume reading's eight and the
 #: futures leg's 15-bar ATR (``_fill_fut_gaps``)
 FUT_GAP_SLOTS = 15
@@ -217,11 +232,13 @@ BAR_AUDIT_HM = "15:40"
 BAR_AUDIT_ALERT_SHARE, BAR_AUDIT_ALERT_MIN = 0.01, 5
 #: a feed with no frame for this long in an open session is dead, whatever its socket says
 FEED_SILENCE_S = 15.0
+#: how long a counter-trend button's plan preview is reused before it is quoted again
+COUNTER_PREVIEW_S = 15.0
 
 BOOK_LABELS = {
     "FUDKII": "FUDKII", "FUDKII_RT_X": "RT-X", "FUDKII_RT_N": "RT-N", "FUDKII_RT_Y": "RT-Y",
     "FUDKII_CT_X": "CT-X", "FUDKII_CT_Y": "CT-Y", "FUDKII_RT_MCX": "RT-MCX",
-    "FUDKII_RT_Y_W1": "RT-Y wide (shadow)",
+    "FUDKII_RT_Y_W1": "RT-Y wide (shadow)", "FUDKII_RT_Y_F": "RT-Y graded F (shadow)",
 }
 
 
@@ -245,7 +262,7 @@ _RESTING_DECISIONS = frozenset({"RESTING", "PARENT_HALTED_TWINS_RESTING", "PAREN
 #: 38 characters of an id the broker keeps; the descriptive rest may be cut there without a collision.
 ORDER_CODES = {
     "FUDKII": "FII-P", "FUDKII_RT_X": "FII-RTX", "FUDKII_RT_N": "FII-RTN", "FUDKII_RT_Y": "FII-RTY",
-    "FUDKII_CT_X": "FII-CTX", "FUDKII_CT_Y": "FII-CTY", "FUDKII_RT_MCX": "FII-RTM", "FUDKII_RT_Y_W1": "FII-RYW",
+    "FUDKII_CT_X": "FII-CTX", "FUDKII_CT_Y": "FII-CTY", "FUDKII_RT_MCX": "FII-RTM", "FUDKII_RT_Y_W1": "FII-RYW", "FUDKII_RT_Y_F": "FII-RYF",
     "FUKAA": "FKA",
 }
 _ORDER_REF_RE = re.compile(r"^([A-Z]{3}(?:-[A-Z]{1,3})?)-(\d{6})-\d{6}-(\d{3,})(?:-|$)")
@@ -274,8 +291,33 @@ LIVE_MARGIN_FIELDS = ("NetAvailableMargin", "AvailableMargin", "ALB")
 _MIRRORS = {"FUDKII_RT_Y_W1": "FUDKII_RT_Y"}
 #: the books that take a FUDKII trigger in the trend's way, each judging it for itself
 IN_TREND_BOOKS = (StrategyKey.FUDKII, StrategyKey.FUDKII_RT_X, StrategyKey.FUDKII_RT_N, StrategyKey.FUDKII_RT_Y)
+#: The last minute any book may place a new NSE entry (operator, 2026-09-29: "3:15PM IST for NSE
+#: trading for all NSE trades for all strategies except for MCX ones, FUDKII-RT-Y-F. last entry time
+#: for FUDKII-RT-Y-F will be before 3:23PM"). Paper and live alike; MCX keeps its own session. Before
+#: this, no paper entry checked the clock: the graded-F shadow bought at 15:30, after the close
+#: (2026-09-29, −₹15,116).
+NSE_LAST_ENTRY_HM = "15:15"
+LAST_ENTRY_HM: dict[str, str] = {StrategyKey.FUDKII_RT_Y_F.value: "15:22"}
+#: "exit latest by 3:25PM IST not after for all NSE trades" (operator, 2026-09-29): every book keeps the
+#: session's 15:20 flatten — moving it to 15:24 cost −₹29,932 over 24 Aug–28 Sep in the replay (89 trades
+#: held to the close, every in-trend book worse) — and the graded-F shadow, whose entries run to 15:22,
+#: flattens from 15:24, out by 15:25.
+FORCE_FLAT_HM: dict[str, str] = {StrategyKey.FUDKII_RT_Y_F.value: "15:24"}
+#: How long after the NSE open a trigger carried from the last session's close waits for its stock's
+#: first print before it expires.
+CARRY_WINDOW_S = 300.0
 #: the books that take the counter-trend fade of it (CT-X's plan), each judging it for itself
 FADE_BOOKS = (StrategyKey.FUDKII_CT_X, StrategyKey.FUDKII_CT_Y)
+#: On an in-trend book's card for a trigger the route sends COUNTER-TREND, the live button is the
+#: counter-trend book's: RT-Y's exits fade in CT-Y, everything else's in CT-X, which owns the fade
+#: (operator, 2026-09-29: "the CTA has to be the OTM we are to buy in counter-trend")
+COUNTER_OF = {
+    StrategyKey.FUDKII: StrategyKey.FUDKII_CT_X, StrategyKey.FUDKII_RT_X: StrategyKey.FUDKII_CT_X,
+    StrategyKey.FUDKII_RT_N: StrategyKey.FUDKII_CT_X, StrategyKey.FUDKII_RT_Y: StrategyKey.FUDKII_CT_Y,
+}
+#: the books offered a trigger FUDKII grades F and does not publish (operator, 2026-09-28): the
+#: graded-F shadow alone, until each book's own grade rule is proven (phase19)
+UNPUBLISHED_BOOKS = (StrategyKey.FUDKII_RT_Y_F,)
 
 
 @dataclass(slots=True)
@@ -406,6 +448,8 @@ class Engine:
             StrategyKey.FUDKII_CT_Y.value: ExitEngine(CT_Y_LIMITS),
             # the wide-stop shadow: RT-Y's policy with the equity stop 1 % further out
             StrategyKey.FUDKII_RT_Y_W1.value: ExitEngine(RT_Y_W1_LIMITS),
+            # the graded-F shadow: RT-Y's policy, 25 % cap included, on the triggers RT-Y never sees
+            StrategyKey.FUDKII_RT_Y_F.value: ExitEngine(RT_Y_F_LIMITS),
         }
         #: Each twin is checked against its own pool — 30 slots, its own lot cap — rather than
         #: skipping the check entirely, which is what it did when first written.
@@ -482,6 +526,12 @@ class Engine:
         #: because the strike chooser ranks on volume as well as open interest.
         self.option_volume: dict[str, float] = {}
         self._decision_tasks: set[asyncio.Task[Any]] = set()
+        #: when each code last printed on the feed (its quote's receive time): a carried trigger
+        #: enters on its stock's FIRST print of the session, never on yesterday's close replayed
+        self._ltp_ts: dict[str, float] = {}
+        #: the triggers carried from the last session's close still waiting for their first print
+        self._carry_day: date | None = None
+        self._carry_pending: list[dict[str, Any]] = []
         self._sweep_task: asyncio.Task[Any] | None = None
         self._intraday_rebuild_day: str = ""
         #: PAPER limit orders (exec/resting.py) and the ones working right now, by client order id
@@ -556,14 +606,16 @@ class Engine:
         self._zone_cache: dict[str, tuple[str, list[Zone]]] = {}
         #: the front future's candles per symbol for the current trigger bar (see _fut_context)
         self._fut_cache: dict[str, tuple[int, dict[str, Any] | None]] = {}
-        #: the choice's wait for fresh quotes (0 = never wait: the replay's frozen clock)
+        #: (name, bar) -> the futures fetch in flight, shared by its concurrent readers
+        self._fut_inflight: dict[tuple[str, int], asyncio.Future[dict[str, Any] | None]] = {}
+        #: the choice's wait for strikes it cannot price yet (0 = never wait: the replay's frozen clock)
         self.quote_wait_s = QUOTE_WAIT_S
         #: snapshot rows with no bid/ask that confirmed / kept a held quote, and confirmed a held book
         self.snapshot_confirmed = self.snapshot_kept = self.snapshot_book_confirmed = 0
         #: snapshot rows that marked an open position's contract from the broker's last price
         self.snapshot_held_marked = 0
         #: code -> when a snapshot's last trade contradicted the held quote: that quote is known old,
-        #: and a choice waiting for fresh quotes waits for a newer one (``_await_fresh_quotes``)
+        #: and the choice waits for a newer one (``_choose_option``)
         self._quote_outdated: dict[str, float] = {}
         #: the market-wide volume check, per 30m bar (``_market_volume``)
         self._vol_market: dict[int, MarketVolume] = {}
@@ -609,6 +661,8 @@ class Engine:
         #: every symbol decides in its own task, so a 09:45 burst of sixteen signals would be
         #: thirty-two concurrent historical calls; the broker client has no limiter of its own
         self._fut_sem = asyncio.Semaphore(4)
+        #: the futures reads of triggers FUDKII did not publish (the graded-F shadow's dried-volume gate)
+        self._fut_sem_low = asyncio.Semaphore(2)
         # -- the pivot data plane (docs/PIVOTS.md) --
         self.daily_cache = DailyCache(settings.data_dir / "daily")
         self._daily_failed: set[str] = set()  # 1d fetch raised; the repair loop retries every pass
@@ -617,6 +671,8 @@ class Engine:
         self._legs_due = False  # a full leg reload is owed: day roll
         self._legs_reanchor_due = False  # re-band the OTM legs on the session's real spot
         self._legs_reanchor_done: set[str] = set()
+        #: (counter book, trigger) -> (when, plan): the counter-trend button's preview (``_counter_cta``)
+        self._counter_preview: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
         self._daily_refresh_done: set[str] = set()  # "YYYY-MM-DD HH:MM" slots already run
         #: the alert-ring reset slots already run, same shape. Seeded here, at construction, and
         #: not in the universe path: a process that boots after the slot has nothing to clear, and
@@ -1021,6 +1077,7 @@ class Engine:
             self.aggregator.track(inst)
         self._seed_daily_from_cache(universe)
         await self._backfill(universe)
+        self._seed_1m_from_archive(universe)
         self._daily_refresh_done = {
             f"{ist_today().isoformat()} {slot}"
             for slot in self.s.daily_refresh_hm
@@ -1161,6 +1218,41 @@ class Engine:
                 await asyncio.sleep(0.15)
         log.info("backfill.done", series_ok=ok, failed=failed)
 
+    def _seed_1m_from_archive(self, universe: list[Instrument], day: date | None = None) -> int:
+        """Today's 1m bars back from the engine's own archive. The 1m series is built from live
+        ticks alone and every closed 1m bar is archived (flushed at shutdown too), so without this a
+        restart emptied it: every card's underlying path read "appears once 1m bars accrue" until the
+        next session's ticks (2026-09-29, restarts at 15:37 and 18:39). No broker call; nothing that
+        decides a trade reads the 1m series. Returns the bars seeded."""
+        day = day or ist_today()
+        path = self.s.data_dir / "archive" / "bars" / f"{day.isoformat()}.parquet"
+        if not path.exists():
+            return 0
+        try:
+            import pandas as pd
+
+            df = pd.read_parquet(path, columns=["symbol", "ts", "o", "h", "l", "c", "v"])
+        except Exception as exc:  # noqa: BLE001 — an unreadable archive costs the paths, never the boot
+            log.warning("archive.1m_seed_failed", path=str(path), error=str(exc)[:120])
+            return 0
+        by_symbol = {i.symbol: i for i in universe}
+        n = names = 0
+        for sym, g in df.groupby("symbol"):
+            inst = by_symbol.get(str(sym))
+            if inst is None:
+                continue
+            rows = g.sort_values("ts").drop_duplicates("ts", keep="last")
+            bars = [
+                UnifiedBar(symbol=inst.symbol, scrip_code=inst.scrip_code, tf="1m", ts=int(r.ts), open=float(r.o), high=float(r.h),
+                           low=float(r.l), close=float(r.c), volume=float(r.v), source=BarSource.LIVE, complete=True)
+                for r in rows.itertuples()
+            ]
+            self.store.seed(inst.symbol, "1m", bars)
+            n += len(bars)
+            names += 1
+        log.info("archive.1m_seeded", day=day.isoformat(), names=names, bars=n)
+        return n
+
     def _seed_daily(self, inst: Instrument, rows: list[dict[str, Any]]) -> None:
         bars = [
             UnifiedBar(
@@ -1181,7 +1273,7 @@ class Engine:
             )
             for r in rows
         ]
-        self.store.seed(inst.symbol, "1d", bars)
+        self._install_daily(inst, bars)
         # The official series is what the pivots read, so anything computed on the old one is void;
         # and the cache holds the last known official candles for a boot the broker cannot serve.
         self._zone_cache.pop(inst.symbol, None)
@@ -1207,15 +1299,27 @@ class Engine:
         log.info("positions.resubscribed", instruments=[i.name or i.scrip_code for i in insts])
         return insts
 
+    def _install_daily(self, inst: Instrument, fresh: list[UnifiedBar]) -> None:
+        """``fresh`` over what the store holds, one bar per session (``one_per_session``)."""
+        held = self.store.bars(inst.symbol, "1d")
+        merged = one_per_session((held, fresh), lambda d: session_open_ts(inst.segment, d))
+        self.store.replace_series(inst.symbol, "1d", merged)
+
     def _seed_daily_from_cache(self, universe: list[Instrument]) -> None:
         """The last known official candles, before REST is asked. A boot while the broker's
         historical endpoint is down then resumes on real levels; ``store.seed`` lets the REST
         refetch win over these the moment it answers."""
         hit = 0
+        cat = self.catalogue_loader.catalogue
         for inst in universe:
+            if (inst.segment is Segment.MCX_FO and inst.kind is InstrumentKind.FUTURE
+                    and cat.front_future(inst.symbol, on=ist_today()) is not inst):
+                # a rolled commodity: the cache holds the expiring month's candles, which are not this
+                # contract's — without the REST answer it has no levels rather than the wrong ones
+                continue
             bars = self.daily_cache.load(inst.symbol, inst.scrip_code)
             if bars:
-                self.store.seed(inst.symbol, "1d", bars)
+                self._install_daily(inst, bars)
                 hit += 1
         log.info("daily.cache_seeded", names=hit, of=len(universe))
 
@@ -1351,6 +1455,7 @@ class Engine:
         ltp = float(tick.get("ltp") or 0)
         if ltp > 0:
             self.ltps[code] = ltp
+            self._ltp_ts[code] = float(tick.get("recv_ts") or time.time())
             self.quotes[code] = Quote(
                 ltp=ltp,
                 bid=float(tick.get("bid") or 0),
@@ -1601,26 +1706,94 @@ class Engine:
         for rej in (*base_out.rejections, *derived.rejections):
             await self.ledger.insert_rejection(rej.to_json())
 
-        for sig in base_out.signals:
-            await self._log_breadth(sig)
-        for sig in base_out.signals:
-            # the trigger reaches every in-trend book at once; each decides for itself. One signal's
-            # error never costs the bar's other signals, FUKAA or the fade their turn.
-            try:
-                await self._handle_signal(sig, bar, books=IN_TREND_BOOKS)
-            except Exception as exc:
-                log.exception("signal.failed", symbol=sig.symbol, error=str(exc))
+        # Every trigger — a SuperTrend flip with the close through the band — is decided on the moment
+        # it is generated, whether FUDKII publishes it as its own signal or not, and every path runs
+        # side by side, not in series (operator, 2026-09-28: "push them in parallel not in series").
+        # A published trigger reaches the in-trend books and the fade route (CT-X, CT-Y's gap fade)
+        # as before; one FUDKII grades F and does not publish reaches the graded-F shadow alone
+        # (UNPUBLISHED_BOOKS) until each book's own grade rule is proven (phase19). FUKAA runs beside
+        # them. Each path is guarded: one path's error never costs another its entry.
+        triggers = [*base_out.signals, *base_out.triggers]
+        for sig in base_out.triggers:
+            # its own row first: the parent's decision on its trigger, found by the cards and the
+            # Shadow page, and never mistaken for a FUDKII signal by a later write (the first row
+            # wins) (review, 2026-09-28). Known to today's book, so a card's TAKE finds it.
+            parent = (sig.context or {}).get("parent") or {}
+            await self.ledger.insert_signal(sig.to_json(), "NOT_PUBLISHED",
+                                            f"FUDKII's own {parent.get('gate', 'grade')}: {parent.get('reason') or f'grade {sig.grade}'}")
+            self._signals_today[sig.signal_id] = sig
+        for sig in triggers:
+            await self._log_breadth(sig)  # read by RT-Y's gate B and the gap fade: before either runs
+        jobs = []
+        for sig in triggers:
+            if self._after_close(sig):
+                # decided at or after the NSE close (the 15:15 bar completes at 15:30): no book can
+                # trade it now — carried to the next session's 09:15 open (operator, 2026-09-29)
+                jobs.append(self._guarded("carry.failed", sig, self._carry_queue(sig)))
+            elif published(sig):  # the in-trend books keep the parent's grade
+                jobs.append(self._guarded("signal.failed", sig, self._handle_signal(sig, bar, books=IN_TREND_BOOKS, adopt=True)))
+                jobs.append(self._guarded("counter.failed", sig, self._handle_counter(sig, bar)))
+            else:
+                jobs.append(self._guarded("signal.failed", sig, self._handle_unpublished(sig, bar)))
         for sig in admitted:
+            jobs.append(self._guarded("signal.failed", sig, self._handle_signal(sig, bar)))
+        if jobs:
+            await asyncio.gather(*jobs)
+
+    async def _handle_unpublished(self, sig: Signal, bar: UnifiedBar) -> None:
+        """A trigger FUDKII does not publish, offered to ``UNPUBLISHED_BOOKS`` (the graded-F shadow).
+        Each such book's own gates run FIRST, from what the engine already holds — the breadth, the
+        pivots, the gap, the volume reading — and only a trigger a book would take goes on to the
+        strike choice: at a 09:45 bar some twenty of these arrive with the one or two published
+        triggers, and a strike choice each would subscribe and quote twenty chains for entries the
+        gates then refuse. The book's decision is the same either way; the gates run again inside
+        ``_enter_book_once`` on the same readings."""
+        underlying = self.underlyings.get(sig.symbol)
+        if underlying is None:
+            return
+        books = tuple(k for k in UNPUBLISHED_BOOKS if self.book_trades(k.value, underlying.segment))
+        if not books:
+            return  # an MCX trigger: no book here trades it, and RT-MCX takes only published ones
+        takers = []
+        for key in books:
+            lim = self.limits_for(key.value)
+            late = self._past_last_entry(key.value, underlying)
+            if late:  # before any broker read: nothing past the book's last entry minute is bought
+                await self._book_skip(key.value, sig, late, gate="entry_cutoff")
+                continue
+            # gate B first: breadth, a pivot just ahead and the 09:45 gap are in memory; the dried-volume
+            # read below asks the broker for the future's candles — only for a trigger gate B passes
+            ctx = self._trigger_ctx(sig.signal_id, sig.direction)
+            early = rt_gate_reasons(ctx, lim)
+            if early:
+                gate, why = early[0]
+                await self._book_skip(key.value, sig, why, gate=gate, gates=[g for g, _ in early], breadth=ctx.get("share"))
+                continue
+            vol = (
+                asyncio.ensure_future(self._volume_surges_safe(underlying, low_priority=True))
+                if lim.dried_volume_v
+                else None
+            )
             try:
-                await self._handle_signal(sig, bar)
-            except Exception as exc:
-                log.exception("signal.failed", symbol=sig.symbol, strategy=sig.strategy.value, error=str(exc))
-        for sig in base_out.signals:
-            # the fade is strictly additive: it may never cost the in-trend books their entry
-            try:
-                await self._handle_counter(sig, bar)
-            except Exception as exc:
-                log.exception("counter.failed", symbol=sig.symbol, error=str(exc))
+                hit = await self._book_gates(key, sig, underlying, vol)
+            finally:
+                if vol is not None and not vol.done():
+                    vol.cancel()
+            if hit is None:
+                takers.append(key)
+                continue
+            gate, why, extra = hit
+            await self._book_skip(key.value, sig, why, gate=gate, **extra)
+        if takers:
+            await self._handle_signal(sig, bar, books=tuple(takers), adopt=False)
+
+    @staticmethod
+    async def _guarded(event: str, sig: Signal, job: Awaitable[Any]) -> None:
+        """One of a bar's concurrent paths: its failure is logged and stays its own."""
+        try:
+            await job
+        except Exception as exc:
+            log.exception(event, symbol=sig.symbol, strategy=sig.strategy.value, error=str(exc))
 
     async def _handle_signal(
         self, sig: Signal, bar: UnifiedBar | None, *, adopt: bool = True, books: Sequence[StrategyKey] | None = None,
@@ -1664,7 +1837,8 @@ class Engine:
         if underlying is None:
             return await everyone("NO_UNDERLYING", "not in the universe")
         segment_book = next((k for k, seg in self.SEGMENT_BOOKS.items() if seg is underlying.segment), None)
-        if sig.strategy is StrategyKey.FUDKII and segment_book is not None and not self.book_trades(sig.strategy.value, underlying.segment):
+        if (sig.strategy is StrategyKey.FUDKII and published(sig) and segment_book is not None
+                and not self.book_trades(sig.strategy.value, underlying.segment)):
             # A commodity trigger. FUDKII's purse never trades MCX and RT-MCX only mirrored FUDKII
             # FILLS — so no commodity trigger was ever entered by anyone (every one was booked
             # WRONG_SEGMENT). It goes to the segment's own book directly, with the trigger as its
@@ -1705,7 +1879,7 @@ class Engine:
         # (review, 2026-09-26: read before the gather, FUDKII's order waited on it and an error in
         # it cost every book its entry).
         vol = (
-            asyncio.ensure_future(self._volume_surges_safe(underlying))
+            asyncio.ensure_future(self._volume_surges_safe(underlying, low_priority=not published(sig)))
             if gated and any(self.limits_for(k).dried_volume_v for k in keys)
             else None
         )
@@ -1777,6 +1951,14 @@ class Engine:
             log.info("book.refused", book=book_key, symbol=sig.symbol, decision="ALREADY_ENTERING", why=why)
             await self.ledger.event("book.already_entering", {"book": book_key, "signal_id": sig.signal_id, "symbol": sig.symbol})
             return {"decision": "ALREADY_ENTERING", "reason": why}
+        if key is StrategyKey.FUDKII and not published(sig):
+            # the parent's own grade (or the last bar's fortress floor): not FUDKII's trade, recorded
+            # as its decision on the trigger's row — its twins judge the same trigger themselves
+            parent = (sig.context or {}).get("parent") or {}
+            return await refuse("NOT_PUBLISHED", f"FUDKII's own {parent.get('gate', 'grade')}: {parent.get('reason') or f'grade {sig.grade}'}")
+        late = self._past_last_entry(book_key, underlying)
+        if late:
+            return await refuse("PAST_ENTRY_CUTOFF", late, gate="entry_cutoff")
         halted, halt_why = self.halted()
         if halted:
             # refused HERE, before any order: sent, each book's order was rejected by the gateway
@@ -1793,7 +1975,7 @@ class Engine:
         if gated and (hit := await self._book_gates(key, sig, underlying, vol)) is not None:
             gate, why, extra = hit
             return await refuse("SKIPPED", why, gate=gate, **extra)
-        if (breach := self._stop_breached(sig, underlying)) is not None:
+        if (breach := self._stop_breached(sig, underlying, book_key)) is not None:
             return await refuse("STOP_BREACHED", breach)
         book = self._exits_by_strategy.get(book_key)
         book_limits = book.limits if book is not None else self.limits
@@ -1984,7 +2166,8 @@ class Engine:
         lim = self.limits_for(key.value)
         if lim.dried_volume_v:
             # shielded: one book's task cancelled never cancels the reading the others wait on
-            vol = await asyncio.shield(reading) if reading is not None else await self._volume_surges_safe(underlying)
+            vol = (await asyncio.shield(reading) if reading is not None
+                   else await self._volume_surges_safe(underlying, low_priority=not published(sig)))
             dry = [leg for leg, (s_t, s_t1) in vol.items() if dried_volume(s_t, s_t1, v=lim.dried_volume_v)]
             if dry:
                 why = "dried volume " + ", ".join(f"{leg} {vol[leg][0]:.2f}/{vol[leg][1]:.2f}" for leg in dry) + f" < {lim.dried_volume_v}"
@@ -1999,16 +2182,142 @@ class Engine:
             return "gap_fade", "CT-Y holds its own 09:45 gap fade on this trigger — not the CT-X fade as well", {}
         return None
 
-    def _stop_breached(self, sig: Signal, underlying: Instrument) -> str | None:
-        """The trade is dead before it starts: the underlying is already through the signal's own
-        stop. SBILIFE, 2026-09-24 09:45: the stop sat 10 paise under the close, the stock printed
-        through it and every book was stopped out 67 ms after its fill. Checked before an entry is
-        placed and on every look at a resting one. None when the price is not known."""
-        ltp = self.ltps.get(underlying.scrip_code)
-        if not ltp or not sig.stop:
+    @staticmethod
+    def _force_flat_hm(book: str, segment: Segment) -> str:
+        """When ``book``'s positions in ``segment`` are flattened: the session's, or the book's own
+        later NSE flatten (``FORCE_FLAT_HM``)."""
+        own = FORCE_FLAT_HM.get(book) if segment is not Segment.MCX_FO else None
+        return own or f"{spec(segment).force_flat:%H:%M}"
+
+    def _past_force_flat(self, book: str, segment: Segment, now: float) -> bool:
+        return ist_hm(now) >= self._force_flat_hm(book, segment) if book in FORCE_FLAT_HM else past_force_flat(segment, now)
+
+    def _past_last_entry(self, book: str, underlying: Instrument, *, now: float | None = None) -> str | None:
+        """Why ``book`` may not place a new entry now, or None: past its last NSE entry minute
+        (``NSE_LAST_ENTRY_HM``, the graded-F shadow's own in ``LAST_ENTRY_HM``). MCX is not
+        restricted here (its own session)."""
+        if underlying.segment is Segment.MCX_FO:
             return None
-        through = ltp <= sig.stop if sig.direction is Direction.BULLISH else ltp >= sig.stop
-        return f"stop already breached — {sig.symbol} {ltp:g} through its stop {sig.stop:g}" if through else None
+        now = time.time() if now is None else now
+        last = LAST_ENTRY_HM.get(book, NSE_LAST_ENTRY_HM)
+        if ist_hm(now) <= last:
+            return None
+        return (f"past {BOOK_LABELS.get(book, book)}'s last NSE entry minute {last} IST ({to_ist(now):%H:%M:%S}) — "
+                f"its positions are flattened from {self._force_flat_hm(book, underlying.segment)}")
+
+    def _after_close(self, sig: Signal) -> bool:
+        """A trigger decided at or after its NSE session's close — the 15:15 bar, complete at 15:30.
+        MCX is not carried (its own session)."""
+        und = self.underlyings.get(sig.symbol)
+        if und is None or und.segment is Segment.MCX_FO:
+            return False
+        close = f"{spec(und.segment).close:%H:%M}"
+        return ist_hm(sig.ts) < close <= ist_hm(sig.ts + TF_SECONDS[DECISION_TF])
+
+    async def _carry_queue(self, sig: Signal) -> None:
+        """A trigger decided after the close cannot be traded that day: it waits for the next
+        session's open (operator, 2026-09-29: "Carry to next 09:15 open"), kept in the ledger so a
+        restart overnight loses nothing, with the breadth it was logged with. A published trigger's
+        row says so; an unpublished one keeps its NOT_PUBLISHED row (FUDKII's own grade)."""
+        pub = published(sig)
+        why = "after the close — the 15:15 bar is decided at 15:30; carried to the next session's 09:15 open"
+        self._signals_today[sig.signal_id] = sig
+        if pub:
+            self.alerts.adopt_signal(sig.to_json(), None)
+            await self.ledger.insert_signal(sig.to_json(), "CARRIED", why)
+        await self.ledger.event("carry.queued", {
+            "signal_id": sig.signal_id, "symbol": sig.symbol, "published": pub, "why": why,
+            "signal": sig.to_json(), "breadth": self._breadth_at.get(sig.signal_id),
+        })
+        log.info("carry.queued", symbol=sig.symbol, signal=sig.signal_id, published=pub)
+
+    async def _carry_load(self, day: date, open_ts: float) -> list[dict[str, Any]]:
+        """The triggers carried to ``day``'s open: queued since the last session and not yet
+        entered, dropped or expired (a restart during the open does not enter one twice)."""
+        prev = self.calendar.previous_trading_day(day)
+        since = from_ist(datetime.combine(prev, datetime.min.time()))  # from the last session's day
+        rows = await self.ledger.rows_between("events", since, open_ts + CARRY_WINDOW_S + 3600)
+        settled = {r.get("signal_id") for r in rows if r.get("kind") in ("carry.done", "carry.dropped", "carry.expired")}
+        return [r for r in rows if r.get("kind") == "carry.queued" and r["ts"] < open_ts and r.get("signal_id") not in settled]
+
+    async def _carry_tick(self, now: float) -> None:
+        """At the NSE open, each trigger carried from the last session's close enters on its stock's
+        first print of the day — ``_carry_enter`` decides, and drops one that opened through its
+        stop. A stock that does not print within CARRY_WINDOW_S of the open (or an engine that was
+        down through it) expires the trigger. Called every second by the clock."""
+        if self.booting:
+            return
+        day = ist_day(now)
+        if not self.calendar.is_trading_day(day):
+            return
+        open_ts = session_open_ts(Segment.NSE_EQ, day)
+        if now < open_ts:
+            return
+        if self._carry_day != day:
+            self._carry_day = day
+            self._carry_pending = await self._carry_load(day, open_ts)
+        for item in list(self._carry_pending):
+            und = self.underlyings.get(item["symbol"])
+            code = und.scrip_code if und is not None else ""
+            px, at = self.ltps.get(code), self._ltp_ts.get(code, 0.0)
+            if px and at >= open_ts and now < open_ts + CARRY_WINDOW_S:
+                self._carry_pending.remove(item)
+                task = asyncio.get_running_loop().create_task(self._carry_enter(item, float(px), at))
+                self._decision_tasks.add(task)
+                task.add_done_callback(self._decision_tasks.discard)
+            elif now >= open_ts + CARRY_WINDOW_S:
+                self._carry_pending.remove(item)
+                why = ("no print within 5 minutes of the open" if und is not None else "not in today's universe")
+                await self.ledger.event("carry.expired", {"signal_id": item["signal_id"], "symbol": item["symbol"], "why": why})
+                log.warning("carry.expired", symbol=item["symbol"], signal=item["signal_id"], why=why)
+
+    async def _carry_enter(self, item: dict[str, Any], px: float, at: float) -> None:
+        """One carried trigger at the open: through its stop, dropped; else — in favour (the open on
+        the trade's side of yesterday's close) or in the zone (between the stop and that close) —
+        re-issued at the open and routed as it would have been: a published trigger to the in-trend
+        books, an unpublished one to the graded-F shadow. The re-issued signal takes the 08:45 slot,
+        so its card reads "fired 09:15" and no FUDKII bar of the day can share its id; its entry is
+        the open, and the targets it has already passed are dropped."""
+        orig = _signal_from_json(item["signal"])
+        sg = 1 if orig.direction is Direction.BULLISH else -1
+        base = {"signal_id": orig.signal_id, "symbol": orig.symbol, "first_print": px, "at": at}
+        if sg * (px - orig.stop) <= 0:
+            await self.ledger.event("carry.dropped", {**base, "why": f"opened through the stop: first print {px:g}, stop {orig.stop:g}"})
+            log.info("carry.dropped", symbol=orig.symbol, first_print=px, stop=orig.stop)
+            return
+        where = "in favour" if sg * (px - orig.entry) >= 0 else "in the zone"
+        slot = int(session_open_ts(Segment.NSE_EQ, ist_day(at))) - TF_SECONDS[DECISION_TF]
+        carried = replace(
+            orig, ts=slot, entry=px, targets=tuple(t for t in orig.targets if sg * (t - px) > 0), gates=(),
+            reason=f"carried from {to_ist(orig.ts + TF_SECONDS[DECISION_TF]):%d %b %H:%M} — {where} at the open {px:g} "
+                   f"(close {orig.entry:g}, stop {orig.stop:g}) — {orig.reason}",
+            context={**dict(orig.context), "carried": {"from": orig.signal_id, "firstPrint": px, "where": where, "prevClose": orig.entry}},
+        )
+        if item.get("breadth") is not None:
+            self._breadth_at[carried.signal_id] = item["breadth"]  # the market as the trigger was logged
+        self._signals_today[carried.signal_id] = carried
+        await self.ledger.event("carry.done", {**base, "carried_id": carried.signal_id, "where": where, "published": item["published"]})
+        log.info("carry.entering", symbol=orig.symbol, where=where, first_print=px, carried=carried.signal_id)
+        if item["published"]:
+            await self._handle_signal(carried, None, books=IN_TREND_BOOKS, adopt=True)
+        else:
+            parent = (orig.context or {}).get("parent") or {}
+            await self.ledger.insert_signal(carried.to_json(), "NOT_PUBLISHED",
+                                            f"carried — FUDKII's own {parent.get('gate', 'grade')}: {parent.get('reason') or f'grade {orig.grade}'}")
+            await self._handle_unpublished(carried, None)
+
+    def _stop_breached(self, sig: Signal, underlying: Instrument, book: str | None = None) -> str | None:
+        """The trade is dead before it starts: the underlying is already through the stop ``book`` will
+        hold (``_book_stop``: the signal's own, or the book's floored one). SBILIFE, 2026-09-24 09:45:
+        the stop sat 10 paise under the close, the stock printed through it and every book was stopped
+        out 67 ms after its fill. Checked before an entry is placed and on every look at a resting one.
+        None when the price is not known."""
+        ltp = self.ltps.get(underlying.scrip_code)
+        stop = self._book_stop(sig, book)
+        if not ltp or not stop:
+            return None
+        through = ltp <= stop if sig.direction is Direction.BULLISH else ltp >= stop
+        return f"stop already breached — {sig.symbol} {ltp:g} through its stop {stop:g}" if through else None
 
     async def _book_skip(self, book: str, sig: Signal, why: str, *, gate: str, **extra: Any) -> None:
         """A book did not take a signal it was offered: recorded for its card with the reason. The
@@ -2046,6 +2355,8 @@ class Engine:
             entry_charges=round(result.fill.charges, 2),
             exec_log={"entry": audit, "exits": [], **({"ref": plan.order_ref} if plan.order_ref else {})},
         )
+        pos.equity_atr = round(atr(self.store.bars(sig.symbol, DECISION_TF, 60), 14) or 0.0, 4)
+        self._floor_equity_stop(pos, book_limits, plan.key)  # before the premium cap, which still binds
         self._protect_option_stop(pos, book_limits, plan.key, result.fill.ts)
         if book is not None and book_limits.own_ladder:
             self._stamp_own_ladder(pos, inst, book_limits, sig.symbol)
@@ -2073,7 +2384,7 @@ class Engine:
         # A shadow failing must never cost the real entry: the position is registered and its
         # wallet charged by this point, and the shadow is strictly additive.
         try:
-            await self._open_shadow_twins(pos, inst, result.fill.ts, result.fill.charges)
+            await self._open_shadow_twins(pos, inst, result.fill.ts, result.fill.charges, planned_sl=sig.stop)
         except Exception as exc:
             log.exception("shadow.failed", of=pos.id, symbol=pos.underlying.symbol, error=str(exc))
         log.info(
@@ -2087,11 +2398,12 @@ class Engine:
             grade=pos.grade,
             mode=self.mode().value,
         )
-        self.telegram.fire_and_forget(
-            f"🟢 {pos.strategy} {pos.underlying.symbol} {sig.direction.value} "
-            f"{inst.name or inst.scrip_code} qty {pos.qty} @ {pos.entry:.2f} "
-            f"SL {pos.option_sl:.2f} grade {pos.grade} [{self.mode().value}]"
-        )
+        if StrategyKey(pos.strategy) not in SHADOW_BOOKS:  # a shadow's entry is a comparison, not a trade to watch
+            self.telegram.fire_and_forget(
+                f"🟢 {pos.strategy} {pos.underlying.symbol} {sig.direction.value} "
+                f"{inst.name or inst.scrip_code} qty {pos.qty} @ {pos.entry:.2f} "
+                f"SL {pos.option_sl:.2f} grade {pos.grade} [{self.mode().value}]"
+            )
 
     # -- paper limit orders (exec/resting.py) ---------------------------------------------------------
 
@@ -2315,7 +2627,7 @@ class Engine:
                 halted, why = True, f"{BOOK_LABELS.get(plan.key, plan.key)} halted — {plan.wallet.halt_reason}"
             if not halted and self.gateway.book_tripped(plan.key):
                 halted, why = True, f"{BOOK_LABELS.get(plan.key, plan.key)}'s order breaker is tripped"
-            dead = self._stop_breached(plan.sig, plan.underlying)
+            dead = self._stop_breached(plan.sig, plan.underlying, plan.key)
             if halted or dead:
                 await self._entry_missed(r, now, bid, ask, dead or why)
                 return
@@ -2702,7 +3014,7 @@ class Engine:
         log.info("regime.breadth", symbol=sig.symbol, direction=sig.direction.value, share=br["share"], names=br["names"])
         await self.ledger.event("regime.breadth", {"signal_id": sig.signal_id, "symbol": sig.symbol, **br})
 
-    async def _open_shadow_twins(self, of: Position, inst: Instrument, ts: float, charges: float) -> None:
+    async def _open_shadow_twins(self, of: Position, inst: Instrument, ts: float, charges: float, *, planned_sl: float = 0.0) -> None:
         """Mirror a book's fresh entry into each book that shadows it (``SHADOW_OF``): the same
         contract, size, price, instant and ladder, one rule changed. The wide-stop shadow moves the
         equity stop ``equity_stop_buffer_pct`` further from entry and re-projects the option stop
@@ -2729,10 +3041,16 @@ class Engine:
                 await self.ledger.event("rt_twin.skipped", {"book": shadow_key.value, "signal_id": of.signal_id, "symbol": of.underlying.symbol, "reason": f"exposure: {verdict.reason}"})
                 continue
             # its own order ref: its exits are its own orders, never the source's ids
-            shadow = replace(of, id=new_id("pos"), strategy=shadow_key.value, note=f"{of.note} · shadow of {of.id}",
+            # the wide shadow widens the PLAN's stop, as it always has — not RT-Y's floored one (1 Oct:
+            # 0.5 ATR30 is at most ~1 % of price, so the plan's stop 1 % further is still the wider; an
+            # extra dip only deepened its stop-outs, SWIGGY and MAXHEALTH) — and never sits nearer than
+            # the stop RT-Y itself holds
+            shadow = replace(of, id=new_id("pos"), strategy=shadow_key.value,
+                             equity_sl=planned_sl if planned_sl > 0 else of.equity_sl,
+                             note=f"{of.note.split(' · stop floored')[0]} · shadow of {of.id}",
                              exec_log={"entry": dict(of.exec_log.get("entry") or {}), "exits": [],
                                        "ref": self._order_ref(shadow_key.value, ts)})
-            self._widen_stop(shadow, engine_for.limits)
+            self._widen_stop(shadow, engine_for.limits, not_nearer_than=of.equity_sl)
             self.positions[shadow.id] = shadow
             self._commit_outlay(wallet, cost, ts, shadow)
             wallet.apply_charges(charges, ts)
@@ -2741,21 +3059,69 @@ class Engine:
             log.info("shadow.open", book=shadow_key.value, shadow=shadow.id, of=of.id, symbol=of.underlying.symbol,
                      equity_sl=shadow.equity_sl, option_sl=shadow.option_sl)
 
-    def _widen_stop(self, pos: Position, lim: RiskLimits) -> None:
+    def _floor_equity_stop(self, pos: Position, lim: RiskLimits, key: str) -> None:
+        """A planned underlying stop nearer than ``min_equity_stop_atr`` ATR30 to the trigger's close sits
+        inside one bar's noise (HDFCLIFE 2026-10-01: 0.18 ATR, taken out by a print AT it): moved out to
+        the floor, and the option stop projected through the delta at entry for the new level. The
+        book's premium cap (``_protect_option_stop``, after this) still bounds the option loss. No ATR
+        at the fill: the stop as planned, never a guess."""
+        k = lim.min_equity_stop_atr
+        if not k or pos.equity_atr <= 0 or pos.equity_sl <= 0 or pos.equity_entry <= 0:
+            return
+        floor = k * pos.equity_atr
+        if abs(pos.equity_entry - pos.equity_sl) >= floor:
+            return
+        planned = pos.equity_sl
+        bull = pos.direction is Direction.BULLISH
+        pos.equity_sl = round(pos.equity_entry - floor if bull else pos.equity_entry + floor, 2)
+        if pos.instrument.is_option:
+            delta = estimate_delta(spot=pos.equity_entry, strike=pos.instrument.strike, option_type=pos.instrument.option_type)
+            option_sl, _ = map_levels_to_option(
+                equity_entry=pos.equity_entry, equity_stop=pos.equity_sl, equity_targets=(), option_premium=pos.entry, delta=delta,
+            )
+            pos.option_sl = self.floored_option_stop(StrategyKey(key), pos.entry, option_sl, pos.instrument.tick_size)
+            pos.initial_option_sl = pos.option_sl
+            pos.r_unit = abs(pos.entry - pos.option_sl)
+        pos.note += f" · stop floored {planned:g} -> {pos.equity_sl:g} ({k:g} ATR30)"
+        log.info("stop.floored", book=key, symbol=pos.underlying.symbol, planned=planned, floored=pos.equity_sl,
+                 atr30=pos.equity_atr, option_sl=pos.option_sl)
+
+    def _book_stop(self, sig: Signal, book: str | None) -> float:
+        """The underlying stop ``book`` will actually hold: the signal's, or — for a book with a stop
+        floor — the floored level ``_floor_equity_stop`` sets at the fill, so a print at a stop the book
+        does not use never kills its entry before it starts."""
+        stop = sig.stop
+        k = self.limits_for(book).min_equity_stop_atr if book else None
+        if not k or not stop or not sig.entry:
+            return stop
+        a = atr(self.store.bars(sig.symbol, DECISION_TF, 60), 14) or 0.0
+        if a <= 0 or abs(sig.entry - stop) >= k * a:
+            return stop
+        return round(sig.entry - k * a if sig.direction is Direction.BULLISH else sig.entry + k * a, 2)
+
+    def _widen_stop(self, pos: Position, lim: RiskLimits, *, not_nearer_than: float = 0.0) -> None:
         """``equity_stop_buffer_pct`` further from entry on the underlying (a bullish trade's stop
-        × 0.99 at 1 %, a bearish one's × 1.01), and the option stop projected through the delta at
-        entry for that wider level, floored as the book's own is."""
+        × 0.99 at 1 %, a bearish one's × 1.01) — never nearer to the entry than ``not_nearer_than``
+        (the source book's own stop) — and the option stop projected through the delta at entry for
+        that wider level, floored as the book's own is."""
         buf = lim.equity_stop_buffer_pct
         if not buf or pos.equity_sl <= 0:
             return
         k = buf / 100
-        pos.equity_sl = round(pos.equity_sl * (1 - k) if pos.direction is Direction.BULLISH else pos.equity_sl * (1 + k), 2)
+        bull = pos.direction is Direction.BULLISH
+        pos.equity_sl = round(pos.equity_sl * (1 - k) if bull else pos.equity_sl * (1 + k), 2)
+        if not_nearer_than > 0 and (pos.equity_sl > not_nearer_than if bull else pos.equity_sl < not_nearer_than):
+            pos.equity_sl = not_nearer_than
         if pos.instrument.is_option and pos.equity_entry > 0:
             delta = estimate_delta(spot=pos.equity_entry, strike=pos.instrument.strike, option_type=pos.instrument.option_type)
             option_sl, _ = map_levels_to_option(
                 equity_entry=pos.equity_entry, equity_stop=pos.equity_sl, equity_targets=(), option_premium=pos.entry, delta=delta,
             )
             pos.option_sl = self.floored_option_stop(StrategyKey(pos.strategy), pos.entry, option_sl, pos.instrument.tick_size)
+            # its own initial stop and R, not the source's: the copy carried RT-Y's, capped at 25 % since
+            # 2026-09-29, so the shadow's R-multiples were measured against a stop it does not have (review)
+            pos.initial_option_sl = pos.option_sl
+            pos.r_unit = abs(pos.entry - pos.option_sl)
 
     # -- the trigger-card page ----------------------------------------------------------------------
 
@@ -2776,12 +3142,20 @@ class Engine:
         latest: dict[str, dict[str, Any]] = {}
         for sgn in signals:  # a take re-enters the same id: the last row is the decision that stands
             latest[sgn["signal_id"]] = sgn
+        # A trigger FUDKII did not publish (NOT_PUBLISHED) is carded for the parent, with its own
+        # reason, and for the graded-F shadow — the one book offered it — which is carded on those
+        # ALONE: it never sees a published trigger (its Alerts tab, operator 2026-09-29). No trading
+        # book is offered one (2026-09-28).
+        sees_unpublished = key in (StrategyKey.FUDKII, StrategyKey.FUDKII_RT_Y_F)
+        only_unpublished = key is StrategyKey.FUDKII_RT_Y_F
         parents = sorted(
             (
                 sgn
                 for sgn in latest.values()
                 if sgn["strategy"] == StrategyKey.FUDKII.value
                 and self.book_trades(key.value, self._segment_of(sgn["symbol"]))
+                and (sees_unpublished or sgn.get("decision") != "NOT_PUBLISHED")
+                and (not only_unpublished or sgn.get("decision") == "NOT_PUBLISHED")
             ),
             key=lambda x: x["ts"],
         )
@@ -2878,10 +3252,16 @@ class Engine:
             # (a skip with its reason, or its own resting entry) since each places its own order
             owns_row = key in (StrategyKey.FUDKII, StrategyKey.FUDKII_CT_X) or (key is StrategyKey.FUDKII_CT_Y and gap_fade is not None)
             pending = self._pending_for(book, {sid, (entry_sig or {}).get("signal_id"), (own or {}).get("signal_id")}) if ps is None else None
+            # decided after the close and carried to the next open — for the books that will be offered it
+            carry_q = next((e for e in evs if e.get("kind") == "carry.queued"), None)
+            carried_here = carry_q is not None and key is not StrategyKey.FUDKII and (
+                key in IN_TREND_BOOKS if carry_q.get("published") else key in UNPUBLISHED_BOOKS)
             if ps:
                 state = "OPEN" if ps.get("status") == "OPEN" else "TRADED"
             elif pending is not None:
                 state = "PENDING"
+            elif carried_here and skip is None:
+                state = "CARRIED"
             elif skip is not None and not owns_row:
                 state = "SKIPPED"
             elif key is StrategyKey.FUDKII:
@@ -2972,7 +3352,9 @@ class Engine:
             fade_book = key.value in counter_books
             # A fade book with no fade has nothing to preview: falling back to the PARENT's signal
             # showed CT-Y a bullish trigger's CE (NAM-INDIA, 2026-09-25 14:45) as if CT-Y would buy it.
-            if ps is None and und is not None and (state not in ("IN_TREND", "NO_ROUTE") or key is StrategyKey.FUDKII) and not (fade_book and entry_sig is None):
+            unpublished = sgn.get("decision") == "NOT_PUBLISHED"
+            if (ps is None and und is not None and (state not in ("IN_TREND", "NO_ROUTE") or key is StrategyKey.FUDKII)
+                    and not (fade_book and entry_sig is None) and not unpublished):
                 plan_sig = entry_sig if entry_sig is not None else sgn
                 try:
                     plan = await self._plan_preview(key, plan_sig, und)
@@ -2982,7 +3364,17 @@ class Engine:
             if ps is not None:
                 p_inst = Instrument(**ps["instrument"]) if isinstance(ps.get("instrument"), dict) else None
                 if p_inst is not None:
-                    exit_plan = self._exit_plan(key, p_inst, int(ps["qty"]), tuple(ps.get("option_targets") or ()), float(ps.get("option_sl") or 0), float(ps.get("equity_sl") or 0), und.segment if und else Segment.NSE_EQ)
+                    seg = und.segment if und else Segment.NSE_EQ
+                    lp = self.positions.get(ps["id"]) if ps.get("status") == "OPEN" else None
+                    if lp is not None:
+                        # the live trade: the stop as it stands now (re-projected every few seconds, stepped to
+                        # breakeven and one rung behind), the lots left and the rungs taken — the ledger row only
+                        # changes at a fill, a target placed or cancelled, or an exit
+                        stop_now = max(lp.option_sl, lp.ratchet_sl)
+                        exit_plan = self._exit_plan(key, p_inst, int(lp.qty_remaining), tuple(lp.option_targets), stop_now,
+                                                    float(lp.equity_sl or 0), seg, hit=lp.targets_hit, rising=lp.ratchet_sl > lp.option_sl)
+                    else:
+                        exit_plan = self._exit_plan(key, p_inst, int(ps["qty"]), tuple(ps.get("option_targets") or ()), float(ps.get("option_sl") or 0), float(ps.get("equity_sl") or 0), seg)
             if skip is not None:
                 route_label = "SKIP"
             elif key is StrategyKey.FUDKII_CT_Y and gap_fade is not None:
@@ -3007,6 +3399,15 @@ class Engine:
             rt_card = alert_cards.get(entry_sig["signal_id"]) if (fade_book and entry_sig is not None) else (None if fade_book else alert_cards.get(sid))
             no_plan = next((e for e in reversed(evs) if e.get("kind") == "counter.no_plan"), None)
             cta = self._card_cta(book, key, state, ps, plan, route, skip, und, sgn, vs, fade_book, entry_sig is None, no_plan)
+            if unpublished:
+                # FUDKII's own grade kept it from publishing the trigger: no TAKE — the parent would
+                # refuse it — and the card says why (review, 2026-09-28). The graded-F shadow's own tab:
+                # a paper shadow decides these itself, so no operator TAKE there either
+                why_not = ("paper shadow — it takes or skips these triggers itself; no operator TAKE"
+                           if key is StrategyKey.FUDKII_RT_Y_F else f"not published — {sgn.get('decision_reason') or 'graded F'}")
+                cta = {**cta, "action": "take", "enabled": False, "reason": why_not}
+            if state == "CARRIED" or (carry_q is not None and key is StrategyKey.FUDKII):
+                cta = {**cta, "action": "take", "enabled": False, "reason": "after the close — carried to the next session's 09:15 open"}
             if pending is not None:
                 # a limit entry is working for this trigger: its fill (or its miss) decides; a TAKE now
                 # would enter the book a second time when the mirrored fill lands
@@ -3020,10 +3421,36 @@ class Engine:
                     seg_books.insert(0, StrategyKey.FUDKII.value)
             else:
                 seg_books = list(nse_books)
+                if unpublished:  # the one book offered a trigger FUDKII did not publish
+                    seg_books.append(StrategyKey.FUDKII_RT_Y_F.value)
             books_row = [book_row(b, position_on(b, sid, fade_x)) for b in seg_books]
-            verdicts = self._card_verdicts(sgn, evs, fade_x, gap_fade, pos_by_key)
+            # RT-Y and CT-Y are never offered a trigger FUDKII did not publish: no chip for what they would
+            # have done — the graded-F shadow's own dot in the row says what it did (review, 2026-09-29)
+            verdicts = {"rtY": None, "ctY": None} if unpublished else self._card_verdicts(sgn, evs, fade_x, gap_fade, pos_by_key)
             if cta.get("type") not in ("CE", "PE"):
                 cta["type"] = side  # a future reads LONG / SHORT
+            # every button says what it buys: lots, the price of one, and the money it needs
+            cta = {**cta, **self._cta_size(ps, plan)}
+            cta_counter = None
+            ckey = COUNTER_OF.get(key)
+            if (ckey is not None and route is not None and route.get("route") == "COUNTER" and not unpublished
+                    and und is not None and und.segment is not Segment.MCX_FO):
+                try:
+                    cta_counter = await self._counter_cta(ckey, sgn, evs, fade_x, gap_fade, pos_by_key, trades_by_pos, und)
+                except Exception as exc:  # noqa: BLE001 — a card must never fail the page (review, 2026-09-29)
+                    cta_counter = {"book": ckey.value, "label": BOOK_LABELS.get(ckey.value, ckey.value), "action": "take",
+                                   "enabled": False, "contract": None, "reason": f"counter-trend plan failed: {exc}"[:160]}
+                if cta.get("action") == "take":
+                    # the route says fade: the in-trend buy stays on the card, named and sized, greyed (the
+                    # operator's rule, 2026-09-29) — the note says what the counter-trend button really is
+                    clabel = BOOK_LABELS.get(ckey.value, ckey.value)
+                    state = {"held": f"{clabel} holds the counter-trend trade", "taken": f"{clabel} traded the counter-trend side"}.get(
+                        cta_counter["action"],
+                        f"the {clabel} counter-trend buy is the live button" if cta_counter.get("enabled")
+                        else f"no {clabel} counter-trend buy now ({cta_counter.get('reason') or 'no plan'})")
+                    note = f"routed COUNTER-TREND ({route.get('summary') or route.get('reason')}) — {state}"
+                    own_why = cta.get("reason") if not cta.get("enabled") else None
+                    cta = {**cta, "enabled": False, "reason": f"{own_why} · {note}" if own_why else note}
             cards.append({
                 "side": side,
                 "atr": ev.get("atr"), "oi": ev.get("oi"), "oiChangePct": ev.get("oi_change_pct"), "clusters": clusters[:8],
@@ -3039,12 +3466,91 @@ class Engine:
                 "live": live, "rtCard": rt_card, "pros": pros, "cons": cons, "cta": cta, "breadth": breadth, "books": books_row,
                 "pending": pending, "execLog": (ps or {}).get("exec_log") or None,
                 "restingTarget": self._resting_target_card(ps),
-                "verdicts": verdicts,
+                "verdicts": verdicts, "ctaCounter": cta_counter,
             })
         counts: dict[str, int] = {}
         for c in cards:
             counts[c["state"]] = counts.get(c["state"], 0) + 1
         return {"book": book, "day": day.isoformat(), "wallet": self.wallets[book].to_json() if book in self.wallets else None, "counts": counts, "cards": cards, "nowTs": time.time()}
+
+    @staticmethod
+    def _cta_size(ps: dict[str, Any] | None, plan: dict[str, Any] | None) -> dict[str, Any]:
+        """A button's size: the lots, the quantity, the price of one and the money in it — the held or
+        traded position's own entry, else the plan's preview. Nothing when neither is known."""
+        if ps:
+            inst = ps.get("instrument") or {}
+            qty, px = int(ps.get("qty") or 0), float(ps.get("entry") or 0)
+            lot = int(inst.get("lot_size") or 1) or 1
+            mult = float(inst.get("multiplier") or 1) or 1.0  # an MCX future's price is per unit of its multiplier
+            return {"lots": qty // lot, "qty": qty, "premium": px, "outlay": round(px * qty * mult, 2)} if qty and px else {}
+        if plan and plan.get("qty") and plan.get("premium"):
+            return {"lots": plan.get("lots"), "qty": plan.get("qty"), "premium": plan.get("premium"), "outlay": plan.get("outlay")}
+        return {}
+
+    def _operator_fade(self, key: StrategyKey, sig: Signal) -> tuple[Signal | None, str]:
+        """The fade a counter book enters on an operator TAKE of ``sig``, and why there is none."""
+        und = self.underlyings.get(sig.symbol)
+        zones = self.zones_for(sig.symbol)
+        atr30 = atr(self.store.bars(sig.symbol, DECISION_TF, 60), 14) or 0.0
+        tick = (und.tick_size if und else 0.05) or 0.05
+        dec = CounterDecision("COUNTER", "operator take", NO_WALL)
+        entry = flipped_signal(sig, key=key, zones=zones, atr=atr30, tick_size=tick, decision=dec, policy=self.fudkii.cfg.fade_grade_policy)
+        if entry is not None:
+            return entry, ""
+        why = fade_refusal(sig, zones=zones, atr=atr30, tick_size=tick, policy=self.fudkii.cfg.fade_grade_policy)
+        return None, str(why.get("reason") or "no fade plan")
+
+    async def _counter_cta(
+        self, ckey: StrategyKey, sgn: dict[str, Any], evs: list[dict[str, Any]], fade_x: dict[str, Any] | None,
+        gap_fade: dict[str, Any] | None, pos_by_key: dict[tuple[str, str], dict[str, Any]],
+        trades_by_pos: dict[str, dict[str, Any]], und: Instrument,
+    ) -> dict[str, Any]:
+        """The counter-trend button on an in-trend book's card: what ``ckey`` bought on this trigger
+        (held or closed, with its money), else what an operator TAKE into ``ckey`` would buy now —
+        the same fade plan ``operator_take`` enters — sized and priced by ``ckey``'s own limits."""
+        label = BOOK_LABELS.get(ckey.value, ckey.value)
+        base = {"book": ckey.value, "label": label}
+        own = gap_fade if (ckey is StrategyKey.FUDKII_CT_Y and gap_fade is not None) else fade_x
+        ps = pos_by_key.get((ckey.value, own["signal_id"])) if own else None
+        if ps is not None:
+            inst = ps.get("instrument") or {}
+            held = ps.get("status") == "OPEN"
+            trade = trades_by_pos.get(ps["id"]) if not held else None
+            why = f"{label} holds it" if held else f"{label} traded it — closed ({ps.get('exit_reason') or 'exited'})" + (
+                f", net ₹{float(trade['net']):,.0f}" if trade and trade.get("net") is not None else "")
+            return {**base, "action": "held" if held else "taken", "enabled": False, "contract": inst.get("name") or inst.get("scrip_code"),
+                    "type": inst.get("option_type"), "reason": why, **self._cta_size(ps, None)}
+        pending = self._pending_for(ckey.value, {sgn["signal_id"], (own or {}).get("signal_id")})
+        if pending is not None:
+            return {**base, "action": "take", "enabled": False, "contract": pending.get("contract"),
+                    "reason": f"limit {pending['limit']:g} resting {pending['restingS']:g} s ({pending['why']})"}
+        if ckey is StrategyKey.FUDKII_CT_Y and (gap_fade is not None or any(e.get("kind") == "counter.gap_fade" for e in evs)):
+            # the 09:45 gap fade decided this trigger for CT-Y: an operator fade would file under the same
+            # id and be counted as the gap fade's trade in its A/B (review, 2026-09-29) — its decision stands
+            why = (f"{(gap_fade or {}).get('decision') or 'planned'} — {(gap_fade or {}).get('decision_reason') or 'see the CT-Y tab'}"
+                   if gap_fade is not None else "the gap fade was planned but not entered")
+            return {**base, "action": "take", "enabled": False, "contract": None, "reason": f"CT-Y's 09:45 gap fade owns this trigger: {why}"}
+        if any(p.status == "OPEN" and p.strategy == ckey.value and p.underlying.symbol == sgn["symbol"] for p in self.positions.values()):
+            return {**base, "action": "take", "enabled": False, "contract": None, "reason": f"{label} already holds {sgn['symbol']} (another trigger)"}
+        sig = self._signals_today.get(sgn["signal_id"])
+        if sig is None:
+            return {**base, "action": "take", "enabled": False, "contract": None, "reason": "not in today's book"}
+        fade, why = self._operator_fade(ckey, sig)
+        if fade is None:
+            return {**base, "action": "take", "enabled": False, "contract": None, "reason": f"no fade plan — {why}"}
+        # a preview quotes the fade's strikes: once per 15 s per card, not on every 2 s poll of the page
+        ck = (ckey.value, sgn["signal_id"])
+        hit = self._counter_preview.get(ck)
+        if hit is not None and time.time() - hit[0] < COUNTER_PREVIEW_S:
+            plan = hit[1]
+        else:
+            try:
+                plan = await self._plan_preview(ckey, fade.to_json(), und)
+            except Exception as exc:  # noqa: BLE001 — a preview must never fail the page
+                plan = {"ok": False, "reason": f"preview failed: {exc}"[:120]}
+            self._counter_preview[ck] = (time.time(), plan)
+        return {**base, "action": "take", "enabled": bool(plan.get("ok")), "contract": plan.get("contract"), "type": plan.get("type"),
+                "reason": None if plan.get("ok") else str(plan.get("reason") or "no plan"), **self._cta_size(None, plan)}
 
     def _resting_target_card(self, ps: dict[str, Any] | None) -> dict[str, Any] | None:
         """The target sell resting in advance for this card's open position, if any."""
@@ -3116,27 +3622,38 @@ class Engine:
         blank = {"contract": None, "type": ("LONG" if aim_dir is Direction.BULLISH else "SHORT") if mcx else aim_dir.option_type.value}
         return {"action": "take", "enabled": False, **(aim or blank), "reason": reason}
 
-    def _exit_plan(self, key: StrategyKey, inst: Instrument, qty: int, ladder: tuple[float, ...], option_sl: float, equity_stop: float, segment: Segment) -> dict[str, Any]:
-        """What leaves at which threshold, for this book — the card's "what happens next"."""
+    def _exit_plan(self, key: StrategyKey, inst: Instrument, qty: int, ladder: tuple[float, ...], option_sl: float, equity_stop: float,
+                   segment: Segment, *, hit: int = 0, rising: bool = False) -> dict[str, Any]:
+        """What leaves at which threshold, for this book — the card's "what happens next". For an open
+        position the caller passes the LIVE stop, the lots left and the rungs already taken (``hit``),
+        so the plan tracks the trade (operator, 2026-09-29: "does the SL get updated live?")."""
         lim = self._exits_by_strategy[key.value].limits if key.value in self._exits_by_strategy else self.limits
         lot = max(1, inst.lot_size)
         rows: list[dict[str, Any]] = []
         rungs = list(ladder[:4])
         if lim.own_ladder:
             for i, r in enumerate(rungs):
+                if i < hit:
+                    rows.append({"kind": "target", "at": f"T{i + 1} {r:.2f} ✓", "action": "taken", "qty": None})
+                    continue
                 last = i == len(rungs) - 1
-                out = max(0, qty - i * lot) if last else min(lot, qty)
+                out = max(0, qty - (i - hit) * lot) if last else min(lot, qty)
                 rows.append({"kind": "target", "at": f"T{i + 1} {r:.2f}", "action": "the rest" if last else "1 lot", "qty": out})
         else:
             left = qty
             for i, r in enumerate(rungs):
+                if i < hit:
+                    rows.append({"kind": "target", "at": f"T{i + 1} {r:.2f} ✓", "action": "taken", "qty": None})
+                    continue
                 share = lim.target_ladder[i] if i < len(lim.target_ladder) else 0.0
                 out = min(left, (int(qty * share) // lot) * lot) if i < len(rungs) - 1 else left
                 left -= out
                 rows.append({"kind": "target", "at": f"T{i + 1} {r:.2f}", "action": f"{share:.0%}", "qty": out})
         if option_sl > 0:
             sus = f", {lim.sustain_s:.0f} s sustain" if lim.sustain_s else ""
-            rows.append({"kind": "stop", "at": f"option stop {option_sl:.2f} (equity stop through δ{sus})", "action": "all", "qty": qty})
+            what = (f"stop now {option_sl:.2f} — the rising line (breakeven, the rung below, or the peak give-back)" if rising
+                    else f"option stop {option_sl:.2f} (equity stop through δ{sus})")
+            rows.append({"kind": "stop", "at": what, "action": "all", "qty": qty})
             if lim.sustain_s:
                 rows.append({"kind": "stop", "at": f"hard floor {option_sl * (1 - lim.hard_floor_below_stop_pct / 100):.2f} — {lim.hard_floor_below_stop_pct:.0f}% through the stop, no sustain", "action": "all", "qty": qty})
         if equity_stop > 0:
@@ -3157,12 +3674,13 @@ class Engine:
         else:
             trail = f"trail arms at +{lim.trail_arm_pct:.0f}%: stop = peak − {lim.trail_giveback_pct:.0f}% of the gain; breakeven after T1"
         rows.append({"kind": "trail", "at": trail, "action": "all remaining", "qty": None})
-        rows.append({"kind": "time", "at": "force-flat " + ("23:20" if segment is Segment.MCX_FO else "15:20") + " IST", "action": "all remaining", "qty": None})
+        rows.append({"kind": "time", "at": f"force-flat {self._force_flat_hm(key.value, segment)} IST", "action": "all remaining", "qty": None})
         policy = {
             "FUDKII": "legacy: share ladder 40/30/20/10, trail 3%/40%",
             "FUDKII_RT_X": "RT-X: own MTF ladder · touch pays a lot, sustain steps the SL · 3% line",
             "FUDKII_RT_N": "RT-N: daily R1–R4 · immediate arm · 2% line, 3 reads",
-            "FUDKII_RT_Y": "RT-Y: T1 = max(own T1, +5%) · SL one rung behind · all out on a 3% fall from the peak",
+            "FUDKII_RT_Y": "RT-Y: T1 = max(own T1, +5%) · SL one rung behind · all out on a 3% fall from the peak · option SL ≤ 25% under the premium",
+            "FUDKII_RT_Y_F": "RT-Y graded F (shadow): RT-Y's gates and exits on the triggers FUDKII grades F",
             "FUDKII_CT_X": "CT-X: the fade under RT-X's exits",
             "FUDKII_CT_Y": "CT-Y: the fade under RT-Y's exits",
             "FUDKII_RT_MCX": "RT-MCX: RT-X's exits on commodities",
@@ -3213,7 +3731,8 @@ class Engine:
         2026-09-25: the button said only "no plan"). Read-only: cached quotes, no REST, no tape."""
         cat = self.catalogue_loader.catalogue
         if underlying.segment is Segment.MCX_FO:
-            inst = cat.front_future(symbol)
+            # the contract the chart reads (the universe's roll), not merely the nearest unexpired one
+            inst = underlying if underlying.kind is InstrumentKind.FUTURE else cat.front_future(symbol)
         else:
             pol = self.selection_policy_for(StrategyKey.FUDKII)
             expiry = choose_expiry(cat.expiries(symbol), ist_today(), pol)
@@ -3271,14 +3790,10 @@ class Engine:
         if (book, sig.symbol) in self._entering:
             raise RuntimeError(f"{book} is placing an entry on {sig.symbol}; its fill decides")
         if key in (StrategyKey.FUDKII_CT_X, StrategyKey.FUDKII_CT_Y):
-            und = self.underlyings.get(sig.symbol)
-            dec = CounterDecision("COUNTER", "operator take", NO_WALL)
-            entry = flipped_signal(sig, key=key, zones=self.zones_for(sig.symbol), atr=atr(self.store.bars(sig.symbol, DECISION_TF, 60), 14) or 0.0,
-                                   tick_size=(und.tick_size if und else 0.05) or 0.05, decision=dec, policy=self.fudkii.cfg.fade_grade_policy)
-            if entry is None:
-                why = fade_refusal(sig, zones=self.zones_for(sig.symbol), atr=atr(self.store.bars(sig.symbol, DECISION_TF, 60), 14) or 0.0,
-                                   tick_size=(und.tick_size if und else 0.05) or 0.05, policy=self.fudkii.cfg.fade_grade_policy)
-                raise RuntimeError(f"no fade plan — {why['reason']}")
+            fade, why = self._operator_fade(key, sig)  # the plan the card's counter-trend button showed
+            if fade is None:
+                raise RuntimeError(f"no fade plan — {why}")
+            entry = fade
         else:
             # the trigger rides along as the source, so the card finds the position this take opens
             entry = replace(sig, strategy=key, reason=f"operator take · {sig.reason}", source_signal_id=sig.signal_id)
@@ -3395,7 +3910,7 @@ class Engine:
             await self._gap_fade(sig, bar, underlying)
         except Exception as exc:  # the gap fade may never cost the counter route
             log.exception("gap_fade.failed", symbol=sig.symbol, error=str(exc)[:160])
-        legs = await self._counter_legs(underlying, bar)
+        legs = await self._counter_legs(underlying, bar, low_priority=not published(sig))
         atr_v = legs[0].atr if legs else 0.0
         dec = counter_route(legs, bullish=sig.direction is Direction.BULLISH, st_flipped="ST flip" in sig.reason)
         self.alerts.mark_route(sig.signal_id, decision=dec.to_json())
@@ -3420,7 +3935,9 @@ class Engine:
             log.info("counter.no_plan", symbol=sig.symbol, reason=why["reason"])
             # the card reads this: the route alone cannot say why no fade was planned
             await self.ledger.event("counter.no_plan", {"signal_id": sig.signal_id, "symbol": sig.symbol, **why})
-            await self.ledger.insert_signal(sig.to_json(), "COUNTER_NO_PLAN", dec.reason)
+            # no signal row: the trigger's row is the parent's (its in-trend path, or NOT_PUBLISHED),
+            # and with the two paths side by side a row written here could win the race to it and
+            # erase the parent's own decision (review, 2026-09-28). The cards read the event.
             return
         # the fade reaches both fade books at once; CT-X's row is the fade's, CT-Y decides for itself
         await self._handle_signal(fade, bar, books=FADE_BOOKS)
@@ -3507,7 +4024,7 @@ class Engine:
         log.info("gap_fade", symbol=sig.symbol, side=plan["side"], stop=plan["stop"], t1=plan["targets"][0], rr=plan["rr"])
         await self._handle_signal(fade, bar, adopt=False)
 
-    async def _counter_legs(self, underlying: Instrument, bar: UnifiedBar) -> list[Leg]:
+    async def _counter_legs(self, underlying: Instrument, bar: UnifiedBar, *, low_priority: bool = False) -> list[Leg]:
         """The equity's side of the trigger from the store, the front future's from the broker
         (``_fut_context``): candle, ATR30m, classic levels with their weights, volume surges."""
         from .instrument.legs import levels_from_candles, weekly_from_rows
@@ -3520,7 +4037,7 @@ class Engine:
             "equity", bar.open, bar.high, bar.low, bar.close, atr(eq_bars, 14) or 0.0,
             self._pivot_points(underlying.symbol), s_t, s_t1,
         )]
-        ctx = await self._fut_context(underlying)
+        ctx = await self._fut_context(underlying, low_priority=low_priority)
         if ctx is None:
             return legs
         trigger = to_ist(bar.ts).strftime("%Y-%m-%dT%H:%M")
@@ -3548,7 +4065,7 @@ class Engine:
         ))
         return legs
 
-    async def _fut_context(self, underlying: Instrument) -> dict[str, Any] | None:
+    async def _fut_context(self, underlying: Instrument, *, low_priority: bool = False) -> dict[str, Any] | None:
         """The front future's side of a trigger — its 30m candles for the last three sessions and
         its daily candles for the levels — fetched from the broker once per trigger bar (the engine
         holds no futures bars) and shared by the counter route and the dried-volume gate. None when
@@ -3563,10 +4080,27 @@ class Engine:
         hit = self._fut_cache.get(underlying.symbol)
         if hit is not None and hit[0] == bucket:
             return hit[1]
+        # The dried-volume gate and the fade route read this for the same bar at the same moment
+        # since the two run side by side (2026-09-28): one fetch, shared, and a reader's
+        # cancellation never cancels it for the others.
+        key = (underlying.symbol, bucket)
+        task = self._fut_inflight.get(key)
+        if task is None:
+            # a trigger FUDKII did not publish is read on its own, smaller queue: at a busy bar its
+            # reads must never delay a published trigger's dried-volume gate (review, 2026-09-28)
+            sem = self._fut_sem_low if low_priority else self._fut_sem
+            task = asyncio.ensure_future(self._fut_context_fetch(underlying, front, bucket, sem))
+            self._fut_inflight[key] = task
+            task.add_done_callback(lambda _t, k=key: self._fut_inflight.pop(k, None))
+        return await asyncio.shield(task)
+
+    async def _fut_context_fetch(self, underlying: Instrument, front: Instrument, bucket: int,
+                                 sem: asyncio.Semaphore) -> dict[str, Any] | None:
+        """``_fut_context``'s broker reads, once per (name, bar)."""
         today = ist_today()
         start30 = self.calendar.previous_trading_day(self.calendar.previous_trading_day(today))
         try:
-            async with self._fut_sem:
+            async with sem:
                 rows30 = await self.rest.candles(front, DECISION_TF, start30.isoformat(), today.isoformat())
                 rows1d = await self.rest.candles(front, "1d", (today - timedelta(days=35)).isoformat(), today.isoformat())
         except Exception as exc:  # noqa: BLE001 — a route input must never fail the fill path
@@ -3577,7 +4111,7 @@ class Engine:
         clean = self._snap_fut_rows(front, rows30)
         fill_failed = False
         if bucket:
-            clean, fill_failed = await self._fill_fut_gaps(front, clean, bucket)
+            clean, fill_failed = await self._fill_fut_gaps(front, clean, bucket, sem=sem)
         ctx = {"front": front, "bars30": clean, "rows1d": rows1d}
         if not fill_failed:  # a 1m call that failed is asked again by the next reader of this bar
             self._fut_cache[underlying.symbol] = (bucket, ctx)
@@ -3604,7 +4138,8 @@ class Engine:
             by[b] = (on_grid, r if on_grid else {**r, "dt": to_ist(b).strftime("%Y-%m-%dT%H:%M:%S"), "stamped": str(r["dt"])})
         return [by[b][1] for b in sorted(by)]
 
-    async def _fill_fut_gaps(self, front: Instrument, rows: list[dict[str, Any]], t_ts: int) -> tuple[list[dict[str, Any]], bool]:
+    async def _fill_fut_gaps(self, front: Instrument, rows: list[dict[str, Any]], t_ts: int, *,
+                             sem: asyncio.Semaphore | None = None) -> tuple[list[dict[str, Any]], bool]:
         """A bucket among the ``FUT_GAP_SLOTS`` ending at the trigger (the volume reading's eight
         and the futures leg's 15-bar ATR) that the broker returned NO row for — 0.46 % of the
         session slots in the Aug–Sep history, once the first-trade stamps are snapped — is rebuilt
@@ -3620,7 +4155,7 @@ class Engine:
         filled, failed = 0, False
         for d in sorted({ist_day(s) for s in missing}):
             try:
-                async with self._fut_sem:
+                async with sem or self._fut_sem:
                     m1 = await self.rest.candles(front, "1m", d.isoformat(), d.isoformat())
             except Exception as exc:  # noqa: BLE001 - a gap unfilled is a doubtful reading, never an error
                 failed = True
@@ -3676,16 +4211,17 @@ class Engine:
                     points += pivot_points(lv, tf)
         return points
 
-    async def _volume_surges_safe(self, underlying: Instrument) -> dict[str, tuple[float, float]]:
+    async def _volume_surges_safe(self, underlying: Instrument, *, low_priority: bool = False) -> dict[str, tuple[float, float]]:
         """``_volume_surges`` that never raises: a reading that cannot be taken is no reading, and
-        no reading never blocks an entry."""
+        no reading never blocks an entry. ``low_priority``: a trigger FUDKII did not publish —
+        its futures read waits on the smaller queue (``_fut_context``)."""
         try:
-            return await self._volume_surges(underlying)
+            return await self._volume_surges(underlying, low_priority=low_priority)
         except Exception as exc:  # noqa: BLE001 - no reading is information, never an error to the books
             log.warning("volume.read_failed", symbol=underlying.symbol, error=str(exc))
             return {}
 
-    async def _volume_surges(self, underlying: Instrument) -> dict[str, tuple[float, float]]:
+    async def _volume_surges(self, underlying: Instrument, *, low_priority: bool = False) -> dict[str, tuple[float, float]]:
         """``surge_T`` / ``surge_T-1`` of the last two closed 30m bars against the T-2…T-7 baseline
         (``volume_surges``, floor 1000) — for the underlying from the store, and for its front
         future from the broker's candles, since the engine holds no futures bars. A leg the data
@@ -3704,7 +4240,7 @@ class Engine:
             log.warning("volume.doubtful", symbol=underlying.symbol, leg="equity", why=vr.doubt)
         if underlying.segment is not Segment.NSE_EQ:
             return out
-        ctx = await self._fut_context(underlying)
+        ctx = await self._fut_context(underlying, low_priority=low_priority)
         if ctx is None:
             return out
         fr = self._fut_volume_reading(ctx["bars30"], t_ts)
@@ -3922,7 +4458,9 @@ class Engine:
         now = time.time()
         pol = self.selection_policy_for(sig.strategy)
         if underlying.segment is Segment.MCX_FO:
-            front = cat.front_future(sig.symbol)
+            # the contract the chart reads and the trigger came from (the universe's roll: 5 days or
+            # fewer to expiry reads the next month), never the nearest unexpired one behind its back
+            front = underlying if underlying.kind is InstrumentKind.FUTURE else cat.front_future(sig.symbol)
             q = self.quotes.get(front.scrip_code) if front else None
             if front is not None and tape:
                 self.tape.follow(sig.symbol, [front.scrip_code], role=ROLE_FUTURE, now=now)
@@ -3944,32 +4482,8 @@ class Engine:
         await self._ensure_quotes(chain, sig.entry, extra=watch)
         if tape:
             self.tape.follow(sig.symbol, [i.scrip_code for i in (watch or chain[:6])], now=now)
-            # The decision path only: a card preview never waits. And only for the strikes the choice
-            # prefers — the ATR-out and target candidates — not the whole span it may fall back
-            # through: one strike in it that never quotes (HDFCBANK OCT 650/660 PE, 2026-09-28, no
-            # quote all day) cost every trigger on the name the full wait (review, 2026-09-28).
-            otm_side = [i for i in chain if (i.strike > sig.entry) is (sig.direction is Direction.BULLISH)]
-            preferred: list[Instrument] = []
-            if watch:
-                preferred, _ = strike_candidates(
-                    otm=[i for i in watch if i in otm_side], spot=sig.entry, direction=sig.direction, atr=atr30,
-                    target1=sig.targets[0] if sig.targets else None, liquidity=self.liquidity_for(watch),
-                    delta_floor=pol.min_delta, oi_margin=pol.oi_margin,
-                )
-            wanted = preferred[:2] or sorted(otm_side, key=lambda i: abs(i.strike - sig.entry))[:2]
-            await self._await_fresh_quotes(wanted, pol.max_quote_age_s, symbol=sig.symbol)
-            now = time.time()
-        sel = select_option(
-            chain=chain,
-            quotes=self.quotes,
-            spot=sig.entry,
-            target1=sig.targets[0] if sig.targets else None,
-            direction=sig.direction,
-            now=now,
-            policy=pol,
-            atr=atr30,
-            liquidity=self.liquidity_for(watch) if watch else None,
-        )
+        # the decision waits for prices it does not know yet; a card preview never waits
+        sel = await self._choose_option(chain=chain, sig=sig, pol=pol, atr30=atr30, watch=watch, wait=tape)
         if watch and sel.instrument is not None:
             picks, why = strike_candidates(
                 otm=[i for i in watch if (i.strike > sig.entry) is (sig.direction is Direction.BULLISH)],
@@ -4103,13 +4617,14 @@ class Engine:
             held_q = self.quotes.get(code)
             held_two_sided = held_q is not None and held_q.bid > 0 and held_q.ask > 0
             if two_sided or not held_two_sided:
-                self.quotes[code] = Quote(ltp=ltp, bid=bid, ask=ask, ts=r["ts"])
+                # labelled: a snapshot's 0/0 is "price unknown", never a one-sided market
+                self.quotes[code] = Quote(ltp=ltp, bid=bid, ask=ask, ts=r["ts"], src="snapshot")
             elif self._still_stands(code, held_q.ts, held_q.ltp, ltp, "mf"):  # type: ignore[union-attr]
-                self.quotes[code] = Quote(ltp=held_q.ltp, bid=held_q.bid, ask=held_q.ask, ts=now)  # type: ignore[union-attr]
+                self.quotes[code] = Quote(ltp=held_q.ltp, bid=held_q.bid, ask=held_q.ask, ts=now, src=held_q.src)  # type: ignore[union-attr]
                 self.snapshot_confirmed += 1
             elif code in held_codes and ltp > 0:
                 # a held contract the feed cannot vouch for: marked from the broker's last price
-                self.quotes[code] = Quote(ltp=ltp, bid=bid, ask=ask, ts=r["ts"])
+                self.quotes[code] = Quote(ltp=ltp, bid=bid, ask=ask, ts=r["ts"], src="snapshot")
                 self.snapshot_held_marked += 1
             else:
                 self.snapshot_kept += 1  # held as it was: its own age says how old it is
@@ -4159,34 +4674,110 @@ class Engine:
             and rest_ltp > 0 and held_ltp > 0 and abs(rest_ltp - held_ltp) < 1e-6
         )
 
-    async def _await_fresh_quotes(self, instruments: list[Instrument], max_age_s: float, *, symbol: str = "") -> None:
-        """At a trigger, before the strike is chosen: wait — at most ``quote_wait_s`` — until each
-        candidate carries a fresh two-sided quote. A strike subscribed a moment ago has none until
-        the feed's first frame (HDFCBANK's 710–670 PE, 2026-09-28: within 1.1 s of the trigger).
-        Triggers on different names decide in their own tasks, so one name's wait never holds up
-        another's. The wait is counted in polls, not read off the clock: it ends in a replay too."""
-        if not instruments or self.quote_wait_s <= 0:
-            return
+    async def _choose_option(
+        self, *, chain: list[Instrument], sig: Signal, pol: SelectionPolicy, atr30: float,
+        watch: list[Instrument], wait: bool,
+    ) -> Selection:
+        """The strike, chosen on prices that are KNOWN. The walk (``select_option``) passes over a
+        strike it cannot price — no quote, a stale one, or only the broker's snapshot, which never has
+        a bid or ask — and a strike subscribed a moment ago has nothing better until the feed's first
+        frame (HDFCBANK 710 PE, 2026-09-28: 1.1 s; SONACOMS 770 PE, 2026-10-01 09:45:08: refused, and
+        10.15 / 10.70 on the feed the same second). So the choice re-walks every ``QUOTE_POLL_S`` while
+        a strike AHEAD of its current choice — or any, when it has none — can still be answered:
 
-        def missing() -> list[Instrument]:
-            now = time.time()
-            return [i for i in instruments
-                    if not ((q := self.quotes.get(i.scrip_code)) is not None and q.bid > 0 and q.ask > 0 and now - q.ts <= max_age_s
-                            and q.ts > self._quote_outdated.get(i.scrip_code, 0.0))]
+        * the strike is on the live ``mf`` subscription and the feed is speaking (else nothing comes);
+        * intraday each such strike gets ``STRIKE_GRACE_S`` — one that never quotes (HDFCBANK OCT
+          650/660 PE, 2026-09-28) costs that, not the whole wait — and the choice ``quote_wait_s``;
+        * in the session's first ``OPEN_SETTLE_S`` a one-sided FEED quote is a book still filling
+          (TATASTEEL 180 PE, 2026-10-01: 0 / 0 at 09:15:03, 2.42 / 2.53 at 09:15:27), so the choice may
+          wait for it until the window closes — the carried triggers enter at the first print;
+        * the choice itself, when the broker's last trade contradicts its held quote
+          (``_quote_outdated``), waits for a newer frame within the same grace, and is read as it is
+          if none comes.
 
-        todo = missing()
-        if not todo:
-            return
-        t0 = time.time()
-        for _ in range(int(self.quote_wait_s / QUOTE_POLL_S)):
-            await asyncio.sleep(QUOTE_POLL_S)
-            todo = missing()
-            if not todo:
+        A strike that passes with nothing still open ahead of it is taken at once — a fast first
+        choice never waits on a slow fallback. The wait is counted in polls (it ends in a replay
+        too); ``quote_wait_s = 0`` never waits, nor does a card preview (``wait=False``)."""
+        target1 = sig.targets[0] if sig.targets else None
+        liquidity = self.liquidity_for(watch) if watch else None
+
+        def walk() -> Selection:
+            return select_option(chain=chain, quotes=self.quotes, spot=sig.entry, target1=target1,
+                                 direction=sig.direction, now=time.time(), policy=pol, atr=atr30, liquidity=liquidity)
+
+        sel = walk()
+        if not wait or self.quote_wait_s <= 0:
+            return sel
+        und = self.underlyings.get(sig.symbol)
+        t_start = time.time()
+        open_until = session_open_ts(und.segment if und is not None else Segment.NSE_EQ, ist_today()) + OPEN_SETTLE_S
+        cap_polls = int(max(self.quote_wait_s, open_until - t_start) / QUOTE_POLL_S)
+        grace_polls = max(1, int(STRIKE_GRACE_S / QUOTE_POLL_S))
+        spent: dict[str, int] = {}  # code -> polls waited on it
+        polls, stop = 0, "answered"
+        while True:
+            at_open = time.time() < open_until
+            ahead = self._answerable(sel, at_open=at_open)
+            if not at_open:
+                ahead = [c for c in ahead if spent.get(c, 0) < grace_polls]
+            if not ahead:
                 break
-        for i in instruments:  # a newer quote has answered the contradiction — or the wait is over
-            self._quote_outdated.pop(i.scrip_code, None)
-        log.info("quotes.awaited", symbol=symbol, waited_ms=round((time.time() - t0) * 1000),
-                 candidates=[i.strike for i in instruments], still_missing=[i.strike for i in todo])
+            if not self._feed_speaking():
+                stop = "feed silent"
+                break
+            if polls >= cap_polls:
+                stop = "cap"
+                break
+            await asyncio.sleep(QUOTE_POLL_S)
+            polls += 1
+            for c in ahead:
+                spent[c] = spent.get(c, 0) + 1
+            sel = walk()
+        for c in spent:  # a newer quote has answered the contradiction — or the wait is over
+            self._quote_outdated.pop(c, None)
+        if sel.instrument is not None and sel.delta_shadow is not None:
+            await self._log_delta_shadow(sig, sel, floor=pol.min_delta, walk_enforced=lambda: select_option(
+                chain=chain, quotes=self.quotes, spot=sig.entry, target1=target1, direction=sig.direction, now=time.time(),
+                policy=replace(pol, enforce_fallback_delta=True), atr=atr30, liquidity=liquidity))
+        if polls or stop != "answered":
+            strike = {i.scrip_code: i.strike for i in chain}
+            log.info("quotes.awaited", symbol=sig.symbol, waited_ms=round((time.time() - t_start) * 1000), polls=polls,
+                     awaited=sorted(strike[c] for c in spent if c in strike), stop=stop,
+                     took=sel.instrument.strike if sel.instrument is not None else None, reason=sel.reason)
+        return sel
+
+    async def _log_delta_shadow(self, sig: Signal, sel: Selection, *, floor: float, walk_enforced: Any) -> None:
+        """The fallback delta floor in shadow mode (operator, 2026-10-01): the strike is taken; the
+        event says what an enforced floor would have bought instead — on the prices held this moment —
+        or that it would have refused the trigger, so the two can be compared on outcomes."""
+        alt = walk_enforced()
+        payload = {
+            "signal_id": sig.signal_id, "symbol": sig.symbol, "direction": sig.direction.value,
+            "took": sel.instrument.strike if sel.instrument else None, "tookDelta": sel.delta_shadow,
+            "floor": floor, "enforcedTook": alt.instrument.strike if alt.instrument else None,
+            "enforcedReason": alt.reason,
+        }
+        log.info("strike.delta_shadow", **payload)
+        await self.ledger.event("strike.delta_shadow", payload)
+
+    def _answerable(self, sel: Selection, *, at_open: bool) -> list[str]:
+        """The strikes ahead of ``sel``'s choice a live frame may still price: unpriced ones on the
+        live subscription, the session's first minute's one-sided books, and the choice itself when
+        its held quote is known old."""
+        since_of = getattr(self.feed, "subscribed_since", None)
+        codes = [*sel.unpriced, *(sel.one_sided if at_open else ())]
+        out = [c for c in codes if since_of is None or since_of("mf", c) is not None]
+        if sel.instrument is not None:
+            code = sel.instrument.scrip_code
+            q = self.quotes.get(code)
+            if code in self._quote_outdated and (q is None or q.ts <= self._quote_outdated[code]):
+                out.append(code)
+        return out
+
+    def _feed_speaking(self) -> bool:
+        fh = self.feed.health
+        silence = fh.silence_s
+        return bool(fh.connected and silence is not None and silence < FEED_LIVE_S)
 
     async def _keep_held_quotes(self) -> None:
         """Re-quote held contracts that have gone quiet, every few seconds, while their segment is
@@ -4315,7 +4906,7 @@ class Engine:
             # stop new entries (self.halted() still reports them to the gateway), but they used to
             # force-close every book — the 2026-09-24 09:45 cascade — for a fault in the order path.
             halted = self._halted
-            forced = past_force_flat(pos.underlying.segment, now) or halted
+            forced = self._past_force_flat(pos.strategy, pos.underlying.segment, now) or halted
             engine_for = self._exits_by_strategy.get(pos.strategy, self.exits)
 
             # An illiquid strike can stop ticking for minutes. Evaluating a stop against a price
@@ -4341,7 +4932,7 @@ class Engine:
                 stale_view = MarketView(
                     option_mid=None, spread_pct=None, quote_ok=False, option_ltp=ltp,
                     underlying_ltp=self.ltps.get(pos.underlying.scrip_code), now=now,
-                    bars_held=pos.bars_held, past_force_flat=past_force_flat(pos.underlying.segment, now),
+                    bars_held=pos.bars_held, past_force_flat=self._past_force_flat(pos.strategy, pos.underlying.segment, now),
                     halted=halted, daily_loss_hit=bool(wallet.daily_halt),
                 )
                 if (stale_exit := engine_for.evaluate_stale(pos, stale_view)) is not None:
@@ -4359,7 +4950,7 @@ class Engine:
                 underlying_ltp=self.ltps.get(pos.underlying.scrip_code),
                 now=now,
                 bars_held=pos.bars_held,
-                past_force_flat=past_force_flat(pos.underlying.segment, now),
+                past_force_flat=self._past_force_flat(pos.strategy, pos.underlying.segment, now),
                 halted=halted,
                 daily_loss_hit=bool(wallet.daily_halt),
             )
@@ -4726,6 +5317,10 @@ class Engine:
                 await self._sync_depth()
             except Exception as exc:
                 log.exception("clock.failed", error=str(exc))
+            try:
+                await self._carry_tick(time.time())
+            except Exception as exc:  # the carry at the open never costs the exits their tick
+                log.exception("carry.failed", error=str(exc))
             await asyncio.sleep(1.0)
 
     async def _feed_watchdog(self, now: float) -> None:
@@ -4873,6 +5468,7 @@ class Engine:
                     self._alerts_reset_done.add(stamp)
                     self.alerts.reset_day(day)
                     self._signals_today.clear()
+                    self._counter_preview.clear()
                     self._fut_cache.clear()
                 for slot in self.s.daily_refresh_hm:
                     stamp = f"{day} {slot}"
@@ -5302,12 +5898,25 @@ def _position_json(p: Position) -> dict[str, Any]:
         "peak_mid": p.peak_mid,
         "trail_dwell": p.trail_dwell,
         "breach_since": p.breach_since,
+        "equity_atr": p.equity_atr,
         "realised_gross": p.realised_gross,
         "entry_charges": p.entry_charges,
         "pnl": p.pnl,
         "line_breach_since": p.line_breach_since,
         "exec_log": p.exec_log,
     }
+
+
+def _signal_from_json(d: dict[str, Any]) -> Signal:
+    """A signal as ``Signal.to_json`` wrote it (its gates are not rebuilt — a carried trigger is
+    re-judged by each book's own gates)."""
+    return Signal(
+        strategy=StrategyKey(d["strategy"]), symbol=d["symbol"], direction=Direction(d["direction"]), ts=int(d["ts"]),
+        entry=float(d["entry"]), stop=float(d["stop"]), targets=tuple(float(t) for t in d.get("targets") or ()),
+        grade=d.get("grade") or "", rr=float(d.get("rr") or 0.0), score=float(d.get("score") or 0.0),
+        confidence=float(d.get("confidence") or 0.0), reason=d.get("reason") or "", evidence=dict(d.get("evidence") or {}),
+        source_signal_id=d.get("source_signal_id") or "", context=dict(d.get("context") or {}),
+    )
 
 
 def _position_from_json(d: dict[str, Any]) -> Position:
@@ -5350,6 +5959,7 @@ def _position_from_json(d: dict[str, Any]) -> Position:
         peak_mid=float(d.get("peak_mid") or 0.0),
         trail_dwell=int(d.get("trail_dwell") or 0),
         breach_since=d.get("breach_since"),
+        equity_atr=float(d.get("equity_atr") or 0.0),
         realised_gross=float(d.get("realised_gross") or 0.0),
         entry_charges=float(d.get("entry_charges") or 0.0),
         line_breach_since=d.get("line_breach_since"),

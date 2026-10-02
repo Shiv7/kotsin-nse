@@ -25,6 +25,22 @@ def _put(strike: float, code: str) -> Instrument:
 P720, P710 = _put(720.0, "78427"), _put(710.0, "97328")
 
 
+def _sig(symbol="HDFCBANK", entry=722.15, targets=(716.1,)):
+    from kotsin_nse.strategy.base import Signal
+    from kotsin_nse.strategy.keys import StrategyKey
+
+    return Signal(strategy=StrategyKey.FUDKII, symbol=symbol, direction=Direction.BEARISH, ts=int(time.time() // 1800 * 1800),
+                  entry=entry, stop=entry + 0.65, targets=targets, grade="A", rr=9.0, reason="ST flip DOWN + close below lower band")
+
+
+@pytest.fixture(autouse=True)
+def _intraday(monkeypatch):
+    """Off the session's first minute, whenever the suite runs (the open has its own tests)."""
+    import kotsin_nse.engine as eng
+
+    monkeypatch.setattr(eng, "OPEN_SETTLE_S", 0.0)
+
+
 def _row(code, ltp, bid=0.0, ask=0.0):
     qty = 650 if bid > 0 and ask > 0 else 0
     return {code: {"ltp": ltp, "bid": bid, "ask": ask, "bid_qty": qty, "ask_qty": qty, "ts": time.time(), "volume": 0}}
@@ -111,9 +127,17 @@ async def test_the_0945_hdfcbank_trigger_gets_its_first_choice(settings):
 
 
 @pytest.mark.asyncio
-async def test_the_choice_waits_for_a_fresh_quote_and_never_past_its_cap(settings):
+async def test_the_choice_waits_for_a_strikes_first_frame_and_never_past_its_cap(settings):
+    """HDFCBANK 710 PE, 2026-09-28: subscribed at the trigger, its first feed frame 1.1 s later. Until
+    then it holds only the broker's snapshot (no bid, no ask): UNPRICED — the choice waits for the
+    frame, returns on it, and never waits past its cap."""
     e = await _engine(settings)
     e.quote_wait_s = 1.0
+    await e.feed.subscribe("mf", [P710])
+    e._apply_snapshot(_row("97328", 11.85), time.time())
+    pol = SelectionPolicy(min_premium=0.0)
+    assert "710:unpriced" in select_option(chain=[P710], quotes=e.quotes, spot=722.15, target1=716.1,
+                                           direction=Direction.BEARISH, now=time.time(), policy=pol).reason
 
     async def feed_frame():
         await asyncio.sleep(0.3)  # the feed's first frame after the subscription
@@ -121,15 +145,18 @@ async def test_the_choice_waits_for_a_fresh_quote_and_never_past_its_cap(setting
 
     t0 = time.perf_counter()
     task = asyncio.create_task(feed_frame())
-    await e._await_fresh_quotes([P710], 30.0, symbol="HDFCBANK")
+    sel = await e._choose_option(chain=[P710], sig=_sig(), pol=pol, atr30=0.0, watch=[], wait=True)
     await task
-    assert 0.25 < time.perf_counter() - t0 < 0.8, "returned on the frame, not at the cap"
+    assert sel.ok and sel.instrument.strike == 710.0 and 0.25 < time.perf_counter() - t0 < 0.8, "returned on the frame"
+    p680 = _put(680.0, "78423")
+    await e.feed.subscribe("mf", [p680])
+    e._apply_snapshot(_row("78423", 3.0), time.time())  # never quoted by the feed
     t0 = time.perf_counter()
-    await e._await_fresh_quotes([_put(680.0, "78423")], 30.0)  # never quoted
-    assert 0.9 < time.perf_counter() - t0 < 1.6, "gave up at the cap"
+    sel = await e._choose_option(chain=[p680], sig=_sig(), pol=pol, atr30=0.0, watch=[], wait=True)
+    assert not sel.ok and "680:unpriced" in sel.reason and 0.9 < time.perf_counter() - t0 < 1.6, "gave up at the cap"
     e.quote_wait_s = 0.0
     t0 = time.perf_counter()
-    await e._await_fresh_quotes([_put(680.0, "78423")], 30.0)
+    await e._choose_option(chain=[p680], sig=_sig(), pol=pol, atr30=0.0, watch=[], wait=True)
     assert time.perf_counter() - t0 < 0.05, "no wait at all when switched off (the replay)"
 
 
@@ -152,16 +179,18 @@ async def test_a_held_quote_the_broker_contradicts_waits_for_the_next_frame(sett
         await asyncio.sleep(0.1)
         e.quotes["78016"] = Quote(ltp=45.65, bid=45.25, ask=45.80, ts=time.time())
 
+    pol = SelectionPolicy(min_premium=0.0)
+    sig = _sig("HCLTECH", entry=1250.0, targets=(1220.0,))
     t0 = time.perf_counter()
     task = asyncio.create_task(frame())
-    await e._await_fresh_quotes([p1240], 30.0, symbol="HCLTECH")
+    sel = await e._choose_option(chain=[p1240], sig=sig, pol=pol, atr30=0.0, watch=[], wait=True)
     await task
-    assert time.perf_counter() - t0 < 0.5 and (e.quotes["78016"].bid, e.quotes["78016"].ask) == (45.25, 45.80)
-    # no frame at all: the wait ends at its cap and the held quote (23 s, inside 30) still stands
+    assert time.perf_counter() - t0 < 0.5 and sel.premium == pytest.approx((45.25 + 45.80) / 2), "chosen on the new frame"
+    # no frame at all: the wait ends (cap 1 s) and the held quote (23 s, inside 30) still stands
     e.quotes["78016"] = Quote(ltp=44.85, bid=45.15, ask=45.55, ts=time.time() - 23)
     e._apply_snapshot(_row("78016", 45.65), time.time())
-    await e._await_fresh_quotes([p1240], 30.0)
-    assert e.quotes["78016"].bid == 45.15 and "78016" not in e._quote_outdated
+    sel = await e._choose_option(chain=[p1240], sig=sig, pol=pol, atr30=0.0, watch=[], wait=True)
+    assert sel.ok and sel.premium == pytest.approx(45.35) and "78016" not in e._quote_outdated
 
 
 @pytest.mark.asyncio
@@ -212,43 +241,45 @@ async def test_a_held_position_is_marked_from_the_broker_when_the_feed_cannot_vo
 
 
 @pytest.mark.asyncio
-async def test_the_choice_waits_only_for_the_candidates_it_prefers(settings):
-    """Review, 2026-09-28: the wait covered the whole span out to the farther candidate; one strike
-    in it that never quotes (HDFCBANK OCT 650/660 PE, no quote all day) cost the full wait."""
-    from kotsin_nse.bars.unified import BarSource, UnifiedBar
-    from kotsin_nse.strategy.base import Signal
-    from kotsin_nse.strategy.keys import StrategyKey
-
-    e = Engine(settings)
-    und = Instrument("1333", "HDFCBANK", Segment.NSE_EQ, InstrumentKind.EQUITY, underlying="HDFCBANK")
-    chain = [_put(float(k), f"9{k}") for k in range(650, 730, 10)]
+async def test_a_strike_that_never_quotes_behind_the_choice_costs_nothing(settings):
+    """Review, 2026-09-28: one strike in the span that never quotes (HDFCBANK OCT 650/660 PE, no quote
+    all day) cost every trigger the full wait. The choice waits only for strikes AHEAD of the one it
+    would take: a priced first choice is taken at once, whatever sits further out unpriced — and a
+    card preview never waits at all."""
     from types import SimpleNamespace
 
+    from kotsin_nse.bars.unified import BarSource, UnifiedBar
+
+    e = await _engine(settings)
+    und = Instrument("1333", "HDFCBANK", Segment.NSE_EQ, InstrumentKind.EQUITY, underlying="HDFCBANK")
+    chain = [_put(float(k), f"9{k}") for k in range(650, 730, 10)]
     e.catalogue_loader.catalogue = SimpleNamespace(expiries=lambda sym: ["2026-10-27"], chain=lambda sym, expiry, ot: chain)
     t0 = int(time.time() // 1800 * 1800) - 1800 * 30
     e.store.seed("HDFCBANK", "30m", [UnifiedBar(symbol="HDFCBANK", scrip_code="1333", tf="30m", ts=t0 + 1800 * k, open=723.0,
                                                 high=724.75, low=721.25, close=723.0, volume=1e6, source=BarSource.REST, complete=True)
                                      for k in range(30)])
+    await e.feed.subscribe("mf", chain)
     now = time.time()
     for i in chain:
-        e.quotes[i.scrip_code] = Quote(ltp=5.0, bid=4.95, ask=5.05, ts=now)
-    waited: list[list[float]] = []
-
-    async def spy(instruments, max_age_s, *, symbol=""):
-        waited.append([i.strike for i in instruments])
+        if i.strike >= 670:
+            e.quotes[i.scrip_code] = Quote(ltp=5.0, bid=4.95, ask=5.05, ts=now)
+    e._apply_snapshot({**_row("9650", 1.2), **_row("9660", 1.6)}, now)  # 650 / 660: the snapshot, never a frame
 
     async def nothing(*_a, **_k):
         return None
 
-    e._await_fresh_quotes = spy  # type: ignore[method-assign]
     e._ensure_quotes = nothing  # type: ignore[method-assign]
     e._ensure_leg_ladder = nothing  # type: ignore[method-assign]
-    sig = Signal(strategy=StrategyKey.FUDKII, symbol="HDFCBANK", direction=Direction.BEARISH, ts=int(now // 1800 * 1800),
-                 entry=722.15, stop=722.8, targets=(680.0,), grade="A", rr=9.0, reason="ST flip DOWN + close below lower band")
+    e.quote_wait_s = 5.0
+    sig = _sig(targets=(680.0,))
     span = e._strike_watch(chain, 722.15, Direction.BEARISH, 3.5, (680.0,))
     assert len(span) >= 4, "the span runs from 720 out to the target's 680"
-    await e._select_instrument(und, sig)
-    assert waited and 1 <= len(waited[0]) <= 2 and set(waited[0]) <= {720.0, 680.0}, waited
-    waited.clear()
+    t0p = time.perf_counter()
+    sel = await e._select_instrument(und, sig)
+    assert sel.ok and sel.instrument.strike >= 670 and time.perf_counter() - t0p < 0.3, (sel, time.perf_counter() - t0p)
+    # the preview, with its first choice unpriced: no wait, it shows what it has
+    e._apply_snapshot(_row(sel.instrument.scrip_code, 5.0), now)
+    e.quotes[sel.instrument.scrip_code] = Quote(ltp=5.0, bid=0.0, ask=0.0, ts=now, src="snapshot")
+    t0p = time.perf_counter()
     await e._select_instrument(und, sig, tape=False)
-    assert waited == [], "a card preview never waits"
+    assert time.perf_counter() - t0p < 0.3, "a card preview never waits"

@@ -25,12 +25,12 @@ fresh REST bar win over a same-day cached one.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
-from ..market.session import TradingCalendar, ist_day
+from ..market.session import TradingCalendar, ist_day, ist_hm
 from .unified import BarSource, UnifiedBar
 
 #: ``Engine.zones_for``'s floor: a month of sessions, so the monthly ladder has a completed month.
@@ -43,6 +43,39 @@ REPAIR_BATCH = 80
 def is_official(bar: UnifiedBar) -> bool:
     """The broker's own completed daily candle — the only source the pivots accept."""
     return bar.source is BarSource.REST and bar.complete
+
+
+def one_per_session(
+    supplies: Iterable[Iterable[UnifiedBar]], session_open: Callable[[date], float]
+) -> list[UnifiedBar]:
+    """One daily bar per trading date, oldest first. ``supplies`` run oldest to freshest.
+
+    5paisa serves the same session twice. On the day itself (and at the evening refetch) it is a
+    provisional candle stamped with the first trade — 09:15 — whose volume is not the day's
+    (KOTAKBANK 25 Sep: 38.7M against 18.2M); from the next day it is the end-of-day candle stamped
+    00:00, which matches the exchange. The indices also came with an 08:59 pre-open row whose low is
+    nowhere near the day's (NIFTY 25 Sep: 22,282.65 against 23,020.95). Merging by timestamp kept
+    all of them: 218 of 240 names held 23–25 Sep twice or three times, the daily ATR counted those
+    days twice, and every index's weekly levels for 28 Sep–2 Oct were built on the pre-open low.
+
+    Per date: the end-of-day candle beats a provisional one, which beats a pre-open row; then the
+    fresher supply; then the larger volume (two contracts' rows on one MCX date — the traded one).
+    """
+    best: dict[date, tuple[tuple[int, int, float], UnifiedBar]] = {}
+    for n, supply in enumerate(supplies):
+        for b in supply:
+            day = ist_day(b.ts)
+            if ist_hm(b.ts) == "00:00":
+                rank = 2
+            elif b.ts >= session_open(day):
+                rank = 1
+            else:
+                rank = 0
+            key = (rank, n, b.volume)
+            held = best.get(day)
+            if held is None or key >= held[0]:
+                best[day] = (key, b)
+    return [best[d][1] for d in sorted(best)]
 
 
 def previous_session(bars: Iterable[UnifiedBar], today: date) -> UnifiedBar | None:

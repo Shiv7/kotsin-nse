@@ -20,7 +20,10 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import gzip
+import hashlib
 import io
+import json
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -167,7 +170,17 @@ def parse_master(text: str, segment: Segment) -> list[tuple[Instrument, bool]]:
 
 class CatalogueLoader:
     """Fetches, caches and refreshes the master. The cache file makes a restart cheap and lets the
-    engine boot (degraded) when the broker's master endpoint is down."""
+    engine boot (degraded) when the broker's master endpoint is down.
+
+    Every distinct master is kept, never pruned (operator, 2026-09-28): an expired contract's scrip
+    code exists nowhere else, and without it no replay can price what the engine would have bought.
+    A day whose master is unchanged writes no file — ``validity.jsonl`` records the day against the
+    file that was valid on it; a day it changes, the new file is kept and the log says how many rows
+    came and went. The newest file stays a plain .csv; the ones before it are gzipped (a 15 MB F&O
+    master is about 2 MB). ``valid_on`` answers which file held the codes on any logged day."""
+
+    #: one JSON object per line: {"day", "segment", "file", "changed", "rows", "added", "removed", "sha1"}
+    LOG_NAME = "validity.jsonl"
 
     def __init__(self, settings: Settings, fetch: Any) -> None:
         self.s = settings
@@ -180,25 +193,23 @@ class CatalogueLoader:
         return self._cache_dir / f"{segment.scripmaster_key}-{day.isoformat()}.csv"
 
     async def ensure(self, day: date | None = None, *, force: bool = False) -> Catalogue:
-        """``force`` refetches today's master even if cached — scripFinder's 09:20 IST rebuild,
+        """``force`` refetches today's master even if held — scripFinder's 09:20 IST rebuild,
         which exists because strikes listed between 09:00 and 09:15 are missing from a master
-        pulled overnight."""
+        pulled overnight. The refetch replaces today's own file when it differs; nothing earlier
+        is ever deleted."""
         day = day or date.today()
         async with self._lock:
             if self.catalogue.loaded_day == day and not force:
                 return self.catalogue
-            if force:
-                for seg in self.s.segment_list:
-                    self._cache_path(seg, day).unlink(missing_ok=True)
-            await self._load(day)
+            await self._load(day, refetch=force)
             return self.catalogue
 
-    async def _load(self, day: date) -> None:
+    async def _load(self, day: date, *, refetch: bool = False) -> None:
         started = time.time()
         cat = Catalogue(loaded_day=day)
         wanted = {s.scripmaster_key: s for s in self.s.segment_list}
         for key, segment in wanted.items():
-            text = await self._text_for(segment, day)
+            text = await self._text_for(segment, day, refetch=refetch)
             if not text:
                 log.error("catalogue.segment_unavailable", segment=key)
                 continue
@@ -217,24 +228,101 @@ class CatalogueLoader:
         self.catalogue = cat
         log.info("catalogue.loaded", took_s=round(time.time() - started, 1), **cat.stats())
 
-    async def _text_for(self, segment: Segment, day: date) -> str:
-        path = self._cache_path(segment, day)
-        if path.exists():
-            return path.read_text()
+    async def _text_for(self, segment: Segment, day: date, *, refetch: bool = False) -> str:
+        held = None if refetch else self.valid_on(segment, day)
+        if held is not None:
+            return self._read(held)
         try:
             text = await self._fetch(segment)
         except Exception as exc:  # noqa: BLE001
             log.warning("catalogue.fetch_failed", segment=segment.value, error=str(exc))
             return self._newest_cached(segment)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text)
-        for old in sorted(self._cache_dir.glob(f"{segment.scripmaster_key}-*.csv"))[:-5]:
-            old.unlink(missing_ok=True)
+        try:
+            # off the event loop: two 80k-row sets and a 15 MB gzip at the 09:20 refetch, with positions open
+            await asyncio.to_thread(self._keep, segment, day, text)
+        except OSError as exc:  # a full disk must not cost the boot its catalogue
+            log.error("catalogue.keep_failed", segment=segment.value, error=str(exc))
         return text
 
+    # -- the kept masters ----------------------------------------------------------------------------
+
+    def _files(self, segment: Segment) -> list[Path]:
+        """Every kept master of ``segment``, oldest first (``<key>-YYYY-MM-DD.csv[.gz]``)."""
+        key = segment.scripmaster_key
+        return sorted(
+            (p for p in self._cache_dir.glob(f"{key}-*.csv*") if p.name.endswith((".csv", ".csv.gz"))),
+            key=lambda p: p.name.removesuffix(".gz"),
+        )
+
+    @staticmethod
+    def _read(path: Path) -> str:
+        """The file exactly as the broker served it. 5paisa's master ends its lines in CRLF, and
+        ``read_text`` turns those into LF — a master compared that way never equals itself
+        (review, 2026-09-29)."""
+        raw = path.read_bytes()
+        return (gzip.decompress(raw) if path.name.endswith(".gz") else raw).decode()
+
+    def _log(self) -> list[dict[str, Any]]:
+        try:
+            lines = (self._cache_dir / self.LOG_NAME).read_text().splitlines()
+        except OSError:
+            return []
+        out = []
+        for ln in lines:
+            try:
+                out.append(json.loads(ln))
+            except ValueError:
+                continue
+        return out
+
+    def valid_on(self, segment: Segment, day: date) -> Path | None:
+        """The kept file whose codes were the master on ``day``: that day's own file, else the file
+        the log recorded for it (a day the master did not change). None for a day not logged."""
+        own = self._cache_path(segment, day)
+        for p in (own, own.with_name(own.name + ".gz")):
+            if p.exists():
+                return p
+        for rec in reversed(self._log()):
+            if rec.get("segment") == segment.scripmaster_key and rec.get("day") == day.isoformat():
+                for name in (rec.get("file", ""), rec.get("file", "") + ".gz"):
+                    p = self._cache_dir / name
+                    if name and p.exists():
+                        return p
+                return None
+        return None
+
+    def _keep(self, segment: Segment, day: date, text: str) -> None:
+        """Keep ``text`` as ``day``'s master: a new file only when it differs from the newest one
+        kept, and a line in the validity log either way."""
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
+        files = self._files(segment)
+        latest = files[-1] if files else None
+        prev = self._read(latest) if latest is not None else None
+        rows = max(0, text.count("\n") - 1)
+        rec: dict[str, Any] = {"day": day.isoformat(), "segment": segment.scripmaster_key, "rows": rows,
+                               "sha1": hashlib.sha1(text.encode()).hexdigest()}
+        if prev == text and latest is not None:
+            rec.update(file=latest.name.removesuffix(".gz"), changed=False, added=0, removed=0)
+        else:
+            path = self._cache_path(segment, day)
+            if prev is not None:
+                old, new = set(prev.splitlines()[1:]), set(text.splitlines()[1:])
+                rec.update(added=len(new - old), removed=len(old - new))
+            else:
+                rec.update(added=rows, removed=0)
+            path.write_bytes(text.encode())  # byte for byte: no newline translation either way
+            rec.update(file=path.name, changed=True)
+            for old in files:  # every earlier master, compressed: only the newest is read daily
+                if old != path and old.name.endswith(".csv"):
+                    old.with_name(old.name + ".gz").write_bytes(gzip.compress(old.read_bytes()))
+                    old.unlink(missing_ok=True)
+        with (self._cache_dir / self.LOG_NAME).open("a") as fh:
+            fh.write(json.dumps(rec) + "\n")
+        log.info("catalogue.master_kept", **{k: v for k, v in rec.items() if k != "sha1"})
+
     def _newest_cached(self, segment: Segment) -> str:
-        files = sorted(self._cache_dir.glob(f"{segment.scripmaster_key}-*.csv"))
+        files = self._files(segment)
         if not files:
             return ""
         log.warning("catalogue.using_stale_cache", segment=segment.value, file=files[-1].name)
-        return files[-1].read_text()
+        return self._read(files[-1])

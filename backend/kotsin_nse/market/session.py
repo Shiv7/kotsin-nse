@@ -49,6 +49,10 @@ class SessionSpec:
 # MCX closes 23:30 in winter and 23:55 in summer. 23:30 is the conservative choice: flattening at
 # 23:20 is inside both. The old stack's single NSE-shaped 15:20 constant would have closed every
 # commodity position eight hours early — see can2_consumer SEGMENT_FLAT.
+# The entry cutoff here is FUDKII's end-of-day PHASE (a bar starting 14:45 or later takes strong
+# signals only); the last minute a book may place an NSE entry is the engine's (engine.NSE_LAST_ENTRY_HM),
+# and so is the graded-F shadow's later flatten (engine.FORCE_FLAT_HM, 15:24 — every NSE position out
+# by 15:25, operator 2026-09-29).
 SESSIONS: dict[Segment, SessionSpec] = {
     Segment.NSE_EQ: SessionSpec(time(9, 15), time(15, 30), time(14, 45), time(15, 20)),
     Segment.NSE_FO: SessionSpec(time(9, 15), time(15, 30), time(14, 45), time(15, 20)),

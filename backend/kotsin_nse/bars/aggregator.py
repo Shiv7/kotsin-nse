@@ -31,6 +31,7 @@ from ..config import Segment
 from ..domain import Instrument
 from ..market.session import (
     TF_SECONDS,
+    bucket_end,
     bucket_start,
     in_session,
     ist_day,
@@ -100,6 +101,8 @@ class Aggregator:
         self.partial_bars = 0
         self.late_ticks = 0
         self.out_of_session_ticks = 0
+        #: frames stamped inside a bucket that had ended before we connected — never bars
+        self.stale_frames = 0
         #: broker history rows outside the session (pre-open, post-close) — never bars
         self.rows_dropped = 0
 
@@ -272,6 +275,13 @@ class Aggregator:
             if cur is None and bucket <= st.closed_upto.get(tf, -1):
                 self.late_ticks += 1  # its bucket is already closed; the reconciler owns it now
                 continue
+            if cur is None and bucket_end(segment, bucket, tf) <= st.connected_since:
+                # The first frame after a subscribe re-sends the last trade, stamped with its own
+                # time (TickDt). An illiquid name's last trade sits in a bucket that had ended
+                # before we connected: opening it built a one-frame bar the clock closed at once —
+                # 36 such closes at the 2026-09-28 15:51 boot, every one a bucket already decided.
+                self.stale_frames += 1
+                continue
             if cur is None:
                 cur = self._open_bar(st, tf, bucket, price, segment)
                 self.store.set_forming(cur)
@@ -404,6 +414,7 @@ class Aggregator:
             "bars_closed": self.bars_closed,
             "partial_bars": self.partial_bars,
             "late_ticks": self.late_ticks,
+            "stale_frames": self.stale_frames,
             "out_of_session_ticks": self.out_of_session_ticks,
             "rows_dropped": self.rows_dropped,
             "ticks": sum(s.ticks for s in self.state.values()),

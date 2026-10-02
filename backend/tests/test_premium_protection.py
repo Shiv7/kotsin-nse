@@ -71,14 +71,26 @@ async def test_the_stop_is_protected_at_the_fill_for_a_book_that_never_reproject
 
 def test_only_rt_n_prices_and_caps_its_stop():
     """Operator, 2026-09-27: "fudkii-rt-n use only priced+35% logic and fudkii-rt-x and fudkii-rt-y,
-    fudkii-ct-x and fudkii-ct-y be as is"."""
+    fudkii-ct-x and fudkii-ct-y be as is" — and 2026-09-28: "execute and make live: RT-Y 25% premium
+    cap on normal trades" (the wide-stop shadow and CT-Y, which inherit RT-Y's limits, stay uncapped)."""
     from kotsin_nse.config import Settings
     from kotsin_nse.engine import Engine
-    from kotsin_nse.risk.limits import CT_X_LIMITS, CT_Y_LIMITS, RT_N_LIMITS, RT_Y_LIMITS
+    from kotsin_nse.risk.limits import (
+        CT_X_LIMITS,
+        CT_Y_LIMITS,
+        RT_N_LIMITS,
+        RT_Y_F_LIMITS,
+        RT_Y_LIMITS,
+        RT_Y_W1_LIMITS,
+    )
 
     assert RT_N_LIMITS.priced_option_stop and RT_N_LIMITS.max_premium_loss_pct == 35.0
-    for lim in (RT_X_LIMITS, RT_Y_LIMITS, CT_X_LIMITS, CT_Y_LIMITS):
+    for lim in (RT_Y_LIMITS, RT_Y_F_LIMITS):
+        assert not lim.priced_option_stop and lim.max_premium_loss_pct == 25.0
+    for lim in (RT_X_LIMITS, CT_X_LIMITS, CT_Y_LIMITS, RT_Y_W1_LIMITS):
         assert not lim.priced_option_stop and lim.max_premium_loss_pct is None
     e = Engine(Settings(_env_file=None))
     assert not e.limits.priced_option_stop and e.limits.max_premium_loss_pct is None, "the parent as it is"
     assert e.limits_for("FUDKII_RT_MCX").max_premium_loss_pct is None and e.limits_for("FUDKII_RT_Y_W1").max_premium_loss_pct is None
+    assert e.limits_for("FUDKII_RT_Y").max_premium_loss_pct == 25.0 and e.limits_for("FUDKII_CT_Y").max_premium_loss_pct is None
+    assert e.limits_for("FUDKII_RT_Y_F").max_premium_loss_pct == 25.0

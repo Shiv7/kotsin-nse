@@ -331,6 +331,7 @@ async def test_ticks_outside_the_session_never_become_bars(equity):
     store = BarStore()
     agg = Aggregator(store, timeframes=("1m",))
     agg.track(equity)
+    agg.state[equity.scrip_code].connected_since = ist_ts("2026-09-18", "09:00")
     pre = ist_ts("2026-09-18", "09:05")
     post = ist_ts("2026-09-18", "15:31")
     await agg.on_tick({"scrip_code": equity.scrip_code, "ltp": 100.0, "total_qty": 10, "ts": pre})

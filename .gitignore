@@ -40,3 +40,6 @@ frontend/dist/
 
 # ShinkaEvolve run outputs
 backend/evolve/results/
+
+# deploy snapshots — git history is the rollback; deploy.sh keeps the newest 10 locally
+deploy/rollbacks/

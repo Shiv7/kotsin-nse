@@ -7,7 +7,7 @@ from kotsin_nse.research.pivot_report import build, floor_outer, ladders_from_ro
 
 EQ = Instrument(scrip_code="2885", symbol="RELIANCE", segment=Segment.NSE_EQ, kind=InstrumentKind.EQUITY, name="RELIANCE")
 FUT = Instrument(scrip_code="68777", symbol="RELIANCE", segment=Segment.NSE_FO, kind=InstrumentKind.FUTURE,
-                 name="RELIANCE 29 SEP 2026", expiry="2026-09-29", underlying="RELIANCE")
+                 name="RELIANCE 29 SEP 2026", expiry="2099-12-31", underlying="RELIANCE")
 
 
 def _opt(code: str, strike: float, ot: OptionType) -> Instrument:
@@ -112,7 +112,7 @@ def test_build_covers_underlying_future_and_the_otm_strikes_with_the_thin_bar_gu
 
 def test_a_commodity_with_no_cash_leg_uses_the_front_future_as_underlying():
     crude = Instrument(scrip_code="482", symbol="CRUDEOIL", segment=Segment.MCX_FO, kind=InstrumentKind.FUTURE,
-                       name="CRUDEOIL 19 OCT 2026", expiry="2026-10-19", underlying="CRUDEOIL")
+                       name="CRUDEOIL 19 OCT 2026", expiry="2099-12-31", underlying="CRUDEOIL")
     cat = FakeCatalogue(None, crude, [])
     rows = _sessions(date(2026, 8, 1), date(2026, 9, 23), 5000)
     rep = asyncio.run(build("CRUDEOIL", date(2026, 9, 23), catalogue=cat, rest=FakeRest({"482": rows})))

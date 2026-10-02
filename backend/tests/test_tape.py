@@ -251,7 +251,7 @@ def test_the_engine_pins_the_open_position_and_resolves_its_legs(settings, equit
     e = Engine(settings)
     e.underlyings[equity.symbol] = equity
     fut = Instrument("68781", "RELIANCE", Segment.NSE_FO, InstrumentKind.FUTURE, lot_size=250,
-                     expiry="2026-09-29", underlying="RELIANCE")
+                     expiry="2099-12-31", underlying="RELIANCE")
     e.catalogue_loader.catalogue.futures_by_symbol["RELIANCE"] = [fut]
     now = time.time()
     e.quotes[option.scrip_code] = q(now, 10.0)

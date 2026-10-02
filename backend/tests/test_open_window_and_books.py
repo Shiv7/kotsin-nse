@@ -148,7 +148,7 @@ async def test_an_nse_trigger_never_reaches_the_commodity_books_page(settings, e
     await e.start()
     try:
         crude = Instrument("482", "CRUDEOIL", Segment.MCX_FO, InstrumentKind.FUTURE,
-                           lot_size=100, expiry="2026-10-17", underlying="CRUDEOIL")
+                           lot_size=100, expiry="2099-12-31", underlying="CRUDEOIL")
         e.underlyings["RELIANCE"], e.underlyings["CRUDEOIL"] = equity, crude
         ts = int(time.time()) - 600
         for sym in ("RELIANCE", "CRUDEOIL"):

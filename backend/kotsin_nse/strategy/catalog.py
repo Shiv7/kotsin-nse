@@ -203,6 +203,7 @@ BOOKS: tuple[Book, ...] = (
             "band_exit": "dwell (3 consecutive one-second reads)",
             "post_arm_sustain": "true (the rung SL keeps its 75 s sustain)",
             "dried_volume_skip": "no mirror when surgeT and surgeT-1 are both < 0.85x the T-2..T-7 volume baseline, on the equity or its front future",
+            "max_premium_loss_pct": "25 (the option stop never more than 25 % under the premium paid; set 2026-09-28)",
         },
         have=(
             "30m/1m bars on the session grid",
@@ -275,6 +276,28 @@ BOOKS: tuple[Book, ...] = (
             "Sep 1–25 replay on gate-B trades: 1–18 Sep +0.43 % against the touch's +1.14 %, "
             "19–25 Sep +6.30 % against +3.90 %; over the month +0.44 ± 1.86 points — unproven, "
             "and the worst trade was −41 % against −35 %. Paper, shown on the Shadow page."
+        ),
+    ),
+    Book(
+        key="FUDKII_RT_Y_F",
+        label="RT-Y · graded F (shadow)",
+        tf="30m entry, 1s exit",
+        summary=(
+            "A shadow with entries of its own: every NSE trigger FUDKII grades F and does not publish, judged by RT-Y's "
+            "gates and traded under RT-Y's exits with its 25 % premium cap. Where no pivot cluster ahead makes a target, "
+            "the raw pivots ahead, nearest first, are the ladder. It answers whether RT-Y should take graded-F triggers."
+        ),
+        status="live",
+        params={
+            "entries": "triggers FUDKII does not publish (NOT_PUBLISHED), NSE only — never a published one",
+            "gates": "RT-Y's: breadth > 50 %, no key pivot within 0.5 ATR30 ahead, no 09:45 gap ≥ 0.3 daily ATR its way, dried volume",
+            "exits": "RT-Y policy, option stop never more than 25 % under the premium paid",
+        },
+        have=("30m/1m bars on the session grid", "MTF pivot zones + confluence stop/targets"),
+        source="kotsin_nse/engine.py (_handle_unpublished); kotsin_nse/risk/limits.py RT_Y_F_LIMITS; strategy/fudkii.py (raw-pivot ladder)",
+        note=(
+            "Replay 1–28 Sep (inside RT-Y's purse): 16 trades, 11 won, −₹2,364. Paper, shown on the Shadow page; "
+            "its P&L is never added to the trading books'."
         ),
     ),
     Book(

@@ -22,7 +22,7 @@ from kotsin_nse.strategy.keys import StrategyKey
 #: GOLDPETAL — one of the four commodity triggers of 2026-09-25 (13:30 SILVER100, 14:00 GOLDTEN,
 #: GOLDPETAL, GOLDGUINEA), all booked WRONG_SEGMENT and entered by nobody
 CRUDE = Instrument("454818", "GOLDPETAL", Segment.MCX_FO, InstrumentKind.FUTURE, name="GOLDPETAL 30 OCT 2026", lot_size=1,
-                   tick_size=1.0, multiplier=1, expiry="2026-10-30", underlying="GOLDPETAL")
+                   tick_size=1.0, multiplier=1, expiry="2099-12-31", underlying="GOLDPETAL")
 
 
 def _trigger() -> Signal:

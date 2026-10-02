@@ -128,6 +128,7 @@ async def test_a_backwards_total_does_not_emit_negative_volume(equity):
     agg = Aggregator(store, timeframes=("1m",))
     agg.track(equity)
     t = ist_ts("2026-09-18", "09:15")
+    agg.state[equity.scrip_code].connected_since = t - 60
     await agg.on_tick({"scrip_code": equity.scrip_code, "ltp": 100.0, "total_qty": 500, "ts": t})
     await agg.on_tick({"scrip_code": equity.scrip_code, "ltp": 100.0, "total_qty": 100, "ts": t})
     assert store.forming("RELIANCE", "1m").volume >= 0
@@ -151,6 +152,7 @@ async def test_bar_closes_when_the_next_bucket_opens(equity):
     agg = Aggregator(store, timeframes=("1m",), on_bar_close=lambda b: _collect(closed, b))
     agg.track(equity)
     t = ist_ts("2026-09-18", "09:15")
+    agg.state[equity.scrip_code].connected_since = t - 60
     await agg.on_tick({"scrip_code": equity.scrip_code, "ltp": 100.0, "total_qty": 10, "ts": t})
     await agg.on_tick({"scrip_code": equity.scrip_code, "ltp": 101.0, "total_qty": 20, "ts": t + 61})
     assert len(closed) == 1
@@ -170,6 +172,7 @@ async def test_flush_stale_closes_a_bar_no_tick_would(equity):
     agg = Aggregator(store, timeframes=("1m",), on_bar_close=lambda b: _collect(closed, b))
     agg.track(equity)
     t = ist_ts("2026-09-18", "09:15")
+    agg.state[equity.scrip_code].connected_since = t - 60
     await agg.on_tick({"scrip_code": equity.scrip_code, "ltp": 100.0, "total_qty": 10, "ts": t})
     assert await agg.flush_stale(now=t + 5) == 0
     assert await agg.flush_stale(now=t + 120) == 1
@@ -254,7 +257,7 @@ def test_tracking_a_future_alongside_its_cash_symbol_is_refused(equity):
         symbol="RELIANCE",
         segment=Segment.NSE_FO,
         kind=InstrumentKind.FUTURE,
-        expiry="2026-09-25",
+        expiry="2099-12-31",
         option_type=OptionType.FUT,
         underlying="RELIANCE",
     )

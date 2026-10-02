@@ -43,6 +43,13 @@ class BarStore:
         self._forming.pop(key, None)
         return bar
 
+    def replace_series(self, symbol: str, tf: str, bars: list[UnifiedBar]) -> int:
+        """Set a series to exactly ``bars`` — for a caller that has already merged what the
+        store held (:meth:`seed` keeps every held bar at a timestamp the new set lacks)."""
+        series = sorted(bars, key=lambda b: b.ts)
+        self._closed[(symbol, tf)] = series[-self.max_bars :]
+        return len(self._closed[(symbol, tf)])
+
     def replace_closed(self, bar: UnifiedBar) -> bool:
         """Install ``bar`` over the closed bar with the same bucket, or insert it in order.
 

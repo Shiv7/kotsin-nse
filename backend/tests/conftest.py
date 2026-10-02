@@ -33,6 +33,33 @@ def _isolate_config_from_the_box() -> object:
     os.environ.update(saved)
 
 
+@pytest.fixture(autouse=True)
+def _entry_window_open(monkeypatch) -> None:
+    """Every book may enter at any hour of the suite: the NSE last-entry minutes (15:15, the graded-F
+    shadow's 15:22 — engine.NSE_LAST_ENTRY_HM) are read from the wall clock, and the suite runs at
+    all hours. Their own tests put the real rule back with the ``entry_cutoff`` fixture."""
+    from kotsin_nse.engine import Engine
+
+    monkeypatch.setattr(Engine, "_past_last_entry", lambda self, book, underlying, *, now=None: None)
+
+
+@pytest.fixture
+def entry_cutoff(monkeypatch) -> None:
+    """The real NSE last-entry rule, for the tests of it."""
+    from kotsin_nse.engine import Engine
+
+    monkeypatch.setattr(Engine, "_past_last_entry", REAL_PAST_LAST_ENTRY)
+
+
+def _real_past_last_entry():
+    from kotsin_nse.engine import Engine
+
+    return Engine._past_last_entry
+
+
+REAL_PAST_LAST_ENTRY = _real_past_last_entry()
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _never_the_operators_charges_file() -> object:
     """Tests cost trades from Settings, never from ``<data_dir>/charges.toml`` — deploy.sh runs the
@@ -118,7 +145,7 @@ def mcx_future() -> Instrument:
         lot_size=1,
         tick_size=0.05,
         multiplier=1000,
-        expiry="2026-09-30",
+        expiry="2099-12-31",
         option_type=OptionType.FUT,
         underlying="ALUMINI",
     )

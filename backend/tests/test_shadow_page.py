@@ -100,7 +100,7 @@ async def test_the_shadow_routes_serve_the_page_the_workbook_and_json(settings):
         assert x.headers["content-disposition"] == 'attachment; filename="shadow-2026-09-28.xlsx"'
         j = (await c.get("/api/shadow", params={"day": DAY.isoformat()})).json()
         assert j["day"] == "2026-09-28" and [r["symbol"] for r in j["rows"]] == ["LODHA", "NYKAA"]
-        assert [t["id"] for t in j["tabs"]] == ["gate-b", "wide-stop", "gap-fade", "volume", "labels"] and all(t["brief"]["decide"] for t in j["tabs"])
+        assert [t["id"] for t in j["tabs"]] == ["gate-b", "wide-stop", "graded-f", "gap-fade", "volume", "labels"] and all(t["brief"]["decide"] for t in j["tabs"])
         assert set(j) >= {"wideStop", "gapFade", "labels", "ab"}
         assert (await c.get("/shadow", params={"day": "yesterday"})).status_code == 400
     await engine.ledger.close()
@@ -115,7 +115,7 @@ def test_every_tab_opens_with_its_brief_and_is_deep_linkable():
 
     page = render_shadow(ShadowData(day=DAY, days=[DAY.isoformat()], rows=rows,
                                     ab=ab_summary(signals=signals, positions=positions, trades=trades, events=events)))
-    assert [t.id for t in TABS] == ["gate-b", "wide-stop", "gap-fade", "volume", "labels"]
+    assert [t.id for t in TABS] == ["gate-b", "wide-stop", "graded-f", "gap-fade", "volume", "labels"]
     for t in TABS:
         assert f'href="#{t.id}"' in page and f'<section class="tab" id="{t.id}"' in page, t.id
         section = page.split(f'id="{t.id}"', 1)[1].split("</section>", 1)[0]

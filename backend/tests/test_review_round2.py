@@ -90,7 +90,7 @@ async def test_the_parent_places_its_order_without_waiting_on_the_volume_read(se
         _book(e, 16.95, 17.25, midday[0])
         ev: list[str] = []
 
-        async def slow_vol(u):
+        async def slow_vol(u, **_kw):
             ev.append("vol-start")
             await asyncio.sleep(0.1)
             ev.append("vol-end")

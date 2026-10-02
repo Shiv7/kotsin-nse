@@ -278,3 +278,90 @@ def test_the_cards_spread_is_a_percent_not_a_hundred_times_it():
 
     src = inspect.getsource(Engine._plan_preview) + inspect.getsource(Engine._aim_contract)
     assert "spread_pct * 100" not in src
+
+
+@pytest.mark.asyncio
+async def test_a_counter_trend_card_in_an_in_trend_tab_offers_the_counter_trend_buy_and_greys_the_trend_one(settings):
+    """KALYANKJIL, 2026-09-29 09:45 (operator: "the CTA has to be the OTM we are to buy in counter-trend as
+    active CTA and the [trend CE] as inactive CTA … also ensure in all CTA, the lots, its price and total
+    required"). The trigger was routed COUNTER-TREND; CT-Y bought the 540 PE — RT-Y's tab names that trade
+    as its counter-trend button, with its lots, price and money; RT-X's tab names CT-X's."""
+    from kotsin_nse.domain import ExitDecision, ExitReason
+    from kotsin_nse.engine import _trade_from, _trade_json
+    from kotsin_nse.risk.exits import apply_exit
+
+    e = Engine(settings)
+    await e.start()
+    try:
+        ts = int(datetime.combine(ist_today(), dtime(9, 15), tzinfo=IST).timestamp())
+        und = Instrument("21327", "KALYANKJIL", Segment.NSE_EQ, InstrumentKind.EQUITY, underlying="KALYANKJIL", tick_size=0.05)
+        e.underlyings["KALYANKJIL"] = und
+        trig = _sig(ts, symbol="KALYANKJIL", entry=575.95, stop=571.0, targets=(590.0,))
+        e._signals_today[trig.signal_id] = trig
+        await e.ledger.insert_signal(trig.to_json(), "NO_INSTRUMENT", "no tradeable strike")
+        await e.ledger.event("counter.route", {"signal_id": trig.signal_id, "symbol": "KALYANKJIL", "route": "COUNTER",
+                                               "reason": "wall-counter", "summary": "wall 6.4 (1d/1wk) on the future", "wall": {"members": []}, "reads": []})
+        gap = _sig(ts, strategy=StrategyKey.FUDKII_CT_Y, symbol="KALYANKJIL", direction=Direction.BEARISH, entry=575.95, stop=580.25,
+                   targets=(565.65,), source_signal_id=trig.signal_id, reason="GAP FADE")
+        await e.ledger.insert_signal(gap.to_json(), "PAPER_FILLED", gap.reason)
+        pe = Instrument("87717", "KALYANKJIL", Segment.NSE_FO, InstrumentKind.OPTION, name="KALYANKJIL 27 OCT 2026 PE 540.00", lot_size=1350,
+                        strike=540.0, option_type=OptionType.PE, underlying="KALYANKJIL")
+        p = Position(id="p-cty", strategy="FUDKII_CT_Y", instrument=pe, underlying=und, side=PosSide.LONG, qty=5400, entry=12.6,
+                     opened_ts=ts + 1854, signal_id=gap.signal_id, direction=Direction.BEARISH, equity_entry=575.95, equity_sl=580.25, option_sl=11.96)
+        apply_exit(p, ExitDecision(p.id, ExitReason.TRAIL, 14.5625, 5400, "trail"), fill_price=14.5625, charges=299.67, now=ts + 3800)
+        await e.ledger.insert_trade(_trade_json(_trade_from(p, ts + 3800)))
+        await e.ledger.upsert_position(_position_json(p))
+
+        y = next(x for x in (await e.book_cards("FUDKII_RT_Y", ist_today()))["cards"] if x["symbol"] == "KALYANKJIL")
+        cc = y["ctaCounter"]
+        assert cc["book"] == "FUDKII_CT_Y" and cc["action"] == "taken" and cc["enabled"] is False
+        assert cc["contract"] == "KALYANKJIL 27 OCT 2026 PE 540.00" and (cc["lots"], cc["qty"], cc["premium"], cc["outlay"]) == (4, 5400, 12.6, 68040.0)
+        assert "traded it — closed (TRAIL)" in cc["reason"] and "net ₹" in cc["reason"]
+        assert y["cta"]["enabled"] is False and "routed COUNTER-TREND" in y["cta"]["reason"], "the trend buy is greyed"
+
+        # CT-Y's own tab is untouched: its button is the PE it traded, sized — no greyed CE, no second button
+        ct = next(c for c in (await e.book_cards("FUDKII_CT_Y", ist_today()))["cards"] if c["symbol"] == "KALYANKJIL")
+        assert ct["ctaCounter"] is None and ct["cta"]["type"] == "PE" and ct["cta"]["action"] == "taken"
+        assert ct["cta"]["contract"] == "KALYANKJIL 27 OCT 2026 PE 540.00" and (ct["cta"]["lots"], ct["cta"]["outlay"]) == (4, 68040.0)
+
+        x = next(c for c in (await e.book_cards("FUDKII_RT_X", ist_today()))["cards"] if c["symbol"] == "KALYANKJIL")
+        assert x["ctaCounter"]["book"] == "FUDKII_CT_X" and x["ctaCounter"]["action"] == "take"
+        assert x["ctaCounter"]["enabled"] is False and x["ctaCounter"]["reason"].startswith("no fade plan"), "no zones here: no plan, said so"
+
+        # RT-X's greyed trend buy says what its counter-trend button really is — not "the live button"
+        assert "no CT-X counter-trend buy now (no fade plan" in x["cta"]["reason"]
+
+        # a gap-fade trigger CT-Y did not enter: its decision stands — no operator fade under the gap fade's id
+        trig3 = _sig(ts + 3600, symbol="KALYANKJIL", entry=578.0, stop=573.0, targets=(590.0,))
+        e._signals_today[trig3.signal_id] = trig3
+        await e.ledger.insert_signal(trig3.to_json(), "NO_INSTRUMENT", "no tradeable strike")
+        await e.ledger.event("counter.route", {"signal_id": trig3.signal_id, "symbol": "KALYANKJIL", "route": "COUNTER",
+                                               "reason": "wall-counter", "summary": "wall", "wall": {"members": []}, "reads": []})
+        gap3 = _sig(ts + 3600, strategy=StrategyKey.FUDKII_CT_Y, symbol="KALYANKJIL", direction=Direction.BEARISH, entry=578.0, stop=582.0,
+                    targets=(565.65,), source_signal_id=trig3.signal_id, reason="GAP FADE")
+        await e.ledger.insert_signal(gap3.to_json(), "MISSED_NOT_FILLED", "limit not filled in 60 s")
+        y3 = next(c for c in (await e.book_cards("FUDKII_RT_Y", ist_today()))["cards"] if c["signalId"] == trig3.signal_id)
+        assert y3["ctaCounter"]["enabled"] is False and "gap fade owns this trigger: MISSED_NOT_FILLED" in y3["ctaCounter"]["reason"]
+
+        # a trigger routed IN TREND carries no counter-trend button
+        trig2 = _sig(ts + 1800, symbol="KALYANKJIL", entry=577.0, stop=572.0, targets=(590.0,))
+        await e.ledger.insert_signal(trig2.to_json(), "NO_INSTRUMENT", "no tradeable strike")
+        await e.ledger.event("counter.route", {"signal_id": trig2.signal_id, "symbol": "KALYANKJIL", "route": "IN_TREND",
+                                               "reason": "no wall", "summary": "no wall", "wall": {"members": []}, "reads": []})
+        y2 = next(c for c in (await e.book_cards("FUDKII_RT_Y", ist_today()))["cards"] if c["signalId"] == trig2.signal_id)
+        assert y2["ctaCounter"] is None
+    finally:
+        await e.stop()
+
+
+def test_a_fade_refused_on_its_stop_says_so_not_no_wall():
+    """KALYANKJIL 2026-09-29 09:45: the fade's stop (1wk.PIVOT, 0.83 above the close) was inside one bar's
+    noise; the walls below it existed. The refusal named "no wall ahead" — it names the stop now."""
+    from kotsin_nse.bars.pivots import GradePolicy, Zone
+    from kotsin_nse.strategy.counter import fade_refusal
+
+    trig = _sig(0, symbol="KALYANKJIL", entry=575.95, stop=571.0, targets=(590.0,))
+    zones = [Zone(551.64, 7.2, ["1d.S2", "1wk.S2"]), Zone(562.71, 5.2, ["1wk.S1", "1mo.S1"]), Zone(565.67, 12.0, ["1d.BC", "1d.PIVOT", "1d.TC"]),
+             Zone(576.78, 3.2, ["1wk.PIVOT"]), Zone(580.17, 4.0, ["1d.R2"])]
+    why = fade_refusal(trig, zones=zones, atr=4.15, tick_size=0.05, policy=GradePolicy(min_stop_atr_filter=0.5))
+    assert why["reason"].startswith("the fade's stop 576.8") and "inside one bar's noise" in why["reason"] and "no wall" not in why["reason"]

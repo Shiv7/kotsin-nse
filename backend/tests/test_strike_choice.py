@@ -115,12 +115,19 @@ def test_the_strike_is_the_one_that_actually_trades_not_merely_the_nearest():
 
 
 def test_without_atr_or_liquidity_the_old_behaviour_is_exactly_preserved():
-    """What the trigger-card preview uses: nearest-to-target, exactly as before."""
+    """What the trigger-card preview uses: nearest-to-target, exactly as before — under the delta
+    floor every strike now answers to (2026-10-01), so the preview shows what the decision takes."""
     chain = [_opt(s) for s in (3550, 3600, 3650, 3700)]
     q = {i.scrip_code: Quote(ltp=20.0, bid=19.9, ask=20.1, ts=time.time()) for i in chain}
     sel = select_option(chain=chain, quotes=q, spot=3523.1, target1=3700.0,
+                        direction=Direction.BULLISH, now=time.time(), policy=SelectionPolicy(min_delta=0.0))
+    assert sel.ok and sel.instrument.strike == 3700.0 and sel.anchor == 3700.0, "the ordering, untouched"
+    sel = select_option(chain=chain, quotes=q, spot=3523.1, target1=3700.0,
                         direction=Direction.BULLISH, now=time.time())
-    assert sel.ok and sel.instrument.strike == 3700.0 and sel.anchor == 3700.0
+    assert sel.ok and sel.instrument.strike == 3700.0 and sel.delta_shadow == pytest.approx(0.15), "shadow: taken, marked"
+    sel = select_option(chain=chain, quotes=q, spot=3523.1, target1=3700.0, direction=Direction.BULLISH,
+                        now=time.time(), policy=SelectionPolicy(enforce_fallback_delta=True))
+    assert sel.ok and sel.instrument.strike == 3650.0, "enforced: 3700 is 5 % out, under the floor; 3650 (3.6 %) clears it"
 
 
 def test_an_unavailable_first_choice_falls_through_to_the_next_suitable_otm():
@@ -170,7 +177,7 @@ def test_a_one_sided_best_strike_falls_through_to_the_rest_of_the_chain():
     and that strike was one-sided. The span is a preference, not a cage — the walk continues
     outward through the rest of the OTM chain, which is 'the nearest possible OTM suitable'."""
     now = time.time()
-    inside, outside = _opt(3550), _opt(3700)          # 3550 is in the span, 3700 beyond it
+    inside, outside = _opt(3550), _opt(3600)          # 3550 is in the span, 3600 beyond it
     chain = [inside, outside]
     quotes = {
         inside.scrip_code: Quote(ltp=20.0, bid=0.0, ask=20.1, ts=now),    # one-sided
@@ -180,12 +187,22 @@ def test_a_one_sided_best_strike_falls_through_to_the_rest_of_the_chain():
     sel = select_option(chain=chain, quotes=quotes, spot=3523.1, target1=None,
                         direction=Direction.BULLISH, now=now, atr=27.4, liquidity=liq)
     assert sel.ok and sel.instrument is outside, "the trigger survives a one-sided first choice"
+    # outward as far as the delta floor (2026-10-01): a strike 5 % out is not a fallback
+    far = _opt(3700)
+    sel = select_option(chain=[inside, far], quotes={**quotes, far.scrip_code: Quote(ltp=8.0, bid=7.9, ask=8.1, ts=now)},
+                        spot=3523.1, target1=None, direction=Direction.BULLISH, now=now, atr=27.4,
+                        liquidity={**liq, far.scrip_code: (1.0, 1.0)}, policy=SelectionPolicy(enforce_fallback_delta=True))
+    assert not sel.ok and "3700:delta-0.15<0.2" in sel.reason
+    sel = select_option(chain=[inside, far], quotes={**quotes, far.scrip_code: Quote(ltp=8.0, bid=7.9, ask=8.1, ts=now)},
+                        spot=3523.1, target1=None, direction=Direction.BULLISH, now=now, atr=27.4,
+                        liquidity={**liq, far.scrip_code: (1.0, 1.0)})
+    assert sel.ok and sel.instrument is far and sel.delta_shadow is not None, "shadow: the far strike is taken, marked"
 
     # and with nothing tradeable anywhere, the refusal names what it tried, span first
     dead = {i.scrip_code: Quote(ltp=20.0, bid=0.0, ask=20.1, ts=now) for i in chain}
     bad = select_option(chain=chain, quotes=dead, spot=3523.1, target1=None,
                         direction=Direction.BULLISH, now=now, atr=27.4, liquidity=liq)
-    assert not bad.ok and "3550" in bad.reason and "3700" in bad.reason
+    assert not bad.ok and "3550" in bad.reason and "3600" in bad.reason
 
 
 @pytest.mark.asyncio

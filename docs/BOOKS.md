@@ -15,16 +15,44 @@ Code: `engine.py` — `_handle_signal` (the trigger, once) → `_enter_book` (ev
 | **FUDKII** | the parent strategy: ST flip + close outside the Bollinger band on 30m, graded on its pivot confluence; its stop is the nearest pivot WALL (strength ≥ 5.2) behind the close — walls only, NSE and MCX alike | its own trigger | its sizing incl. the costs-against-T1 test | the equity levels projected through delta; 40 % / 30 % / 20 % / 10 % of the position at T1–T4; the stop to breakeven after T1; from +3 % on the premium a trail that gives back 40 % of the peak's gain; a time stop after 8 bars (4 h) | ₹10 L |
 | **RT-X** | in-trend variant | the FUDKII trigger | dried volume (equity + future) | the option's own multi-timeframe ladder; a lot per rung; a 3 % give-back line off the peak | ₹10 L |
 | **RT-N** | in-trend variant, the ungated control | the FUDKII trigger | none | the option's own daily R1–R4; arms when the underlying reaches its T1 or its resting R1 sell is touched (a 1-minute close over R1 with limit orders off); 2 % give-back. Its option stop is the option PRICED with the stock at its stop (the option's own implied volatility and time left, not the straight-line delta) and never more than 35 % below the premium paid (operator, 27 Sep; 1–25 Sep: −₹2,05,273 → −₹1,80,291) | ₹10 L |
-| **RT-Y** | in-trend variant, gated (the paper A/B) | the FUDKII trigger | dried volume + gate B: breadth > 50 %, no key pivot within 0.5 ATR ahead, no 09:45 gap ≥ 0.3 daily ATR its own way | T1 = max(the option's own T1, entry +5 %) on every route — the option touching it, its resting sell, or the stock reaching its own T1 (which sells nothing below an own T1 over +5 %); with no own ladder T1 is entry +5 % itself. T1 sells one lot, the stop goes to breakeven and a 3 % give-back line trails the peak for the rest; T2–T4 one lot each; any stop exits everything at once | ₹10 L |
-| **RT-Y wide (shadow)** | RT-Y with one number changed | RT-Y's own fill: same contract, price, size and instant | none of its own — it opens when RT-Y fills, unless its own purse is halted, short of money or at its exposure cap (each recorded) | RT-Y's, with the equity stop 1 % further | ₹10 L |
+| **RT-Y** | in-trend variant, gated (the paper A/B) | the FUDKII trigger | dried volume + gate B: breadth > 50 %, no key pivot within 0.5 ATR ahead, no 09:45 gap ≥ 0.3 daily ATR its own way | T1 = max(the option's own T1, entry +5 %) on every route — the option touching it, its resting sell, or the stock reaching its own T1 (which sells nothing below an own T1 over +5 %); with no own ladder T1 is entry +5 % itself. T1 sells one lot, the stop goes to breakeven and a 3 % give-back line trails the peak for the rest; T2–T4 one lot each; any stop exits everything at once. Its option stop is never more than 25 % below the premium paid (operator, 28 Sep; 1–28 Sep replay: ₹16,973 → ₹19,732 on 28 trades). A stop floor is built and tested but **off** (`min_equity_stop_atr`, validated at `RT_Y_STOP_FLOOR_ATR` = 0.5, operator decision pending, 1 Oct): when on, a planned stock stop nearer than 0.5 ATR30 to the trigger's close moves out to it at the fill, the option stop re-projected under the 25 % cap, and the entry checks read the same stop (HDFCLIFE 1 Oct: 0.18-ATR stop hit by a print at it, then the call ran 14.60 → 18.20; Aug replay +₹2,830, live 28 Sep–1 Oct +₹7,535 vs −₹2,200) | ₹10 L |
+| **RT-Y wide (shadow)** | RT-Y with one number changed | RT-Y's own fill: same contract, price, size and instant | none of its own — it opens when RT-Y fills, unless its own purse is halted, short of money or at its exposure cap (each recorded) | RT-Y's, with the equity stop 1 % further than the plan's — never nearer than RT-Y's own stop (should RT-Y's floor be switched on), no floor of its own — and without RT-Y's 25 % cap (1 Oct: 0.5 ATR30 is at most ~1 % of price, so the plan's stop 1 % further is already the wider; inheriting the floor only deepened its stop-outs) | ₹10 L |
+| **RT-Y graded F (shadow)** | RT-Y's rules on the triggers FUDKII does not publish (operator, 28 Sep) | a trigger FUDKII grades F (NOT_PUBLISHED), NSE only; where no pivot cluster ahead makes a target, the raw pivot zones ahead, nearest first, are its ladder | RT-Y's gates, run BEFORE the strike choice (a trigger they refuse costs no broker call) | RT-Y's, incl. the 25 % cap — not its 0.5 ATR stop floor (mixed in the 1 Oct study) | ₹10 L — its wallet and its cards (the unpublished triggers only) on its own Alerts tab, FUDKII-RT-Y-F (29 Sep) |
 | **CT-X** | counter-trend fade | the fade plan of a FUDKII trigger routed COUNTER; a plan whose stop is nearer than 0.5 ATR30 to the close is graded F (every counter-trend plan) | none | own ladder, RT-X's policy | ₹10 L |
 | **CT-Y** | counter-trend fade + the 09:45 gap fade | (a) its own 09:45 gap fade of a trigger that gapped ≥ 0.3 daily ATR its own way; (b) the same fade plan as CT-X | stands aside from (b) on a trigger it already gap-faded | own ladder, RT-Y's policy (incl. the +5 % T1 floor) | ₹10 L |
 | **RT-MCX** | the commodity book | every FUDKII trigger on MCX (FUDKII's purse never trades MCX) | none | own ladder, RT-X's policy | ₹30 L |
 | **FUKAA** | a separate strategy derived from FUDKII's context | its own signals | its own, incl. the costs-against-T1 test | its own | ₹10 L |
 
+## 1b. The clock (operator, 29 Sep)
+
+- **Last NSE entry: 15:15** for every book — a trigger decided at 15:15 (the 14:45 bar) may still be entered
+  in that minute, nothing later (`PAST_ENTRY_CUTOFF`, recorded on the book's card). **The graded-F shadow:
+  before 15:23.** MCX keeps its own session. Paper and live alike (a live order still stops at 15:10 first).
+- **Every NSE position is out by 15:25:** the books keep the 15:20 flatten (moving it to 15:24 cost −₹29,932 over
+  24 Aug–28 Sep in the replay — 89 trades held to the close); the graded-F shadow, whose entries run to 15:22,
+  flattens from 15:24.
+- **A trigger decided at the close** — the 15:15 bar, complete at 15:30 — is not traded that day. It is kept
+  (`CARRIED`, the `carry.queued` event, safe across the overnight restart) and at the next session's open it
+  enters on its stock's **first print after 09:15**: through the trigger's stop → dropped (`carry.dropped`);
+  otherwise — in favour (the open on the trade's side of the close) or in the zone (between the stop and the
+  close) — re-issued at the open (its card reads "fired 09:15", entry = the open, targets already passed
+  dropped) and routed as it would have been: published → the in-trend books, not published → the graded-F
+  shadow. No fade. No print within 5 minutes of the open → `carry.expired`. The 24 Aug–28 Sep stock-level
+  backtest of the idea lost (56 entries, −0.13 % to −0.26 % a trade before option costs): the operator's
+  call, to be judged on its own trades.
+
+- **The MCX roll (operator, 30 Sep):** a commodity future 5 calendar days or fewer from expiry is not the one
+  read or traded — the next month is. The chart, the trigger, RT-MCX's entry and the levels all use that
+  contract; a rolled commodity never takes the expiring month's cached daily candles (no levels rather than wrong
+  ones until the broker answers). On 29 Sep ALUMINIUM's expiring contract traded 53 lots against 1,438 in the next
+  month. NSE is not rolled here.
+
 ## 2. The funnel — decided ONCE per trigger (a reason here stops every book)
 
-1. The trigger itself — FUDKII's strategy logic and grade (a rejected trigger never reaches any book).
+1. The trigger itself — FUDKII's strategy logic and grade. A trigger FUDKII grades F (a SuperTrend flip with
+   the close through the band, but no publishable grade) is recorded as `NOT_PUBLISHED` on FUDKII's card and
+   reaches ONE book — the graded-F shadow; every other book sees FUDKII's published signals only, until each
+   book's own grade rule is proven (phase19). Every path runs side by side, not one after another.
 2. The underlying is in the universe (`NO_UNDERLYING`).
 3. The segment: an MCX trigger goes to RT-MCX alone (`ROUTED`).
 4. The contract: the selector's strike for the trigger's direction — the fade's opposite strike for the
@@ -95,7 +123,8 @@ again at 0 after one.
 ## 7. Order ids
 
 `FII-RTX-260926-192510-007-EN-HINDUNILVR-1960CE-L4` — the book's code (`FII-P` parent, `FII-RTX`,
-`FII-RTN`, `FII-RTY`, `FII-CTX`, `FII-CTY`, `FII-RTM` RT-MCX, `FII-RYW` RT-Y wide, `FKA` FUKAA), the IST
+`FII-RTN`, `FII-RTY`, `FII-CTX`, `FII-CTY`, `FII-RTM` RT-MCX, `FII-RYW` RT-Y wide, `FII-RYF` RT-Y graded F,
+`FKA` FUKAA), the IST
 date and time, the book's order number that day, then what the order is and on what. The first part is
 unique and fits inside the 38 characters of an id the broker keeps. What it is: `EN` entry, `TK` an
 operator TAKE, `T1V1` a resting target sell (rung 1, first placing), and an exit's reason and rung —

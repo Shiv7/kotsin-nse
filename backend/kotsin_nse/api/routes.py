@@ -38,7 +38,7 @@ from ..hotstocks.service import HotStocksService
 from ..ledger.db import events, rejections, signals, trades
 from ..market.session import IST, TF_SECONDS, ist_day, ist_hm, ist_today, to_ist
 from ..strategy.catalog import BOOKS, LIVE_KEYS
-from ..strategy.keys import ALL_KEYS, StrategyKey
+from ..strategy.keys import ALL_KEYS, SHADOW_BOOKS, StrategyKey
 from . import daybook, export, shadow
 from .ws import Hub, handle, pump
 
@@ -187,7 +187,11 @@ def build_app(engine: Engine) -> FastAPI:
     @api.get("/overview")
     async def overview() -> dict[str, Any]:
         open_positions = [p for p in engine.positions.values() if p.status == "OPEN"]
-        capital = sum(w.balance for w in engine.wallets.values())
+        # the headline is the trading books': a shadow is a comparison (the wide stop re-trades RT-Y's
+        # entries, the graded-F one trades what no trading book is offered) — its money is shown apart
+        shadows = {k.value for k in SHADOW_BOOKS}
+        trading = [w for k, w in engine.wallets.items() if k not in shadows]
+        capital = sum(w.balance for w in trading)
         return {
             "mode": engine.mode().value,
             "armed_until": engine._armed_until,
@@ -195,11 +199,12 @@ def build_app(engine: Engine) -> FastAPI:
             "halt_reason": engine.halted()[1],
             "wallets": [engine.wallets[k.value].to_json() for k in ALL_KEYS],
             "capital": round(capital, 2),
-            "day_pnl": round(sum(w.day_pnl for w in engine.wallets.values()), 2),
+            "day_pnl": round(sum(w.day_pnl for w in trading), 2),
+            "shadow_day_pnl": round(sum(w.day_pnl for k, w in engine.wallets.items() if k in shadows), 2),
             "positions": [
                 _position_view(engine, p) for p in sorted(open_positions, key=lambda x: -x.opened_ts)
             ],
-            "exposure": engine.exposure.snapshot(open_positions, capital),
+            "exposure": engine.exposure.snapshot([p for p in open_positions if p.strategy not in shadows], capital),
             "universe": len(engine.underlyings),
             "boot_notes": engine.boot_notes,
         }
@@ -216,8 +221,11 @@ def build_app(engine: Engine) -> FastAPI:
         return out
 
     @api.get("/signals")
-    async def recent_signals(limit: int = Query(100, le=500)) -> list[dict[str, Any]]:
-        return await engine.ledger.recent(signals, limit)
+    async def recent_signals(limit: int = Query(100, le=500), unpublished: bool = False) -> list[dict[str, Any]]:
+        # a trigger FUDKII graded F and did not publish (~20 at a busy bar) is listed only when asked
+        # for: it would push the day's real signals out of the window (review, 2026-09-29)
+        where = None if unpublished else signals.c.decision != "NOT_PUBLISHED"
+        return await engine.ledger.recent(signals, limit, where=where)
 
     @api.get("/rejections")
     async def recent_rejections(
@@ -531,7 +539,9 @@ def build_app(engine: Engine) -> FastAPI:
         """Every FUDKII signal of the session from 09:00 IST, as the ledger holds it — live ones
         with what the books did, and the ones the rescan found with why nothing traded them."""
         rows = await engine.fudkii_today()
-        return {"count": len(rows), "signals": rows, "lastScan": engine.last_fudkii_scan}
+        # a trigger FUDKII graded F and did not publish is listed, not counted as its signal
+        unpublished = sum(1 for r in rows if r.get("decision") == "NOT_PUBLISHED")
+        return {"count": len(rows) - unpublished, "unpublished": unpublished, "signals": rows, "lastScan": engine.last_fudkii_scan}
 
     @api.post("/fudkii/scan")
     async def fudkii_scan() -> dict[str, Any]:
@@ -970,6 +980,7 @@ def build_app(engine: Engine) -> FastAPI:
             day=day, days=days, rows=rows,
             ab=daybook.ab_summary(signals=s_sigs, positions=s_pos, trades=s_trades, events=s_events),
             wide=shadow.wide_stop_summary(positions=s_pos, trades=s_trades),
+            graded_f=shadow.graded_f_summary(signals=s_sigs, positions=s_pos, trades=s_trades, events=s_events),
             gap=shadow.gap_fade_summary(signals=s_sigs, positions=s_pos, trades=s_trades, events=s_events),
             labels=shadow.label_summary(since_rows),
             volume=shadow.volume_summary(since_rows),
@@ -1067,7 +1078,7 @@ The bid/ask spread is not a charge: fills pay it by trading against the order bo
         data = await _shadow(day)
         return {
             "day": data.day.isoformat(), "days": data.days, "ab": data.ab, "rows": data.rows,
-            "wideStop": data.wide, "gapFade": data.gap, "labels": data.labels, "volume": data.volume,
+            "wideStop": data.wide, "gradedF": data.graded_f, "gapFade": data.gap, "labels": data.labels, "volume": data.volume,
             "tabs": [{"id": t.id, "title": t.title, "brief": asdict(t.brief)} for t in shadow.TABS],
         }
 

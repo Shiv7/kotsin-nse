@@ -37,7 +37,10 @@ def shadow_rows(
     latest: dict[str, dict] = {}
     for s in signals:  # a take re-enters the same id: the last row is the one that stands
         latest[s["signal_id"]] = s
-    parents = sorted((s for s in latest.values() if s.get("strategy") == "FUDKII"), key=lambda s: s["ts"])
+    # RT-Y's gate-B A/B is about the triggers RT-Y judges: one FUDKII did not publish (NOT_PUBLISHED,
+    # 2026-09-28) reaches only the graded-F shadow (its own tab) and is not a row of it
+    parents = sorted((s for s in latest.values() if s.get("strategy") == "FUDKII" and s.get("decision") != "NOT_PUBLISHED"),
+                     key=lambda s: s["ts"])
     fade_x_by = {s["source_signal_id"]: s for s in latest.values() if s.get("source_signal_id") and s.get("strategy") == "FUDKII_CT_X"}
     own_by = {(s["strategy"], s["source_signal_id"]): s for s in latest.values() if s.get("source_signal_id")}
     pos_by = {(p["strategy"], p["signal_id"]): p for p in positions}
@@ -105,6 +108,7 @@ class ShadowData:
     rows: list[dict[str, Any]]
     ab: dict[str, Any]
     wide: dict[str, Any] = field(default_factory=dict)
+    graded_f: dict[str, Any] = field(default_factory=dict)
     gap: dict[str, Any] = field(default_factory=dict)
     labels: dict[str, Any] = field(default_factory=dict)
     volume: dict[str, Any] = field(default_factory=dict)
@@ -150,6 +154,9 @@ def _net_cell(v: float | None, status: str | None = None) -> str:
 # -- the wide-stop shadow ------------------------------------------------------------------------
 
 WIDE_BOOK = "FUDKII_RT_Y_W1"
+#: RT-Y's option stop is capped at 25 % of the premium from this session; the wide-stop shadow's is
+#: not (operator, 2026-09-28) — from here the pair differs in the cap as well as the 1 % buffer
+RT_Y_CAP_FROM = date(2026, 9, 29)
 
 
 def wide_stop_summary(*, positions: list[dict], trades: list[dict]) -> dict[str, Any]:
@@ -190,7 +197,63 @@ def wide_stop_summary(*, positions: list[dict], trades: list[dict]) -> dict[str,
         "y_worst": min((p["y"]["net"] for p in done), default=None), "w_worst": min((p["w"]["net"] for p in done), default=None),
     }
     total["diff"] = total["w_net"] - total["y_net"]
-    return {"pairs": pairs, "total": total}
+    cap_ts = datetime(RT_Y_CAP_FROM.year, RT_Y_CAP_FROM.month, RT_Y_CAP_FROM.day, tzinfo=IST).timestamp()
+    capped = [p for p in done if float(p["opened"] or 0) >= cap_ts]
+    since_cap = {
+        "from": RT_Y_CAP_FROM.isoformat(), "closed": len(capped),
+        "y_net": sum(p["y"]["net"] for p in capped), "w_net": sum(p["w"]["net"] for p in capped),
+        "y_win": sum(1 for p in capped if p["y"]["net"] > 0), "w_win": sum(1 for p in capped if p["w"]["net"] > 0),
+        "better": sum(1 for p in capped if p["diff"] > 0), "worse": sum(1 for p in capped if p["diff"] < 0),
+        "same": sum(1 for p in capped if p["diff"] == 0),
+    }
+    since_cap["diff"] = since_cap["w_net"] - since_cap["y_net"]
+    return {"pairs": pairs, "total": total, "since_cap": since_cap}
+
+
+# -- the graded-F shadow -------------------------------------------------------------------------
+
+GRADED_F_BOOK = "FUDKII_RT_Y_F"
+
+
+def graded_f_summary(*, signals: list[dict], positions: list[dict], trades: list[dict], events: list[dict]) -> dict[str, Any]:
+    """Every trigger FUDKII graded F and did not publish (NOT_PUBLISHED), and what the graded-F
+    shadow did with it under RT-Y's rules: traded (its net once closed) or stood aside (the gate
+    and why). An MCX trigger is not offered to it and is not a row."""
+    latest: dict[str, dict] = {}
+    for sg in signals:
+        latest[sg["signal_id"]] = sg
+    pos_by = {p["signal_id"]: p for p in positions if p.get("strategy") == GRADED_F_BOOK}
+    trade_by: dict[str, float] = {}
+    for t in trades:
+        if t.get("position_id"):
+            trade_by[t["position_id"]] = trade_by.get(t["position_id"], 0.0) + float(t.get("net") or 0.0)
+    skip_by = {e["signal_id"]: e for e in events
+               if e.get("kind") == "rt_twin.skipped" and e.get("book") == GRADED_F_BOOK and e.get("signal_id")}
+    offered = {e["signal_id"] for e in events if e.get("kind") == "regime.breadth" and e.get("signal_id")}
+    rows = []
+    for sg in sorted(latest.values(), key=lambda x: x["ts"]):
+        sid = sg["signal_id"]
+        if sg.get("strategy") != "FUDKII" or sg.get("decision") != "NOT_PUBLISHED" or sid not in offered:
+            continue
+        p, sk = pos_by.get(sid), skip_by.get(sid)
+        closed = p is not None and p.get("status") != "OPEN"
+        rows.append({
+            "signal_id": sid, "symbol": sg.get("symbol"), "direction": sg.get("direction"),
+            "fired": float(sg.get("created_ts") or (float(sg["ts"]) + 1800)), "why_f": sg.get("decision_reason"),
+            "targets": list(sg.get("targets") or []),
+            "status": "NONE" if p is None else ("EXITED" if closed else "OPEN"),
+            "contract": ((p or {}).get("instrument") or {}).get("name"), "entry": (p or {}).get("entry"),
+            "exit_reason": (p or {}).get("exit_reason") if closed else None,
+            "net": trade_by.get(p["id"]) if closed else None,
+            "skip": (sk or {}).get("reason") if p is None else None, "gate": (sk or {}).get("gate") if p is None else None,
+        })
+    done = [r for r in rows if r["net"] is not None]
+    total = {
+        "triggers": len(rows), "traded": sum(1 for r in rows if r["status"] != "NONE"), "closed": len(done),
+        "net": sum(r["net"] for r in done), "win": sum(1 for r in done if r["net"] > 0),
+        "worst": min((r["net"] for r in done), default=None), "best": max((r["net"] for r in done), default=None),
+    }
+    return {"rows": rows, "total": total}
 
 
 # -- the 09:45 gap fade --------------------------------------------------------------------------
@@ -372,6 +435,15 @@ def _render_wide(d: ShadowData) -> str:
         f'{_net_cell(t.get("w_net") if n else None)}<td>{_pct(t.get("w_win", 0), n)}</td>{_net_cell(t.get("w_worst"))}'
         f'{_net_cell(t.get("diff") if n else None)}<td>{t.get("better", 0)} / {t.get("worse", 0)} / {t.get("same", 0)}</td></tr>'
     )
+    c = w.get("since_cap") or {}
+    m = c.get("closed", 0)
+    if c:
+        tot += (
+            f'<tr><td class="l">since {c["from"]} · RT-Y capped at 25 %, wide not</td><td>—</td><td>{m}</td>'
+            f'{_net_cell(c.get("y_net") if m else None)}<td>{_pct(c.get("y_win", 0), m)}</td><td class="dim">—</td>'
+            f'{_net_cell(c.get("w_net") if m else None)}<td>{_pct(c.get("w_win", 0), m)}</td><td class="dim">—</td>'
+            f'{_net_cell(c.get("diff") if m else None)}<td>{c.get("better", 0)} / {c.get("worse", 0)} / {c.get("same", 0)}</td></tr>'
+        )
     return f"""<h3>Wide stop · running total</h3>
 <div class="scroll"><table><thead><tr><th class="l">Period</th><th>Paired trades</th><th>Closed</th><th>RT-Y net</th><th>RT-Y win</th><th>RT-Y worst</th>
 <th>Wide net</th><th>Wide win</th><th>Wide worst</th><th>Wide − RT-Y</th><th>Wide better / worse / same</th></tr></thead><tbody>{tot}</tbody></table></div>
@@ -380,6 +452,31 @@ def _render_wide(d: ShadowData) -> str:
 <th>RT-Y eq. stop</th><th>RT-Y exit</th><th class="l">RT-Y reason</th><th>RT-Y net</th>
 <th>Wide eq. stop</th><th>Wide exit</th><th class="l">Wide reason</th><th>Wide net</th><th>Wide − RT-Y</th></tr></thead>
 <tbody>{body or '<tr><td colspan="13" class="dim">no RT-Y trade since the shadow began</td></tr>'}</tbody></table></div>"""
+
+
+def _render_graded_f(d: ShadowData) -> str:
+    g = d.graded_f or {"rows": [], "total": {}}
+    t = g.get("total") or {}
+    body = "".join(
+        f'<tr><td class="sym">{_ist(r["fired"])}</td><td class="sym l">{html.escape(str(r["symbol"]))}</td>'
+        f'<td class="{"pos" if r["direction"] == "BULLISH" else "neg"}">{"BULL" if r["direction"] == "BULLISH" else "BEAR"}</td>'
+        f'<td class="l">{html.escape(str(r["why_f"] or "—"))}</td><td class="l">{" · ".join(_fmt(x) for x in r["targets"]) or "—"}</td>'
+        f'<td class="l">{html.escape(str(r["contract"] or "—"))}</td><td>{_fmt(r["entry"])}</td>'
+        f'<td class="l">{html.escape(str(r["exit_reason"] or r["skip"] or "—"))}</td>{_net_cell(r["net"], r["status"])}</tr>'
+        for r in g["rows"]
+    )
+    n = t.get("closed", 0)
+    tot = (
+        f'<tr><td class="l"><b>since {d.ab["since"]}</b></td><td>{t.get("triggers", 0)}</td><td>{t.get("traded", 0)}</td><td>{n}</td>'
+        f'{_net_cell(t.get("net") if n else None)}<td>{_pct(t.get("win", 0), n)}</td>{_net_cell(t.get("best"))}{_net_cell(t.get("worst"))}</tr>'
+    )
+    return f"""<h3>Graded F · running total</h3>
+<div class="scroll"><table><thead><tr><th class="l">Period</th><th>Graded-F triggers</th><th>Traded</th><th>Closed</th><th>Net</th>
+<th>Win</th><th>Best</th><th>Worst</th></tr></thead><tbody>{tot}</tbody></table></div>
+<h3>Graded F · every trigger · {len(g["rows"])}</h3>
+<div class="scroll"><table><thead><tr><th>Fired</th><th class="l">Symbol</th><th>Dir</th><th class="l">Why FUDKII graded it F</th>
+<th class="l">Targets (raw pivots when no wall)</th><th class="l">Contract</th><th>Entry</th><th class="l">Exit / why it stood aside</th><th>Net</th></tr></thead>
+<tbody>{body or '<tr><td colspan="9" class="dim">no graded-F trigger since the shadow began</td></tr>'}</tbody></table></div>"""
 
 
 def _render_gap(d: ShadowData) -> str:
@@ -527,7 +624,11 @@ WIDE_STOP = Brief(
         "with the equity stop 1% further from entry (a bullish trade's stop × 0.99, a bearish one's × 1.01) and the option "
         "stop re-projected through delta for that wider level."
     ),
-    against="RT-Y itself, with the stop as planned (it exits on the touch).",
+    against=(
+        "RT-Y itself, with the stop as planned (it exits on the touch). From 29 Sep RT-Y's option stop is also capped at 25% "
+        "of the premium and the shadow's is not, so from that date the pair differs in two rules — its own row in the "
+        "running total."
+    ),
     logic=(
         "The shadow opens only when RT-Y opens, so the two books hold exactly the same trades. Everything else is RT-Y's: the +5% "
         "arm, the rung SL one step behind, the 3% give-back, the 75 s sustain, the hard floor 9% under the option stop, the "
@@ -545,6 +646,38 @@ WIDE_STOP = Brief(
     decide=(
         "After about 50 paired trades: adopt the wide stop for RT-Y only if the shadow's total net beats RT-Y's and its "
         "worst trade is not materially deeper."
+    ),
+)
+
+GRADED_F = Brief(
+    name="Graded F · RT-Y's rules",
+    testing="Whether the triggers FUDKII grades F and does not publish make money under RT-Y's own rules.",
+    for_rule=(
+        "The shadow book RT-Y · graded F: every NSE trigger FUDKII does not publish (a SuperTrend flip with the close "
+        "through the band, graded F — mostly no wall ahead for a target — or, rarely, the session's last bar below "
+        "FUDKII's fortress floor), judged by RT-Y's gates (breadth, a key pivot "
+        "just ahead, the 09:45 gap, dried volume) and traded under RT-Y's exits with its 25% premium cap. Where no pivot "
+        "cluster makes a target, the raw pivots ahead, nearest first, are the ladder."
+    ),
+    against="Standing aside, which is what every trading book does on these triggers today.",
+    logic=(
+        "Its own entries and its own purse: RT-Y never sees these triggers, so nothing is mirrored. Its gates run first, "
+        "from what the engine already holds; only a trigger they pass goes on to the strike choice, the 4 lots under "
+        "₹75,000 and the resting limit entry, exactly as RT-Y's. The option stop is never more than 25% under the premium paid."
+    ),
+    pros=(
+        "Measured live on real quotes and fills, beside the trading books, without touching them.",
+        "Replay 1–28 Sep: 11 of 16 trades won.",
+    ),
+    cons=(
+        "Replay 1–28 Sep: −₹2,364 net on 16 trades — three losers (DIXON −13,251, BLUESTARCO −12,782, SBICARD −7,340) "
+        "outweighed eleven small winners.",
+        "A graded-F trigger has no wall ahead by definition, so its stop is often 2–4 ATR30 away; the 25% cap is what "
+        "limits the loss, not the chart.",
+    ),
+    decide=(
+        "After about 30 closed trades: offer graded-F triggers to RT-Y itself only if this book's net is positive and its "
+        "worst trade is no deeper than RT-Y's own."
     ),
 )
 
@@ -631,6 +764,7 @@ VOLUME = Brief(
 TABS: list[ShadowTab] = [
     ShadowTab("gate-b", "Gate B · RT-Y regime gate", GATE_B, _render_gate_b),
     ShadowTab("wide-stop", "Wide stop · RT-Y 1% past", WIDE_STOP, _render_wide),
+    ShadowTab("graded-f", "Graded F · RT-Y's rules", GRADED_F, _render_graded_f),
     ShadowTab("gap-fade", "Gap fade · CT-Y 09:45", GAP_FADE, _render_gap),
     ShadowTab("volume", "Volume · dried & surge", VOLUME, _render_volume),
     ShadowTab("labels", "Trigger labels", LABELS_BRIEF, _render_labels),
@@ -685,6 +819,7 @@ def render_shadow(d: ShadowData) -> str:
     ids = "[" + ",".join(f'"{t.id}"' for t in TABS) + "]"
     stood = sum(1 for r in d.rows if _gate_b_skip(r))
     wt = (d.wide or {}).get("total") or {}
+    ft = (d.graded_f or {}).get("total") or {}
     gt = (d.gap or {}).get("total") or {}
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
@@ -703,6 +838,7 @@ def render_shadow(d: ShadowData) -> str:
       <div class="tal"><b>{len(d.rows)}</b><span>triggers</span></div>
       <div class="tal"><b>{stood}</b><span>RT-Y gate-B skips</span></div>
       <div class="tal"><b>{wt.get("pairs", 0)}</b><span>wide-stop pairs</span></div>
+      <div class="tal"><b>{ft.get("traded", 0)}</b><span>graded-F trades</span></div>
       <div class="tal"><b>{gt.get("fired", 0)}</b><span>gap fades</span></div>
     </div>
   </div>
@@ -711,7 +847,7 @@ def render_shadow(d: ShadowData) -> str:
 {sections}
 <footer>
   <p><b>Paper only.</b> Every figure is from the paper books' own fills and exits, net of charges; open positions join the totals
-  when they close. A shadow book mirrors another book's entries with one rule changed, so its P&amp;L is never added to the
-  others'.</p>
+  when they close. A shadow book mirrors another book's entries with one rule changed, or trades what no trading book is
+  offered, so its P&amp;L is never added to the others'.</p>
 </footer>
 </div><script>{_TAB_JS % ids}</script></body></html>"""

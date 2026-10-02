@@ -173,7 +173,7 @@ async def test_ct_y_alone_enters_the_gap_fade_and_the_counter_route_still_runs(s
         async def capture(sig, bar, *, adopt=True):
             handled.append((sig, adopt))
 
-        async def no_legs(underlying, bar):
+        async def no_legs(underlying, bar, **_kw):
             return []
 
         e._handle_signal = capture  # type: ignore[method-assign]

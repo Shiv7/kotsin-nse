@@ -240,33 +240,56 @@ class Fudkii:
         else:
             gates.append(self.g_eod.verdict(True, note=f"phase {phase}"))
 
-        if not chain_passed(gates):
+        publish = chain_passed(gates)
+        context["parent"] = {"published": publish}
+        targets = conf.targets
+        if not publish:
+            gate = binding_gate(gates) or "unknown"
+            context["parent"].update(gate=gate, reason=next((g.note for g in gates if g.name == gate), "") or conf.note)
+            if not targets:
+                # No pivot cluster ahead makes a target (graded F, "no wall ahead"): the pivot zones
+                # ahead, nearest first, are the ladder the graded-F shadow trades to (operator,
+                # 2026-09-28: "use the raw pivots in a ladder format as a fallback"). A trigger FUDKII
+                # publishes always has its walls; its targets are never these.
+                bullish = direction is Direction.BULLISH
+                ahead = sorted((z for z in zones if (z.price > bar.close) == bullish),
+                               key=lambda z: abs(z.price - bar.close))[: cfg.grade_policy.max_targets]
+                targets = tuple(round(round(z.price / 0.05) * 0.05, 2) for z in ahead)
+                if targets:
+                    context["confluence"].update(targets=list(targets), target_zones=[",".join(z.members) for z in ahead],
+                                                 target_note="raw pivots ahead — no cluster wall")
+                    evidence["targets_from_raw_pivots"] = 1.0
+        sig = Signal(
+            strategy=self.key,
+            symbol=bar.symbol,
+            direction=direction,
+            ts=bar.ts,
+            entry=bar.close,
+            stop=conf.stop,
+            targets=targets,
+            grade=conf.grade,
+            rr=conf.rr,
+            score=score,
+            confidence=min(1.0, conf.rr / cfg.grade_policy.rr_a),
+            reason=(
+                f"ST flip {'UP' if st.trend > 0 else 'DOWN'} + close "
+                f"{'above upper' if direction is Direction.BULLISH else 'below lower'} band; "
+                f"grade {conf.grade} rr {conf.rr}"
+            ),
+            gates=tuple(gates),
+            evidence=evidence,
+            context=context,
+        )
+        if not publish:
+            # Not FUDKII's own trade — its grade (or the session's last bar below its fortress floor)
+            # is the parent's rule — but still a trigger: every twin judges it by its own rules
+            # (operator, 2026-09-28: "all strategies 'see' all these triggers always as soon as they
+            # are generated"). The rejection stays on record as the parent's.
+            out.triggers.append(sig)
             return self._reject(out, bar, direction, gates, evidence, conf.note)
 
         self.stats.record(gates)
-        out.signals.append(
-            Signal(
-                strategy=self.key,
-                symbol=bar.symbol,
-                direction=direction,
-                ts=bar.ts,
-                entry=bar.close,
-                stop=conf.stop,
-                targets=conf.targets,
-                grade=conf.grade,
-                rr=conf.rr,
-                score=score,
-                confidence=min(1.0, conf.rr / cfg.grade_policy.rr_a),
-                reason=(
-                    f"ST flip {'UP' if st.trend > 0 else 'DOWN'} + close "
-                    f"{'above upper' if direction is Direction.BULLISH else 'below lower'} band; "
-                    f"grade {conf.grade} rr {conf.rr}"
-                ),
-                gates=tuple(gates),
-                evidence=evidence,
-                context=context,
-            )
-        )
+        out.signals.append(sig)
         return out
 
     # -----------------------------------------------------------------------------------------

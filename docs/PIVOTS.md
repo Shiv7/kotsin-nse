@@ -96,7 +96,7 @@ reports `loaded / failed / refused`.
 - **One rising stop:** `ratchet_sl = max(stepped rung SL, peak − 3 % [spread-floored])`, never lowered;
   trading through it ends the trade at once. Before the T1 touch the option-side stop is the equity
   stop through **live** delta (re-projected every 10 s), with the 75 s sustain and the 9 % hard floor.
-- No bar time-stop; NSE positions flatten at 15:20 IST, MCX at 23:20.
+- No bar time-stop; NSE positions flatten at 15:20 IST (the graded-F shadow at 15:24, out by 15:25), MCX at 23:20.
 
 **Three RT books off the same fill** (`risk/limits.py`, since 2026-09-23 evening). Every FUDKII
 NSE fill is mirrored into RT-X, RT-N and RT-Y, each on its own wallet; only the exit differs.
@@ -183,6 +183,42 @@ the chain, most-traded first, and the substitution is logged (`strike.fell_back`
 
 **The exit ladder is untouched.** `Signal.stop` and `Signal.targets` are still the confluence
 engine's, for the parent and every twin; a test asserts the strike path writes neither.
+
+**A strike is chosen on a price that is known** (operator, 2026-10-01). The broker's REST snapshot
+(V1/MarketFeed) carries a last price and **never** a bid or ask (47,448 of 47,448 replies by 28 Sep).
+A strike subscribed at the trigger holds only that until the feed's first frame, about a second
+later — and the walk used to read its 0 / 0 as "one-sided" and refuse it. With the near strikes
+often too dear for 4 lots under ₹75,000, the walk lands on exactly those strikes: SONACOMS 09:45
+(770 PE 10.15 / 10.70 on the feed the same second, the stock −2.5 % by 12:26), PAYTM 13:15 and 12
+more, 28 Sep – 1 Oct. Three pieces had each covered part of it — quote the whole span (24 Sep),
+never let a snapshot wipe a two-sided quote (28 Sep), wait for the two preferred strikes only
+(28 Sep) — and none for the fallback. Now one rule replaces the preferred-only wait
+(`Engine._choose_option`):
+
+- a snapshot quote is labelled (`Quote.src`); without a bid and ask it is **unpriced**, never
+  "one-sided" — only the feed can say a book is one-sided;
+- the choice re-walks every 0.1 s while a strike **ahead of** what it would take can still be
+  priced: on the live subscription, the feed speaking, each strike at most 2 s
+  (`STRIKE_GRACE_S`), the choice at most 5 s (`QUOTE_WAIT_S`). A strike behind the choice, one off
+  the feed, or a silent feed costs nothing; a priced first choice is taken at once;
+- in the session's first minute (`OPEN_SETTLE_S`) a one-sided feed book is still filling — the
+  09:15 carry (TATASTEEL 180 PE: 0 / 0 at 09:15:03, 2.42 / 2.53 at 09:15:27) waits up to 09:16;
+- a card preview never waits; the replay (`quote_wait_s = 0`) never waits; every refused strike is
+  counted in the reason (`(+N more)`), and `quotes.awaited` logs what was waited for and why it stopped.
+
+**The delta floor for the fallback strikes — in SHADOW mode** (operator, 2026-10-01: "keep the floor in shadow mode").
+Live, the walk still takes a fallback strike under 0.20 (`SelectionPolicy.enforce_fallback_delta = False`); the choice
+carries its delta (`Selection.delta_shadow`) and the event `strike.delta_shadow` records what the enforced floor would
+have bought instead (or that it would have refused the trigger), for the comparison on outcomes. The two candidates
+are floored as they always were. The case for enforcing it: it used to guard only the two
+candidates; the fallback walk had none, and with the near strikes often too dear for 4 lots it walked far out: its
+trades under 0.20 (24 Aug – 1 Oct, 43 trades, 16 strikes on 14 names — TECHM 1620 PE, CHOLAFIN 1700, SOLARINDS 19000…)
+lost ₹1,14,096, 26 % won, −6.2 % a trade against −3.3 % above it. The floor reads the moneyness estimate
+(`estimate_delta`: 0.20 is about 3.75 % out of the money) — the option's own implied delta flagged only 12 of the 43,
+and the far strikes lost as badly where a high IV lifted it. Enforced, it is read before any price, so a strike it
+refuses is never waited for; the OTM strike nearest spot is exempt (a coarse grid — IDEA's ₹1 strikes); the card preview
+applies the same policy; and a name whose every strike within ~3.75 % costs ₹75,000 or more for 4 lots is refused by
+rule (SONACOMS 1 Oct 09:45: 790 PE ₹82.6k, 780 / 770 PE under the floor).
 
 **Depth where it is used** (operator, 2026-09-24 midday). The 09:45 staleness was never the
 exchange's: `recv_ts` was stamped when the engine got round to a frame, so "book age" measured our

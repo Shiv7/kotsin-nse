@@ -20,7 +20,7 @@ from typing import Any
 
 from ..market.session import IST
 from ..strategy.gapscore import f14_score, gap_open_class
-from ..strategy.keys import SHADOW_OF
+from ..strategy.keys import SHADOW_BOOKS
 from ..strategy.regime_gates import MISSED_GATES
 
 TTL_HOURS = 24
@@ -143,7 +143,10 @@ def assemble(
 
     out: list[dict[str, Any]] = []
     for sig in sorted(signals, key=lambda s: s["ts"]):
-        if sig.get("strategy") != "FUDKII":
+        # FUDKII's signals only: a trigger it graded F and did not publish (NOT_PUBLISHED) is no
+        # signal of the day's and no refusal either — the graded-F shadow's trades on it are on the
+        # Shadow page (review, 2026-09-28)
+        if sig.get("strategy") != "FUDKII" or sig.get("decision") == "NOT_PUBLISHED":
             continue
         conf = (sig.get("context") or {}).get("confluence") or {}
         zones = (sig.get("context") or {}).get("zones") or []
@@ -281,7 +284,8 @@ def ab_summary(*, signals: list[dict], positions: list[dict], trades: list[dict]
     in total. Pure: rows in, summary out. A trigger RT-Y stood aside from is judged by what the
     ungated books made on it — the nearest thing to a counterfactual the ledger holds. Only closed
     trades count; an open position joins the tally when it closes."""
-    parents = {s["signal_id"]: s for s in signals if s.get("strategy") == "FUDKII"}
+    # the triggers RT-Y judges: FUDKII's published signals, not the ones it graded F (NOT_PUBLISHED)
+    parents = {s["signal_id"]: s for s in signals if s.get("strategy") == "FUDKII" and s.get("decision") != "NOT_PUBLISHED"}
     breadth = {e["signal_id"]: e for e in events if e.get("kind") == "regime.breadth" and e.get("signal_id")}
     gated = {e["signal_id"]: e["gate"] for e in events
              if e.get("kind") == "rt_twin.skipped" and e.get("book") == "FUDKII_RT_Y" and e.get("gate") in RT_Y_GATES}
@@ -388,9 +392,9 @@ def render(rows: list[dict[str, Any]], ticket: Ticket, ab: dict[str, Any] | None
     counts = {"filled": 0, "refused": 0, "blocked": 0}
     for r in rows:
         counts[_bucket(r["decision"])] += 1
-    # a shadow book re-trades another book's entries with one rule changed — counting it would
-    # count those trades twice
-    shadows = {k.value for k in SHADOW_OF}
+    # a shadow book is a comparison, not a trading book: the wide-stop one re-trades RT-Y's entries
+    # (counting it would count them twice), the graded-F one trades what no trading book is offered
+    shadows = {k.value for k in SHADOW_BOOKS}
     net = sum(f["net"] or 0 for r in rows for f in r["fills"] if f.get("net") is not None and f["book"] not in shadows)
     fills = [(r, f) for r in rows for f in r["fills"]]
 

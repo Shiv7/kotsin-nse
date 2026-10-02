@@ -179,6 +179,15 @@ class RiskLimits:
     #: shadows (the "1 % past" test, operator 2026-09-26). The option stop is re-projected for the
     #: wider level. None = the stop as planned.
     equity_stop_buffer_pct: float | None = None
+    #: A planned underlying stop nearer than this many ATR30 to the trigger's close is moved out to it at
+    #: the fill, and the option stop re-projected for it (``Engine._floor_equity_stop``). Stop study,
+    #: 2026-10-01: HDFCLIFE's stop sat 0.18 ATR30 under the close, a print AT it stopped every book at
+    #: 09:56:33 and the call then ran 14.60 -> 18.20; grace on the trigger (a 75 s sustain, a 1-minute
+    #: close, a buffer) did not save it — the option stop is the same level through delta — and hurt
+    #: real breakdowns. On RT-Y: Aug engine replay +2,830, Aug-Sep model +1.8k, live 28 Sep - 1 Oct
+    #: HDFCLIFE +7,535 against -2,200; never a worse worst trade (the 25 % premium cap still binds).
+    #: None = the stop as planned.
+    min_equity_stop_atr: float | None = None
 
     def position_budget(self, balance: float) -> float:
         return min(balance * self.max_position_pct / 100, self.max_position_inr)
@@ -266,7 +275,18 @@ RT_Y_LIMITS = RiskLimits(
     breadth_min=0.5,           # paper A/B: RT-Y gated, RT-X / RT-N not (2026-09-25)
     skip_pivot_ahead_atr=0.5,  # gate B (2026-09-26): a key pivot within 0.5 ATR30 ahead
     skip_open_gap_datr=0.3,    # gate B: a 09:45 trigger that gapped >= 0.3 daily ATR its own way
+    min_equity_stop_atr=None,  # built and validated at RT_Y_STOP_FLOOR_ATR; OFF until the operator says (2026-10-01)
+    # the option stop never more than 25 % under the premium paid (operator, 2026-09-28: "execute and
+    # make live: RT-Y 25% premium cap on normal trades"). Replay 1–28 Sep, fresh purses: 28 trades,
+    # ₹16,973 → ₹19,732 (SRF +1,844, IRFC +1,300, COLPAL −385). RT-Y's alone: the wide-stop shadow
+    # and CT-Y inherit these limits and switch it off below.
+    max_premium_loss_pct=25.0,
 )
+
+#: RT-Y's underlying-stop floor, validated by the 1 Oct stop study (``min_equity_stop_atr``) — not
+#: switched on: the operator has not decided (2026-10-01). Turning it on is RT_Y_LIMITS'
+#: ``min_equity_stop_atr=RT_Y_STOP_FLOOR_ATR``; RT-Y-F, CT-Y and the wide shadow stay off either way.
+RT_Y_STOP_FLOOR_ATR = 0.5
 
 #: The commodity book: RT-X's policy with the sizing it always had — up to 4 lots within the risk
 #: and position budgets. The NSE books' fixed 4 lots under ₹75,000 is not for MCX (operator,
@@ -279,6 +299,8 @@ CT_X_LIMITS = replace(RT_X_LIMITS, dried_volume_v=None)
 CT_Y_LIMITS = replace(
     RT_Y_LIMITS, dried_volume_v=None, breadth_min=None, skip_pivot_ahead_atr=None, skip_open_gap_datr=None,
     gap_fade_datr=0.3,  # CT-Y fades the 09:45 gap-with triggers RT-Y stands aside from (2026-09-26)
+    max_premium_loss_pct=None,  # RT-Y's 25 % cap is RT-Y's (2026-09-28), not the fade's
+    min_equity_stop_atr=None,   # so is its stop floor (2026-10-01): a fade's stop is its own plan's
 )
 
 #: The wide-stop shadow (operator, 2026-09-26: ""1% past" looks good this week — can we shadow
@@ -286,4 +308,13 @@ CT_Y_LIMITS = replace(
 #: Sep 1–25 replay on gate-B trades: 1–18 Sep +0.43 % against +1.14 % on the touch, 19–25 Sep
 #: +6.30 % against +3.90 % — unproven (+0.44 ± 1.86 points over the month), worst trade −41 %
 #: against −35 %. It only mirrors RT-Y, so RT-Y's entry gates are its gates.
-RT_Y_W1_LIMITS = replace(RT_Y_LIMITS, equity_stop_buffer_pct=1.0)
+RT_Y_W1_LIMITS = replace(RT_Y_LIMITS, equity_stop_buffer_pct=1.0,
+                         max_premium_loss_pct=None,  # a capped stop is not a wider one (2026-09-28)
+                         min_equity_stop_atr=None)   # the PLAN's stop 1 % further, as always (1 Oct check)
+
+#: The graded-F shadow (operator, 2026-09-28: "keep 'Graded-F triggers for RT-Y (with the raw-pivot
+#: ladder)' as shadow book"): RT-Y's rules exactly — its gates, its exits, its 25 % premium cap — on
+#: the triggers FUDKII grades F and does not publish, which RT-Y itself never sees. Its own purse,
+#: kept off the trading tabs and shown on the Shadow page. Replay 1–28 Sep (inside RT-Y's purse):
+#: 16 trades, 11 won, −₹2,364 — DIXON −13,251, BLUESTARCO −12,782, SBICARD −7,340.
+RT_Y_F_LIMITS = replace(RT_Y_LIMITS, min_equity_stop_atr=None)  # RT-Y's floor is not the shadow's (mixed in the study)

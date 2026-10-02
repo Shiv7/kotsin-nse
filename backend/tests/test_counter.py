@@ -154,7 +154,7 @@ async def test_a_counter_route_enters_ct_x_through_the_ordinary_entry_path(setti
     from kotsin_nse import engine as engine_mod
     monkeypatch.setattr(engine_mod, "atr", lambda bars, n: 2.0)  # ATR30m for the test
 
-    async def no_future(underlying):
+    async def no_future(underlying, **_kw):
         return None
 
     e._fut_context = no_future  # type: ignore[method-assign]

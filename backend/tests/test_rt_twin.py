@@ -86,7 +86,7 @@ async def test_a_commodity_trigger_goes_to_the_mcx_book_alone_and_fukaa_trades_o
     e = await _paper(settings)
     try:
         fut = Instrument("482", "CRUDEOIL", Segment.MCX_FO, InstrumentKind.FUTURE, lot_size=100,
-                         multiplier=100, expiry="2026-10-19", underlying="CRUDEOIL")
+                         multiplier=100, expiry="2099-12-31", underlying="CRUDEOIL")
         await _trigger(e, fut, fut, premium=5.0, entry=5.0, stop=4.9, targets=(5.3,))
         assert [p.strategy for p in e.positions.values()] == ["FUDKII_RT_MCX"]
 
@@ -239,7 +239,7 @@ async def test_a_dry_front_future_skips_even_when_the_equity_bar_is_live(setting
         eq = _bars30("RELIANCE", "2885", [10_000.0] * 6 + [25_000.0, 15_000.0])
         e.store.seed("RELIANCE", "30m", eq)
         fut = Instrument("68781", "RELIANCE", Segment.NSE_FO, InstrumentKind.FUTURE, lot_size=250,
-                         expiry="2026-09-29", underlying="RELIANCE")
+                         expiry="2099-12-31", underlying="RELIANCE")
         e.catalogue_loader.catalogue.futures_by_symbol["RELIANCE"] = [fut]
         asked: list[tuple] = []
 

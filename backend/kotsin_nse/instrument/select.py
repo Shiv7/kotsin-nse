@@ -51,6 +51,10 @@ class SelectionPolicy:
     #: out, on 0.15 delta; buying that is buying where positions are parked, not where the thesis
     #: pays. Applied only to the two candidates, never to the fallback walk.
     min_delta: float = 0.20
+    #: the floor for the strikes the walk falls back to (all but the two candidates, which are always
+    #: floored): False = SHADOW — the strike is still taken and the choice carries its delta
+    #: (``Selection.delta_shadow``); True = refused (operator, 2026-10-01: "keep the floor in shadow mode")
+    enforce_fallback_delta: bool = False
     #: how far the further strike must beat the nearer one on every liquidity measure before its
     #: lower delta is accepted. HAVELLS the same day: 10 % more open interest for a quarter less
     #: delta is a bad trade; 2-3x more is not.
@@ -64,6 +68,16 @@ class Selection:
     reason: str = ""
     anchor: float = 0.0
     spread_pct: float | None = None
+    #: strikes the walk passed over, in its order, ahead of the choice (all of them when there is
+    #: none), because their price was not KNOWN: no quote, a stale one, or only a broker snapshot —
+    #: which never carries a bid or ask. A live frame may still answer for them (``Engine._choose_option``).
+    unpriced: tuple[str, ...] = ()
+    #: strikes passed over, ahead of the choice, because the FEED showed one side only — a fact
+    #: intraday; in the session's first minute, a book that has not filled yet
+    one_sided: tuple[str, ...] = ()
+    #: the chosen strike's estimated delta when it sits under ``min_delta`` and the fallback floor is
+    #: in shadow mode — the strike an enforced floor would have refused; None otherwise
+    delta_shadow: float | None = None
 
     @property
     def ok(self) -> bool:
@@ -76,6 +90,15 @@ class Quote:
     bid: float
     ask: float
     ts: float
+    #: where the quote came from: the live feed, or a broker REST "snapshot" — whose bid and ask are
+    #: always 0 (every one of 47,448 replies logged by 2026-09-28), so it prices nothing: a strike
+    #: holding only a snapshot is UNPRICED, never "one-sided" (SONACOMS 770 PE, 2026-10-01 09:45:08:
+    #: 10.15 / 10.70 on the feed a second later; 14 triggers refused that way 28 Sep - 1 Oct)
+    src: str = "feed"
+
+    @property
+    def priced(self) -> bool:
+        return self.bid > 0 and self.ask > 0
 
     @property
     def mid(self) -> float:
@@ -259,13 +282,36 @@ def select_option(
         pool = sorted(pool, key=lambda i: abs(i.strike - anchor))
 
     skipped: list[str] = []
+    unpriced: list[str] = []
+    one_sided: list[str] = []
+    # The delta floor holds for EVERY strike the walk may take, not only the two candidates (operator,
+    # 2026-10-01): the fallback walk had none, and its trades under it (24 Aug - 1 Oct: 43 trades, 16
+    # strikes on 14 names) lost ₹1,14,096 — 26 % won, -6.2 % a trade against -3.3 % above it. Read
+    # before any price, so a strike it refuses is never waited for. The OTM strike nearest spot is
+    # exempt: on a coarse grid (IDEA's ₹1 strikes) it is as near as the chain goes.
+    nearest = min(otm, key=lambda i: abs(i.strike - spot)).scrip_code if otm else None
     for inst in pool:
+        under: float | None = None
+        if pol.min_delta and otm and inst.scrip_code != nearest:
+            d = estimate_delta(spot=spot, strike=inst.strike, option_type=want)
+            if d < pol.min_delta:
+                if pol.enforce_fallback_delta:
+                    skipped.append(f"{inst.strike:g}:delta-{d:.2f}<{pol.min_delta:g}")
+                    continue
+                under = round(d, 3)  # shadow: taken, and marked
         q = quotes.get(inst.scrip_code)
         if q is None:
             skipped.append(f"{inst.strike:g}:no-quote")
+            unpriced.append(inst.scrip_code)
             continue
         if now - q.ts > pol.max_quote_age_s:
             skipped.append(f"{inst.strike:g}:stale-{int(now - q.ts)}s")
+            unpriced.append(inst.scrip_code)
+            continue
+        if q.src == "snapshot" and not q.priced:
+            # the broker's snapshot has a last price and no book: not known to be one-sided
+            skipped.append(f"{inst.strike:g}:unpriced")
+            unpriced.append(inst.scrip_code)
             continue
         premium = q.mid
         if premium < pol.min_premium:
@@ -277,6 +323,7 @@ def select_option(
         spread = q.spread_pct
         if spread is None:
             skipped.append(f"{inst.strike:g}:one-sided")
+            one_sided.append(inst.scrip_code)
             continue
         if pol.outlay_lots and pol.outlay_under_inr is not None:
             cost = premium * inst.lot_size * inst.multiplier * pol.outlay_lots
@@ -287,11 +334,13 @@ def select_option(
             skipped.append(f"{inst.strike:g}:spread-{spread:.1f}%")
             continue
         return Selection(inst, premium=premium, anchor=anchor, spread_pct=spread,
-                         reason=f"ok ({note})" if note else "ok")
+                         reason=f"ok ({note})" if note else "ok", unpriced=tuple(unpriced), one_sided=tuple(one_sided),
+                         delta_shadow=under)
+    more = f" (+{len(skipped) - 6} more)" if len(skipped) > 6 else ""
     return Selection(
         None,
-        reason="no tradeable strike: " + ", ".join(skipped[:6]),
-        anchor=anchor,
+        reason="no tradeable strike: " + ", ".join(skipped[:6]) + more,
+        anchor=anchor, unpriced=tuple(unpriced), one_sided=tuple(one_sided),
     )
 
 

@@ -128,10 +128,19 @@ class Outcome:
 
     signals: list[Signal] = field(default_factory=list)
     rejections: list[Rejection] = field(default_factory=list)
+    #: triggers the strategy does NOT publish as its own signal but its twins still judge for
+    #: themselves (FUDKII: a flip + break its confluence grades F) — ``context["parent"]`` says why
+    triggers: list[Signal] = field(default_factory=list)
 
     def extend(self, other: Outcome) -> None:
         self.signals.extend(other.signals)
         self.rejections.extend(other.rejections)
+        self.triggers.extend(other.triggers)
+
+
+def published(sig: Signal) -> bool:
+    """Did the signal's own strategy publish it (as opposed to passing it on as a bare trigger)?"""
+    return bool(((sig.context or {}).get("parent") or {}).get("published", True))
 
 
 class Context(Protocol):

@@ -132,7 +132,10 @@ def test_a_market_median_t1_of_0002_is_a_broken_bar_not_a_quiet_market():
     assert market_volume(1, live_shaped[:20]).alarm == "", "too few names to judge the market"
 
 
-def test_every_reading_at_an_alarmed_bar_is_doubtful_and_the_health_line_says_so(settings):
+def test_every_reading_at_an_alarmed_bar_is_doubtful_and_the_health_line_says_so(settings, monkeypatch):
+    import kotsin_nse.engine as engine_mod
+
+    monkeypatch.setattr(engine_mod, "ist_today", lambda: MON)  # the market check judges today's bars: today is the data's day
     e = Engine(settings)
     e.calendar = CAL
     # 60 names shaped like 2026-09-28 09:45: the post-close bar in T-1 (the old ingestion let it in)
@@ -239,7 +242,7 @@ async def test_the_future_context_snaps_rows_onto_the_grid_and_rewrites_their_ti
     """TATAPOWER SEP 2026-09-07 ``10:46`` (146,450 shares) is the 10:45 bucket; the readers compare
     ``dt`` with the trigger bucket as a string, so the stamp must become the bucket."""
     e = Engine(settings)
-    fut = Instrument("68534", "HDFCBANK", Segment.NSE_FO, InstrumentKind.FUTURE, lot_size=650, expiry="2026-10-27", underlying="HDFCBANK")
+    fut = Instrument("68534", "HDFCBANK", Segment.NSE_FO, InstrumentKind.FUTURE, lot_size=650, expiry="2099-12-31", underlying="HDFCBANK")
     rows = [{"dt": "2026-09-25T15:16:00", "o": 1, "h": 1, "l": 1, "c": 1, "v": 500},
             {"dt": "2026-09-25T15:45:00", "o": 1, "h": 1, "l": 1, "c": 1, "v": 3},  # after the close: no bar
             {"dt": "2026-09-28T09:16:00", "o": 1, "h": 1, "l": 1, "c": 1, "v": 7},
@@ -253,7 +256,7 @@ async def test_the_future_context_snaps_rows_onto_the_grid_and_rewrites_their_ti
 async def test_a_futures_bucket_with_no_row_at_all_is_rebuilt_from_its_1m_candles(settings):
     e = Engine(settings)
     e.calendar = CAL
-    fut = Instrument("68795", "TATAPOWER", Segment.NSE_FO, InstrumentKind.FUTURE, lot_size=1450, expiry="2026-09-29", underlying="TATAPOWER")
+    fut = Instrument("68795", "TATAPOWER", Segment.NSE_FO, InstrumentKind.FUTURE, lot_size=1450, expiry="2099-12-31", underlying="TATAPOWER")
     day = date(2026, 9, 7)
     grid = [f"{h:02d}:{m:02d}" for h in range(9, 16) for m in (15, 45) if "09:15" <= f"{h:02d}:{m:02d}" <= "15:15"]
     prev = date(2026, 9, 4)

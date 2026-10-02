@@ -315,7 +315,15 @@ def fade_refusal(
     bullish = sig.direction is not Direction.BULLISH
     conf = compute_confluence(close=sig.entry, bullish=bullish, zones=zones, atr_value=atr, tick_size=tick_size, policy=policy)
     out = {"grade": conf.grade, "rr": round(conf.rr, 2), "stop": conf.stop, "targets": list(conf.targets), "note": conf.note}
-    if not conf.targets:
+    if not conf.targets and "inside one bar's noise" in (conf.note or ""):
+        # refused on its STOP, before any target was looked for: the walls ahead may well be there
+        # (KALYANKJIL 2026-09-29 09:45: 1wk.PIVOT 0.83 above the close as the stop, 0.20 ATR; the 12.0,
+        # 5.2 and 7.2 walls below it were the targets CT-Y's gap fade traded to — the log said "no wall")
+        out["reason"] = (
+            f"the fade's stop {conf.stop:g} ({conf.stop_zone or 'nearest level'}) is {abs(conf.stop - sig.entry):.2f} from the close — "
+            f"{conf.note}; its targets were not looked for"
+        )
+    elif not conf.targets:
         out["reason"] = "no wall ahead on the fade's side to aim a target at" + (f" ({conf.note})" if conf.note else "")
     elif conf.stop <= 0:
         out["reason"] = "no level behind the close to put the fade's stop on"

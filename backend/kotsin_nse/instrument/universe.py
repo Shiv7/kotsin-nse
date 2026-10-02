@@ -53,6 +53,11 @@ class UniversePolicy:
     include_indices: bool = True
     #: MCX bands are wider (scripFinder passed caller-supplied factors for commodities)
     mcx_band_pct: float = 20.0
+    #: An MCX future this many calendar days or fewer from expiry is not the one read or traded: the
+    #: next month is (operator, 2026-09-30). On 29 Sep ALUMINIUM's expiring contract traded 53 lots
+    #: against 1,438 in the next month, and its "breakout" to 353.00 came while the traded month fell
+    #: 345.60 → 343.45. 0 = off (the nearest unexpired contract, to its last day).
+    mcx_roll_days: int = 5
 
 
 @dataclass(slots=True)
@@ -116,6 +121,11 @@ class UniverseBuilder:
             for f in self.cat.futures_by_symbol.get(root, [])
             if f.segment is segment and f.expiry >= t
         ]
+        if segment is Segment.MCX_FO and self.policy.mcx_roll_days > 0:
+            # the roll: a contract in its last days is left for the next month — never all of them
+            later = [f for f in rows if (date.fromisoformat(f.expiry) - today).days > self.policy.mcx_roll_days]
+            if later:
+                rows = later
         return sorted(rows, key=lambda f: f.expiry)[: self.policy.futures_count]
 
     def build_underlyings(self, segments: Iterable[Segment], today: date) -> dict[str, ScripGroup]:

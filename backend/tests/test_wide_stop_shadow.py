@@ -64,7 +64,11 @@ def test_the_shadow_is_rt_y_with_one_number_changed():
     assert RT_Y_W1_LIMITS.equity_stop_buffer_pct == 1.0 and RT_Y_LIMITS.equity_stop_buffer_pct is None
     from dataclasses import replace
 
-    assert replace(RT_Y_W1_LIMITS, equity_stop_buffer_pct=None) == RT_Y_LIMITS, "every other exit rule is RT-Y's"
+    assert RT_Y_LIMITS.max_premium_loss_pct == 25.0 and RT_Y_W1_LIMITS.max_premium_loss_pct is None, "a capped stop is not a wider one"
+    # its stop is the PLAN's, 1 % further — never RT-Y's floored one, should that be switched on (2026-10-01)
+    assert RT_Y_W1_LIMITS.min_equity_stop_atr is None
+    assert replace(RT_Y_W1_LIMITS, equity_stop_buffer_pct=None, max_premium_loss_pct=25.0,
+                   min_equity_stop_atr=RT_Y_LIMITS.min_equity_stop_atr) == RT_Y_LIMITS, "every other exit rule is RT-Y's"
 
 
 @pytest.mark.asyncio

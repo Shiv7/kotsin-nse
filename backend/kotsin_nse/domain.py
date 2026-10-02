@@ -240,6 +240,8 @@ class Position:
     #: FUDKII-RT exit state. ``breach_since`` is the start of a *continuous* option-side
     #: breach — cleared on recovery, paused (not cleared) when the quote is missing.
     breach_since: float | None = None
+    #: the underlying's ATR30 at the fill — what the stop floor (``min_equity_stop_atr``) is measured in
+    equity_atr: float = 0.0
     #: highest option MID seen since the watermark armed, and how many consecutive reads have
     #: sat below the give-back level.
     peak_mid: float = 0.0

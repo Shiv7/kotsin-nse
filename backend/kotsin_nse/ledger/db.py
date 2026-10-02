@@ -424,7 +424,9 @@ class Ledger:
         return {r["strategy"]: dict(r) for r in rows}
 
     async def last_signal(self, strategy: str) -> dict[str, Any] | None:
-        rows = await self.recent(signals, 1, order_col="ts", where=signals.c.strategy == strategy)
+        # a trigger the strategy did not publish (NOT_PUBLISHED, 2026-09-28) is not its last signal
+        where = sa.and_(signals.c.strategy == strategy, signals.c.decision != "NOT_PUBLISHED")
+        rows = await self.recent(signals, 1, order_col="ts", where=where)
         return rows[0] if rows else None
 
     async def signal(self, signal_id: str) -> dict[str, Any] | None:

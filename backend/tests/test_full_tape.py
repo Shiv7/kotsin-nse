@@ -61,7 +61,7 @@ def test_the_engine_records_the_feed_and_leaves_mcx_off(settings):
 
     e = Engine(settings)
     assert e.fulltape.enabled and e.fulltape.keep_days == 60 and settings.tape_full_flush_s == 120
-    crude = Instrument("482", "CRUDEOIL", Segment.MCX_FO, InstrumentKind.FUTURE, lot_size=100, expiry="2026-10-17", underlying="CRUDEOIL")
+    crude = Instrument("482", "CRUDEOIL", Segment.MCX_FO, InstrumentKind.FUTURE, lot_size=100, expiry="2099-12-31", underlying="CRUDEOIL")
     e.catalogue_loader.catalogue.by_code["482"] = crude
     assert e._fulltape_skip("482") is True and e._fulltape_skip("2885") is False
 
