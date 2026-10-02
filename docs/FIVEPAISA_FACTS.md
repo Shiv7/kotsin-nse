@@ -52,6 +52,19 @@ Intervals: `1m 3m 5m 10m 15m 30m 60m 1d`. Timestamps are **naive IST**. The APIM
 ships inside `py5paisa`; it identifies the API product, not the user, and the host rejects the
 request without it.
 
+**The 30m history gets the closing auction wrong** (measured 2026-10-02). An NSE stock's 15:15 bar is its
+closing auction — one print at the official close (open = high = low = close); the live build gets it right.
+The historical endpoint gets it wrong two ways: it **drops** the bucket for 4–18 of the NIFTY50 on a given day,
+and the rows it does serve are a **stray trade after the auction** — 1,599 of 1,773 held for past days were not
+the official close (median 0.25 % off, up to 3.4 %, on 1–500 shares; TATASTEEL 30 Sep: 185.69 on 161 shares
+against the 184.30 close). FUDKII's SuperTrend / Bollinger read that bar: replaying 25 Sep – 1 Oct with it set
+right changed 44 trades. So (`Engine._set_closing_auction_bars`): at boot and after every daily refresh (08:30
+sets yesterday's before the open), every stock session with its 14:45 bar gets its 15:15 bar set to the daily
+candle's official close (the end-of-day row stamped at midnight, never the provisional 09:15 one), its volume
+from the engine's minute archive where that day was recorded; today's once the session has closed and that row
+exists. At 15:30 the bar-close check keeps the live build's auction print and does not install the broker's row
+over it. Indices are left alone — their last bar is a real bar.
+
 ## Market-data WebSocket
 
 **It is a snapshot feed, not a tape.** Measured on the first live MCX session (2026-09-21): ~6.5

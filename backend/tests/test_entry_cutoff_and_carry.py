@@ -26,6 +26,11 @@ from .test_wide_stop_shadow import UND, _rt_y_trigger
 DAY = date(2026, 9, 29)  # a Tuesday
 
 
+
+#: how far ahead the ledger is read: a carried trigger is stamped at the NEXT session's open, which a
+#: Friday or a holiday eve puts more than two days away (the 2 Oct 2026 holiday broke a 2-day window)
+AHEAD = 10 * 86_400
+
 def _at(hms: str, d: date = DAY) -> float:
     return from_ist(datetime.combine(d, dtime.fromisoformat(hms), tzinfo=IST))
 
@@ -154,7 +159,7 @@ async def test_a_carried_trigger_enters_the_in_trend_books_on_its_first_print_at
         carried = e._signals_today[next(iter(e.positions.values())).signal_id]
         assert carried.ts == int(open_ts) - 1800 and carried.entry == 1505.0, "the 08:45 slot (its card reads 09:15), entered at the open"
         assert carried.context["carried"] == {"from": trig.signal_id, "firstPrint": 1505.0, "where": "in favour", "prevClose": 1500.0}
-        done = [r for r in await e.ledger.rows_between("events", 0, time.time() + 2 * 86_400) if r.get("kind") == "carry.done"]
+        done = [r for r in await e.ledger.rows_between("events", 0, time.time() + AHEAD) if r.get("kind") == "carry.done"]
         assert len(done) == 1 and done[0]["where"] == "in favour"
         e._carry_day = None  # a restart during the open
         await e._carry_tick(open_ts + 10)
@@ -179,7 +184,7 @@ async def test_a_carried_trigger_that_opens_through_its_stop_is_dropped(settings
     try:
         await _queue_and_open(e, _close_trigger(e, sig), 1488.0)  # opened through the stop
         assert not e.positions
-        dropped = [r for r in await e.ledger.rows_between("events", 0, time.time() + 2 * 86_400) if r.get("kind") == "carry.dropped"]
+        dropped = [r for r in await e.ledger.rows_between("events", 0, time.time() + AHEAD) if r.get("kind") == "carry.dropped"]
         assert len(dropped) == 1 and "through the stop" in dropped[0]["why"]
     finally:
         await e.stop()
@@ -193,7 +198,7 @@ async def test_a_carried_trigger_whose_stock_does_not_print_expires(settings):
         assert len(e._carry_pending) == 1, "waits for the first print"
         await e._carry_tick(open_ts + 301)
         assert not e._carry_pending and not e.positions
-        exp = [r for r in await e.ledger.rows_between("events", 0, time.time() + 2 * 86_400) if r.get("kind") == "carry.expired"]
+        exp = [r for r in await e.ledger.rows_between("events", 0, time.time() + AHEAD) if r.get("kind") == "carry.expired"]
         assert len(exp) == 1
     finally:
         await e.stop()
@@ -207,7 +212,7 @@ async def test_an_unpublished_carried_trigger_goes_to_the_graded_f_shadow_alone(
         await _queue_and_open(e, trig, 1505.0)
         assert [p.strategy for p in e.positions.values()] == ["FUDKII_RT_Y_F"]
         carried_id = next(iter(e.positions.values())).signal_id
-        rows = [r for r in await e.ledger.rows_between("signals", 0, time.time() + 2 * 86_400) if r["signal_id"] == carried_id]
+        rows = [r for r in await e.ledger.rows_between("signals", 0, time.time() + AHEAD) if r["signal_id"] == carried_id]
         assert rows and rows[-1]["decision"] == "NOT_PUBLISHED" and rows[-1]["decision_reason"].startswith("carried")
     finally:
         await e.stop()

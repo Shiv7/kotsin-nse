@@ -12,6 +12,25 @@ doc_verified:   2026-09-20
 
 # FUKAA
 
+## 0. Status (operator, 2026-10-02): inputs fixed, running in SHADOW
+
+An audit of its first 229 live decisions (22 Sep – 1 Oct) found FUKAA could never trade: its best
+possible composite was 30 + 5 + 0 + 15 = 50 against a floor of 60. Fixed in phase30:
+
+| input | was | now |
+|---|---|---|
+| OI change | the broker's `oi_change_pct` — 0.0 on every frame (824,031 of 824,031 on 1 Oct), scored as a real 0 % (5 pts); the ref-OI gate could never pass | computed from the OI level against the previous session's close (`bars/oi_read.py`): the current month, the current + next month **summed** in the contract's last three sessions; stale (> 5 min), unreferenced or missing = **doubtful**, never 0. Also as a z-score against the NIFTY50's cross-section (`Engine.oi_relative`) |
+| momentum | ATR(14) over the 10-bar volume window → never computed → 0 | ATR(14) over 60 bars (the engine's ATR30) |
+| volume | the last 10 bars by list position, so a dropped 15:15 bar shifted T-1 and the baseline (SBILIFE 24 Sep read 0; JINDALSTEL 30 Sep read 14:45 as T-1) | the engine's checked reading (`bars/volume_read.py`, by session slot, the 15:15 auction out, missing / zero / flagged = doubtful); plus, logged, its ratio to the NIFTY50's mean surge at the same bar (09:45 triggers passed the 4x test 43 % of the time, later bars 18 %) |
+| T+1 promotion | entry moved to T+1's close, RR kept from the trigger, no stop check (MANAPPURAM 24 Sep promoted above its stop at RR 9.4) | priced at T+1's close, RR recomputed, refused through the stop (gate `stop_side`) |
+| a stock's bar OI | whichever of the near / next month printed last | the front month only |
+
+A required input that cannot be read fails its gate closed **with the reason** in the gate note.
+`FukaaConfig.shadow = True`: an admitted signal is recorded (`SHADOW` row, `fukaa.shadow` event with every
+input) and never traded. The thresholds (4x volume, 150 / 300 OI scoring, 5 % ref OI) are unchanged and
+are to be re-fitted on these readings before it may trade (the 150 / 300 OI bands are not a scale an OI
+change reaches).
+
 ## 1. Thesis
 
 A SuperTrend flip with a Bollinger break is a real event, but base FUDKII takes it whether or not

@@ -36,7 +36,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..bars.indicators import atr, volume_surges
+from ..bars.indicators import atr
 from ..bars.unified import UnifiedBar
 from ..domain import Direction
 from .base import Context, Outcome, Rejection, Signal
@@ -70,7 +70,13 @@ class FukaaConfig:
     top_n: int | None = None
     max_same_direction: int | None = None
     atr_period: int = 14
+    #: the bars the momentum ATR is taken over — the engine's standard 60 (an ATR(14) needs 15; the
+    #: volume window of 10 it was handed never had them, so momentum never scored)
+    atr_bars: int = 60
     promote_on_t_plus_1: bool = True
+    #: SHADOW (operator, 2026-10-02: "keep FUKAA in shadow"): its decisions are recorded with every
+    #: input and never traded, until its thresholds are re-fitted on these readings
+    shadow: bool = True
 
 
 @dataclass(slots=True)
@@ -104,6 +110,7 @@ class Fukaa:
         self.g_rr = Gate("rr", OnMissing.FAIL_CLOSED)
         self.g_refoi = Gate("ref_oi", OnMissing.FAIL_CLOSED, required=self.cfg.require_ref_oi)
         self.g_tier = Gate("conviction_tier", OnMissing.FAIL_CLOSED)
+        self.g_stop_side = Gate("stop_side", OnMissing.FAIL_CLOSED)
 
     def multiplier(self, exchange: str) -> float:
         return {
@@ -151,17 +158,26 @@ class Fukaa:
     def _evaluate(
         self, ctx: Context, bar: UnifiedBar, *, base: Signal | None, watching: Watching | None
     ) -> Outcome:
+        """Every input read fresh and checked (operator, 2026-10-02 — the audit found two dead and two
+        wrong): the volume from the engine's checked reading (slots, the 15:15 auction out, a missing
+        or zero bar DOUBTFUL — it read positions in a list, so a dropped 15:15 bar shifted the
+        window); the OI change computed from the OI level (the broker's field is 0.0 on every frame
+        and was scored as a real 0 %); momentum on an ATR that has its bars (14 needs 15; it was
+        handed 10, so it never scored); a T+1 promotion priced at the bar it enters on (its RR was the
+        trigger's, and MANAPPURAM 24 Sep was promoted above its own stop). A required input that
+        cannot be read fails its gate closed and says why — never a fabricated zero."""
         cfg = self.cfg
         out = Outcome()
         src = base or watching
         if src is None:
             return out
         direction = src.direction
+        bull = direction is Direction.BULLISH
         exchange = ctx.exchange(bar.symbol)
         mult = self.multiplier(exchange)
         th = thresholds_for(exchange)
 
-        hist = list(ctx.bars(bar.symbol, bar.tf, cfg.avg_bars + 4))
+        hist = list(ctx.bars(bar.symbol, bar.tf, cfg.atr_bars))
         gates: list[GateResult] = [
             self.g_history.evaluate(
                 float(len(hist)),
@@ -173,23 +189,35 @@ class Fukaa:
         if not chain_passed(gates):
             return self._reject(out, bar, direction, gates, {}, "insufficient history", src)
 
-        vols = [b.volume for b in hist]
-        surge_t, surge_t1, baseline = volume_surges(
-            vols, window=cfg.avg_bars, floor=cfg.avg_volume_floor
-        )
+        vr = ctx.volume_reading(bar.symbol, bar.ts)
+        surge_t, surge_t1, baseline = (vr.surge_t, vr.surge_t1, vr.baseline) if vr.ok else (None, None, vr.baseline)
         best = max((s for s in (surge_t, surge_t1) if s is not None), default=None)
         passed_candle = "T" if (surge_t is not None and best == surge_t) else "T-1"
+        n50_surge, n50_n = ctx.market_volume_surge(bar.ts)
+        rel_volume = best / n50_surge if (best is not None and n50_surge) else None
 
         a = atr(hist, cfg.atr_period) if len(hist) > cfg.atr_period else None
         price_over_atr = (abs(bar.close - bar.open) / a) if (a and a > 0) else None
-        rr = src.rr  # both Signal and Watching carry the confluence RR
+
+        oi = ctx.oi_reading(bar.symbol)
+        oi_change = oi.change_pct if oi.ok else None
+        oi_z, oi_peers = ctx.oi_relative(bar.symbol) if oi.ok else (None, 0)
+
+        # the entry this signal would take, and its RR there: a promotion enters on T+1's close
+        entry, rr = src.entry, src.rr
+        stop_room: float | None = None
+        if watching is not None:
+            entry = bar.close
+            stop_room = (entry - src.stop) if bull else (src.stop - entry)
+            t1 = src.targets[0] if src.targets else None
+            rr = abs(t1 - entry) / stop_room if (t1 is not None and stop_room > 0) else 0.0
 
         conv = score(
             ConvictionInput(
                 exchange=exchange,
                 volume_surge=best,
-                oi_change_pct=bar.oi_change_pct,
-                oi_buildup_pct=bar.oi_change_pct,
+                oi_change_pct=oi_change,
+                oi_buildup_pct=oi_change,
                 price_change_over_atr=price_over_atr,
                 rr=rr,
             )
@@ -207,17 +235,22 @@ class Fukaa:
             "momentum_score": conv.momentum_score,
             "rr_score": conv.rr_score,
             "rr": rr,
+            "entry": entry,
             "promoted": 1.0 if watching is not None else 0.0,
         }
-        if bar.oi_change_pct is not None:
-            evidence["oi_change_pct"] = bar.oi_change_pct
+        for k, v in (("n50_surge", n50_surge), ("rel_volume", rel_volume), ("atr", a), ("price_over_atr", price_over_atr),
+                     ("oi_change_pct", oi_change), ("oi_rel_z", oi_z), ("oi_age_s", oi.age_s)):
+            if v is not None:
+                evidence[k] = round(float(v), 4)
+        doubts = "; ".join(d for d in (f"volume: {vr.doubt}" if vr.doubt else "", f"OI: {oi.doubt}" if oi.doubt else "") if d)
+        inputs = {"volumeDoubt": vr.doubt, "n50Members": n50_n, "oi": oi.to_json(), "oiPeers": oi_peers}
 
         gates.append(
             self.g_volume.evaluate(
                 best,
                 lambda v: v >= mult,
                 threshold=mult,
-                note=f"{exchange} bar {passed_candle}",
+                note=f"{exchange} bar {passed_candle}" + (f" — {vr.doubt}" if vr.doubt else ""),
             )
         )
         volume_failed = not gates[-1].passed and not gates[-1].missing
@@ -240,6 +273,13 @@ class Fukaa:
             )
             return out
 
+        if watching is not None:
+            gates.append(
+                self.g_stop_side.evaluate(
+                    stop_room, lambda v: v > 0, threshold=0.0,
+                    note=f"the promoted entry {entry:g} against the trigger's stop {src.stop:g}",
+                )
+            )
         gates.append(
             self.g_composite.evaluate(
                 conv.composite, lambda v: v >= cfg.composite_min, threshold=cfg.composite_min
@@ -248,10 +288,10 @@ class Fukaa:
         gates.append(self.g_rr.evaluate(rr, lambda v: v >= cfg.rr_floor, threshold=cfg.rr_floor))
         gates.append(
             self.g_refoi.evaluate(
-                abs(bar.oi_change_pct) if bar.oi_change_pct is not None else None,
+                abs(oi_change) if oi_change is not None else None,
                 lambda v: v >= th.ref_oi_floor,
                 threshold=th.ref_oi_floor,
-                note="|OI change %| on the front future",
+                note="|OI change %| since the previous close" + (f" — {oi.doubt}" if oi.doubt else ""),
             )
         )
         gates.append(
@@ -265,7 +305,7 @@ class Fukaa:
         if not chain_passed(gates):
             if watching is not None:
                 self._parked(ctx).pop(bar.symbol, None)
-            return self._reject(out, bar, direction, gates, evidence, "", src)
+            return self._reject(out, bar, direction, gates, evidence, doubts, src)
 
         if watching is not None:
             self._parked(ctx).pop(bar.symbol, None)
@@ -276,7 +316,7 @@ class Fukaa:
                 symbol=bar.symbol,
                 direction=direction,
                 ts=bar.ts,
-                entry=bar.close if watching is not None else src.entry,
+                entry=entry,
                 stop=src.stop,
                 targets=tuple(src.targets),
                 grade=src.grade,
@@ -298,7 +338,9 @@ class Fukaa:
                                         "volume_score": conv.volume_score, "oi_score": conv.oi_score,
                                         "momentum_score": conv.momentum_score, "rr_score": conv.rr_score},
                          "volume": {"surge_t": surge_t, "surge_t1": surge_t1, "baseline": baseline,
-                                    "multiplier": mult, "exchange": exchange}},
+                                    "multiplier": mult, "exchange": exchange, "n50Surge": n50_surge,
+                                    "relVolume": rel_volume},
+                         "inputs": inputs},
             )
         )
         return out

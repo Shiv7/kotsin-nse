@@ -39,6 +39,27 @@ class FakeCtx:
     def bars(self, symbol: str, tf: str, n: int):
         return self._bars[-n:]
 
+    # the engine's checked readings, from this context's own bars (the engine's slot-based reading
+    # has its own tests): T is the last bar, T-1 the one before, the baseline the six before those
+    def volume_reading(self, symbol: str, ts: int):
+        from kotsin_nse.bars.indicators import volume_surges
+        from kotsin_nse.bars.volume_read import VolumeReading
+
+        t, t1, base = volume_surges([b.volume for b in self._bars[-10:]], window=6, floor=1000.0)
+        return VolumeReading(surge_t=t, surge_t1=t1, baseline=base) if t is not None else VolumeReading(doubt="no baseline", kind="baseline")
+
+    def market_volume_surge(self, ts: int):
+        return None, 0
+
+    def oi_reading(self, symbol: str):
+        from kotsin_nse.bars.oi_read import OiReading
+
+        pct = self._bars[-1].oi_change_pct
+        return OiReading(change_pct=pct, contracts=("FUT",), age_s=1.0) if pct is not None else OiReading(doubt="no OI print for FUT")
+
+    def oi_relative(self, symbol: str):
+        return None, 0
+
     def zones(self, symbol: str):
         return self._zones
 

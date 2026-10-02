@@ -70,7 +70,9 @@ class Gate:
                 value=None,
                 threshold=threshold,
                 missing=True,
-                note=f"input missing → {self.on_missing.value}",
+                # the caller's note says WHY the input is missing (a doubtful reading's reason); a
+                # bare "input missing" sent the operator to the logs to find it
+                note=f"input missing → {self.on_missing.value}" + (f" ({note})" if note else ""),
             )
         return GateResult(
             name=self.name,

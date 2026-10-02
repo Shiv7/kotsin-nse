@@ -22,12 +22,16 @@ from __future__ import annotations
 
 from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from ..bars.pivots import Zone
 from ..bars.unified import UnifiedBar
 from ..domain import Direction
 from .gates import GateResult
+
+if TYPE_CHECKING:
+    from ..bars.oi_read import OiReading
+    from ..bars.volume_read import VolumeReading
 from .keys import StrategyKey
 
 
@@ -164,6 +168,23 @@ class Context(Protocol):
     def exchange(self, symbol: str) -> str:
         """``N`` (NSE), ``M`` (MCX) or ``C`` (currency). Thresholds differ per exchange and the
         strategy must be able to pick the right one without knowing what a segment is."""
+        ...
+
+    def volume_reading(self, symbol: str, ts: int) -> VolumeReading:
+        """The checked 30m volume reading at the bar starting ``ts`` (``bars/volume_read.py``): the
+        session's slots, not positions in a list — DOUBTFUL when one is missing, zero or flagged."""
+        ...
+
+    def market_volume_surge(self, ts: int) -> tuple[float | None, int]:
+        """The NIFTY50's mean surge at that bar, and how many members it stands on."""
+        ...
+
+    def oi_reading(self, symbol: str) -> OiReading:
+        """The OI change since the previous close, computed from the OI level (``bars/oi_read.py``)."""
+        ...
+
+    def oi_relative(self, symbol: str) -> tuple[float | None, int]:
+        """That change as a z-score in the NIFTY50's cross-section, and the members it stands on."""
         ...
 
     @property
