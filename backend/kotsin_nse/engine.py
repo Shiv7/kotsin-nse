@@ -39,7 +39,6 @@ from .alerts.engine import LOOKBACK as ALERT_LOOKBACK
 from .alerts.engine import AlertEngine
 from .bars.aggregator import Aggregator
 from .bars.daily import (
-    MIN_DAILY_BARS,
     REPAIR_BATCH,
     DailyCache,
     basis_ok,
@@ -69,7 +68,7 @@ from .bars.volume_read import (
     read_volume,
     slot_reading,
 )
-from .bars.zones import build_zones, is_provisional, pivot_points_for
+from .bars.zones import ZoneBuild, build_zones, is_provisional
 from .bus import Bus, Topic
 from .committee.service import CommitteeService
 from .config import Segment, Settings
@@ -685,7 +684,7 @@ class Engine:
         self.books: dict[str, BookSnapshot] = {}
         self.quotes: dict[str, Quote] = {}
         self.ltps: dict[str, float] = {}
-        self._zone_cache: dict[str, tuple[str, list[Zone]]] = {}
+        self._zone_cache: dict[str, tuple[str, ZoneBuild]] = {}
         #: names with no zones today and why ("history", "provisional", "basis") — bars/zones.py
         self.zone_refusals: dict[str, str] = {}
         #: sessions whose daily and 30m series are on different price bases (a corporate action):
@@ -1964,6 +1963,14 @@ class Engine:
         An open position is unaffected by a band change: its stop was stamped onto the position
         at entry and never moves. Only *new* signals see the new width.
         """
+        built = self._zone_build(symbol)
+        return built.zones if built is not None else []
+
+    def _zone_build(self, symbol: str) -> ZoneBuild | None:
+        """Today's zones AND the classic points they were clustered from, from the ONE builder — or
+        None where it refuses the name. ``zones_for`` and ``_pivot_points`` (gate B's "key level
+        ahead", the counter legs) both read it, so a name without levels has no pivots either
+        (review, 2026-10-03: the points ignored a provisional candle and a basis mismatch)."""
         today = ist_today()
         regime = self.volatility_regime(symbol)
         key = f"{today.isoformat()}:{regime.band.value}"
@@ -1981,10 +1988,10 @@ class Engine:
             self.zone_refusals[symbol] = f"{built.refused}: {built.detail}"
             if built.refused == "basis":
                 log.warning("zones.basis_mismatch", symbol=symbol, detail=built.detail)
-            return []
+            return None
         self.zone_refusals.pop(symbol, None)
-        self._zone_cache[symbol] = (key, built.zones)
-        return built.zones
+        self._zone_cache[symbol] = (key, built)
+        return built
 
     def volatility_regime(self, symbol: str) -> Regime:
         """India VIX for NSE, the contract's own realised vol for MCX."""
@@ -4844,12 +4851,8 @@ class Engine:
         """The equity's classic levels for today — daily from the previous session, weekly and
         monthly from the previous completed periods — with their timeframe weights. None where the
         zones refuse the name (bars/zones.py: history, a provisional candle, a basis mismatch)."""
-        today = ist_today()
-        dailies = self.store.bars(symbol, "1d")
-        prev = previous_session(dailies, today)
-        if len(dailies) < MIN_DAILY_BARS or prev is None or not is_official(prev):
-            return []
-        return pivot_points_for(dailies, today)
+        built = self._zone_build(symbol)
+        return list(built.points) if built is not None else []
 
     async def _volume_surges_safe(self, underlying: Instrument, *, low_priority: bool = False) -> dict[str, tuple[float, float]]:
         """``_volume_surges`` that never raises: a reading that cannot be taken is no reading, and

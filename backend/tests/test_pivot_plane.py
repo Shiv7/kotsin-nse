@@ -156,3 +156,26 @@ def test_the_zones_line_alarms_on_a_provisional_candle_once_the_session_is_under
     early, late = e._zones_check(a, now=at("09:00")), e._zones_check(a, now=at("10:30"))
     assert early.ok and "provisional candle: 1" in early.detail
     assert not late.ok and equity.symbol in late.detail and "provisional after 09:20" in late.detail
+
+
+def test_a_name_the_zones_refuse_has_no_pivots_either(settings):
+    """Gate B's "key level ahead" and the counter legs read the same build as the zones (review,
+    2026-10-03): a daily series on another price basis (a corporate action) gave zones nothing but
+    still fed its adjusted levels to the gate."""
+    from dataclasses import replace
+
+    from .test_stage2_3_bars_and_zones import _daily, _thirty, _weekdays
+
+    today = ist_today()
+    days = _weekdays(40, today)
+    intraday = [b for d in days for b in _thirty(d, 1000.0)]
+    dailies = [_daily(d, 1000.0) for d in days]
+    e = Engine(settings)
+    e.store.seed("X", "1d", dailies)
+    e.store.seed("X", "30m", intraday)
+    assert "1d.R1" in {p.label for p in e._pivot_points("X")}
+    adjusted = [replace(b, open=b.open * 0.374, high=b.high * 0.374, low=b.low * 0.374, close=b.close * 0.374) for b in dailies]
+    e2 = Engine(settings)
+    e2.store.seed("X", "1d", adjusted)
+    e2.store.seed("X", "30m", intraday)
+    assert e2._pivot_points("X") == [] and e2.zones_for("X") == [] and e2.zone_refusals["X"].startswith("basis")

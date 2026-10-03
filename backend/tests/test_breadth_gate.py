@@ -154,7 +154,9 @@ def test_every_trigger_is_labelled_with_the_replays_measures(settings, monkeypat
     while len(dailies) < 30:
         d += timedelta(days=1)
         if d.weekday() < 5 and d < day:
-            ts = int(datetime.combine(d, dtime(9, 15), tzinfo=IST).timestamp())
+            # the end-of-day candle's stamp: a 09:15 one is 5paisa's provisional candle, which sets no
+            # levels and so no pivots (review, 2026-10-03)
+            ts = int(datetime.combine(d, dtime(0, 0), tzinfo=IST).timestamp())
             dailies.append(UnifiedBar(sym, code, "1d", ts, 4700, 4730, 4670, 4700, 1e6, source=BarSource.REST, complete=True))
     e.store.seed(sym, "1d", dailies)
     open_ts = int(datetime.combine(day, dtime(9, 15), tzinfo=IST).timestamp())
