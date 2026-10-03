@@ -286,3 +286,20 @@ def test_the_daily_table_sums_every_expiry_and_names_the_quadrant(tmp_path):
     assert last.total_oi == 39_903_300 + 570_375
     assert last.oi_chg_pct == pytest.approx((-448_200 + 6_075) / (40_473_675 - (-442_125)) * 100.0)
     assert last.px_chg_pct < 0 and last.quadrant == "long unwinding"
+
+
+def test_a_level_resent_at_subscribe_is_as_old_as_its_trade_not_its_arrival(settings):
+    """At a subscribe 5paisa re-sends each contract's last print: on a Saturday JSWSTEEL's 1 Oct level
+    arrived 'now' and read +1.05 % against the official close. Aged by its own time it is doubtful."""
+    import asyncio as _asyncio
+
+    e = _engine(settings)
+    today = date(2026, 10, 3)
+    e.oi_daily.write(e.calendar.previous_trading_day(today), parse(_bhavcopy(JSW)))
+    e._seed_oi_reference(today=today)
+    arrived = _at(today, "16:40")
+    printed = _at(date(2026, 10, 1), "15:29")
+    _asyncio.run(e._on_oi({"scrip_code": "48900", "open_interest": 40_321_800, "oi_change": 0, "oi_change_pct": 0.0,
+                           "ts": printed, "recv_ts": arrived, "ltp": 1236.6, "volume": 0}))
+    r = e.oi_reading("JSWSTEEL", now=arrived + 1)
+    assert not r.ok and "old" in r.doubt

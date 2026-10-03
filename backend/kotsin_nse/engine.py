@@ -1718,7 +1718,11 @@ class Engine:
                 "ts": float(oi.get("recv_ts") or time.time()),
             }
             return
-        self._note_oi(fut_code, float(oi["open_interest"]), recv)
+        # The level is as old as the broker's own time on it, not as fresh as its arrival: at a
+        # subscribe 5paisa re-sends each contract's last print, so on a Saturday JSWSTEEL's 1 Oct
+        # 15:29 level arrived "now" and read +1.05 % against NSE's official close (review, 2026-10-03).
+        broker = float(oi.get("ts") or 0)
+        self._note_oi(fut_code, float(oi["open_interest"]), recv, level_ts=broker if 0 < broker <= recv + 5 else None)
         inst = self.underlyings.get(symbol)
         if inst is None:
             return
@@ -1735,7 +1739,7 @@ class Engine:
             fut_code=fut_code,
         )
 
-    def _note_oi(self, code: str, oi: float, ts: float) -> None:
+    def _note_oi(self, code: str, oi: float, ts: float, *, level_ts: float | None = None) -> None:
         """Keep a future's OI level; at the first print of a new day the levels held from the day
         before become the previous-close reference (an engine running through midnight); a print
         before the open is the previous close itself (OI does not move pre-open)."""
@@ -1750,7 +1754,7 @@ class Engine:
         if code not in self._oi_ref and oi > 0 and ts < session_open_ts(seg, day):
             self._oi_ref[code] = oi
             self._oi_ref_src[code] = "preopen"
-        self._fut_oi[code] = (oi, ts)
+        self._fut_oi[code] = (oi, ts if level_ts is None else level_ts)
         self.oi_candles.on_print(code, oi, ts, seg)
 
     def _seed_oi_reference(self, *, today: date | None = None) -> int:
