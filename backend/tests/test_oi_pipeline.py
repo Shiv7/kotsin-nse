@@ -307,3 +307,37 @@ def test_a_level_from_before_todays_session_is_not_todays_oi(settings, monkeypat
     assert not pre.ok and "today's session" in pre.doubt
     e._note_oi("48900", 40_500_000.0, _at(tuesday, "09:20"))
     assert e.oi_reading("JSWSTEEL", now=_at(tuesday, "09:20") + 1).ok
+
+
+# -- the reference across a weekend (review, 2026-10-03) ------------------------------------------------
+
+
+def test_a_saturday_boot_keeps_the_exchanges_closes_as_mondays_reference(settings, monkeypatch):
+    """A Saturday boot seeds NSE's closes for Friday; the levels 5paisa re-sends at the subscribe are
+    Friday's last prints, not its close. Monday's first print must not roll them over the exchange's."""
+    import kotsin_nse.engine as engine_mod
+
+    e = _engine(settings)
+    fri, sat, mon = date(2026, 10, 9), date(2026, 10, 10), date(2026, 10, 12)
+    e.oi_daily.write(fri, parse(_bhavcopy([JSW[0]])))
+    e._seed_oi_reference(today=sat)
+    assert (e._oi_ref["48900"], e._oi_ref_src["48900"]) == (39_903_300.0, "nse")
+    e._note_oi("48900", 40_321_800.0, _at(sat, "00:05"))  # Friday's 15:29 level, re-sent on Saturday
+    e._note_oi("48900", 40_500_000.0, _at(mon, "09:16"))
+    assert (e._oi_ref["48900"], e._oi_ref_src["48900"]) == (39_903_300.0, "nse"), "still the exchange's close"
+    monkeypatch.setattr(engine_mod, "ist_today", lambda: mon)
+    r = e.oi_reading("JSWSTEEL", now=_at(mon, "09:16") + 5)
+    assert r.ok and r.ref_source == "nse" and r.change_pct == pytest.approx((40_500_000.0 / 39_903_300.0 - 1) * 100, abs=1e-6)
+
+
+def test_fridays_last_print_rolls_into_saturday_and_no_further(settings):
+    """An engine running through Friday midnight: Friday's last level is Monday's reference until the
+    exchange's file replaces it; a Saturday re-send of it, or a Sunday one, never rolls again."""
+    e = _engine(settings)
+    fri, sat, mon = date(2026, 10, 9), date(2026, 10, 10), date(2026, 10, 12)
+    e._oi_ref_day = fri
+    e._note_oi("48900", 40_321_800.0, _at(fri, "15:29"))
+    e._note_oi("48900", 40_321_900.0, _at(sat, "00:05"))
+    assert (e._oi_ref["48900"], e._oi_ref_src["48900"]) == (40_321_800.0, "archive")
+    e._note_oi("48900", 40_500_000.0, _at(mon, "09:16"))
+    assert e._oi_ref["48900"] == 40_321_800.0, "Saturday's re-send is not a session's close"

@@ -1775,11 +1775,18 @@ class Engine:
     def _note_oi(self, code: str, oi: float, ts: float) -> None:
         """Keep a future's OI level; at the first print of a new day the levels held from the day
         before become the previous-close reference (an engine running through midnight); a print
-        before the open is the previous close itself (OI does not move pre-open)."""
+        before the open is the previous close itself (OI does not move pre-open).
+
+        The reference is the PREVIOUS TRADING DAY's close, so the held levels roll into it only when
+        that day changes. Rolled on any new calendar day, a Saturday boot's references — NSE's own
+        closes for Friday — were replaced on Monday's first print by 5paisa's last Friday print
+        re-sent at the Saturday subscribe: −0.05 % read where NSE's close gives +1.00 % (review,
+        2026-10-03). Thursday → Friday still rolls; Saturday → Monday, or across a holiday, does not."""
         day = ist_day(ts)
         seg = self._segment_by_code.get(code, Segment.NSE_FO)
         if self._oi_ref_day != day:
-            if self._oi_ref_day is not None:
+            if (self._oi_ref_day is not None
+                    and self.calendar.previous_trading_day(day) != self.calendar.previous_trading_day(self._oi_ref_day)):
                 rolled = {c: lv[0] for c, lv in self._fut_oi.items() if ist_day(lv[1]) < day and lv[0] > 0}
                 self._oi_ref.update(rolled)
                 self._oi_ref_src.update(dict.fromkeys(rolled, "archive"))
