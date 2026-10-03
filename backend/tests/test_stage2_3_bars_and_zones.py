@@ -48,6 +48,22 @@ async def test_the_opening_auction_primes_the_baseline_and_stays_out_of_the_0915
 
 
 @pytest.mark.asyncio
+async def test_yesterdays_last_print_re_sent_before_the_open_never_primes_todays_baseline(equity):
+    """At a subscribe 5paisa re-sends the last print, stamped with its own (yesterday's) time and
+    carrying yesterday's total. It must not become today's baseline, or every frame would book 0
+    until today's total passed it (review, 2026-10-03; the tape of 30 Sep and 1 Oct holds no
+    pre-open frame without a same-morning broker time)."""
+    store = BarStore()
+    agg = Aggregator(store, timeframes=("1m",))
+    agg.track(equity)
+    agg.state[equity.scrip_code].connected_since = _at("2026-10-05", "08:55:00")
+    await agg.on_tick(_tick(equity, _at("2026-10-01", "15:29:58"), 2_450_000))  # Thursday's last print, re-sent
+    await agg.on_tick(_tick(equity, _at("2026-10-05", "09:07:00"), 50_000))      # Monday's opening auction
+    await agg.on_tick(_tick(equity, _at("2026-10-05", "09:15:02"), 50_400))
+    assert store.forming(equity.symbol, "1m").volume == 400
+
+
+@pytest.mark.asyncio
 async def test_a_stale_frame_keeps_the_higher_baseline_and_counts_nothing_twice(equity):
     store = BarStore()
     agg = Aggregator(store, timeframes=("1m",))
