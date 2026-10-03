@@ -130,6 +130,17 @@ book's time as now (operator, 3 Oct: "if at 15:15 we are waiting for SL which is
 exit asap, in case the SL is away, then we wait if the target is close by"). 30 Sep – 1 Oct had one
 such position in nine, so the rule is measured before it is used.
 
+**Quote freshness — two clocks (review, 3 Oct).** Every quote and book carries when the engine SAW
+it (`ts`: the feed frame's arrival, the broker call) and, separately, when the broker last TRADED
+(`traded_ts`, 5paisa's TickDt). Age guards — the exit loop's 60 s staleness, the matcher's book age,
+the background re-quote of held contracts — read only the first. The trade time decides only whether
+a price is a newer print: a broker snapshot replaces a held quote only when it has a newer trade, so
+5paisa's 5 s cache can never move a position's mid backwards, and an older cached print never counts
+as a trade through a resting order. A held contract the feed cannot vouch for is marked fresh from the
+newest trade known, without a bid or ask the feed cannot vouch for. Known gap (before this change too):
+with the feed silent, a stale depth book and a snapshot carrying no bid, no fresh book can be built —
+an exit then waits for the feed, or for the 15:20 flatten's last-price fill.
+
 ## 6. Order breaker, per book
 
 A book's breaker trips after 12 CONSECUTIVE rejected entry orders of that book (operator, 2026-09-26:

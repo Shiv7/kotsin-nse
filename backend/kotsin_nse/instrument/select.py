@@ -89,12 +89,30 @@ class Quote:
     ltp: float
     bid: float
     ask: float
+    #: when WE observed this quote (the feed frame's arrival, the REST call). Every age guard reads
+    #: this — the paper matcher, the exit loop's staleness, the background re-quote — never
+    #: ``traded_ts`` (review, 2026-10-03: a snapshot stamped with the broker's last-trade time made
+    #: every quiet held option "stale", and its option stop, trail and targets stopped being checked)
     ts: float
     #: where the quote came from: the live feed, or a broker REST "snapshot" — whose bid and ask are
     #: always 0 (every one of 47,448 replies logged by 2026-09-28), so it prices nothing: a strike
     #: holding only a snapshot is UNPRICED, never "one-sided" (SONACOMS 770 PE, 2026-10-01 09:45:08:
     #: 10.15 / 10.70 on the feed a second later; 14 triggers refused that way 28 Sep - 1 Oct)
     src: str = "feed"
+    #: the broker's time of the last TRADE behind ``ltp`` (5paisa's TickDt); 0 = not given. Decides
+    #: only whether a price is a NEW print — never how old the quote is (``ts`` does that)
+    traded_ts: float = 0.0
+
+    def superseded_by(self, ltp: float, traded_ts: float) -> bool:
+        """Is a print at ``ltp`` traded at ``traded_ts`` newer than this quote's? By trade time when
+        both carry one; else by price (the broker has seen a trade this quote has not: HCLTECH 1240 PE,
+        2026-09-28 11:15:04, 44.85 held, 45.65 traded). An unknown time never outranks a known one,
+        so a 5paisa snapshot cached for 5 s cannot replace a newer feed print (review, 2026-10-03)."""
+        if ltp <= 0:
+            return False
+        if traded_ts > 0 and self.traded_ts > 0:
+            return traded_ts > self.traded_ts
+        return abs(ltp - self.ltp) > 1e-6
 
     @property
     def priced(self) -> bool:

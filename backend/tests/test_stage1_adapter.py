@@ -130,8 +130,10 @@ async def test_the_snapshot_carries_the_brokers_trade_time_not_the_time_of_the_c
     rest._post = post  # type: ignore[method-assign]
     inst = Instrument("45678", "RELIANCE", Segment.NSE_FO, InstrumentKind.OPTION)
     got = await rest.market_feed([inst, Instrument("45679", "RELIANCE", Segment.NSE_FO, InstrumentKind.OPTION)])
-    assert got["45678"]["ts"] == pytest.approx(traded, abs=0.01), "four minutes old, and it says so"
-    assert time.time() - got["45679"]["ts"] < 5, "no TickDt: the call time, as before"
+    # two clocks (review, 2026-10-03): when we asked, and when the broker last traded
+    assert got["45678"]["traded_ts"] == pytest.approx(traded, abs=0.01), "four minutes since the trade, and it says so"
+    assert time.time() - got["45678"]["ts"] < 5, "observed now: an age guard reads when we saw it"
+    assert got["45679"]["traded_ts"] == 0.0 and time.time() - got["45679"]["ts"] < 5, "no TickDt: an unknown trade time, never a guess"
 
 
 @pytest.mark.asyncio
@@ -144,6 +146,8 @@ async def test_an_option_reads_its_volume_from_the_feed_and_a_cached_snapshot_ne
     await e._on_tick({"scrip_code": option.scrip_code, "ltp": 7.2, "bid": 7.1, "ask": 7.3, "total_qty": 125_000,
                       "last_qty": 250, "recv_ts": now, "ts": now, "exch": "N", "exch_type": "D"})
     assert e.option_volume[option.scrip_code] == 125_000.0
-    e._apply_snapshot({option.scrip_code: {"ltp": 6.9, "bid": 0.0, "ask": 0.0, "volume": 120_000, "ts": now - 5}}, now)
+    e._apply_snapshot({option.scrip_code: {"ltp": 6.9, "bid": 0.0, "ask": 0.0, "volume": 120_000, "ts": now,
+                                           "traded_ts": now - 5}}, now)
     assert e.ltps[option.scrip_code] == 7.2, "an older REST price is not a new trade"
+    assert e._ltp_traded_ts[option.scrip_code] == now, "nor does it rewind the trade clock"
     assert e.option_volume[option.scrip_code] == 125_000.0

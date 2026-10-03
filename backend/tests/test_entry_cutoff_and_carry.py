@@ -126,7 +126,7 @@ async def _queue_and_open(e: Engine, trig, first_print: float | None, *, after_s
     open_ts = session_open_ts(Segment.NSE_EQ, nd)
     if first_print is not None:
         e.ltps[UND.scrip_code] = first_print
-        e._ltp_ts[UND.scrip_code] = open_ts + 2
+        e._ltp_traded_ts[UND.scrip_code] = open_ts + 2
     await e._carry_tick(open_ts + after_s)
     while e._decision_tasks:
         await asyncio.gather(*list(e._decision_tasks), return_exceptions=True)

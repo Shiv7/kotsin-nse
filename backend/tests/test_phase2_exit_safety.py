@@ -202,7 +202,10 @@ async def test_quiet_held_contracts_are_requoted_in_the_background(settings, mon
 
     async def market_feed(insts):
         calls.append([i.scrip_code for i in insts])
-        return {OPT.scrip_code: {"ltp": 0.55, "bid": 0.54, "ask": 0.0, "bid_qty": 60000, "ask_qty": 0, "ts": time.time()}}
+        # the broker's last trade five minutes back: the book must still be fresh — observed now
+        # (review, 2026-10-03: stamped with the trade's time it was born stale)
+        return {OPT.scrip_code: {"ltp": 0.55, "bid": 0.54, "ask": 0.0, "bid_qty": 60000, "ask_qty": 0, "ts": time.time(),
+                                 "traded_ts": time.time() - 300}}
 
     monkeypatch.setattr(e.rest, "market_feed", market_feed)
     # the real signature, so a call that forgets the calendar fails here instead of in production,

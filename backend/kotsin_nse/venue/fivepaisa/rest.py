@@ -179,11 +179,12 @@ class FivePaisaREST:
         now = time.time()
 
         def traded_at(row: dict[str, Any]) -> float:
-            """The broker's time of the last trade (``TickDt``), never later than now. It was stamped
-            with the time of the CALL, so a price minutes old passed every staleness guard as fresh
-            (review, 2026-10-03). No usable TickDt: the call time, as before."""
+            """The broker's time of the last trade (``TickDt``), never later than now; 0 when the row
+            carries none — an unknown time, never a guess that could outrank a feed print. Two clocks
+            (review, 2026-10-03): ``ts`` is when we asked (every age guard reads it); ``traded_ts``
+            decides only whether this price is a newer trade than the one held."""
             t = parse_broker_date(row.get("TickDt"))
-            return min(t, now) if t is not None and t > 0 else now
+            return min(t, now) if t is not None and t > 0 else 0.0
 
         out: dict[str, dict[str, Any]] = {}
         for row in resp.get("Data") or []:
@@ -200,7 +201,8 @@ class FivePaisaREST:
                 "bid_qty": int(row.get("BidQty") or 0),
                 "ask_qty": int(row.get("OfferQty") or 0),
                 "volume": int(row.get("Volume") or row.get("TotalQty") or 0),
-                "ts": traded_at(row),
+                "ts": now,
+                "traded_ts": traded_at(row),
             }
         return out
 

@@ -233,7 +233,8 @@ LEG_ENSURE_TIMEOUT_S = 2.0
 HELD_QUOTE_MAX_AGE_S = 20.0
 HELD_QUOTE_POLL_S = 5.0
 #: A broker snapshot (V1/MarketFeed) carries no bid or ask; it may CONFIRM a held two-sided quote as
-#: current only while the feed has spoken within this many seconds (``_still_stands``)
+#: current only while the feed has spoken within this many seconds (``_still_stands``) and the
+#: broker has no newer trade (``Quote.superseded_by``)
 FEED_LIVE_S = 5.0
 #: at a trigger, how long the choice may wait for the strikes it could not price yet — a strike
 #: subscribed a moment ago has only the broker's snapshot (no bid, no ask) until the feed's first frame
@@ -589,9 +590,11 @@ class Engine:
         #: every option strike the universe selected — the tick path writes their volume from the feed
         self._option_codes: set[str] = set()
         self._decision_tasks: set[asyncio.Task[Any]] = set()
-        #: when each code last printed on the feed (its quote's receive time): a carried trigger
-        #: enters on its stock's FIRST print of the session, never on yesterday's close replayed
-        self._ltp_ts: dict[str, float] = {}
+        #: the broker's time of each code's last print (the feed frame's TickDt, or a REST row's): a
+        #: carried trigger enters on its stock's FIRST print TRADED this session — yesterday's close
+        #: replayed at a subscribe after the open arrives now but traded yesterday (review, 2026-10-03:
+        #: this held the receive time, and a REST row wrote the broker's into the same map)
+        self._ltp_traded_ts: dict[str, float] = {}
         #: the triggers carried from the last session's close still waiting for their first print
         self._carry_day: date | None = None
         self._carry_pending: list[dict[str, Any]] = []
@@ -1690,13 +1693,16 @@ class Engine:
             self.option_volume[code] = float(total)
         ltp = float(tick.get("ltp") or 0)
         if ltp > 0:
+            seen = float(tick.get("recv_ts") or time.time())
+            traded = float(tick.get("ts") or seen)  # the frame's TickDt; its arrival when it has none
             self.ltps[code] = ltp
-            self._ltp_ts[code] = float(tick.get("recv_ts") or time.time())
+            self._ltp_traded_ts[code] = traded
             self.quotes[code] = Quote(
                 ltp=ltp,
                 bid=float(tick.get("bid") or 0),
                 ask=float(tick.get("ask") or 0),
-                ts=float(tick.get("recv_ts") or time.time()),
+                ts=seen,
+                traded_ts=traded,
             )
         await self.aggregator.on_tick(tick)
         # no TICK publish: nothing subscribes to it (/api/system: 'subscribers': []) and it ran on
@@ -2727,7 +2733,7 @@ class Engine:
         for item in list(self._carry_pending):
             und = self.underlyings.get(item["symbol"])
             code = und.scrip_code if und is not None else ""
-            px, at = self.ltps.get(code), self._ltp_ts.get(code, 0.0)
+            px, at = self.ltps.get(code), self._ltp_traded_ts.get(code, 0.0)
             if px and at >= open_ts and now < open_ts + CARRY_WINDOW_S:
                 self._carry_pending.remove(item)
                 task = asyncio.get_running_loop().create_task(self._carry_enter(item, float(px), at))
@@ -5244,35 +5250,52 @@ class Engine:
         Kept at its old age instead, a feed outage over ``position_quote_max_age_s`` (25 Sep
         12:23–12:31, 8 minutes) turned every open position stale — only the equity stop and the
         backstops — and for the first minute its option mid was a price the broker had already
-        contradicted."""
+        contradicted.
+
+        Two clocks (review, 2026-10-03). Every quote and book installed, confirmed or marked here is
+        stamped ``now`` — when we saw it — because that is what every age guard asks. The row's
+        ``traded_ts`` (5paisa's TickDt) decides only whether its price is NEWER than the one held
+        (``Quote.superseded_by``): stamped into ``ts`` instead, a quiet held option read minutes "old"
+        and ran on the equity stop alone, and a 5 s-cached older print could replace a fresh feed
+        quote and leave its book unconfirmable."""
         limit = self.matcher.age_limit_ms(now)
         held_codes = {p.instrument.scrip_code for p in self.positions.values() if p.status == "OPEN"}
         for code, r in rows.items():
             ltp, bid, ask = float(r.get("ltp") or 0), float(r.get("bid") or 0), float(r.get("ask") or 0)
             two_sided = bid > 0 and ask > 0
+            traded = float(r.get("traded_ts") or 0.0)
             held_q = self.quotes.get(code)
             held_two_sided = held_q is not None and held_q.bid > 0 and held_q.ask > 0
-            if two_sided or not held_two_sided:
+            newer = held_q is None or held_q.superseded_by(ltp, traded)
+            if held_q is None or (two_sided and (newer or not held_two_sided)) or (not held_two_sided and newer):
                 # labelled: a snapshot's 0/0 is "price unknown", never a one-sided market
-                self.quotes[code] = Quote(ltp=ltp, bid=bid, ask=ask, ts=r["ts"], src="snapshot")
-            elif self._still_stands(code, held_q.ts, held_q.ltp, ltp, "mf"):  # type: ignore[union-attr]
-                self.quotes[code] = Quote(ltp=held_q.ltp, bid=held_q.bid, ask=held_q.ask, ts=now, src=held_q.src)  # type: ignore[union-attr]
+                self.quotes[code] = Quote(ltp=ltp, bid=bid, ask=ask, ts=now, src="snapshot", traded_ts=traded)
+            elif not newer and (held_q.src == "snapshot" or self._still_stands(code, held_q.ts, "mf")):
+                # the broker has no newer trade: the same cached reply seen again, or a quiet contract
+                # on a live feed — current as held, bid and ask kept, so its book can be confirmed too
+                self.quotes[code] = replace(held_q, ts=now)
                 self.snapshot_confirmed += 1
-            elif code in held_codes and ltp > 0:
-                # a held contract the feed cannot vouch for: marked from the broker's last price
-                self.quotes[code] = Quote(ltp=ltp, bid=bid, ask=ask, ts=r["ts"], src="snapshot")
+            elif code in held_codes and (newer or held_q.ltp > 0):
+                # a held contract the feed cannot vouch for: marked fresh from the NEWEST trade known —
+                # the broker's when it is newer, else the one held, never a cached older print (it
+                # would move the mid backwards and could fire a false give-back) — and no bid / ask
+                # the feed cannot vouch for
+                px, at = (ltp, traded) if newer else (held_q.ltp, held_q.traded_ts)
+                self.quotes[code] = Quote(ltp=px, bid=bid if newer else 0.0, ask=ask if newer else 0.0, ts=now,
+                                          src="snapshot", traded_ts=at)
                 self.snapshot_held_marked += 1
             else:
                 self.snapshot_kept += 1  # held as it was: its own age says how old it is
-                if ltp > 0 and abs(ltp - held_q.ltp) > 1e-6:  # type: ignore[union-attr]
+                if newer:
                     # the broker has seen a trade the held quote has not (HCLTECH 1240 PE,
                     # 2026-09-28 11:15:04: 44.85 held, 45.65 traded — the feed's frame came 0.1 s on)
                     self._quote_outdated[code] = now
-            if ltp > 0 and r["ts"] >= self._ltp_ts.get(code, 0.0):
+            if ltp > 0 and newer:
                 # never a cached REST price over a newer feed print: 5paisa caches the snapshot for
                 # 5 s, and an older price read as a fresh trade by a resting order (review, 2026-10-03)
                 self.ltps[code] = ltp
-                self._ltp_ts[code] = r["ts"]
+                if traded > 0:
+                    self._ltp_traded_ts[code] = traded
             if r.get("volume"):
                 self.option_volume[code] = max(float(r["volume"]), self.option_volume.get(code, 0.0))
             held = self.books.get(code)
@@ -5280,7 +5303,7 @@ class Engine:
                 # a side the snapshot does carry still makes a (one-sided) book to sell or buy into
                 book = book_from_quote(
                     code, bid=bid, ask=ask,
-                    bid_qty=int(r.get("bid_qty") or 0), ask_qty=int(r.get("ask_qty") or 0), ts=r["ts"],
+                    bid_qty=int(r.get("bid_qty") or 0), ask_qty=int(r.get("ask_qty") or 0), ts=now,
                 )
                 if book is not None:
                     self.books[code] = book
@@ -5288,20 +5311,21 @@ class Engine:
                       # a book that disagrees with the live quote is from another time, whatever
                       # its subscription says (review, 2026-09-28: 12.00 / 12.20 beside 15.85 / 15.95)
                       and held.best_bid <= held_q.ltp <= held.best_ask  # type: ignore[union-attr]
-                      and self._still_stands(code, held.ts, held_q.ltp, ltp, "md")):  # type: ignore[union-attr]
+                      and not newer and self._still_stands(code, held.ts, "md")):
                     self.books[code] = BookSnapshot(scrip_code=code, bids=held.bids, asks=held.asks, ts=now)
                     self.snapshot_book_confirmed += 1
                 else:
                     log.debug("snapshot.no_book", scrip=code, bid=bid, ask=ask)
 
-    def _still_stands(self, code: str, held_ts: float, held_ltp: float, rest_ltp: float, channel: str) -> bool:
+    def _still_stands(self, code: str, held_ts: float, channel: str) -> bool:
         """May a held quote (``mf``) or book (``md``) be read as current although the feed has sent
         nothing for it lately? Only when the contract is on that live subscription AND has been
         since before the value arrived — a value from an earlier subscription (depth drops a strike
         30 minutes after the selector last looked, and ``self.books`` keeps its last book) is from
         another time (review, 2026-09-28) — the feed has been connected since the value arrived (a
-        reconnect gap could hide a change) and has spoken within ``FEED_LIVE_S``, and the broker's
-        own last trade is the one we hold."""
+        reconnect gap could hide a change) and has spoken within ``FEED_LIVE_S``. Whether the broker
+        has a newer trade is the caller's question (``Quote.superseded_by``). ``held_ts`` is an
+        observation time, compared with the local subscribe / connect times."""
         fh = self.feed.health
         since_of = getattr(self.feed, "subscribed_since", None)
         since = since_of(channel, code) if since_of is not None else None
@@ -5310,7 +5334,6 @@ class Engine:
             since is not None and held_ts >= since
             and fh.connected and fh.connected_since is not None and held_ts >= fh.connected_since
             and silence is not None and silence < FEED_LIVE_S
-            and rest_ltp > 0 and held_ltp > 0 and abs(rest_ltp - held_ltp) < 1e-6
         )
 
     async def _choose_option(
