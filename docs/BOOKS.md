@@ -141,6 +141,18 @@ newest trade known, without a bid or ask the feed cannot vouch for. Known gap (b
 with the feed silent, a stale depth book and a snapshot carrying no bid, no fresh book can be built —
 an exit then waits for the feed, or for the 15:20 flatten's last-price fill.
 
+## 5b. Data-pipeline changes accepted 3 Oct (Shiv7's Stage 0–5, reviewed and fixed in phase35)
+
+The operator accepted these four behaviour changes on 3 Oct; every book sees them alike, so the A/B
+stays like for like.
+
+| Change | What it does | Evidence |
+|---|---|---|
+| **Option stop held at the fill** | The delta-line books (RT-X, RT-Y, CT-X, CT-Y, the parent) keep the option stop stamped at the fill (entry premium − stock risk × the delta at the ENTRY spot), capped and floored as before. It used to be re-derived with today's delta: on an adverse move delta falls, so the line rose toward the entry and stopped the option out before the stock reached its stop. The stock stop still runs on every position and fires first when delta falls against the trade; RT-N keeps its priced stop. | MOTHERSON 1 Oct (RT-Y-F replay): −₹12,962 → +₹2,605 |
+| **One zone builder** | Pivot zones cluster at k × ATR(14)/price as before, but the width is taken from the sessions BEFORE today (a restart no longer changes it), live and the backtest share the builder, and a provisional daily candle or a corporate-action basis sets no levels (re-asked every 10 min; the zones health line alarms from 09:20). | Replay 25 Sep–1 Oct: RT+CT +₹1,25,776 → +₹98,839 — mostly LAURUSLABS 25 Sep, whose grade-A wall was two levels 0.12 % apart merging at exactly the wall minimum |
+| **SuperTrend over 120 bars** | FUDKII, the cards and the chart read the same converged window (55 bars put 16.7 % of flips on another bar; 120 bars 0 of 1,633). The boot backfill reaches back 12 trading sessions so a restart holds it. | Stage 3 measurement |
+| **MCX volume floor in lots** | MCX volume is in LOTS (GOLD's 30m median ~214); a floor of 1,000 made 93–95 % of GOLD/COPPER readings read "dried", so RT-MCX skipped nearly every trigger there. The floor is 10 lots now: RT-MCX takes most of them. | Stage 2 measurement |
+
 ## 6. Order breaker, per book
 
 A book's breaker trips after 12 CONSECUTIVE rejected entry orders of that book (operator, 2026-09-26:
