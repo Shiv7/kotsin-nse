@@ -30,7 +30,8 @@ __pycache__/
 
 # node
 node_modules/
-frontend/dist/
+# no trailing slash: a committed symlink is a file, and `dir/` ignores directories only (review, 2026-10-03)
+frontend/dist
 *.tsbuildinfo
 
 # os / editor

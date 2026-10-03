@@ -15,6 +15,10 @@ RBDIR="$L/deploy/rollbacks"   # one copy per deploy; the newest KEEP_ROLLBACKS a
 KEEP_ROLLBACKS=10
 RB="$RBDIR/$(date +%Y%m%d-%H%M%S)"
 [ -d "$SRC/backend/kotsin_nse" ] || { echo "no such build: $SRC"; exit 1; }
+# the dashboard is copied as a directory: a symlink (3554ada committed one to another machine's folder)
+# would be installed as a dangling link and take the UI down (review, 2026-10-03)
+{ [ -d "$SRC/frontend/dist" ] && [ ! -L "$SRC/frontend/dist" ] && [ -f "$SRC/frontend/dist/index.html" ]; } \
+  || { echo "$SRC/frontend/dist is not a built directory — npm run build first"; exit 1; }
 
 open=$(curl -s -m 5 http://127.0.0.1:8500/api/health | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin).get("positions_open", "?"))' 2>/dev/null || echo "?")
 [ "$open" = "0" ] || { echo "positions_open=$open — not deploying"; exit 1; }
