@@ -76,7 +76,7 @@ def shadow_rows(
             "fired": float(sg.get("created_ts") or (float(sg["ts"]) + 1800)), "rr": sg.get("rr"), "decision": sg.get("decision"),
             "breadth": ctx.get("share"), "names": ctx.get("names"), "efficiency": ctx.get("efficiency"), "volBand": ctx.get("volBand"),
             "gapDatr": ctx.get("gapDatr"), "openBar": ctx.get("openBar"), "pivotsAhead": list(ctx.get("pivotsAhead") or []),
-            "logged": bool(ctx), "rtY": verdicts["rtY"], "ctY": verdicts["ctY"], "books": books,
+            "logged": bool(ctx), "rtY": verdicts["rtY"], "ctY": verdicts["ctY"], "ctM": verdicts["ctM"], "books": books,
             "volSurgeT": ctx.get("volSurgeT"), "volSurgeT1": ctx.get("volSurgeT1"), "mktSurgeT": ctx.get("mktSurgeT"),
             "mktSurgeT1": ctx.get("mktSurgeT1"), "volDried": ctx.get("volDried"), "volDriedRel": ctx.get("volDriedRel"),
             "volSurge": ctx.get("volSurge"),
@@ -110,6 +110,8 @@ class ShadowData:
     wide: dict[str, Any] = field(default_factory=dict)
     graded_f: dict[str, Any] = field(default_factory=dict)
     gap: dict[str, Any] = field(default_factory=dict)
+    market_fade: dict[str, Any] = field(default_factory=dict)
+    fukaa: dict[str, Any] = field(default_factory=dict)
     labels: dict[str, Any] = field(default_factory=dict)
     volume: dict[str, Any] = field(default_factory=dict)
 
@@ -307,6 +309,138 @@ def gap_fade_summary(*, signals: list[dict], positions: list[dict], trades: list
     return {"rows": rows, "total": total}
 
 
+# -- FUDKII-CT-M, the market-against fade ------------------------------------------------------------
+
+MARKET_FADE_BOOK = "FUDKII_CT_M"
+
+
+def _net_by_position(trades: list[dict]) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for t in trades:
+        if t.get("position_id"):
+            out[t["position_id"]] = out.get(t["position_id"], 0.0) + float(t.get("net") or 0.0)
+    return out
+
+
+def _book_on(pos_by: dict, net_by: dict, b: str, sid: str | None) -> dict[str, Any]:
+    p = pos_by.get((b, sid)) if sid else None
+    if p is None:
+        return {"status": "NONE", "net": None}
+    closed = p.get("status") != "OPEN"
+    return {"status": "EXITED" if closed else "OPEN", "net": net_by.get(p["id"]) if closed else None}
+
+
+def market_fade_summary(*, signals: list[dict], positions: list[dict], trades: list[dict], events: list[dict]) -> dict[str, Any]:
+    """Every published NSE trigger FUDKII-CT-M decided on (the market-against fade shadow, operator
+    2026-10-03): its fade — the plan, the contract, the fill, the exit and the net — or its skip with the
+    share, and what the books that trade the same trigger made on it (RT-X, RT-N, RT-Y, and CT-Y where
+    it gap-faded)."""
+    latest: dict[str, dict] = {}
+    for sg in signals:
+        latest[sg["signal_id"]] = sg
+    own_by = {(sg["strategy"], sg["source_signal_id"]): sg for sg in latest.values() if sg.get("source_signal_id")}
+    pos_by = {(p["strategy"], p["signal_id"]): p for p in positions}
+    net_by = _net_by_position(trades)
+    fades: dict[str, dict] = {}
+    skips: dict[str, dict] = {}
+    for e in events:
+        if not e.get("signal_id"):
+            continue
+        if e.get("kind") == "counter.market_fade":
+            fades[e["signal_id"]] = e
+        elif e.get("kind") == "rt_twin.skipped" and e.get("book") == MARKET_FADE_BOOK:
+            skips[e["signal_id"]] = e
+
+    def fired(sid: str) -> float | None:
+        trig = latest.get(sid) or {}
+        return float(trig.get("created_ts") or (float(trig["ts"]) + 1800 if trig.get("ts") else 0)) or None
+
+    rows = []
+    for sid, ev in sorted(fades.items(), key=lambda kv: fired(kv[0]) or 0.0):
+        trig = latest.get(sid) or {}
+        own = own_by.get((MARKET_FADE_BOOK, sid))
+        mp = pos_by.get((MARKET_FADE_BOOK, own["signal_id"])) if own else None
+        m = _book_on(pos_by, net_by, MARKET_FADE_BOOK, own["signal_id"] if own else None)
+        gap = own_by.get(("FUDKII_CT_Y", sid))
+        rows.append({
+            "signal_id": sid, "symbol": ev.get("symbol") or trig.get("symbol"), "trigger": trig.get("direction"), "fired": fired(sid),
+            "breadth": ev.get("breadth"), "side": ev.get("side"), "stop": ev.get("stop"), "targets": list(ev.get("targets") or []),
+            "rr": ev.get("rr"), "grade": ev.get("grade"),
+            "contract": ((mp or {}).get("instrument") or {}).get("name"), "fill": (mp or {}).get("entry"),
+            "exit_reason": (mp or {}).get("exit_reason") if m["status"] == "EXITED" else None,
+            "not_taken": (own or {}).get("decision_reason") if mp is None else None,
+            "ct_m": m, "rt_x": _book_on(pos_by, net_by, "FUDKII_RT_X", sid), "rt_n": _book_on(pos_by, net_by, "FUDKII_RT_N", sid),
+            "rt_y": _book_on(pos_by, net_by, "FUDKII_RT_Y", sid),
+            "ct_y": _book_on(pos_by, net_by, "FUDKII_CT_Y", gap["signal_id"]) if gap else {"status": "NONE", "net": None},
+        })
+    skipped = sorted(({"signal_id": sid, "symbol": e.get("symbol") or (latest.get(sid) or {}).get("symbol"),
+                       "trigger": (latest.get(sid) or {}).get("direction"), "fired": fired(sid),
+                       "breadth": e.get("breadth"), "gate": e.get("gate"), "reason": e.get("reason")} for sid, e in skips.items()),
+                     key=lambda r: r["fired"] or 0.0)
+    done = [r for r in rows if r["ct_m"]["net"] is not None]
+
+    def same(k: str) -> float:
+        return sum(r[k]["net"] for r in done if r[k]["net"] is not None)
+
+    shares = [r["breadth"] for r in skipped if r["breadth"] is not None]
+    total = {
+        "fades": len(rows), "traded": sum(1 for r in rows if r["ct_m"]["status"] != "NONE"), "closed": len(done),
+        "net": sum(r["ct_m"]["net"] for r in done), "win": sum(1 for r in done if r["ct_m"]["net"] > 0),
+        "best": max((r["ct_m"]["net"] for r in done), default=None), "worst": min((r["ct_m"]["net"] for r in done), default=None),
+        "rt_x_net": same("rt_x"), "rt_n_net": same("rt_n"), "rt_y_net": same("rt_y"), "ct_y_net": same("ct_y"),
+        "skipped": len(skipped), "near": sum(1 for x in shares if x <= 0.50), "mid": sum(1 for x in shares if 0.50 < x <= 0.60),
+        "far": sum(1 for x in shares if x > 0.60),
+    }
+    return {"rows": rows, "skipped": skipped, "total": total}
+
+
+# -- FUKAA in shadow -------------------------------------------------------------------------------------
+
+
+def fukaa_shadow_summary(*, signals: list[dict], positions: list[dict], trades: list[dict], events: list[dict]) -> dict[str, Any]:
+    """Every signal FUKAA admitted in SHADOW (operator, 2026-10-02: its inputs fixed, recorded with every
+    input, never traded): what it read, whether the market and the OI were with it, and what the books that
+    trade the same FUDKII trigger made on it."""
+    latest: dict[str, dict] = {}
+    for sg in signals:
+        latest[sg["signal_id"]] = sg
+    own_by = {(sg["strategy"], sg["source_signal_id"]): sg for sg in latest.values() if sg.get("source_signal_id")}
+    pos_by = {(p["strategy"], p["signal_id"]): p for p in positions}
+    net_by = _net_by_position(trades)
+    rows = []
+    for e in sorted((e for e in events if e.get("kind") == "fukaa.shadow" and e.get("signal_id")), key=lambda e: float(e.get("ts") or 0)):
+        ev, al = e.get("evidence") or {}, e.get("alignment") or {}
+        sg = latest.get(e["signal_id"]) or {}
+        parent = sg.get("source_signal_id") or ""
+        targets = list(e.get("targets") or [])
+        ct_m = own_by.get((MARKET_FADE_BOOK, parent))
+        rows.append({
+            "signal_id": e["signal_id"], "parent": parent, "symbol": e.get("symbol"), "direction": e.get("direction"),
+            "fired": float(e.get("ts") or 0) or None, "entry": e.get("entry"), "stop": e.get("stop"), "t1": targets[0] if targets else None,
+            "rr": e.get("rr"), "composite": ev.get("composite"), "promoted": bool(ev.get("promoted")),
+            "surge": ev.get("surge_used"), "rel_volume": ev.get("rel_volume"), "momentum": ev.get("momentum_score"),
+            "oi_change": ev.get("oi_change_pct"), "oi_z": ev.get("oi_rel_z"),
+            "breadth": al.get("breadth"), "with_market": al.get("withMarket"), "price_change": al.get("priceChangePct"),
+            "oi_quadrant": al.get("oiQuadrant"), "oi_agrees": al.get("oiAgrees"),
+            "rt_x": _book_on(pos_by, net_by, "FUDKII_RT_X", parent), "rt_n": _book_on(pos_by, net_by, "FUDKII_RT_N", parent),
+            "rt_y": _book_on(pos_by, net_by, "FUDKII_RT_Y", parent),
+            "ct_m": _book_on(pos_by, net_by, MARKET_FADE_BOOK, ct_m["signal_id"] if ct_m else None),
+        })
+
+    def same(k: str) -> float:
+        return sum(r[k]["net"] for r in rows if r[k]["net"] is not None)
+
+    total = {
+        "signals": len(rows), "promoted": sum(1 for r in rows if r["promoted"]),
+        "with_market": sum(1 for r in rows if r["with_market"] is True), "counter": sum(1 for r in rows if r["with_market"] is False),
+        "oi_agrees": sum(1 for r in rows if r["oi_agrees"] is True),
+        "rt_x_net": same("rt_x"), "rt_n_net": same("rt_n"), "rt_y_net": same("rt_y"),
+        "rt_x_closed": sum(1 for r in rows if r["rt_x"]["net"] is not None),
+        "rt_y_closed": sum(1 for r in rows if r["rt_y"]["net"] is not None),
+    }
+    return {"rows": rows, "total": total}
+
+
 # -- the labels ----------------------------------------------------------------------------------
 
 
@@ -361,10 +495,12 @@ def _brief_html(b: Brief) -> str:
 
 def _triggers_table(rows: list[dict[str, Any]]) -> str:
     head = ["Fired", "Symbol", "Dir", "RR", "Breadth", "Trend eff.", "Own vol", "Gap dATR", "09:45", "Pivots ≤0.5 ATR ahead",
-            "RT-Y", "RT-Y why", "CT-Y", "CT-Y plan", *(LABELS[b] for b in BOOKS)]
+            "RT-Y", "RT-Y why", "CT-Y", "CT-Y plan", "CT-M", "CT-M why", *(LABELS[b] for b in BOOKS)]
     body = []
     for r in rows:
         y, c = r["rtY"], r["ctY"]
+        m = r.get("ctM") or {"action": "NONE", "why": "—"}
+        m_cls = "blocked" if m["action"] == "FADE" else "dim"
         # a gate's skip, a take, and — neither — a miss or another refusal (review, 2026-09-26: those read as "filled")
         y_cls = {"SKIP": "refused", "TAKE": "filled"}.get(y["action"], "blocked")
         c_cls = "blocked" if c["action"] in ("GAP FADE", "FADE") else "dim"
@@ -380,9 +516,10 @@ def _triggers_table(rows: list[dict[str, Any]]) -> str:
             f'<td><span class="chip {y_cls}">{html.escape(y["action"].lower() if y["state"] in ("taken", "skipped") else y["state"])}</span></td>'
             f'<td class="why l">{html.escape("; ".join(y["why"]) or "—")}</td>'
             f'<td><span class="chip {c_cls}">{html.escape(c["action"].lower())}</span></td><td class="why l">{plan}</td>'
+            f'<td><span class="chip {m_cls}">{html.escape(m["action"].lower())}</span></td><td class="why l">{html.escape(str(m.get("why") or "—"))}</td>'
             + "".join(_book_cell(r["books"][b]) for b in BOOKS) + "</tr>"
         )
-    left = ("Symbol", "Own vol", "Pivots ≤0.5 ATR ahead", "RT-Y why", "CT-Y plan")
+    left = ("Symbol", "Own vol", "Pivots ≤0.5 ATR ahead", "RT-Y why", "CT-Y plan", "CT-M why")
     return (
         f'<div class="scroll"><table><thead><tr>{"".join(f"<th class=l>{h}</th>" if h in left else f"<th>{h}</th>" for h in head)}</tr></thead>'
         f'<tbody>{"".join(body) or f"<tr><td colspan={len(head)} class=dim>no triggers on this day</td></tr>"}</tbody></table></div>'
@@ -507,6 +644,88 @@ def _render_gap(d: ShadowData) -> str:
 <th class="l">Targets</th><th>RR</th><th>Grade</th><th class="l">Contract</th><th>Fill</th><th class="l">Exit</th><th>CT-Y net</th>
 <th>Parent net</th><th>RT-X net</th><th>RT-N net</th></tr></thead>
 <tbody>{body or '<tr><td colspan="16" class="dim">no 09:45 gap trigger since the A/B began</td></tr>'}</tbody></table></div>"""
+
+
+def _pct_of(x: float | None) -> str:
+    return "—" if x is None else f"{x:.0%}"
+
+
+def _render_market_fade(d: ShadowData) -> str:
+    g = d.market_fade or {"rows": [], "skipped": [], "total": {}}
+    t = g.get("total") or {}
+    body = "".join(
+        f'<tr><td class="sym">{_ist(r["fired"])}</td><td class="sym l">{html.escape(str(r["symbol"]))}</td>'
+        f'<td class="{"pos" if r["trigger"] == "BULLISH" else "neg"}">{"BULL" if r["trigger"] == "BULLISH" else "BEAR" if r["trigger"] else "—"}</td>'
+        f'<td>{_pct_of(r["breadth"])}</td><td class="{"pos" if r["side"] == "CE" else "neg"}">{html.escape(str(r["side"] or "—"))}</td>'
+        f'<td>{_fmt(r["stop"])}</td><td class="l">{" · ".join(_fmt(x) for x in r["targets"]) or "—"}</td>'
+        f'<td>{_fmt(r["rr"])}</td><td>{html.escape(str(r["grade"] or "—"))}</td>'
+        f'<td class="l">{html.escape(str(r["contract"] or r["not_taken"] or "—"))}</td><td>{_fmt(r["fill"])}</td>'
+        f'<td class="l">{html.escape(str(r["exit_reason"] or "—"))}</td>{_net_cell(r["ct_m"]["net"], r["ct_m"]["status"])}'
+        f'{_net_cell(r["rt_x"]["net"], r["rt_x"]["status"])}{_net_cell(r["rt_n"]["net"], r["rt_n"]["status"])}'
+        f'{_net_cell(r["rt_y"]["net"], r["rt_y"]["status"])}{_net_cell(r["ct_y"]["net"], r["ct_y"]["status"])}</tr>'
+        for r in g["rows"]
+    )
+    n = t.get("closed", 0)
+    tot = (
+        f'<tr><td class="l"><b>since {d.ab["since"]}</b></td><td>{t.get("fades", 0)}</td><td>{t.get("traded", 0)}</td><td>{n}</td>'
+        f'{_net_cell(t.get("net") if n else None)}<td>{_pct(t.get("win", 0), n)}</td>{_net_cell(t.get("best"))}{_net_cell(t.get("worst"))}'
+        f'{_net_cell(t.get("rt_x_net") if n else None)}{_net_cell(t.get("rt_n_net") if n else None)}{_net_cell(t.get("rt_y_net") if n else None)}</tr>'
+    )
+    near = [r for r in g.get("skipped", []) if r["breadth"] is not None and r["breadth"] <= 0.50][-15:]
+    near_rows = "".join(
+        f'<tr><td class="sym">{_ist(r["fired"])}</td><td class="sym l">{html.escape(str(r["symbol"]))}</td>'
+        f'<td class="{"pos" if r["trigger"] == "BULLISH" else "neg"}">{"BULL" if r["trigger"] == "BULLISH" else "BEAR" if r["trigger"] else "—"}</td>'
+        f'<td>{_pct_of(r["breadth"])}</td><td class="why l">{html.escape(str(r["reason"] or "—"))}</td></tr>'
+        for r in near
+    )
+    return f"""<h3>Market fade · running total</h3>
+<div class="scroll"><table><thead><tr><th class="l">Period</th><th>Fades planned</th><th>Traded</th><th>Closed</th><th>CT-M net</th><th>CT-M win</th>
+<th>Best</th><th>Worst</th><th>RT-X on the same</th><th>RT-N on the same</th><th>RT-Y on the same</th></tr></thead><tbody>{tot}</tbody></table></div>
+<p class="sub">Skipped, market not against: {t.get("skipped", 0)} triggers — {t.get("near", 0)} at 46–50 % agreeing, {t.get("mid", 0)} at 51–60 %,
+{t.get("far", 0)} above 60 %.</p>
+<h3>Market fade · every fade · {len(g["rows"])}</h3>
+<div class="scroll"><table><thead><tr><th>Fired</th><th class="l">Symbol</th><th>Trigger</th><th>Breadth</th><th>Fade</th><th>Stop (1 ATR30)</th>
+<th class="l">Targets</th><th>RR</th><th>Grade</th><th class="l">Contract / why not taken</th><th>Fill</th><th class="l">Exit</th><th>CT-M net</th>
+<th>RT-X net</th><th>RT-N net</th><th>RT-Y net</th><th>CT-Y net</th></tr></thead>
+<tbody>{body or '<tr><td colspan="17" class="dim">no trigger the market was clearly against since CT-M began</td></tr>'}</tbody></table></div>
+<h3>Market fade · the closest skips (46–50 % agreeing)</h3>
+<div class="scroll"><table><thead><tr><th>Fired</th><th class="l">Symbol</th><th>Trigger</th><th>Breadth</th><th class="l">Why it stood aside</th></tr></thead>
+<tbody>{near_rows or '<tr><td colspan="5" class="dim">none</td></tr>'}</tbody></table></div>"""
+
+
+def _render_fukaa(d: ShadowData) -> str:
+    g = d.fukaa or {"rows": [], "total": {}}
+    t = g.get("total") or {}
+
+    def yn(v: Any) -> str:
+        return "—" if v is None else ("with" if v else "against")
+
+    body = "".join(
+        f'<tr><td class="sym">{_ist(r["fired"])}</td><td class="sym l">{html.escape(str(r["symbol"]))}</td>'
+        f'<td class="{"pos" if r["direction"] == "BULLISH" else "neg"}">{"BULL" if r["direction"] == "BULLISH" else "BEAR"}</td>'
+        f'<td>{_fmt(r["entry"])}</td><td>{_fmt(r["stop"])}</td><td>{_fmt(r["t1"])}</td><td>{_fmt(r["rr"])}</td><td>{_fmt(r["composite"])}</td>'
+        f'<td>{"T+1" if r["promoted"] else "—"}</td><td>{_fmt(r["surge"])}</td><td>{_fmt(r["rel_volume"])}</td><td>{_fmt(r["momentum"])}</td>'
+        f'<td>{_fmt(r["oi_change"])}</td><td>{_fmt(r["oi_z"])}</td><td>{_pct_of(r["breadth"])} {yn(r["with_market"])}</td>'
+        f'<td class="l">{html.escape(str(r["oi_quadrant"] or "—"))}</td><td>{yn(r["oi_agrees"])}</td>'
+        f'{_net_cell(r["rt_x"]["net"], r["rt_x"]["status"])}{_net_cell(r["rt_n"]["net"], r["rt_n"]["status"])}'
+        f'{_net_cell(r["rt_y"]["net"], r["rt_y"]["status"])}{_net_cell(r["ct_m"]["net"], r["ct_m"]["status"])}</tr>'
+        for r in g["rows"]
+    )
+    tot = (
+        f'<tr><td class="l"><b>since {d.ab["since"]}</b></td><td>{t.get("signals", 0)}</td><td>{t.get("promoted", 0)}</td>'
+        f'<td>{t.get("with_market", 0)}</td><td>{t.get("counter", 0)}</td><td>{t.get("oi_agrees", 0)}</td>'
+        f'{_net_cell(t.get("rt_x_net") if t.get("rt_x_closed") else None)}{_net_cell(t.get("rt_n_net") if t.get("rt_x_closed") else None)}'
+        f'{_net_cell(t.get("rt_y_net") if t.get("rt_y_closed") else None)}</tr>'
+    )
+    return f"""<h3>FUKAA · running total</h3>
+<div class="scroll"><table><thead><tr><th class="l">Period</th><th>Shadow signals</th><th>Promoted at T+1</th><th>Market with</th>
+<th>Market against</th><th>OI building its way</th><th>RT-X on the same</th><th>RT-N on the same</th><th>RT-Y on the same</th></tr></thead>
+<tbody>{tot}</tbody></table></div>
+<h3>FUKAA · every shadow signal · {len(g["rows"])}</h3>
+<div class="scroll"><table><thead><tr><th>Fired</th><th class="l">Symbol</th><th>Dir</th><th>Entry</th><th>Stop</th><th>T1</th><th>RR</th>
+<th>Score</th><th>T+1</th><th>Volume ×</th><th>vs NIFTY50</th><th>Momentum</th><th>OI chg %</th><th>OI z</th><th>Market</th>
+<th class="l">OI quadrant</th><th>OI its way</th><th>RT-X net</th><th>RT-N net</th><th>RT-Y net</th><th>CT-M net</th></tr></thead>
+<tbody>{body or '<tr><td colspan="21" class="dim">no FUKAA shadow signal yet</td></tr>'}</tbody></table></div>"""
 
 
 def volume_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -709,6 +928,79 @@ GAP_FADE = Brief(
     ),
 )
 
+MARKET_FADE = Brief(
+    name="Market fade · CT-M ≤ 45 %",
+    testing="Whether a published trigger the market is clearly against is worth trading the other way.",
+    for_rule=(
+        "The shadow book FUDKII-CT-M: every published NSE trigger at most 45 % of the market agrees with — breadth, the "
+        "share of NSE names past today's open in the trigger's direction, logged at the trigger — is faded with CT-Y's "
+        "plan: the opposite OTM, the stock stop 1 ATR30 past the trigger's close, the walls on the fade's side as targets "
+        "(one target 1 ATR30 away when there are none), traded under CT-Y's exits."
+    ),
+    against=(
+        "What the books that trade the trigger made on it: RT-X and RT-N take it in-trend; RT-Y stands aside from it "
+        "(its breadth gate); CT-Y fades only the 09:45 gap ones."
+    ),
+    logic=(
+        "Its own entries and its own ₹10 L purse; nothing is mirrored. Every published NSE trigger is decided: breadth "
+        "at or under 45 % is a fade (the same plan CT-Y's gap fade uses), otherwise a skip on its card with the share; a "
+        "breadth that could not be read decides nothing. 4 lots under ₹75,000 and the resting limit entry, as every "
+        "book; exits: T1 = max(own T1, entry +5 %), the stop to breakeven after T1, a 3 % give-back from the peak, no "
+        "25 % premium cap. A shadow: never in the day's totals, never a live order."
+    ),
+    pros=(
+        "25 Sep – 1 Oct, actual replay through this code: 3 fades filled, all won, +₹19,127 net of charges (INFY, "
+        "KALYANKJIL, ADANIENT).",
+        "Following these triggers is worse: on the option model over 24 Aug – 1 Oct the same triggers traded in-trend "
+        "lost −₹2,17,547.",
+    ),
+    cons=(
+        "On the option model over 24 Aug – 1 Oct the rule itself lost: 73 fades, 55 % won, −₹80,934 — −₹76,238 to "
+        "11 Sep, −₹4,696 after (75 % won). Unproven.",
+        "In the replay, of 6 planned fades one entry did not fill and two had no option prices.",
+        "A 1-ATR stop is wider than the confluence stop, so a loser costs more.",
+    ),
+    decide=(
+        "After about 30 closed fades: keep it — and consider it as a trading book — only if its net after charges is "
+        "positive in both halves of the sample and beats RT-X and RT-N on the same triggers."
+    ),
+)
+
+FUKAA_SHADOW = Brief(
+    name="FUKAA · in shadow",
+    testing="Whether FUKAA — FUDKII's trigger admitted only when volume confirms it — is worth trading, now that its inputs are read correctly.",
+    for_rule=(
+        "FUKAA admits a FUDKII trigger only when the trigger bar or the one before ran at 4× its baseline volume or more and "
+        "its composite score (volume, OI, momentum, RR) reaches 60; a trigger without the volume is watched one more bar "
+        "(35 min) and promoted at that bar's close, refused through the stop. Its inputs since 2 Oct: the engine's checked "
+        "volume reading, volume against the NIFTY50's mean, momentum on a 60-bar ATR, and the OI change against the "
+        "previous session's close (the current month; current + next in the contract's last three sessions) with its "
+        "z against the NIFTY50."
+    ),
+    against="What RT-X, RT-N and RT-Y made on the same FUDKII triggers.",
+    logic=(
+        "In shadow (FukaaConfig.shadow): an admitted signal is a SHADOW row and a fukaa.shadow event with every input; "
+        "nothing reaches a book and its wallet never moves. Each event also carries its alignment — labels, never gates: "
+        "whether the market was with the trigger (breadth over 50 %), the price-OI quadrant since the previous close "
+        "(long or short build-up, short covering, long unwinding) and whether OI built the signal's way."
+    ),
+    pros=(
+        "Before 2 Oct FUKAA could never fire: the broker's OI change field is 0.0 on every frame and its momentum was never "
+        "computed. Its readings are now real.",
+        "Volume confirmation is measured on every trigger, beside the books that trade them.",
+    ),
+    cons=(
+        "23 Sep – 1 Oct with the fixed inputs (stock-path estimate): 7 signals, 2 won, about −₹11,900; no volume, OI, "
+        "momentum or direction rule cleared costs.",
+        "The OI readings so far are from the expiry week, when OI fell on most names.",
+        "Its thresholds (4× volume, the OI scoring bands) predate the fixes and are not yet re-fitted.",
+    ),
+    decide=(
+        "After the 27 Oct expiry, with about 30 shadow signals: re-fit the thresholds on these readings; trade it only if "
+        "the re-fitted rule is positive after charges in both halves and beats RT-Y on the same triggers."
+    ),
+)
+
 LABELS_BRIEF = Brief(
     name="Trigger labels",
     testing="Whether the measures logged on every trigger separate the winners from the losers.",
@@ -766,6 +1058,8 @@ TABS: list[ShadowTab] = [
     ShadowTab("wide-stop", "Wide stop · RT-Y 1% past", WIDE_STOP, _render_wide),
     ShadowTab("graded-f", "Graded F · RT-Y's rules", GRADED_F, _render_graded_f),
     ShadowTab("gap-fade", "Gap fade · CT-Y 09:45", GAP_FADE, _render_gap),
+    ShadowTab("market-fade", "Market fade · CT-M ≤45%", MARKET_FADE, _render_market_fade),
+    ShadowTab("fukaa", "FUKAA · shadow", FUKAA_SHADOW, _render_fukaa),
     ShadowTab("volume", "Volume · dried & surge", VOLUME, _render_volume),
     ShadowTab("labels", "Trigger labels", LABELS_BRIEF, _render_labels),
 ]
@@ -821,6 +1115,8 @@ def render_shadow(d: ShadowData) -> str:
     wt = (d.wide or {}).get("total") or {}
     ft = (d.graded_f or {}).get("total") or {}
     gt = (d.gap or {}).get("total") or {}
+    mt = (d.market_fade or {}).get("total") or {}
+    kt = (d.fukaa or {}).get("total") or {}
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Shadow — {html.escape(pretty)}</title>
@@ -840,6 +1136,8 @@ def render_shadow(d: ShadowData) -> str:
       <div class="tal"><b>{wt.get("pairs", 0)}</b><span>wide-stop pairs</span></div>
       <div class="tal"><b>{ft.get("traded", 0)}</b><span>graded-F trades</span></div>
       <div class="tal"><b>{gt.get("fired", 0)}</b><span>gap fades</span></div>
+      <div class="tal"><b>{mt.get("fades", 0)}</b><span>CT-M fades</span></div>
+      <div class="tal"><b>{kt.get("signals", 0)}</b><span>FUKAA signals</span></div>
     </div>
   </div>
 </header>

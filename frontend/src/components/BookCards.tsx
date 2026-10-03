@@ -13,14 +13,16 @@ type Level = { label: string; price: number }
 type ExitRow = { kind: 'target' | 'stop' | 'trail' | 'time'; at: string; action: string; qty: number | null }
 type Plan = { ok: boolean; reason?: string; contract?: string; strike?: number; type?: string; premium?: number; bid?: number | null; ask?: number | null; spreadPct?: number | null; delta?: number; lots?: number; qty?: number; outlay?: number; lotSize?: number; optionSl?: number; ladder?: number[]; edm?: number; ladderNote?: string; exitPlan?: { policy: string; rows: ExitRow[] } | null }
 type BookRow = { book: string; label: string; status: 'OPEN' | 'EXITED' | 'NONE'; side: 'CE' | 'PE' | 'LONG' | 'SHORT' | null; openedTs: number | null; closedTs: number | null; exitReason: string | null; pnl: number | null }
-type Verdict = { action: string; state?: string; gate?: string | null; why: string[] | string; side?: string; stop?: number | null; targets?: number[]; rr?: number | null; grade?: string | null }
+type Verdict = { action: string; state?: string; gate?: string | null; why: string[] | string; side?: string; stop?: number | null; targets?: number[]; rr?: number | null; grade?: string | null; breadth?: number | null }
 type TargetEv = { rung: number; limit: number; qty: number; placedTs: number; ts: number; outcome: string }
 type Card = {
-  verdicts?: { rtY: Verdict | null; ctY: Verdict | null }
+  verdicts?: { rtY: Verdict | null; ctY: Verdict | null; ctM?: Verdict | null }
   pending?: (ExecA & { restingS?: number; contract?: string; forTwins?: boolean; parentWhy?: string }) | null
   execLog?: { entry?: ExecA; exits?: (ExecA & { reason?: string; qty?: number })[]; targets?: TargetEv[] } | null
   // the next target SELL resting in advance (fills on a touch; any other exit cancels it first)
   restingTarget?: { rung: number; limit: number; qty: number; lots: number; placedTs: number } | null
+  // every rung's SELL resting, lowest first (since 3 Oct the whole ladder rests from the fill)
+  restingTargets?: { rung: number; limit: number; qty: number; lots: number; placedTs: number }[]
   side?: 'CE' | 'PE' | 'LONG' | 'SHORT'
   breadth?: { share: number | null; names: number; efficiency?: number; volBand?: string | null; gapDatr?: number; pivotsAhead?: string[]; openBar?: boolean } | null
   books?: BookRow[]
@@ -362,11 +364,15 @@ function Cta({ book, c, onDone }: { book: string; c: Card; onDone: () => void })
 /** Every book on this trigger at a glance (operator, 2026-09-29): a glowing GREEN circle while the book
  *  holds a live trade on it, CE or PE alike; a GREY one once it has exited; a ring where it never bought.
  *  The side, times and P&L are on hover. */
-// Gate B and the 09:45 gap fade, on EVERY book's card (operator, 2026-09-26: "mention on all respective
-// strategies as label"). Rose = RT-Y stands aside, emerald = RT-Y takes, amber = CT-Y fades.
-function VerdictChips({ v }: { v: { rtY: Verdict | null; ctY: Verdict | null } }) {
+// Gate B, the 09:45 gap fade and the market-against fade, on EVERY book's card (operator, 2026-09-26:
+// "mention on all respective strategies as label"). Rose = RT-Y stands aside, emerald = RT-Y takes,
+// amber = CT-Y fades, violet = CT-M fades (the shadow, 2026-10-03).
+function VerdictChips({ v }: { v: { rtY: Verdict | null; ctY: Verdict | null; ctM?: Verdict | null } }) {
   const y = v.rtY
   const c = v.ctY
+  const m = v.ctM ?? null
+  const mWhy = m ? (Array.isArray(m.why) ? m.why.join(' · ') : m.why) : ''
+  const mPct = m?.breadth != null ? ` · ${Math.round(m.breadth * 100)}% agree` : ''
   const yWhy = y ? (Array.isArray(y.why) ? y.why : [y.why]).filter(Boolean).join(' · ') : ''
   const yLabel = y ? `RT-Y: ${y.action}${y.state && y.state.startsWith('would') ? ' (would)' : ''}${y.action !== 'TAKE' && yWhy ? ` — ${yWhy}` : ''}` : ''
   const cPlan = c && c.action !== 'NONE'
@@ -381,6 +387,13 @@ function VerdictChips({ v }: { v: { rtY: Verdict | null; ctY: Verdict | null } }
         <span title={Array.isArray(c.why) ? c.why.join(' · ') : c.why} className="rounded-md border border-amber-400/40 bg-amber-400/10 px-2 py-0.5 text-amber-200">{cPlan}</span>
       ) : c ? (
         <span title={Array.isArray(c.why) ? c.why.join(' · ') : c.why} className="rounded-md border border-slate-600/60 bg-slate-800/70 px-2 py-0.5 text-slate-400">CT-Y: no fade — {Array.isArray(c.why) ? c.why.join(' · ') : c.why}</span>
+      ) : null}
+      {m && m.action === 'FADE' ? (
+        <span title={mWhy} className="rounded-md border border-violet-400/40 bg-violet-400/10 px-2 py-0.5 text-violet-200">{`CT-M: FADE ${m.side ?? ''} · stop ${f(m.stop)} · T1 ${f(m.targets?.[0])}${mPct}`}</span>
+      ) : m && m.action === 'WOULD FADE' ? (
+        <span title={mWhy} className="rounded-md border border-violet-400/30 bg-slate-800/70 px-2 py-0.5 text-violet-300/80">{`CT-M: would fade${mPct}`}</span>
+      ) : m ? (
+        <span title={mWhy} className="rounded-md border border-slate-600/60 bg-slate-800/70 px-2 py-0.5 text-slate-400">{`CT-M: no fade — ${mWhy}`}</span>
       ) : null}
     </div>
   )
@@ -711,7 +724,7 @@ function TriggerCard({ book, c, open, onToggle, refresh }: { book: string; c: Ca
 
         {/* the one line to read first */}
         <div className={`mt-4 rounded-lg border-l-4 bg-slate-950/40 px-4 py-2.5 text-[15px] leading-relaxed ${whyTone[why.tone]}`}>{why.text}</div>
-        {c.verdicts?.rtY || c.verdicts?.ctY ? <VerdictChips v={c.verdicts} /> : null}
+        {c.verdicts?.rtY || c.verdicts?.ctY || c.verdicts?.ctM ? <VerdictChips v={c.verdicts} /> : null}
 
         {/* SCAN: the trade map, and the readings beside it */}
         <div className="mt-4 grid grid-cols-[minmax(0,1.65fr)_minmax(280px,1fr)] gap-5">
@@ -834,14 +847,14 @@ function Expanded({ book, c }: { book: string; c: Card }) {
               <div className="text-[14px] text-slate-300">{stateOf(c.state).label} — {c.skip ? c.skip.reason : c.parentReason ?? c.route?.summary ?? ''}{c.plan && !c.plan.ok ? <div className="mt-1 text-slate-500">preview: {c.plan.reason}</div> : null}</div>
             )}
           </Section>
-          {(c.pending || c.execLog || c.restingTarget) && (
+          {(c.pending || c.execLog || c.restingTarget || (c.restingTargets ?? []).length > 0) && (
             <Section icon={IC.ticket} title="order trail · limit orders">
               <div className="text-[13.5px] leading-relaxed">
-                {c.restingTarget && <div className="text-emerald-300">RESTING · T{c.restingTarget.rung} sell {f(c.restingTarget.limit)} × {c.restingTarget.qty} ({c.restingTarget.lots} lot{c.restingTarget.lots === 1 ? '' : 's'}) since {ist(c.restingTarget.placedTs)} — fills on a touch</div>}
+                {(c.restingTargets && c.restingTargets.length > 0 ? c.restingTargets : c.restingTarget ? [c.restingTarget] : []).map((t) => <div key={`r${t.rung}`} className="text-emerald-300">RESTING · T{t.rung} sell {f(t.limit)} × {t.qty} ({t.lots} lot{t.lots === 1 ? '' : 's'}) since {ist(t.placedTs)} — fills on a touch</div>)}
                 {c.pending && <div className="text-amber-300">PENDING · {c.pending.contract} · limit {f(c.pending.limit)} resting {f(c.pending.restingS, 0)} s · {trail(c.pending)} · {c.pending.why}</div>}
                 {c.execLog?.entry && <div className="text-slate-300"><b className="text-slate-200">Entry:</b> {trail(c.execLog.entry)}</div>}
                 {(c.execLog?.exits ?? []).map((x, i) => <div key={i} className="text-slate-300"><b className="text-slate-200">Exit {x.reason ?? ''}{x.qty ? ` ×${x.qty}` : ''}:</b> {trail(x)}</div>)}
-                {(c.execLog?.targets ?? []).filter((t) => t.outcome !== 'placed').map((t, i) => <div key={`t${i}`} className="text-slate-400"><b className="text-slate-300">T{t.rung} resting sell {f(t.limit)} ×{t.qty}:</b> placed {ist(t.placedTs)} · {t.outcome} {ist(t.ts)}</div>)}
+                {(c.execLog?.targets ?? []).filter((t) => t.outcome !== 'placed' && !t.outcome.startsWith('kept')).map((t, i) => <div key={`t${i}`} className="text-slate-400"><b className="text-slate-300">T{t.rung} resting sell {f(t.limit)} ×{t.qty}:</b> placed {ist(t.placedTs)} · {t.outcome} {ist(t.ts)}</div>)}
               </div>
             </Section>
           )}

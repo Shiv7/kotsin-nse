@@ -20,9 +20,9 @@ Code: `engine.py` — `_handle_signal` (the trigger, once) → `_enter_book` (ev
 | **RT-Y graded F (shadow)** | RT-Y's rules on the triggers FUDKII does not publish (operator, 28 Sep) | a trigger FUDKII grades F (NOT_PUBLISHED), NSE only; where no pivot cluster ahead makes a target, the raw pivot zones ahead, nearest first, are its ladder | RT-Y's gates, run BEFORE the strike choice (a trigger they refuse costs no broker call) | RT-Y's, incl. the 25 % cap — not its 0.5 ATR stop floor (mixed in the 1 Oct study) | ₹10 L — its wallet and its cards (the unpublished triggers only) on its own Alerts tab, FUDKII-RT-Y-F (29 Sep) |
 | **CT-X** | counter-trend fade | the fade plan of a FUDKII trigger routed COUNTER; a plan whose stop is nearer than 0.5 ATR30 to the close is graded F (every counter-trend plan) | none | own ladder, RT-X's policy | ₹10 L |
 | **CT-Y** | counter-trend fade + the 09:45 gap fade | (a) its own 09:45 gap fade of a trigger that gapped ≥ 0.3 daily ATR its own way; (b) the same fade plan as CT-X | stands aside from (b) on a trigger it already gap-faded | own ladder, RT-Y's policy (incl. the +5 % T1 floor) | ₹10 L |
-| **CT-M (shadow)** | the market-against fade (operator, 3 Oct: "fade when the market is clearly against" as a shadow, named FUDKII-CT-M) | every published NSE trigger at most 45 % of the market agrees with — breadth, the share of NSE names past today's open the trigger's way (`CT_M_MARKET_AGAINST_MAX`); a trigger above that is a skip on its card with the share | none of its own: CT-Y's fade plan (`Engine.fade_plan`) — the opposite OTM, the stock stop 1 ATR30 past the close, the walls on the fade's side (else one target 1 ATR30 away); beside CT-Y's gap fade, never instead of it | CT-Y's: RT-Y's policy incl. the +5 % T1 floor, no 25 % premium cap | ₹10 L — paper, on the Shadow page; never in the day's totals. 25 Sep–1 Oct actual replay (at ≤ 40 %): 3 fades, all won, +₹19,127; option model 24 Aug–1 Oct: lost before 11 Sep, won after |
+| **CT-M (shadow)** | the market-against fade (operator, 3 Oct: "fade when the market is clearly against" as a shadow, named FUDKII-CT-M) | every published NSE trigger at most 45 % of the market agrees with — breadth, the share of NSE names past today's open the trigger's way (`CT_M_MARKET_AGAINST_MAX`); a trigger above that is a skip on its card with the share | none of its own: CT-Y's fade plan (`Engine.fade_plan`) — the opposite OTM, the stock stop 1 ATR30 past the close, the walls on the fade's side (else one target 1 ATR30 away); beside CT-Y's gap fade, never instead of it | CT-Y's: RT-Y's policy incl. the +5 % T1 floor, no 25 % premium cap | ₹10 L — paper, on the Shadow page; never in the day's totals. 25 Sep–1 Oct actual replay: 3 fades, all won, +₹19,127; option model 24 Aug–1 Oct: 73 fades, −₹80,934 (−₹76,238 to 11 Sep, −₹4,696 after), against −₹2,17,547 for the same triggers in-trend. Every fade and skip: the Shadow page's *Market fade · CT-M* tab; a CT-M chip on every card |
 | **RT-MCX** | the commodity book | every FUDKII trigger on MCX (FUDKII's purse never trades MCX) | none | own ladder, RT-X's policy | ₹30 L |
-| **FUKAA** | a separate strategy derived from FUDKII's context | its own signals | its own, incl. the costs-against-T1 test | its own | ₹10 L |
+| **FUKAA (shadow)** | a separate strategy derived from FUDKII's context — FUDKII's trigger admitted only when volume confirms it; in SHADOW since 2 Oct (inputs fixed) | its own signals | its own, incl. the costs-against-T1 test: 4x volume on T or T-1 (else watched one bar), composite ≥ 60 | never trades: each signal is a SHADOW row and a `fukaa.shadow` event with its inputs and alignment (market with / against, OI quadrant); the Shadow page's *FUKAA · shadow* tab | ₹10 L, untouched |
 
 ## 1b. The clock (operator, 29 Sep)
 
@@ -108,6 +108,27 @@ entry +5 %), entry +5 % itself when the contract has no own ladder; RT-N: its ow
 Each book's targets are its own — RT-X, RT-N, CT-X and RT-MCX have no +5 % floor. Any other exit
 cancels the resting sell first — never two sells for the same lots. A stop exits every remaining lot at
 once.
+
+How an exit sells (PAPER with limit orders on; LIVE sells at once):
+
+| Exit | Order |
+|---|---|
+| target | a SELL resting at the rung from the moment the contract is held — the next rung only, placed the instant the one below fills; fills on a touch |
+| **urgent stop** — the stock through its stop (SL-EQ), the option's mid down 2 % or more in 30 s, or a book 2 ticks wide or less | **sold into the bid at once, through the depth for every lot** (operator, 3 Oct: "if the momentum is very high, then stoploss if not executed quickly and waited will attract high losses"; live 30 Sep – 1 Oct, 43 stops: +₹23,224 after the depth, +₹5,370 without DMART's collapse; the candle-built replay −₹5,209) |
+| calm option stop on a wide book | the mid, walked to the bid, sold at the bid after 15 s |
+| trail (the give-back line) | the mid, walked to the bid, 45 s — the walk beat the bid on 13 of 18 |
+| 15:20 flatten | the mid, walked to the bid, 10 s |
+
+Every order's trail keeps the book at placing and at the fill (or cross, or cancel) — the best bid and
+ask, and five levels a side, price and quantity (`depthAtPlace`, `depthAtFill`, `depthAtCross`,
+`depthAtCancel`).
+
+**15:15 plan (recorded, not acted on).** At 15:15 each open NSE position's distance to its stop line
+and its next target is written to the ledger as an `eod.plan` event with what the operator's rule
+would do: stop line within 3 % → exit now; else target within 3 % → wait for it; else flatten at the
+book's time as now (operator, 3 Oct: "if at 15:15 we are waiting for SL which is very near, we should
+exit asap, in case the SL is away, then we wait if the target is close by"). 30 Sep – 1 Oct had one
+such position in nine, so the rule is measured before it is used.
 
 ## 6. Order breaker, per book
 

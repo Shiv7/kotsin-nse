@@ -357,6 +357,20 @@ class ExitEngine:
         lot = max(1, pos.instrument.lot_size) * max(1, self.limits.arm_tranche_lots)
         return pos.qty_remaining if pos.qty_remaining <= lot else min(lot, pos.qty_remaining)
 
+    def stop_line(self, pos: Position, view: MarketView) -> float:
+        """The highest level a stop or the give-back line takes this position out at now (0 = none) —
+        what the engine's 15:15 plan measures the distance to."""
+        lim = self.limits
+        line = max(pos.option_sl, pos.ratchet_sl)
+        if lim.own_ladder:
+            return round(max(line, self._band_level(pos, view)), 2)
+        if lim.peak_giveback_pct is not None and pos.peak_mid > 0 and pos.targets_hit >= 1:
+            give = lim.peak_giveback_pct / 100
+            if view.spread_pct:
+                give = max(give, view.spread_pct * lim.peak_giveback_spread_mult)
+            line = max(line, pos.peak_mid * (1 - give))
+        return round(line, 2)
+
     def _band_level(self, pos: Position, view: MarketView) -> float:
         """The peak give-back line, once armed: max(peak_giveback_pct, giveback_move_frac × the
         option's expected daily move), floored at a multiple of the live spread."""
@@ -496,44 +510,83 @@ class ExitEngine:
     #
     # "upon approaching the target … why not place order in advance? … first come first serve has
     # our name too and in case it is a touch-and-fall case, we at least make profit on lot 1". The
-    # books whose target is a TOUCH rest the next rung's sell in advance; the engine fills it on a
-    # touch (exec/resting.py) and books it with the same state changes as the touch would have made.
+    # books whose target is a TOUCH rest every rung's sell in advance (since 2026-10-03; before, the
+    # next rung only); the engine fills each on a touch (exec/resting.py) and books it with the same
+    # state changes as the touch would have made.
 
     def resting_target(self, pos: Position) -> tuple[int, float, int] | None:
-        """The target sell to rest now: ``(rung index, limit, qty)``, or None. The base books' share
-        ladder (T{n}, ``target_ladder`` share); the own-ladder books (a lot per rung, the last the
-        rest; an ``arm_at_pct`` book's first rung no lower than entry + that %). RT-N
-        (``arm_mode="immediate"``) rests its own R1 too (operator, 2026-09-26: "yes RT-N to get
-        advance target sells too"): its T1 otherwise arms on a 1-minute CLOSE over R1, which a
-        resting order cannot wait for — so a touch of R1 now sells its first lot and arms it, as the
-        other books' touch does. An ``arm_at_pct`` book with no own rung at all rests its T1 at the
-        minimum itself (review, 2026-09-26: nothing rested and lot 1 went at market on the first
-        print over +5 %); any other position with no targets rests nothing."""
+        """The next rung's sell: ``(rung index, limit, qty)``, or None — the first of ``resting_ladder``."""
+        ladder = self.resting_ladder(pos)
+        return ladder[0] if ladder else None
+
+    def resting_ladder(self, pos: Position) -> list[tuple[int, float, int]]:
+        """Every target sell to rest now, lowest first: ``[(rung index, limit, qty), ...]`` (operator,
+        2026-10-03: "adding all targets immediately as we know ... to make the most of first come first
+        serve"; before, only the next rung rested). The base books' share ladder (T{n}, ``target_ladder``
+        share of the position); the own-ladder books a lot a rung, the last the rest; an ``arm_at_pct``
+        book's first rung no lower than entry + that %. RT-N (``arm_mode="immediate"``) rests its own R1
+        too (operator, 2026-09-26: "yes RT-N to get advance target sells too"): its T1 otherwise arms on
+        a 1-minute CLOSE over R1, which a resting order cannot wait for. An ``arm_at_pct`` book with no
+        own rung at all rests its T1 at the minimum itself (review, 2026-09-26); any other position with
+        no targets rests nothing. Rungs strictly rise; the lots go to the lowest rungs and the last rung
+        placed takes the rest, so the quantity on sale is never more than is held."""
         if pos.status != "OPEN" or pos.qty_remaining <= 0:
-            return None
+            return []
         lim = self.limits
-        i = pos.targets_hit
-        if lim.trail_all_after_t1 and i >= 1:
-            return None  # after T1 nothing more is sold at a rung: the rest rides the give-back line
-        if i >= len(pos.option_targets) or pos.option_targets[i] <= 0:
-            if not (lim.own_ladder and lim.arm_at_pct is not None and i == 0 and not pos.option_targets):
-                return None
-            price = 0.0  # the minimum below is T1
+        i0 = pos.targets_hit
+        if lim.trail_all_after_t1 and i0 >= 1:
+            return []  # after T1 nothing more is sold at a rung: the rest rides the give-back line
+        targets = tuple(pos.option_targets)
+        if i0 >= len(targets) or targets[i0] <= 0:
+            if not (lim.own_ladder and lim.arm_at_pct is not None and i0 == 0 and not targets):
+                return []
+            first = 0.0  # the minimum below is T1
         else:
-            price = pos.option_targets[i]
+            first = targets[i0]
         tick = pos.instrument.tick_size or 0.05
-        if not lim.own_ladder:
-            share = lim.target_ladder[i] if i < len(lim.target_ladder) else 0.0
-            qty = self._ladder_qty(pos, share)
-            return (i, _tick_up(price, tick), qty) if qty > 0 else None
-        targets = pos.option_targets
-        if i == 0:
+        if lim.own_ladder and i0 == 0:
             threshold, pct_arm = self._arm_threshold(pos)
-            price = max(price, threshold)
+            first = max(first, threshold)
             if pct_arm and (not targets or targets[0] < pct_arm):  # own T1 below the minimum (or none): the minimum is T1
-                targets = (price, *[r for r in targets if r > price])[:4]
-        qty = pos.qty_remaining if self._last_rung(pos, targets) else self._tranche(pos)
-        return i, _tick_up(price, tick), qty
+                targets = (first, *[r for r in targets if r > first])[:4]
+            else:
+                targets = (first, *targets[1:])
+        rungs: list[tuple[int, float]] = []
+        for i in range(i0, len(targets) if targets else 1):
+            px = _tick_up(targets[i] if targets else first, tick)
+            if px <= 0 or (rungs and px <= rungs[-1][1]):
+                continue  # a rung not above the one below is not a rung
+            rungs.append((i, px))
+        if lim.trail_all_after_t1:
+            rungs = rungs[:1]
+        out: list[tuple[int, float, int]] = []
+        left = pos.qty_remaining
+        if not lim.own_ladder:
+            step = pos.instrument.qty_step
+            for k, (i, px) in enumerate(rungs):
+                share = lim.target_ladder[i] if i < len(lim.target_ladder) else 0.0
+                if share <= 0 or left <= 0:
+                    break
+                want = int(pos.qty * share)
+                want = (want // step) * step if step > 1 else want
+                qty = left if (k == len(rungs) - 1 or want <= 0) else min(want, left)
+                out.append((i, px, qty))
+                left -= qty
+            return out
+        lot = max(1, pos.instrument.lot_size) * max(1, lim.arm_tranche_lots)
+        for k, (i, px) in enumerate(rungs):
+            if left <= 0:
+                break
+            last = k == len(rungs) - 1 and not lim.trail_all_after_t1
+            if (last and i == 0 and len(targets) == 1 and lim.arm_at_pct is not None
+                    and lim.peak_giveback_pct is not None):
+                # arming synthesised T1 and there is no rung above it: the arm tranche, and the
+                # give-back band carries the remainder (``_last_rung``)
+                last = False
+            qty = left if (last or left <= lot) else lot
+            out.append((i, px, qty))
+            left -= qty
+        return out
 
     def resting_target_filled(self, pos: Position, now: float, price: float, mid: float | None) -> ExitDecision:
         """A resting target sell filled at ``price``: the same state changes as the touch (the SL

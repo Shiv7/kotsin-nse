@@ -41,6 +41,11 @@ export function Strategies() {
               <span className="text-xs text-slate-500">
                 {s.gates.candidates} candidates evaluated · {s.gates.passed} passed
               </span>
+              {s.config.shadow === true ? (
+                <span className="rounded border border-violet-400/40 bg-violet-400/10 px-2 py-0.5 text-[11px] font-semibold text-violet-200">
+                  SHADOW — every signal is recorded with its inputs and alignment, never traded · see the Shadow page&apos;s {s.key} tab
+                </span>
+              ) : null}
             </div>
 
             <div className="grid grid-cols-2 gap-3 md:grid-cols-6">

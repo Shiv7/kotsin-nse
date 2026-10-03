@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..risk.limits import RiskLimits
+from ..risk.limits import CT_M_MARKET_AGAINST_MAX, RiskLimits
 
 
 def rt_gate_reasons(ctx: dict[str, Any] | None, lim: RiskLimits) -> list[tuple[str, str]]:
@@ -101,7 +101,30 @@ def trigger_verdicts(
             why = "routed COUNTER-TREND, but " + str((no_plan or {}).get("reason") or "no fade plan could be made")
         ct_y = {"action": "NONE", "side": fade_side, "stop": None, "targets": [], "rr": (no_plan or {}).get("rr"),
                 "grade": (no_plan or {}).get("grade"), "why": why}
-    return {"rtY": rt_y, "ctY": ct_y}
+    return {"rtY": rt_y, "ctY": ct_y, "ctM": market_fade_verdict(evs, ctx, fade_side)}
+
+
+def market_fade_verdict(evs: list[dict[str, Any]], ctx: dict[str, Any] | None, fade_side: str) -> dict[str, Any]:
+    """What FUDKII-CT-M, the market-against fade shadow (operator, 2026-10-03), does with one trigger:
+    its fade (``counter.market_fade``), its skip with the share (``rt_twin.skipped``), or — for a trigger
+    from before the book existed — what its rule WOULD do from the breadth logged at the trigger."""
+    fade = next((e for e in reversed(evs) if e.get("kind") == "counter.market_fade"), None)
+    skip = next((e for e in reversed(evs) if e.get("kind") == "rt_twin.skipped" and e.get("book") == "FUDKII_CT_M"), None)
+    share = (ctx or {}).get("share")
+    blank = {"side": fade_side, "stop": None, "targets": [], "rr": None, "grade": None}
+    if fade is not None:
+        b = float(fade.get("breadth") or 0.0)
+        return {"action": "FADE", "side": fade.get("side") or fade_side, "stop": fade.get("stop"), "targets": fade.get("targets") or [],
+                "rr": fade.get("rr"), "grade": fade.get("grade"), "breadth": b,
+                "why": f"market against the trigger: {b:.0%} agree ≤ {CT_M_MARKET_AGAINST_MAX:.0%} — CT-M fades it, stop 1 ATR30 past the close"}
+    if skip is not None:
+        return {**blank, "action": "NONE", "breadth": skip.get("breadth"), "why": str(skip.get("reason") or "")}
+    if share is None:
+        return {**blank, "action": "NONE", "breadth": None, "why": "no breadth logged at the trigger"}
+    if share <= CT_M_MARKET_AGAINST_MAX:
+        return {**blank, "action": "WOULD FADE", "breadth": share,
+                "why": f"{share:.0%} agree ≤ {CT_M_MARKET_AGAINST_MAX:.0%} — CT-M's rule would fade it"}
+    return {**blank, "action": "NONE", "breadth": share, "why": f"market not against the trigger: {share:.0%} agree > {CT_M_MARKET_AGAINST_MAX:.0%}"}
 
 
 #: the RT books' dried-volume threshold, and the surge level the Sep replay flagged

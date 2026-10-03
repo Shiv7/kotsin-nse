@@ -951,7 +951,7 @@ def build_app(engine: Engine) -> FastAPI:
     async def _shadow(day_s: str | None) -> shadow.ShadowData:
         """Every shadow tab's data: one session's triggers with their labels — the day asked for,
         else today, else the latest day that has any trigger — and the running tallies (the RT-Y
-        A/B, the wide stop, the gap fade, the labels) since the A/B began."""
+        A/B, the wide stop, the gap fade, CT-M's market fade, FUKAA's shadow, the labels) since the A/B began."""
         today = ist_today()
         lookback = datetime(today.year, today.month, today.day, tzinfo=IST).timestamp() - 21 * 86_400
         recent = await engine.ledger.rows_between("signals", lookback, time.time() + 86_400)
@@ -982,6 +982,8 @@ def build_app(engine: Engine) -> FastAPI:
             wide=shadow.wide_stop_summary(positions=s_pos, trades=s_trades),
             graded_f=shadow.graded_f_summary(signals=s_sigs, positions=s_pos, trades=s_trades, events=s_events),
             gap=shadow.gap_fade_summary(signals=s_sigs, positions=s_pos, trades=s_trades, events=s_events),
+            market_fade=shadow.market_fade_summary(signals=s_sigs, positions=s_pos, trades=s_trades, events=s_events),
+            fukaa=shadow.fukaa_shadow_summary(signals=s_sigs, positions=s_pos, trades=s_trades, events=s_events),
             labels=shadow.label_summary(since_rows),
             volume=shadow.volume_summary(since_rows),
         )
@@ -1078,7 +1080,8 @@ The bid/ask spread is not a charge: fills pay it by trading against the order bo
         data = await _shadow(day)
         return {
             "day": data.day.isoformat(), "days": data.days, "ab": data.ab, "rows": data.rows,
-            "wideStop": data.wide, "gradedF": data.graded_f, "gapFade": data.gap, "labels": data.labels, "volume": data.volume,
+            "wideStop": data.wide, "gradedF": data.graded_f, "gapFade": data.gap, "marketFade": data.market_fade,
+            "fukaa": data.fukaa, "labels": data.labels, "volume": data.volume,
             "tabs": [{"id": t.id, "title": t.title, "brief": asdict(t.brief)} for t in shadow.TABS],
         }
 

@@ -23,6 +23,7 @@ import os
 import re
 import time
 from bisect import bisect_right
+from collections import deque
 from collections.abc import Awaitable, MutableMapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
@@ -95,6 +96,7 @@ from .exec.resting import (
     option_run_pct,
     race_call,
     touch_fills,
+    urgent_stop,
 )
 from .instrument.catalogue import CatalogueLoader
 from .instrument.legs import OPTION_CLUSTER_TOL_PCT, LegPivotLoader, otm_legs
@@ -311,6 +313,13 @@ LAST_ENTRY_HM: dict[str, str] = {StrategyKey.FUDKII_RT_Y_F.value: "15:22"}
 #: held to the close, every in-trend book worse) — and the graded-F shadow, whose entries run to 15:22,
 #: flattens from 15:24, out by 15:25.
 FORCE_FLAT_HM: dict[str, str] = {StrategyKey.FUDKII_RT_Y_F.value: "15:24"}
+#: The 15:15 plan (operator, 2026-10-03: "if at 15:15 we are waiting for SL which is very near, we should
+#: exit asap, in case the SL is away, then we wait if the target is close by ... by 15:15 you will know if
+#: we need to exit at 15:20"): at this minute every open NSE position's distance to its stop line and to
+#: its next target is RECORDED with what the rule would do — never acted on yet (30 Sep - 1 Oct: one
+#: position of nine had its stop that near, none a target). ``EOD_PLAN_NEAR_PCT`` is "near", % of the mid.
+EOD_PLAN_HM = "15:15"
+EOD_PLAN_NEAR_PCT = 3.0
 #: How long after the NSE open a trigger carried from the last session's close waits for its stock's
 #: first print before it expires.
 CARRY_WINDOW_S = 300.0
@@ -571,8 +580,18 @@ class Engine:
             exit_cross_urgent_s=settings.paper_limit_exit_cross_urgent_s,
             exit_cross_other_s=settings.paper_limit_exit_cross_other_s,
             rest_targets=settings.paper_limit_rest_targets,
+            exit_urgent_stops=settings.paper_limit_exit_urgent_stops,
+            exit_fast_fall_pct=settings.paper_limit_exit_fast_fall_pct,
+            exit_fast_window_s=settings.paper_limit_exit_fast_window_s,
+            exit_tight_ticks=settings.paper_limit_exit_tight_ticks,
         )
         self._resting: dict[str, Resting] = {}
+        #: positions whose target ladder is being synced now (a fill inside the sync re-enters it)
+        self._target_sync: set[str] = set()
+        #: each held option's mid, a read a second for the last two minutes — the urgent-stop rule's "falling fast"
+        self._mid_hist: dict[str, deque[tuple[float, float]]] = {}
+        #: the IST date the 15:15 plan was last recorded for
+        self._eod_plan_day = ""
         #: book → (drift, first seen) of a ``deployed`` that disagrees with the book's open positions
         #: and resting entries; corrected on the second sighting (``_reconcile_deployed``)
         self._deployed_drift: dict[str, tuple[float, float]] = {}
@@ -2680,6 +2699,34 @@ class Engine:
             return (q.bid or None), (q.ask or None), ltp, (now - q.ts) * 1000
         return None, None, ltp, None
 
+    def _depth(self, scrip_code: str, now: float) -> dict[str, Any] | None:
+        """Five levels a side of the contract's depth book, price and quantity, and its age — for the order
+        trail (operator, 2026-10-03: "check lots on sell"). None when the contract has no depth book."""
+        b = self.books.get(scrip_code)
+        if b is None or not (b.bids or b.asks):
+            return None
+        return {"bids": [[p, q] for p, q in b.bids[:5]], "asks": [[p, q] for p, q in b.asks[:5]], "ageMs": round(b.age_ms(now))}
+
+    def _note_mid(self, scrip_code: str, now: float, mid: float) -> None:
+        """A held option's mid, at most a read a second, kept two minutes."""
+        h = self._mid_hist.setdefault(scrip_code, deque())
+        if h and now - h[-1][0] < 1.0:
+            return
+        h.append((now, mid))
+        while h and now - h[0][0] > 120.0:
+            h.popleft()
+
+    def _option_fall(self, scrip_code: str, now: float, mid: float | None) -> float | None:
+        """The option's mid now against ``exit_fast_window_s`` ago, % — None without a read from then."""
+        w = self.limit_policy.exit_fast_window_s
+        h = self._mid_hist.get(scrip_code)
+        if not h or not mid:
+            return None
+        then = [m for t, m in h if now - w - 15 <= t <= now - w]
+        if not then or then[-1] <= 0:
+            return None
+        return (mid / then[-1] - 1) * 100
+
     def _entry_resting(self, strategy: str, signal_id: str, symbol: str) -> Resting | None:
         return next(
             (r for r in self._resting.values() if r.kind == "entry" and r.intent.strategy == strategy
@@ -2701,31 +2748,83 @@ class Engine:
     def _exit_resting(self, position_id: str) -> Resting | None:
         return next((r for r in self._resting.values() if r.kind == "exit" and r.intent.position_id == position_id), None)
 
+    def _targets_resting(self, position_id: str) -> list[Resting]:
+        """Every target sell resting for the position, lowest rung first."""
+        return sorted((r for r in self._resting.values() if r.kind == "target" and r.intent.position_id == position_id),
+                      key=lambda r: r.ctx[1])
+
     def _target_resting(self, position_id: str) -> Resting | None:
-        return next((r for r in self._resting.values() if r.kind == "target" and r.intent.position_id == position_id), None)
+        """The NEXT rung's resting sell (the lowest), or None."""
+        rs = self._targets_resting(position_id)
+        return rs[0] if rs else None
 
     # -- target sells placed in advance (exec/resting.py, risk/exits.py) --------------------------------
 
-    async def _ensure_resting_target(self, pos: Position, now: float) -> None:
-        """Keep the next rung's SELL resting for a book whose target is a touch: placed when the
-        position has none, replaced when its rung, price or size has moved on, cancelled when the
-        book no longer wants one. Never while another exit of the position is working."""
-        want = None
+    async def _ensure_resting_targets(self, pos: Position, now: float) -> None:
+        """Keep EVERY rung's SELL resting for a book whose target is a touch — the whole ladder from the
+        fill, each rung for its lots (operator, 2026-10-03: "adding all targets immediately as we know
+        ... to make the most of first come first serve"; before, the next rung only).
+
+        An order whose price still stands is KEPT, and with it its place in the queue, even when its rung
+        number or size moved; a size is changed where the order rests. Only a rung whose price changed
+        is re-placed ("in case there is an edit in target 2, let target 3 and 4 be as is"), and a rung no
+        longer wanted is cancelled. Cancels and size cuts go first, new orders last, so the quantity on
+        sale never exceeds what is held. While another exit of the position is working nothing moves."""
+        if pos.id in self._target_sync:
+            return  # a fill inside this sync re-enters it; the outer pass finishes the ladder
+        if (pos.id in self._exits_in_flight or self._exit_resting(pos.id) is not None
+                or now < self._exit_retry_at.get(pos.id, 0.0)):
+            # an exit is working: it already took off what it needed (``_exit``), so the rungs still
+            # resting keep their place in the queue until it is done
+            return
+        want: list[tuple[int, float, int]] = []
         if (
             self._limit_mode() and self.s.paper_limit_exits and self.limit_policy.rest_targets
             and pos.status == "OPEN" and pos.qty_remaining > 0 and self.positions.get(pos.id) is pos
-            and pos.id not in self._exits_in_flight and self._exit_resting(pos.id) is None
-            and now >= self._exit_retry_at.get(pos.id, 0.0)
         ):
-            want = self._exits_by_strategy.get(pos.strategy, self.exits).resting_target(pos)
-        cur = self._target_resting(pos.id)
-        if cur is not None:
-            if want is not None and (cur.ctx[1], cur.limit, cur.intent.qty) == want:
-                return
-            await self._cancel_resting_target(pos, now, "replaced — the ladder moved on" if want else "no target to rest")
-        if want is None:
+            want = self._exits_by_strategy.get(pos.strategy, self.exits).resting_ladder(pos)
+        cur = self._targets_resting(pos.id)
+        if not want and not cur:
             return
-        rung, price, qty = want
+        self._target_sync.add(pos.id)
+        try:
+            at_price: dict[float, list[Resting]] = {}
+            for r in cur:
+                at_price.setdefault(round(r.limit, 4), []).append(r)
+            keep: list[tuple[Resting, int, int]] = []
+            place: list[tuple[int, float, int]] = []
+            for rung, price, qty in want:
+                same = at_price.get(round(price, 4))
+                if same:
+                    keep.append((same.pop(0), rung, qty))
+                else:
+                    place.append((rung, price, qty))
+            for r in [r for rs in at_price.values() for r in rs]:
+                await self._cancel_target_order(pos, r, now, "the ladder moved on" if want else "no target to rest")
+            for r, rung, qty in sorted(keep, key=lambda k: k[2] - k[0].intent.qty):  # size cuts before size raises
+                if r.ctx[1] != rung or r.intent.qty != qty:
+                    was = (r.ctx[1] + 1, r.intent.qty)
+                    r.ctx = (pos, rung)
+                    r.intent = replace(r.intent, qty=qty, reason=f"T{rung + 1} {r.limit:g} target sell, placed in advance")
+                    if r.order is not None and hasattr(r.order, "qty"):
+                        r.order.qty = qty
+                    self._target_trail(pos, r, now, f"kept at {r.limit:g} — was T{was[0]} × {was[1]}")
+            if sum(r.intent.qty for r, _, _ in keep) + sum(q for _, _, q in place) > pos.qty_remaining:
+                log.error("target.ladder_oversold", position=pos.id, held=pos.qty_remaining, want=want)
+                return  # never more on sale than is held — the ladder is rebuilt next pass
+            fresh: list[Resting] = []
+            for rung, price, qty in place:
+                placed = await self._place_target(pos, rung, price, qty, now)
+                if placed is not None:
+                    fresh.append(placed)
+            if fresh or keep:
+                await self.ledger.upsert_position(_position_json(pos))
+        finally:
+            self._target_sync.discard(pos.id)
+        for r in sorted(fresh, key=lambda r: r.ctx[1]):  # a rung the market is already through fills now, lowest first
+            await self._advance_one(r, now, first=True)
+
+    async def _place_target(self, pos: Position, rung: int, price: float, qty: int, now: float) -> Resting | None:
         ref = pos.exec_log.get("ref")
         if ref:
             k = int(pos.exec_log.get("tgtSeq", 0)) + 1
@@ -2742,49 +2841,65 @@ class Engine:
         if res.decision is not Decision.RESTING:
             await self.ledger.insert_order(_order_json(res.order), res.decision.value)
             log.warning("target.not_placed", position=pos.id, rung=rung + 1, reason=res.order.note)
-            return
+            return None
         bid, ask, _, _ = self._touch(pos.instrument.scrip_code, now)
         r = Resting(intent=intent, kind="target", limit=price, placed_ts=now, deadline_s=0.0, signal_ts=pos.opened_ts, ref=price,
                     why=f"T{rung + 1} sell placed in advance — fills on a touch", book_at_place=(bid, ask), last_check=now,
-                    ctx=(pos, rung))
+                    ctx=(pos, rung), depth_at_place=self._depth(pos.instrument.scrip_code, now))
         r.order = res.order
         self._resting[intent.client_order_id] = r
         self._target_trail(pos, r, now, "placed")
-        await self.ledger.upsert_position(_position_json(pos))
         log.info("limit.placed", kind="target", strategy=pos.strategy, symbol=pos.underlying.symbol, rung=rung + 1, limit=price, qty=qty)
-        await self._advance_one(r, now, first=True)
+        return r
 
     def _target_trail(self, pos: Position, r: Resting, now: float, outcome: str) -> None:
-        """The resting target's life on the position's order trail: placed, filled, cancelled (why)."""
+        """A resting target's life on the position's order trail: placed, kept, filled, cancelled (why)."""
         trail = pos.exec_log.setdefault("targets", [])
         trail.append({"rung": r.ctx[1] + 1, "limit": r.limit, "qty": r.intent.qty, "placedTs": r.placed_ts, "ts": now, "outcome": outcome})
-        del trail[:-20]
+        del trail[:-40]
 
-    async def _cancel_resting_target(self, pos: Position, now: float, why: str) -> None:
-        """Take the resting target sell off before any other exit — never two SELLs for the same lots."""
-        r = self._target_resting(pos.id)
-        if r is None:
+    async def _cancel_target_order(self, pos: Position, r: Resting, now: float, why: str) -> None:
+        """Take one resting target sell off the book."""
+        if self._resting.pop(r.intent.client_order_id, None) is None:  # before the first await: nothing can fill it now
             return
-        self._resting.pop(r.intent.client_order_id, None)  # before the first await: nothing can fill it now
         bid, ask, _, _ = self._touch(pos.instrument.scrip_code, now)
         res = self.gateway.cancel_resting(r.order, f"T{r.ctx[1] + 1} resting sell {r.limit:g} cancelled — {why}")
         audit = r.audit(cancelledTs=now, cancelReason=why, bookAtCancel={"bid": bid, "ask": ask},
-                        waitS=round(now - r.placed_ts, 3), outcome="cancelled")
+                        depthAtCancel=self._depth(pos.instrument.scrip_code, now), waitS=round(now - r.placed_ts, 3), outcome="cancelled")
         self._target_trail(pos, r, now, f"cancelled — {why}")
         await self.ledger.insert_order(_order_json(res.order, audit), "TARGET_CANCELLED")
-        if pos.status == "OPEN":
-            await self.ledger.upsert_position(_position_json(pos))
         log.info("target.cancelled", position=pos.id, rung=r.ctx[1] + 1, limit=r.limit, why=why)
+
+    async def _cancel_resting_targets(self, pos: Position, now: float, why: str) -> None:
+        """Take EVERY resting target sell of the position off before any other exit is sent — never two
+        SELLs for the same lots (operator, 2026-10-03: "cancel the target sells first, then immediately
+        exit")."""
+        rs = self._targets_resting(pos.id)
+        for r in reversed(rs):  # the highest first
+            await self._cancel_target_order(pos, r, now, why)
+        if rs and pos.status == "OPEN":
+            await self.ledger.upsert_position(_position_json(pos))
+
+    async def _make_room(self, pos: Position, qty: int, now: float, why: str) -> None:
+        """A sell of ``qty`` is about to go out beside the resting targets: cancel from the highest rung
+        down until targets and the sell together are no more than is held."""
+        rs = self._targets_resting(pos.id)
+        while rs and sum(r.intent.qty for r in rs) + qty > pos.qty_remaining:
+            await self._cancel_target_order(pos, rs.pop(), now, why)
 
     async def _target_filled(self, r: Resting, now: float, price: float, bid: float | None, ask: float | None, age: float | None) -> None:
         """A resting target sell was touched: booked as a TARGET exit with the same state changes the
-        exit engine's touch makes (risk/exits.py ``resting_target_filled``), then the next rung rests."""
+        exit engine's touch makes (risk/exits.py ``resting_target_filled``). Rungs book lowest first: a
+        higher rung touched before the one below has booked waits for it; a rung below the ladder is
+        stale and comes off."""
         pos, rung = r.ctx
         if pos.id in self._exits_in_flight:
             return  # another exit is being sent — it takes this order off the book itself
-        if pos.targets_hit != rung:
-            await self._cancel_resting_target(pos, now, "the ladder moved on")
+        if rung < pos.targets_hit:
+            await self._cancel_target_order(pos, r, now, "the ladder moved on")
             return
+        if rung > pos.targets_hit:
+            return  # the rung below books first; this one stays where it rests
         self._resting.pop(r.intent.client_order_id, None)
         self._exits_in_flight.add(pos.id)  # an operator SKIP arriving mid-booking stands down, as for any exit
         try:
@@ -2793,7 +2908,8 @@ class Engine:
             decision = self._exits_by_strategy.get(pos.strategy, self.exits).resting_target_filled(pos, now, result.fill.price, mid)
             decision = replace(decision, qty=int(result.fill.qty))
             audit = r.audit(filledTs=now, fillPrice=result.fill.price, bookAtFill={"bid": bid, "ask": ask},
-                            waitS=round(now - r.placed_ts, 3), outcome=f"T{rung + 1} resting limit filled")
+                            depthAtFill=self._depth(pos.instrument.scrip_code, now), waitS=round(now - r.placed_ts, 3),
+                            outcome=f"T{rung + 1} resting limit filled")
             self._target_trail(pos, r, now, "filled")
             log.info("limit.filled", kind="target", strategy=pos.strategy, symbol=pos.underlying.symbol, rung=rung + 1,
                      price=result.fill.price, qty=result.fill.qty)
@@ -2802,7 +2918,7 @@ class Engine:
         finally:
             self._exits_in_flight.discard(pos.id)
         if pos.status == "OPEN":
-            await self._ensure_resting_target(pos, now)  # the next rung, at once
+            await self._ensure_resting_targets(pos, now)  # the rest of the ladder re-checked, as it stands
 
     def _market_audit(self, kind: str, signal_ts: float, placed_ts: float, result: Any, scrip_code: str) -> dict[str, Any]:
         """The trail of an immediate fill (limit orders off, or a cross): when, at what, against which book."""
@@ -2810,7 +2926,7 @@ class Engine:
         fill = getattr(result, "fill", None)
         return {
             "kind": kind, "signalTs": signal_ts, "placedTs": placed_ts, "limit": None, "why": "market — walked the book",
-            "bookAtPlace": {"bid": bid, "ask": ask}, "reprices": [],
+            "bookAtPlace": {"bid": bid, "ask": ask}, "depthAtPlace": self._depth(scrip_code, placed_ts), "reprices": [],
             "filledTs": fill.ts if fill else None, "fillPrice": fill.price if fill else None,
             "waitS": round(fill.ts - placed_ts, 3) if fill else None, "outcome": "filled" if fill else "not filled",
         }
@@ -2839,7 +2955,8 @@ class Engine:
                 await self._book_skip(plan.key, plan.sig, f"entry refused — {res.order.note or res.decision.value}", gate="order_refused")
             return
         r = Resting(intent=intent, kind="entry", limit=limit, placed_ts=now, deadline_s=self.limit_policy.entry_wait_s,
-                    signal_ts=plan.decided_at, ref=plan.ref, why=why, book_at_place=(bid, ask), last_check=now, ctx=plan)
+                    signal_ts=plan.decided_at, ref=plan.ref, why=why, book_at_place=(bid, ask), last_check=now, ctx=plan,
+                    depth_at_place=self._depth(plan.inst.scrip_code, now))
         r.order = res.order
         self._resting[intent.client_order_id] = r
         plan.outcome = ("RESTING", f"limit {limit:g} {why}")
@@ -2853,8 +2970,9 @@ class Engine:
         await self._advance_one(r, now, first=True)
 
     async def _advance_resting(self, now: float) -> None:
-        """Every resting limit, once per exit-loop tick: filled, repriced, crossed or cancelled."""
-        for r in list(self._resting.values()):
+        """Every resting limit, once per exit-loop tick: filled, repriced, crossed or cancelled — each
+        position's target sells lowest rung first, so a jump through several books them in order."""
+        for r in sorted(self._resting.values(), key=lambda r: (r.kind == "target", r.ctx[1] if r.kind == "target" else 0)):
             try:
                 await self._advance_one(r, now)
             except Exception as exc:  # one order's fault must not stall the others
@@ -2870,7 +2988,7 @@ class Engine:
         if r.kind == "target":
             pos, _rung = r.ctx
             if pos.status != "OPEN" or pos.qty_remaining <= 0 or self.positions.get(pos.id) is not pos:
-                await self._cancel_resting_target(pos, now, "the position is closed")
+                await self._cancel_resting_targets(pos, now, "the position is closed")
             # a touch, on a book or quote fresh enough to trade on (age None = nothing fresh)
             elif age is not None and touch_fills(r.limit, bid, ltp):
                 await self._target_filled(r, now, max(r.limit, bid) if (first and bid) else r.limit, bid, ask, age)
@@ -2903,7 +3021,7 @@ class Engine:
             mid = (bid + ask) / 2 if bid and ask else None
             result = self.gateway.fill_resting(r.order, r.intent, price=price, mid=mid, book_age_ms=age, now=now)
             audit = r.audit(filledTs=now, fillPrice=result.fill.price, bookAtFill={"bid": bid, "ask": ask},
-                            waitS=round(now - r.placed_ts, 3), outcome="filled at the limit")
+                            depthAtFill=self._depth(code, now), waitS=round(now - r.placed_ts, 3), outcome="filled at the limit")
             log.info("limit.filled", kind=r.kind, strategy=r.intent.strategy, symbol=r.intent.instrument.symbol,
                      price=result.fill.price, wait_s=round(now - r.placed_ts, 1))
             if r.kind == "entry":
@@ -2980,7 +3098,7 @@ class Engine:
         mid = (bid + ask) / 2 if bid and ask else None
         result = self.gateway.fill_resting(r.order, r.intent, price=ask, mid=mid, book_age_ms=age, now=now)
         audit = r.audit(filledTs=now, fillPrice=result.fill.price, bookAtFill={"bid": bid, "ask": ask},
-                        waitS=round(now - r.placed_ts, 3), outcome=outcome)
+                        depthAtFill=self._depth(r.intent.instrument.scrip_code, now), waitS=round(now - r.placed_ts, 3), outcome=outcome)
         await self._entry_filled(r, result, audit)
 
     async def _entry_filled(self, r: Resting, result: Any, audit: dict[str, Any]) -> None:
@@ -3006,7 +3124,7 @@ class Engine:
         plan.outcome = (Decision.LIMIT_UNFILLED.value, note)
         res = self.gateway.cancel_resting(r.order, note)
         audit = r.audit(cancelledTs=now, cancelReason=why, bookAtCancel={"bid": bid, "ask": ask},
-                        waitS=round(now - r.placed_ts, 3), outcome="missed")
+                        depthAtCancel=self._depth(r.intent.instrument.scrip_code, now), waitS=round(now - r.placed_ts, 3), outcome="missed")
         await self.ledger.insert_order(_order_json(res.order, audit), res.decision.value)
         if plan.owns_row:
             await self.ledger.settle_signal(plan.sig.to_json(), res.decision.value, note)
@@ -3685,7 +3803,7 @@ class Engine:
             books_row = [book_row(b, position_on(b, sid, fade_x)) for b in seg_books]
             # RT-Y and CT-Y are never offered a trigger FUDKII did not publish: no chip for what they would
             # have done — the graded-F shadow's own dot in the row says what it did (review, 2026-09-29)
-            verdicts = {"rtY": None, "ctY": None} if unpublished else self._card_verdicts(sgn, evs, fade_x, gap_fade, pos_by_key)
+            verdicts = {"rtY": None, "ctY": None, "ctM": None} if unpublished else self._card_verdicts(sgn, evs, fade_x, gap_fade, pos_by_key)
             if cta.get("type") not in ("CE", "PE"):
                 cta["type"] = side  # a future reads LONG / SHORT
             # every button says what it buys: lots, the price of one, and the money it needs
@@ -3725,6 +3843,7 @@ class Engine:
                 "live": live, "rtCard": rt_card, "pros": pros, "cons": cons, "cta": cta, "breadth": breadth, "books": books_row,
                 "pending": pending, "execLog": (ps or {}).get("exec_log") or None,
                 "restingTarget": self._resting_target_card(ps),
+                "restingTargets": self._resting_targets_card(ps),
                 "verdicts": verdicts, "ctaCounter": cta_counter,
             })
         counts: dict[str, int] = {}
@@ -3812,21 +3931,25 @@ class Engine:
                 "reason": None if plan.get("ok") else str(plan.get("reason") or "no plan"), **self._cta_size(None, plan)}
 
     def _resting_target_card(self, ps: dict[str, Any] | None) -> dict[str, Any] | None:
-        """The target sell resting in advance for this card's open position, if any."""
-        r = self._target_resting(ps["id"]) if ps and ps.get("status") == "OPEN" else None
-        if r is None:
-            return None
-        return {"rung": r.ctx[1] + 1, "limit": r.limit, "qty": r.intent.qty, "placedTs": r.placed_ts,
-                "lots": r.intent.qty // max(1, r.intent.instrument.lot_size)}
+        """The next rung's target sell resting for this card's open position, if any."""
+        rs = self._resting_targets_card(ps)
+        return rs[0] if rs else None
+
+    def _resting_targets_card(self, ps: dict[str, Any] | None) -> list[dict[str, Any]]:
+        """Every target sell resting for this card's open position, lowest rung first."""
+        if not ps or ps.get("status") != "OPEN":
+            return []
+        return [{"rung": r.ctx[1] + 1, "limit": r.limit, "qty": r.intent.qty, "placedTs": r.placed_ts,
+                 "lots": r.intent.qty // max(1, r.intent.instrument.lot_size)} for r in self._targets_resting(ps["id"])]
 
     def _card_verdicts(
         self, sgn: dict[str, Any], evs: list[dict[str, Any]], fade_x: dict[str, Any] | None,
         gap_fade: dict[str, Any] | None, pos_by_key: dict[tuple[str, str], dict[str, Any]],
     ) -> dict[str, Any]:
-        """What RT-Y and CT-Y do with this trigger — a label on EVERY book's card (operator,
+        """What RT-Y, CT-Y and CT-M do with this trigger — a label on EVERY book's card (operator,
         2026-09-26: "mention on all respective strategies as label"); see ``trigger_verdicts``."""
         if self._segment_of(sgn["symbol"]) is Segment.MCX_FO:
-            return {"rtY": None, "ctY": None}
+            return {"rtY": None, "ctY": None, "ctM": None}
         return trigger_verdicts(
             sgn, evs, fade_x=fade_x, gap_fade=gap_fade,
             rt_y_held=(StrategyKey.FUDKII_RT_Y.value, sgn["signal_id"]) in pos_by_key,
@@ -5273,6 +5396,8 @@ class Engine:
                 halted=halted,
                 daily_loss_hit=bool(wallet.daily_halt),
             )
+            if view.quote_ok and mid:
+                self._note_mid(pos.instrument.scrip_code, now, mid)
             # The exact numbers the exit is judged against, published so the card shows these
             # and not a second computation of them.
             self.position_marks[pos.id] = {
@@ -5289,9 +5414,59 @@ class Engine:
             }
             decision = engine_for.evaluate(pos, view)
             if decision is None:
-                await self._ensure_resting_target(pos, now)
+                await self._ensure_resting_targets(pos, now)
                 continue
             await self._exit(pos, decision, now)
+        # after this tick's exits: the 15:15 plan records what is still open
+        try:
+            await self._record_eod_plan(now)
+        except Exception as exc:  # a record must never cost the exits their pass
+            log.exception("eod_plan.failed", error=str(exc))
+
+    async def _record_eod_plan(self, now: float) -> None:
+        """At ``EOD_PLAN_HM``, once a session: each open NSE position's distance to its stop line and to its
+        next target, and what the 15:15 rule would do — an ``eod.plan`` event, never an order."""
+        if ist_hm(now) < EOD_PLAN_HM:
+            return
+        day = to_ist(now).date().isoformat()
+        if self._eod_plan_day == day:
+            return
+        self._eod_plan_day = day
+        for pos in list(self.positions.values()):
+            if pos.status != "OPEN" or pos.qty_remaining <= 0 or pos.underlying.segment is Segment.MCX_FO:
+                continue
+            code = pos.instrument.scrip_code
+            bid, ask, ltp, _ = self._touch(code, now)
+            mid = (bid + ask) / 2 if bid and ask else (ltp or None)
+            q = self.quotes.get(code)
+            ex = self._exits_by_strategy.get(pos.strategy, self.exits)
+            view = MarketView(option_ltp=ltp or 0.0, underlying_ltp=self.ltps.get(pos.underlying.scrip_code), now=now,
+                              bars_held=pos.bars_held, past_force_flat=False, option_mid=mid,
+                              spread_pct=(q.spread_pct / 100) if (q and q.spread_pct is not None) else None, quote_ok=mid is not None)
+            line = ex.stop_line(pos, view)
+            resting = self._target_resting(pos.id)
+            nxt = ex.resting_target(pos) if resting is None else None
+            target = resting.limit if resting is not None else (nxt[1] if nxt else None)
+            stop_pct = (mid - line) / mid * 100 if mid and line > 0 else None
+            tgt_pct = (target - mid) / mid * 100 if mid and target else None
+            flat = self._force_flat_hm(pos.strategy, pos.underlying.segment)
+            if stop_pct is not None and stop_pct <= 0:
+                verdict = f"exit now — already {-stop_pct:.1f}% through the stop line {line:g}"
+            elif stop_pct is not None and stop_pct <= EOD_PLAN_NEAR_PCT:
+                verdict = f"exit now — the stop line {line:g} is {stop_pct:.1f}% away"
+            elif tgt_pct is not None and tgt_pct <= EOD_PLAN_NEAR_PCT:
+                verdict = f"wait for the target {target:g}, {tgt_pct:.1f}% away"
+            else:
+                verdict = f"flatten at {flat} as now"
+            await self.ledger.event("eod.plan", {
+                "kind": "eod.plan", "positionId": pos.id, "book": pos.strategy, "symbol": pos.underlying.symbol,
+                "contract": pos.instrument.name or code, "qty": pos.qty_remaining, "entry": pos.entry,
+                "bid": bid, "ask": ask, "mid": round(mid, 2) if mid else None,
+                "stopLine": line or None, "stopPct": round(stop_pct, 2) if stop_pct is not None else None,
+                "target": target, "targetPct": round(tgt_pct, 2) if tgt_pct is not None else None,
+                "nearPct": EOD_PLAN_NEAR_PCT, "flattenAt": flat, "verdict": verdict, "recordOnly": True,
+            })
+            log.info("eod.plan", book=pos.strategy, symbol=pos.underlying.symbol, verdict=verdict)
 
     async def _exit(self, pos: Position, decision: Any, now: float) -> None:
         """One exit in flight per position. The operator's SKIP and the exit loop both call this;
@@ -5317,7 +5492,16 @@ class Engine:
         try:
             # any other exit — stop, trail, band, the equity-T1 arm, the exit engine's own target,
             # EOD, halt, daily loss, SKIP — takes the resting target sell off first
-            await self._cancel_resting_target(pos, now, f"{decision.reason.value}: {decision.note}")
+            why = f"{decision.reason.value}: {decision.note}"
+            if decision.reason is ExitReason.TARGET and decision.qty < pos.qty_remaining:
+                # the exit engine's own touch (the stock reaching its T1): only that rung's sell comes
+                # off, and the rungs above keep their place unless the lots are needed
+                for r in self._targets_resting(pos.id):
+                    if r.ctx[1] == pos.targets_hit:
+                        await self._cancel_target_order(pos, r, now, why)
+                await self._make_room(pos, decision.qty, now, why)
+            else:
+                await self._cancel_resting_targets(pos, now, why)
             if pos.status != "OPEN" or pos.qty_remaining <= 0:
                 return
             if decision.qty > pos.qty_remaining:  # decided before an earlier slice filled
@@ -5335,10 +5519,17 @@ class Engine:
         await self._exit_market(pos, decision, now)
 
     async def _place_exit_limit(self, pos: Position, decision: Any, now: float) -> None:
-        """SELL LIMIT at the mid, walked to the bid, crossed at the deadline its urgency sets."""
+        """SELL LIMIT at the mid, walked to the bid, crossed at the deadline its urgency sets — or, for a
+        stop that is urgent (exec/resting.py ``urgent_stop``), sold into the bid at once."""
         await self._refresh_exit_book(pos.instrument, now)
         attempt = self._exit_attempts.get(pos.id, 0)
-        bid, ask, _, _ = self._touch(pos.instrument.scrip_code, now)
+        code = pos.instrument.scrip_code
+        bid, ask, _, _ = self._touch(code, now)
+        run = self._option_fall(code, now, (bid + ask) / 2 if bid and ask else None)
+        urgent = urgent_stop(decision.reason, bid, ask, run, self.limit_policy, pos.instrument.tick_size or 0.05)
+        if urgent and bid:
+            await self._exit_at_once(pos, decision, now, attempt, (bid, ask), run, urgent)
+            return
         deadline = self.limit_policy.exit_deadline(decision.reason)
         limit = exit_limit(bid, ask, 0.0, deadline, pos.instrument.tick_size or 0.05)
         if limit is None:
@@ -5356,12 +5547,30 @@ class Engine:
             return
         r = Resting(intent=intent, kind="exit", limit=limit, placed_ts=now, deadline_s=deadline, signal_ts=now,
                     ref=decision.ref_price, why=f"{decision.reason.value}: the mid, walked to the bid, crossed after {deadline:g} s",
-                    book_at_place=(bid, ask), last_check=now, ctx=(pos, decision, attempt))
+                    book_at_place=(bid, ask), last_check=now, ctx=(pos, decision, attempt), depth_at_place=self._depth(code, now))
         r.order = res.order
         self._resting[intent.client_order_id] = r
         log.info("limit.placed", kind="exit", strategy=pos.strategy, symbol=pos.underlying.symbol, limit=limit, bid=bid, ask=ask,
                  reason=decision.reason.value, deadline_s=deadline)
         await self._advance_one(r, now, first=True)
+
+    async def _exit_at_once(self, pos: Position, decision: Any, now: float, attempt: int, book: tuple[float, float | None],
+                            run: float | None, why: str) -> None:
+        """An urgent stop: sold into the bid now, through the depth for every lot — no rest at the mid."""
+        bid, ask = book
+        code = pos.instrument.scrip_code
+        intent = OrderIntent(
+            strategy=pos.strategy, instrument=pos.instrument, side=OrderSide.SELL, qty=decision.qty, purpose=Purpose.EXIT,
+            signal_id=pos.signal_id, client_order_id=exit_client_order_id(pos, decision, attempt), reason=decision.note,
+            position_id=pos.id, ref_price=decision.ref_price, limit_price=bid,
+        )
+        r = Resting(intent=intent, kind="exit", limit=bid, placed_ts=now, deadline_s=0.0, signal_ts=now, ref=decision.ref_price,
+                    why=f"{decision.reason.value}: sold into the bid at once — {why}", book_at_place=(bid, ask), last_check=now,
+                    ctx=(pos, decision, attempt), depth_at_place=self._depth(code, now))
+        r.momentum.append({"atS": 0.0, "runPct": round(run, 2) if run is not None else None, "note": why})
+        log.info("exit.urgent", strategy=pos.strategy, symbol=pos.underlying.symbol, reason=decision.reason.value, bid=bid, ask=ask,
+                 run_pct=round(run, 2) if run is not None else None, why=why)
+        await self._exit_cross(r, now, bid, ask, outcome=f"sold into the bid at once — {why}")
 
     async def _exit_filled(self, r: Resting, result: Any, audit: dict[str, Any]) -> None:
         pos, decision, attempt = r.ctx
@@ -5371,19 +5580,20 @@ class Engine:
             return
         await self._book_exit(pos, decision, result, result.fill.ts, attempt, audit)
 
-    async def _exit_cross(self, r: Resting, now: float, bid: float | None, ask: float | None) -> None:
+    async def _exit_cross(self, r: Resting, now: float, bid: float | None, ask: float | None, *, outcome: str | None = None) -> None:
         """The deadline: sell through the book at the bid, so an exit is never left working."""
         self._resting.pop(r.intent.client_order_id, None)
         pos, decision, attempt = r.ctx
         if pos.status != "OPEN" or pos.qty_remaining <= 0:
             return
         qty = min(r.intent.qty, pos.qty_remaining)
+        depth = self._depth(pos.instrument.scrip_code, now)  # the book our sell walks, before it walks it
         cross = replace(r.intent, client_order_id=exit_client_order_id(pos, decision, attempt, cross=True), limit_price=None, qty=qty)
         result = await self._submit(cross, verdict_ok=True, verdict_reason="")
         fill = result.fill
-        audit = r.audit(crossedTs=now, bookAtCross={"bid": bid, "ask": ask}, filledTs=fill.ts if fill else None,
+        audit = r.audit(crossedTs=now, bookAtCross={"bid": bid, "ask": ask}, depthAtCross=depth, filledTs=fill.ts if fill else None,
                         fillPrice=fill.price if fill else None, waitS=round(now - r.placed_ts, 3),
-                        outcome=f"crossed at the bid after {r.deadline_s:g} s" if fill else f"cross failed: {result.order.note}")
+                        outcome=(outcome or f"crossed at the bid after {r.deadline_s:g} s") if fill else f"cross failed: {result.order.note}")
         await self.ledger.insert_order(_order_json(result.order, audit), result.decision.value)
         if fill is None:
             n = attempt + 1

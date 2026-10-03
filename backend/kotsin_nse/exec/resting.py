@@ -15,6 +15,17 @@ trip to the spread and charges — buying at the ask and selling at the bid was 
   deadline → the trigger is recorded as missed.
 * **Exit** — SELL LIMIT at the mid, walked toward the bid on every reprice, and crossed (sold at the
   bid through the book) at a deadline set by the exit's urgency, so an exit is never left working.
+* **Urgent stops** — operator, 2026-10-03: "when the stoploss is hit and sustained ... if there are
+  already buyers at the price we want to sell, why place order at the mid? ... if the momentum is very
+  high, then stoploss if not executed quickly and waited will attract high losses ... place order
+  smartly not blindly". A stop sells into the bid AT ONCE (through the depth, for every lot) when the
+  stock has broken its stop (SL-EQ), the option's mid has fallen ``exit_fast_fall_pct`` % or more in
+  ``exit_fast_window_s``, or the book is ``exit_tight_ticks`` ticks wide or less; a calm option stop on
+  a wide book still rests at the mid and walks. Live paper 30 Sep - 1 Oct, 43 stop exits: +₹23,224
+  after the depth (DMART: bid 107.10 when its stock stop fired, crossed at 94.97 fifteen seconds
+  later); +₹5,370 without DMART; the 25 Sep - 1 Oct replay, whose books are built from 1-minute
+  candles and cannot show a 15-second collapse, −₹5,209. Insurance against the collapse, about even
+  otherwise. Trail, target and 15:20 exits keep the walk (it beat the bid there).
 * **Momentum (entry)** — operator, 2026-09-26: "if it is racing ahead, take a call in 30th second and
   get in quickly", measured on "the option's move not the stock/equity's move". The run is the
   OPTION's mid against the signal price, in % of that price. One look at ``entry_race_check_s``: a
@@ -86,6 +97,13 @@ class LimitPolicy:
     exit_cross_other_s: float = 45.0
     #: rest the next target sell in advance for the books whose target is a touch
     rest_targets: bool = True
+    #: a stop that is urgent sells into the bid at once instead of walking from the mid (``urgent_stop``)
+    exit_urgent_stops: bool = True
+    #: ... urgent when the option's mid fell this many % or more over ``exit_fast_window_s``
+    exit_fast_fall_pct: float = 2.0
+    exit_fast_window_s: float = 30.0
+    #: ... or when the book is this many ticks wide or less: resting at the mid buys at most a tick
+    exit_tight_ticks: int = 2
 
     def exit_deadline(self, reason: ExitReason) -> float:
         if reason in URGENT_REASONS:
@@ -103,6 +121,8 @@ class LimitPolicy:
             "exitRepriceS": self.exit_reprice_s, "exitCrossStopS": self.exit_cross_stop_s,
             "exitCrossUrgentS": self.exit_cross_urgent_s, "exitCrossOtherS": self.exit_cross_other_s,
             "restTargets": self.rest_targets,
+            "exitUrgentStops": self.exit_urgent_stops, "exitFastFallPct": self.exit_fast_fall_pct,
+            "exitFastWindowS": self.exit_fast_window_s, "exitTightTicks": self.exit_tight_ticks,
         }
 
 
@@ -154,6 +174,21 @@ def exit_limit(bid: float | None, ask: float | None, elapsed: float, deadline: f
     mid = (bid + ask) / 2
     frac = min(1.0, max(0.0, elapsed / deadline)) if deadline > 0 else 1.0
     return _tick(mid - (mid - bid) * frac, tick)
+
+
+def urgent_stop(reason: ExitReason, bid: float | None, ask: float | None, run_pct: float | None, policy: LimitPolicy,
+                tick: float = 0.05) -> str | None:
+    """Why a stop sells into the bid at once rather than resting at the mid, or None (rest and walk).
+    ``run_pct`` is the option's mid now against ``exit_fast_window_s`` ago, % (None = not known)."""
+    if not policy.exit_urgent_stops or reason not in STOP_REASONS:
+        return None
+    if reason is ExitReason.SL_EQ:
+        return "the stock has broken its stop"
+    if run_pct is not None and run_pct <= -policy.exit_fast_fall_pct:
+        return f"the option is falling fast ({run_pct:+.1f}% in {policy.exit_fast_window_s:g} s)"
+    if bid and ask and bid > 0 and ask >= bid and ask - bid <= policy.exit_tight_ticks * tick + 1e-9:
+        return f"a tight book ({bid:g} / {ask:g})"
+    return None
 
 
 def race_call(run_pct: float | None, ask: float | None, cap: float | None, policy: LimitPolicy) -> tuple[bool, str]:
@@ -209,6 +244,8 @@ class Resting:
     race_checked: bool = False
     #: the momentum rule's reads — ``{atS, runPct, note}`` — for the order's trail
     momentum: list[dict[str, Any]] = field(default_factory=list)
+    #: the five levels a side, price and quantity, when the order was placed (None = no depth book)
+    depth_at_place: dict[str, Any] | None = None
 
     def audit(self, **more: Any) -> dict[str, Any]:
         bid, ask = self.book_at_place
@@ -216,5 +253,6 @@ class Resting:
             "kind": self.kind, "signalTs": self.signal_ts, "placedTs": self.placed_ts, "limit": self.limit, "ref": self.ref,
             "why": self.why, "bookAtPlace": {"bid": bid, "ask": ask}, "deadlineS": self.deadline_s,
             "reprices": [[round(t, 3), p] for t, p in self.reprices],
-            **({"momentum": list(self.momentum)} if self.momentum else {}), **more,
+            **({"momentum": list(self.momentum)} if self.momentum else {}),
+            **({"depthAtPlace": self.depth_at_place} if self.depth_at_place else {}), **more,
         }

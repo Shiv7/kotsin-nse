@@ -90,24 +90,25 @@ BOOKS: tuple[Book, ...] = (
         key="FUKAA",
         label="FUKAA",
         tf="30m",
-        summary="The same trigger, admitted only when volume confirms participation.",
+        summary=(
+            "FUDKII's trigger, admitted only when volume confirms participation. In SHADOW since 2 Oct 2026: every signal "
+            "is recorded with the inputs it read and its alignment with the market and the OI, and never traded."
+        ),
         status="live",
         params={
-            "fukaa.trigger.volume.multiplier": "4.0",
-            "fukaa.trigger.avg.candles": "6",
-            "fukaa.trigger.watching.ttl.minutes": "35",
-            "fukaa.selection.composite.min": "60.0",
-            "fukaa.selection.gate.rr.floor": "0.5",
-            "fukaa.selection.refoi.nse": "5.0",
-            "fukaa.selection.refoi.mcx": "8.0",
-            "fukaa.selection.top.n": "999",
-            "fukaa.selection.max.same.direction": "999",
+            "volume": "max(T, T-1) ≥ 4.0x its T-2…T-7 baseline (the engine's checked slot reading); else watched one bar, promoted at T+1",
+            "composite.min": "60 — volume, OI, momentum and RR scores",
+            "OI change": "against the previous session's close: current month; current + next in the last 3 sessions; z vs the NIFTY50",
+            "momentum": "the trigger bar's body on a 60-bar ATR",
+            "refoi.nse / refoi.mcx": "5.0 % / 8.0 %",
+            "shadow": "True — a SHADOW row and a fukaa.shadow event per signal, never an order",
         },
         have=(BARS, PIVOTS, CHAIN, COST, OI),
-        source="kotsin_nse/strategy/fukaa.py",
+        source="kotsin_nse/strategy/fukaa.py; kotsin_nse/bars/oi_read.py; kotsin_nse/engine.py (_fukaa_shadow, oi_reading)",
         note=(
-            "Runs here. Note the deployed top.n and max.same.direction were both 999 — the "
-            "sentinel R4 exists to forbid; this repo spells the same thing None/OFF."
+            "Inputs fixed 2 Oct: the broker's OI change is 0.0 on every frame and momentum had never been computed, so it "
+            "could never fire. 23 Sep – 1 Oct estimate with the fixed inputs: 7 signals, about −₹11,900. Thresholds to be "
+            "re-fitted after the 27 Oct expiry; the Shadow page's FUKAA tab lists every signal."
         ),
     ),
     Book(
@@ -248,12 +249,25 @@ BOOKS: tuple[Book, ...] = (
         key="FUDKII_CT_Y",
         label="FUDKII-CT-Y",
         tf="30m entry, 1s exit",
-        summary="The same counter-trend fade as CT-X, under RT-Y's exits (late arming, SL one rung behind, band in expected-move units).",
+        summary=(
+            "Two fades under RT-Y's exits: (a) its own 09:45 gap fade — a first-bar trigger that gapped 0.3 daily ATR or more "
+            "its own way, faded with the stock stop 1 ATR30 past the close and the fade side's walls as targets; (b) CT-X's "
+            "counter-trend fade, decided for itself, except on a trigger it already gap-faded."
+        ),
         status="live",
-        params={"counter_wall_min": "5.2", "exits": "RT-Y policy"},
+        params={
+            "gap_fade_datr": "0.3 daily ATR, the trigger's own way, 09:45 bar only",
+            "fade plan": "Engine.fade_plan — the same plan FUDKII-CT-M uses",
+            "counter_wall_min": "5.2 (route b, CT-X's)",
+            "exits": "RT-Y policy incl. the +5 % T1 floor; no 25 % premium cap",
+            "size": "4 lots under ₹75,000",
+        },
         have=("30m/1m bars on the session grid", "MTF pivot zones + confluence stop/targets", "per-name ATM implied vol (market/iv.py)"),
-        source="kotsin_nse/strategy/counter.py; kotsin_nse/risk/exits.py (own-ladder branch)",
-        note="Mirrored from CT-X's fill at the same price and instant, so only the exit differs.",
+        source="kotsin_nse/engine.py (gap_fade_plan, fade_plan, _gap_fade); kotsin_nse/strategy/counter.py; kotsin_nse/risk/exits.py",
+        note=(
+            "Its own entries since 26 Sep — no longer a mirror of CT-X's fill. Replay 24 Aug – 1 Oct: +₹32,306 on 18 fades, "
+            "the profit from fading B/C-graded triggers. The Shadow page's Gap fade tab tracks route (a)."
+        ),
     ),
     Book(
         key="FUDKII_RT_Y_W1",
@@ -319,8 +333,8 @@ BOOKS: tuple[Book, ...] = (
         source="kotsin_nse/engine.py (_market_fade, fade_plan); kotsin_nse/risk/limits.py CT_M_LIMITS",
         note=(
             "Operator, 2026-10-03. 25 Sep - 1 Oct actual replay: 3 fades, all won, +₹19,127 (two more had no option "
-            "prices). Option model 24 Aug - 1 Oct: lost before 11 Sep, won after. Paper, shown on the Shadow page; its "
-            "P&L is never added to the trading books'."
+            "prices). Option model 24 Aug - 1 Oct: 73 fades, −₹80,934 (−₹76,238 to 11 Sep, −₹4,696 after). Paper; the Shadow "
+            "page's Market fade tab lists every fade and skip; its P&L is never added to the trading books'."
         ),
     ),
     Book(

@@ -321,7 +321,8 @@ RT_Y_F_LIMITS = replace(RT_Y_LIMITS, min_equity_stop_atr=None)  # RT-Y's floor i
 
 #: FUDKII-CT-M (operator, 2026-10-03), a shadow: CT-Y's fade plan and exits on every published NSE trigger the
 #: market is clearly against — at most this share of the NSE names past today's open the trigger's way (RT-Y
-#: trades only above 50 %). The 25 Sep - 1 Oct actual replay: 3 fades, all won (+₹19,127); over 24 Aug - 1 Oct on
-#: the option model the same rule lost before 11 Sep and won after — unproven, hence a shadow.
+#: trades only above 50 %). The 25 Sep - 1 Oct actual replay: 3 fades, all won (+₹19,127). On the option model over
+#: 24 Aug - 1 Oct the rule lost: 73 fades, −₹80,934 (−₹76,238 to 11 Sep, −₹4,696 after) — though following the same
+#: triggers lost −₹2,17,547. Unproven, hence a shadow.
 CT_M_MARKET_AGAINST_MAX = 0.45
 CT_M_LIMITS = replace(CT_Y_LIMITS, gap_fade_datr=None)  # its own fade route, not CT-Y's 09:45 gap rule

@@ -330,6 +330,13 @@ class Settings(BaseSettings):
     #: the next rung's SELL at the rung and fill on a touch; any other exit cancels it first.
     #: False = targets sell when the exit engine sees the touch (the 15:12 behaviour).
     paper_limit_rest_targets: bool = True
+    #: urgent stops sell into the bid at once (operator, 2026-10-03; exec/resting.py ``urgent_stop``): the
+    #: stock through its stop, the option's mid down ``..._fast_fall_pct`` % in ``..._fast_window_s``, or a
+    #: book ``..._tight_ticks`` wide or less. False = every stop rests at the mid and walks, as before
+    paper_limit_exit_urgent_stops: bool = True
+    paper_limit_exit_fast_fall_pct: float = 2.0
+    paper_limit_exit_fast_window_s: float = 30.0
+    paper_limit_exit_tight_ticks: int = 2
 
     @field_validator("max_universe", "committee_experiment_symbols", mode="before")
     @classmethod

@@ -310,6 +310,8 @@ async def test_no_book_enters_a_trigger_whose_stop_the_underlying_is_already_thr
 
 @pytest.mark.asyncio
 async def test_an_exit_rests_at_the_mid_walks_to_the_bid_and_crosses_at_its_deadline(settings, clock):
+    """A calm option stop on a wide book (an urgent stop sells into the bid at once:
+    test_urgent_stops_depth_eod_plan.py)."""
     e = await _engine(settings, clock)
     try:
         pos = Position(id="p1", strategy="FUDKII_RT_X", instrument=OPT, underlying=UND, side=PosSide.LONG, qty=2750, entry=17.0,
@@ -318,10 +320,10 @@ async def test_an_exit_rests_at_the_mid_walks_to_the_bid_and_crosses_at_its_dead
         e.positions[pos.id] = pos
         e.wallets["FUDKII_RT_X"].commit(17.0 * 2750, clock[0])
         _book(e, 10.0, 11.0, clock[0])
-        await e._exit(pos, ExitDecision(pos.id, ExitReason.SL_EQ, 10.5, 2750, "SL-EQ"), clock[0])
+        await e._exit(pos, ExitDecision(pos.id, ExitReason.SL_OP, 10.5, 2750, "SL-OP"), clock[0])
         r = e._exit_resting(pos.id)
         assert r is not None and r.limit == 10.5 and r.deadline_s == 15
-        await e._exit(pos, ExitDecision(pos.id, ExitReason.SL_EQ, 10.5, 2750, "SL-EQ"), clock[0])  # the loop decides again
+        await e._exit(pos, ExitDecision(pos.id, ExitReason.SL_OP, 10.5, 2750, "SL-OP"), clock[0])  # the loop decides again
         assert len(e._resting) == 1, "one exit in flight — the resting one, repriced, never a second SELL"
         t0 = clock[0]
         clock[0] = t0 + 6
@@ -333,7 +335,7 @@ async def test_an_exit_rests_at_the_mid_walks_to_the_bid_and_crosses_at_its_dead
         await e._manage_positions()
         assert pos.status == "CLOSED" and pos.exit_price == 10.0, "crossed at the bid at 15 s"
         x = pos.exec_log["exits"][-1]
-        assert x["crossedTs"] == clock[0] and x["reason"] == "SL-EQ" and "crossed" in x["outcome"] and x["reprices"]
+        assert x["crossedTs"] == clock[0] and x["reason"] == "SL-OP" and "crossed" in x["outcome"] and x["reprices"]
     finally:
         await e.stop()
 

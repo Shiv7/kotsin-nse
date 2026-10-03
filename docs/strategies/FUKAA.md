@@ -31,6 +31,25 @@ input) and never traded. The thresholds (4x volume, 150 / 300 OI scoring, 5 % re
 are to be re-fitted on these readings before it may trade (the 150 / 300 OI bands are not a scale an OI
 change reaches).
 
+**Alignment, logged with every shadow signal (2 Oct).** Each `fukaa.shadow` event carries an `alignment`
+block — labels, never gates (`Engine._fukaa_alignment`):
+
+| field | what it is |
+|---|---|
+| `breadth`, `withMarket` | the parent trigger's breadth (the share of NSE names past today's open its way) and whether it is over 50 % |
+| `priceChangePct` | the stock since the previous session's close |
+| `oiChangePct`, `oiQuadrant` | the OI change and the price-OI quadrant: long build-up (price up, OI up), short build-up (down, up), short covering (up, down), long unwinding (down, down) |
+| `oiAgrees` | OI building the signal's way — a long build-up for a bull signal, a short build-up for a bear |
+
+**What the fixed inputs said (study, 2 Oct; stock-path estimate, ₹ = stock % × 12,000 − ₹1,400).** On the 98
+NSE triggers FUDKII published 23 Sep – 1 Oct, FUKAA as built admitted 7: 2 won, about −₹11,900. No volume,
+relative-volume, OI, relative-OI or direction rule cleared costs; the one positive slice — momentum over 1.2
+with the market — made about ₹575 a trade. The OI readings are from the expiry week, when OI fell on most
+names. Re-test after the 27 Oct expiry.
+
+**Where to read it.** The Shadow page's *FUKAA · shadow* tab lists every shadow signal with its inputs, its
+alignment and what RT-X, RT-N and RT-Y made on the same trigger; the Strategies page badges FUKAA as SHADOW.
+
 ## 1. Thesis
 
 A SuperTrend flip with a Bollinger break is a real event, but base FUDKII takes it whether or not

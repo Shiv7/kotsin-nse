@@ -61,27 +61,32 @@ def test_a_resting_target_fills_on_a_touch():
 
 
 @pytest.mark.asyncio
-async def test_the_parents_share_ladder_rests_t1_and_then_t2(settings, clock):
+async def test_the_parents_share_ladder_rests_t1_and_t2_at_once(settings, clock):
+    """Every rung rests from the fill (operator, 2026-10-03: "adding all targets immediately ... to make
+    the most of first come first serve"); T2's order keeps its place when T1 fills."""
     e = await _engine(settings, clock)
     try:
         pos = await _hold(e, _pos("FUDKII", clock[0], targets=(19.0, 21.0)), clock[0])
         await _tick(e, clock, 1, 17.40, 17.60)
-        r = e._target_resting(pos.id)
-        assert r is not None and (r.ctx[1], r.limit, r.intent.qty) == (0, 19.0, LOT), "T1: 40 % of 4 lots, floored to a lot"
+        t0 = clock[0]
+        rs = e._targets_resting(pos.id)
+        assert [(r.ctx[1], r.limit, r.intent.qty) for r in rs] == [(0, 19.0, LOT), (1, 21.0, 3 * LOT)], \
+            "T1: 40 % of 4 lots, floored to a lot; T2, the last rung, the rest"
+        t2_id = rs[1].intent.client_order_id
         await _tick(e, clock, 5, 18.60, 18.90)
-        assert pos.targets_hit == 0 and e._target_resting(pos.id) is r, "not touched: still resting"
+        assert pos.targets_hit == 0 and e._target_resting(pos.id) is rs[0], "not touched: still resting"
         await _tick(e, clock, 5, 19.00, 19.20)  # the bid touches T1
         assert pos.targets_hit == 1 and pos.qty_remaining == 3 * LOT
         x = pos.exec_log["exits"][-1]
         assert x["reason"] == "TARGET" and x["fillPrice"] == 19.0 and x["outcome"] == "T1 resting limit filled"
         r2 = e._target_resting(pos.id)
-        assert r2 is not None and (r2.ctx[1], r2.limit, r2.intent.qty) == (1, 21.0, 3 * LOT), "T2 rests at once — the last rung, the rest"
-        assert [t["outcome"] for t in pos.exec_log["targets"]] == ["placed", "filled", "placed"]
+        assert r2.intent.client_order_id == t2_id and (r2.ctx[1], r2.limit, r2.intent.qty) == (1, 21.0, 3 * LOT), "the same T2 order: its place kept"
+        assert [t["outcome"] for t in pos.exec_log["targets"]] == ["placed", "placed", "filled"]
         assert len(_sells(await _rows(e, "orders"))) == 1
         # the card shows what is resting; the order trail (the ledger's copy) shows its life
-        assert e._resting_target_card({"id": pos.id, "status": "OPEN"}) == {"rung": 2, "limit": 21.0, "qty": 3 * LOT, "placedTs": clock[0], "lots": 3}
+        assert e._resting_target_card({"id": pos.id, "status": "OPEN"}) == {"rung": 2, "limit": 21.0, "qty": 3 * LOT, "placedTs": t0, "lots": 3}
         row = next(p for p in await _rows(e, "positions") if p["id"] == pos.id)
-        assert [t["outcome"] for t in row["exec_log"]["targets"]] == ["placed", "filled", "placed"]
+        assert [t["outcome"] for t in row["exec_log"]["targets"]] == ["placed", "placed", "filled"]
     finally:
         await e.stop()
 
@@ -182,14 +187,13 @@ async def test_an_equity_stop_cancels_the_resting_target_and_sells_the_whole_pos
         pos = await _hold(e, _pos("FUDKII", clock[0], targets=(19.0, 21.0)), clock[0])
         await _tick(e, clock, 1, 17.40, 17.60)
         assert e._target_resting(pos.id) is not None
-        await _tick(e, clock, 1, 16.00, 16.20, und=184.5)  # the underlying through its stop
-        assert e._target_resting(pos.id) is None
-        ex = e._exit_resting(pos.id)
-        assert ex.ctx[1].reason is ExitReason.SL_EQ and ex.intent.qty == 4 * LOT
+        await _tick(e, clock, 1, 16.00, 16.20, und=184.5)  # the underlying through its stop: an urgent stop
+        assert e._target_resting(pos.id) is None and e._exit_resting(pos.id) is None, "sold into the bid at once"
+        x = pos.exec_log["exits"][-1]
+        assert pos.status == "CLOSED" and x["reason"] == "SL-EQ" and x["qty"] == 4 * LOT and "at once" in x["outcome"]
+        assert pos.exec_log["targets"][-1]["outcome"].startswith("cancelled — SL-EQ"), "the T1 sell came off first"
         await _tick(e, clock, 1, 19.00, 19.20, und=184.5)  # a spike to T1 now can fill nothing: it was cancelled
-        assert pos.targets_hit == 0
-        await _tick(e, clock, 16, 16.00, 16.20, und=184.5)
-        assert pos.status == "CLOSED" and len(_sells(await _rows(e, "orders"))) == 1
+        assert pos.targets_hit == 0 and len(_sells(await _rows(e, "orders"))) == 1
     finally:
         await e.stop()
 
@@ -197,24 +201,29 @@ async def test_an_equity_stop_cancels_the_resting_target_and_sells_the_whole_pos
 @pytest.mark.asyncio
 async def test_the_exit_engines_own_target_first_cancels_the_resting_one(settings, clock):
     """The equity-T1 arm path: the underlying reaches its T1 before the option reaches its own rung —
-    the exit engine's TARGET exits as today, and the resting T1 comes off first."""
+    the exit engine's TARGET exits as today, only T1's resting sell comes off first, and T2's keeps its
+    place in the queue (resized when the ladder is re-read)."""
     e = await _engine(settings, clock)
     try:
         pos = await _hold(e, _pos("FUDKII_RT_X", clock[0], targets=(19.5, 20.5)), clock[0])
         await _tick(e, clock, 1, 17.40, 17.60)
-        assert e._target_resting(pos.id).limit == 19.5
+        rs = e._targets_resting(pos.id)
+        assert [(r.limit, r.intent.qty) for r in rs] == [(19.5, LOT), (20.5, 3 * LOT)]
+        t2_id = rs[1].intent.client_order_id
         await _tick(e, clock, 1, 18.20, 18.40, und=190.2)  # equity T1 190.0 reached, option at 18.30
-        assert e._target_resting(pos.id) is None
+        assert [r.limit for r in e._targets_resting(pos.id)] == [20.5], "T1's sell came off; T2's stays"
         ex = e._exit_resting(pos.id)
         assert ex is not None and ex.ctx[1].reason is ExitReason.TARGET and ex.intent.qty == LOT
         assert pos.option_targets[0] == pytest.approx(18.3), "the equity path's T1, as today"
         await _tick(e, clock, 1, 18.20, 18.40, und=190.2)
-        assert e._target_resting(pos.id) is None, "no resting target while the exit is working"
+        assert [r.intent.client_order_id for r in e._targets_resting(pos.id)] == [t2_id], "nothing moves while the exit works"
         await _tick(e, clock, 46, 18.20, 18.40, und=190.2)  # the target exit crosses at 45 s
         assert pos.targets_hit == 1 and pos.qty_remaining == 3 * LOT
         await _tick(e, clock, 1, 18.20, 18.40, und=190.2)
-        r2 = e._target_resting(pos.id)
-        assert r2 is not None and r2.ctx[1] == 1 and r2.limit == 19.5, "then the next rung rests"
+        rs = e._targets_resting(pos.id)
+        assert [(r.ctx[1], r.limit, r.intent.qty) for r in rs] == [(1, 19.5, LOT), (2, 20.5, 2 * LOT)], "the ladder as it now stands"
+        assert rs[1].intent.client_order_id == t2_id, "the 20.5 order kept its place, cut to its new size"
+        assert sum(r.intent.qty for r in rs) == pos.qty_remaining
         assert len(_sells(await _rows(e, "orders"))) == 1
     finally:
         await e.stop()
