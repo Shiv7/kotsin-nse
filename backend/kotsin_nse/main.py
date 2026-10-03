@@ -384,6 +384,15 @@ def build_parser() -> argparse.ArgumentParser:
     pv.add_argument("--for", dest="for_date", default=date.today().isoformat(), help="the session the levels were in force on (default: today)")
     pv.add_argument("--otm", type=int, default=4, help="OTM strikes per side to ladder (default: 4, the book's own)")
 
+    fo = sub.add_parser("fetch-oi", help="NSE's F&O bhavcopy into the daily OI store — the official closing OI per contract (no broker needed)")
+    fo.add_argument("--start", default=(today - timedelta(days=365)).isoformat())
+    fo.add_argument("--end", default=today.isoformat())
+    fo.add_argument("--refetch", action="store_true", help="fetch again days already held")
+
+    oi = sub.add_parser("oi", help="an underlying's daily futures OI from the store: the change, the price, the quadrant")
+    oi.add_argument("symbol", help="underlying root, e.g. RELIANCE")
+    oi.add_argument("--days", type=int, default=20, help="the last N sessions held (default 20)")
+
     tp = sub.add_parser("tape", help="the tick tape: what was recorded on a day, or one contract second by second (no engine needed)")
     tp.add_argument("--day", default=date.today().isoformat(), help="IST session (default: today)")
     tp.add_argument("--symbol", default=None, help="only this underlying")
@@ -418,6 +427,39 @@ def run_rl_cli(settings: Settings, args: argparse.Namespace) -> None:
     print(f"\nsaved {settings.data_dir / 'rl' / (art['name'] + '.json')}")
 
 
+async def fetch_oi(settings: Settings, args: argparse.Namespace) -> None:
+    import httpx
+
+    from .market.fo_bhavcopy import OiDailyStore, backfill
+
+    store = OiDailyStore(settings.data_dir / "oi_daily")
+    start, end = date.fromisoformat(args.start), date.fromisoformat(args.end)
+    async with httpx.AsyncClient(timeout=60, follow_redirects=True) as http:
+        out = await backfill(http, store, start, end, refetch=args.refetch)
+    days = store.days()
+    print(json.dumps({**out, "store": str(store.root), "sessions_held": len(days),
+                      "first": days[0].isoformat() if days else None, "last": days[-1].isoformat() if days else None}))
+
+
+def show_oi(settings: Settings, args: argparse.Namespace) -> None:
+    import pandas as pd
+
+    from .market.fo_bhavcopy import OiDailyStore
+    from .research.oi_daily import futures_oi, with_changes
+
+    store = OiDailyStore(settings.data_dir / "oi_daily")
+    t = with_changes(futures_oi(store, [args.symbol]))
+    if t.empty:
+        print(f"no OI held for {args.symbol.upper()} — run `kotsin-nse fetch-oi` first", file=sys.stderr)
+        raise SystemExit(1)
+    t = t.tail(args.days)
+    print(f"{'day':10s} {'front':10s} {'front OI':>12s} {'all futures OI':>15s} {'OI chg':>8s} {'close':>10s} {'px chg':>7s}  quadrant")
+    for r in t.itertuples():
+        oi_chg = "" if pd.isna(r.oi_chg_pct) else f"{r.oi_chg_pct:+.2f}%"
+        px_chg = "" if pd.isna(r.px_chg_pct) else f"{r.px_chg_pct:+.2f}%"
+        print(f"{r.day!s:10s} {r.front_expiry:10s} {r.front_oi:>12,.0f} {r.total_oi:>15,.0f} {oi_chg:>8s} {r.front_close:>10,.2f} {px_chg:>7s}  {r.quadrant or ''}")
+
+
 def cli() -> None:
     args = build_parser().parse_args()
     try:
@@ -443,6 +485,10 @@ def cli() -> None:
         asyncio.run(show_pivots(settings, args))
     elif command == "tape":
         show_tape(settings, args)
+    elif command == "fetch-oi":
+        asyncio.run(fetch_oi(settings, args))
+    elif command == "oi":
+        show_oi(settings, args)
     else:  # pragma: no cover - argparse rejects anything else
         raise SystemExit(f"unknown command {command}")
 

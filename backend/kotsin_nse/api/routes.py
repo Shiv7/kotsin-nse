@@ -101,6 +101,19 @@ def build_app(engine: Engine) -> FastAPI:
 
     # -- health & system ---------------------------------------------------------------------------
 
+    @api.get("/oi/{symbol}")
+    async def oi_view(symbol: str) -> dict[str, Any]:
+        """One underlying's OI: the change since the previous close, each future's level, the
+        reference it is measured from (and whether that is the exchange's, ours or a pre-open print),
+        and its OI candles."""
+        return engine.oi_view(symbol)
+
+    @api.get("/feed/rate")
+    async def feed_rate(code: str | None = None) -> dict[str, Any]:
+        """How often 5paisa's price frames arrive per contract, and whether every trade arrives
+        (``ops/feed_rate.py``). Meaningful only once a session has traded for a while."""
+        return {"segments": engine.feed_rate.snapshot(), "code": engine.feed_rate.code(code) if code else None}
+
     @api.get("/health")
     async def health() -> dict[str, Any]:
         return engine.health_snapshot()

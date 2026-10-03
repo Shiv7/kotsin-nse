@@ -42,6 +42,10 @@ class OiReading:
     #: the oldest level it used, in seconds
     age_s: float | None = None
     doubt: str = ""
+    #: where the previous close came from: "nse" (the exchange's bhavcopy), "archive" (the engine's
+    #: own last print of that session) or "preopen" (today's first print before the open) — joined
+    #: with "+" when the roll reads two contracts whose references came from different places
+    ref_source: str = ""
 
     @property
     def ok(self) -> bool:
@@ -50,7 +54,7 @@ class OiReading:
     def to_json(self) -> dict[str, object]:
         return {"changePct": None if self.change_pct is None else round(self.change_pct, 3), "contracts": list(self.contracts),
                 "refOi": self.ref_oi, "nowOi": self.now_oi, "ageS": None if self.age_s is None else round(self.age_s, 1),
-                "doubt": self.doubt}
+                "doubt": self.doubt, "refSource": self.ref_source}
 
 
 def read_oi(
@@ -61,10 +65,11 @@ def read_oi(
     refs: Mapping[str, float],
     now: float,
     max_age_s: float = MAX_AGE_S,
+    ref_sources: Mapping[str, str] | None = None,
 ) -> OiReading:
     """``futures``: the unexpired futures' codes, nearest first. ``sessions_left``: sessions to the
     nearest one's expiry, today and the expiry day both counted. ``levels``: code → (OI, when);
-    ``refs``: code → the previous session's closing OI."""
+    ``refs``: code → the previous session's closing OI; ``ref_sources``: code → where that came from."""
     if not futures:
         return OiReading(doubt="no unexpired future")
     use = list(futures[:2]) if sessions_left <= ROLL_SESSIONS and len(futures) >= 2 else [futures[0]]
@@ -80,11 +85,12 @@ def read_oi(
         oldest = max(oldest, now - lv[1])
         ref_sum += ref
         now_sum += lv[0]
+    src = "+".join(dict.fromkeys((ref_sources or {}).get(c, "") for c in use if (ref_sources or {}).get(c)))
     if oldest > max_age_s:
         return OiReading(contracts=tuple(use), ref_oi=ref_sum, now_oi=now_sum, age_s=oldest,
-                         doubt=f"OI {oldest:.0f}s old (> {max_age_s:.0f}s)")
+                         doubt=f"OI {oldest:.0f}s old (> {max_age_s:.0f}s)", ref_source=src)
     return OiReading(change_pct=(now_sum / ref_sum - 1.0) * 100.0, contracts=tuple(use), ref_oi=ref_sum, now_oi=now_sum,
-                     age_s=oldest)
+                     age_s=oldest, ref_source=src)
 
 
 def relative_z(own: float, peers: Sequence[float], *, min_peers: int = MIN_PEERS) -> tuple[float | None, int]:

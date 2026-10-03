@@ -131,11 +131,26 @@ class DailyArchive:
             },
         )
 
-    def oi(self, scrip_code: str, ts: float, oi: float, change_pct: float | None) -> None:
+    def oi(
+        self,
+        scrip_code: str,
+        ts: float,
+        oi: float,
+        change_pct: float | None,
+        *,
+        change: float | None = None,
+        tick_ts: float | None = None,
+        ltp: float | None = None,
+        volume: float | None = None,
+    ) -> None:
+        """One OI frame, every field the broker sent (operator, 2026-10-03: keep the raw frame).
+        ``change`` and ``change_pct`` are 5paisa's own fields, kept to be checked, never used: the
+        percent is 0.0 on every frame. ``tick_ts`` is the broker's time, ``ts`` our arrival."""
         self._add(
             "oi",
             ts,
-            {"scrip_code": str(scrip_code), "ts": float(ts), "oi": float(oi), "change_pct": change_pct},
+            {"scrip_code": str(scrip_code), "ts": float(ts), "oi": float(oi), "change_pct": change_pct,
+             "change": change, "tick_ts": tick_ts, "ltp": ltp, "volume": volume},
         )
 
     def option_quote(

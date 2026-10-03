@@ -42,10 +42,12 @@ from typing import Any
 import pandas as pd
 import structlog
 
+from ..bars.oi_read import OiReading
 from ..bars.periods import monthly, previous_complete, weekly
 from ..bars.pivots import Zone, classic_pivots, cluster_zones, pivot_points
 from ..bars.store import BarStore
 from ..bars.unified import BarSource, UnifiedBar
+from ..bars.volume_read import VolumeReading
 from ..config import Segment, Settings
 from ..domain import Direction, ExitReason, Instrument, InstrumentKind, OrderSide
 from ..instrument.select import estimate_delta, map_levels_to_option
@@ -120,6 +122,25 @@ class BacktestContext:
         if hm <= sp.open.strftime("%H:%M"):
             return "OPEN"
         return "MID"
+
+    # The four readings FUKAA asks for (``strategy/base.py`` Context). The history has none of what
+    # they are read from — no OI at bar resolution (5paisa's candles carry none and the exchange
+    # publishes only the day's close), no checked volume reading, no NIFTY50 cross-section — so each
+    # answers "unknown", which is what the live engine answers for a missing input: the gate that
+    # needs it fails closed. Missing outright, they raised on every bar and every symbol failed
+    # (2026-10-03: 0 trades, exit 0, from ead4a81 on).
+
+    def volume_reading(self, symbol: str, ts: int) -> VolumeReading:
+        return VolumeReading(doubt="no checked volume reading in the backtest", kind="missing")
+
+    def market_volume_surge(self, ts: int) -> tuple[float | None, int]:
+        return None, 0
+
+    def oi_reading(self, symbol: str) -> OiReading:
+        return OiReading(doubt="no intraday OI in the history (the exchange publishes the day's close only)")
+
+    def oi_relative(self, symbol: str) -> tuple[float | None, int]:
+        return None, 0
 
     @property
     def state(self) -> MutableMapping[str, Any]:
@@ -365,11 +386,17 @@ class Backtester:
             signals=0,
             rejections=0,
         )
+        failed: list[str] = []
         for symbol in symbols:
             try:
                 self._run_symbol(store, symbol, result, start, end)
             except Exception as exc:  # noqa: BLE001 - one bad symbol must not void the sweep
+                failed.append(symbol)
                 log.warning("backtest.symbol_failed", symbol=symbol, error=str(exc))
+        if symbols and len(failed) == len(symbols):
+            # One bad symbol is a symbol; every symbol is the backtester. Saving an empty run as a
+            # result is how a broken context read as "0 trades" for a day (2026-10-03).
+            raise RuntimeError(f"every one of {len(symbols)} symbols failed — the run is broken, not empty; see backtest.symbol_failed")
         result.trades.sort(key=lambda t: t.entry_ts)
         return result
 

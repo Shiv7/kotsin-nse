@@ -117,6 +117,10 @@ class Settings(BaseSettings):
     #: be tested without, went unrecorded.
     archive_enabled: bool = True
     archive_flush_s: float = 300.0
+    #: fetch NSE's F&O bhavcopy for the previous session (``market/fo_bhavcopy.py``) — the official
+    #: closing OI every OI change is measured from when the engine's own archive lacks that day.
+    #: Public exchange data, no broker session needed; off only for an engine with no internet.
+    oi_bhavcopy_enabled: bool = True
     #: rolling window for the **tape** (``quotes``): day files kept after each flush (sessions,
     #: not calendar days — a file exists only for a day something was recorded); 0 keeps
     #: everything. Fifteen sessions is three weeks of second-by-second replays for ~120 MB

@@ -48,6 +48,7 @@ from .bars.daily import (
 from .bars.daily import audit as audit_daily
 from .bars.indicators import atr, dried_volume
 from .bars.micro import MicroAggregator
+from .bars.oi_candles import OiCandleBuilder
 from .bars.oi_read import OiReading, oi_quadrant, read_oi, relative_z
 from .bars.periods import monthly, previous_complete, weekly
 from .bars.pivots import (
@@ -112,6 +113,8 @@ from .instrument.select import (
 )
 from .instrument.universe import ScripGroup, UniverseBuilder, UniversePolicy
 from .ledger.db import Ledger, events
+from .market.fo_bhavcopy import OiDailyStore
+from .market.fo_bhavcopy import fetch_day as fetch_fo_bhavcopy
 from .market.indices import NIFTY50
 from .market.iv import (
     MIN_HISTORY,
@@ -155,6 +158,7 @@ from .market.volatility import (
     regime_for_equity,
 )
 from .ops.archive import DailyArchive
+from .ops.feed_rate import FeedRate
 from .ops.fulltape import FullTape
 from .ops.health import Check, HealthMonitor
 from .ops.tape import ROLE_EQUITY, ROLE_FUTURE, ROLE_INDEX, ROLE_OPTION, Tape
@@ -314,6 +318,8 @@ FORCE_FLAT_HM: dict[str, str] = {StrategyKey.FUDKII_RT_Y_F.value: "15:24"}
 #: How long after the NSE open a trigger carried from the last session's close waits for its stock's
 #: first print before it expires.
 CARRY_WINDOW_S = 300.0
+#: the feed probe's segments, from a frame's own Exch + ExchType (``ops/feed_rate.py``)
+FEED_SEGMENTS: dict[str, str] = {"NC": "NSE_EQ", "ND": "NSE_FO", "MD": "MCX_FO", "NU": "NSE_CDS"}
 #: the books that take the counter-trend fade of it (CT-X's plan), each judging it for itself
 FADE_BOOKS = (StrategyKey.FUDKII_CT_X, StrategyKey.FUDKII_CT_Y)
 #: On an in-trend book's card for a trigger the route sends COUNTER-TREND, the live button is the
@@ -717,6 +723,20 @@ class Engine:
         self._fut_oi: dict[str, tuple[float, float]] = {}
         self._oi_ref: dict[str, float] = {}
         self._oi_ref_day: date | None = None
+        #: where each reference came from — "nse" (the exchange's bhavcopy), "archive" (our own last
+        #: print of that session) or "preopen" (today's first print before the open)
+        self._oi_ref_src: dict[str, str] = {}
+        #: the exchange's closing OI per session (``market/fo_bhavcopy.py``) and the session whose
+        #: file the references were last taken from
+        self.oi_daily = OiDailyStore(settings.data_dir / "oi_daily")
+        self._oi_bhav_day: date | None = None
+        self._oi_bhav_tried = 0.0
+        self._oi_bhav_task: asyncio.Task[Any] | None = None
+        #: each future's OI as candles (``bars/oi_candles.py``), from the prints — never from the
+        #: broker's change field
+        self.oi_candles = OiCandleBuilder()
+        #: how fast the price feed really is, and whether it delivers every trade (``ops/feed_rate.py``)
+        self.feed_rate = FeedRate()
         self._front_code: dict[tuple[str, date], str | None] = {}
         self._n50_oi: tuple[int, dict[str, float]] = (-1, {})
         self._n50_vol: dict[int, tuple[float | None, int]] = {}
@@ -1562,6 +1582,13 @@ class Engine:
 
     async def _on_tick(self, tick: dict[str, Any]) -> None:
         code = str(tick["scrip_code"])
+        self.feed_rate.on_tick(
+            code,
+            FEED_SEGMENTS.get(f"{tick.get('exch') or ''}{tick.get('exch_type') or ''}", "OTHER"),
+            float(tick.get("recv_ts") or time.time()),
+            int(tick.get("last_qty") or 0),
+            int(tick.get("total_qty") or 0),
+        )
         ltp = float(tick.get("ltp") or 0)
         if ltp > 0:
             self.ltps[code] = ltp
@@ -1589,6 +1616,10 @@ class Engine:
             recv,
             float(oi["open_interest"]),
             float(oi["oi_change_pct"]) if oi.get("oi_change_pct") is not None else None,
+            change=float(oi["oi_change"]) if oi.get("oi_change") is not None else None,
+            tick_ts=float(oi["ts"]) if oi.get("ts") else None,
+            ltp=float(oi["ltp"]) if oi.get("ltp") else None,
+            volume=float(oi["volume"]) if oi.get("volume") else None,
         )
         symbol = self._future_to_underlying.get(fut_code)
         if symbol is None:
@@ -1622,13 +1653,18 @@ class Engine:
         before become the previous-close reference (an engine running through midnight); a print
         before the open is the previous close itself (OI does not move pre-open)."""
         day = ist_day(ts)
+        seg = self._segment_by_code.get(code, Segment.NSE_FO)
         if self._oi_ref_day != day:
             if self._oi_ref_day is not None:
-                self._oi_ref.update({c: lv[0] for c, lv in self._fut_oi.items() if ist_day(lv[1]) < day and lv[0] > 0})
+                rolled = {c: lv[0] for c, lv in self._fut_oi.items() if ist_day(lv[1]) < day and lv[0] > 0}
+                self._oi_ref.update(rolled)
+                self._oi_ref_src.update(dict.fromkeys(rolled, "archive"))
             self._oi_ref_day = day
-        if code not in self._oi_ref and oi > 0 and ts < session_open_ts(self._segment_by_code.get(code, Segment.NSE_FO), day):
+        if code not in self._oi_ref and oi > 0 and ts < session_open_ts(seg, day):
             self._oi_ref[code] = oi
+            self._oi_ref_src[code] = "preopen"
         self._fut_oi[code] = (oi, ts)
+        self.oi_candles.on_print(code, oi, ts, seg)
 
     def _seed_oi_reference(self, *, today: date | None = None) -> int:
         """The previous session's closing OI for every future we map, from the engine's own OI archive
@@ -1636,13 +1672,60 @@ class Engine:
         neither has no reference — its readings are doubtful until tomorrow, never guessed."""
         today = today or ist_today()
         codes = set(self._future_to_underlying)
-        refs = self._oi_from_archive(self.calendar.previous_trading_day(today), codes, last=True)
-        missing = codes - set(refs)
-        if missing:
-            refs.update(self._oi_from_archive(today, missing, last=False, before=session_open_ts(Segment.NSE_EQ, today)))
-        self._oi_ref, self._oi_ref_day = refs, today
-        log.info("oi.reference_seeded", futures=len(codes), with_reference=len(refs))
+        prev = self.calendar.previous_trading_day(today)
+        refs: dict[str, float] = {}
+        src: dict[str, str] = {}
+        for source, read in (
+            ("nse", lambda want: self._oi_from_bhavcopy(prev, want)),
+            ("archive", lambda want: self._oi_from_archive(prev, want, last=True)),
+            ("preopen", lambda want: self._oi_from_archive(today, want, last=False, before=session_open_ts(Segment.NSE_EQ, today))),
+        ):
+            missing = codes - set(refs)
+            if not missing:
+                break
+            found = read(missing)
+            refs.update(found)
+            src.update(dict.fromkeys(found, source))
+        self._oi_ref, self._oi_ref_src, self._oi_ref_day = refs, src, today
+        if self.oi_daily.has(prev):
+            self._oi_bhav_day = prev
+        log.info("oi.reference_seeded", futures=len(codes), with_reference=len(refs),
+                 by_source={k: sum(1 for v in src.values() if v == k) for k in ("nse", "archive", "preopen")})
         return len(refs)
+
+    def _oi_from_bhavcopy(self, day: date, codes: set[str]) -> dict[str, float]:
+        try:
+            return self.oi_daily.closes(day, codes)
+        except Exception as exc:  # noqa: BLE001 — an unreadable file is no reference, never a failed boot
+            log.warning("oi.bhavcopy_read_failed", day=day.isoformat(), error=str(exc)[:120])
+            return {}
+
+    async def _ensure_oi_bhavcopy(self, *, today: date | None = None) -> bool:
+        """Hold the previous session's F&O bhavcopy and take every reference the exchange has from
+        it: its closing OI is the official one, so it replaces an archive print or a pre-open one
+        (operator, 2026-10-03). NSE publishes it in the evening, so this is asked again until it
+        answers. Returns whether the file is held."""
+        today = today or ist_today()
+        prev = self.calendar.previous_trading_day(today)
+        if not self.oi_daily.has(prev):
+            df = await fetch_fo_bhavcopy(self.http, prev)
+            if df is None or df.empty:
+                return False
+            try:
+                await asyncio.to_thread(self.oi_daily.write, prev, df)
+            except Exception as exc:  # noqa: BLE001 — a disk that refuses is the archive's references, not a crash
+                log.warning("oi.bhavcopy_write_failed", day=prev.isoformat(), error=str(exc)[:120])
+                return False
+        if self._oi_ref_day != today:
+            self._seed_oi_reference(today=today)  # the day turned: everything from the file first
+        else:
+            official = await asyncio.to_thread(self._oi_from_bhavcopy, prev, set(self._future_to_underlying))
+            self._oi_ref.update(official)
+            self._oi_ref_src.update(dict.fromkeys(official, "nse"))
+        self._oi_bhav_day = prev
+        log.info("oi.bhavcopy_reference", day=prev.isoformat(),
+                 from_nse=sum(1 for v in self._oi_ref_src.values() if v == "nse"), futures=len(self._future_to_underlying))
+        return True
 
     def _oi_from_archive(self, day: date, codes: set[str], *, last: bool, before: float | None = None) -> dict[str, float]:
         path = self.s.data_dir / "archive" / "oi" / f"{day.isoformat()}.parquet"
@@ -1681,7 +1764,28 @@ class Engine:
         expiry = date.fromisoformat(futs[0].expiry[:10])
         sessions = sum(1 for k in range((expiry - today).days + 1) if self.calendar.is_trading_day(today + timedelta(days=k)))
         return read_oi([f.scrip_code for f in futs], sessions_left=sessions, levels=self._fut_oi, refs=self._oi_ref,
-                       now=time.time() if now is None else now)
+                       now=time.time() if now is None else now, ref_sources=self._oi_ref_src)
+
+    def oi_view(self, symbol: str) -> dict[str, Any]:
+        """Everything behind one underlying's OI reading: each future's level now, the previous close
+        it is measured from and where that came from, and its OI candles."""
+        symbol = symbol.upper()
+        reading = self.oi_reading(symbol)
+        today = ist_today()
+        futs = sorted((f for f in self.catalogue_loader.catalogue.futures_by_symbol.get(symbol, [])
+                       if f.expiry and f.expiry[:10] >= today.isoformat()), key=lambda f: f.expiry)
+        legs = []
+        for f in futs[:3]:
+            lv = self._fut_oi.get(f.scrip_code)
+            day = self.oi_candles.forming(f.scrip_code, "1d")
+            legs.append({
+                "code": f.scrip_code, "expiry": f.expiry[:10], "oi": lv[0] if lv else None, "at": lv[1] if lv else None,
+                "ref": self._oi_ref.get(f.scrip_code), "refSource": self._oi_ref_src.get(f.scrip_code),
+                "day": day.to_json() if day is not None else None,
+                "candles30m": [c.to_json() for c in self.oi_candles.series(f.scrip_code, "30m", 14)],
+            })
+        return {"symbol": symbol, "reading": reading.to_json(), "refDay": self.calendar.previous_trading_day(today).isoformat(),
+                "bhavcopyDay": self._oi_bhav_day.isoformat() if self._oi_bhav_day else None, "legs": legs}
 
     def oi_relative(self, symbol: str, *, now: float | None = None) -> tuple[float | None, int]:
         """How far ``symbol``'s OI change stands from the NIFTY50's at this minute (a z-score in their
@@ -5702,8 +5806,21 @@ class Engine:
                 ):
                     self._autopilot_day = day
                     self._decision_tasks.add(asyncio.create_task(self._autopilot()))
+                self.oi_candles.flush(now, self._segment_by_code)
+                if (
+                    self.s.oi_bhavcopy_enabled
+                    and self.s.engine_enabled
+                    and self._future_to_underlying
+                    and self._oi_bhav_day != self.calendar.previous_trading_day(ist_today())
+                    and now - self._oi_bhav_tried > 600
+                    and (self._oi_bhav_task is None or self._oi_bhav_task.done())
+                ):
+                    self._oi_bhav_tried = now
+                    self._oi_bhav_task = asyncio.create_task(self._ensure_oi_bhavcopy(), name="oi-bhavcopy")
                 if day != last_day:
                     last_day = day
+                    log.info("feed.rate_day", segments=self.feed_rate.snapshot())
+                    self.feed_rate.reset()
                     self._alerts_reset_done.clear()
                     self._zone_cache.clear()
                     self._daily_due = self._legs_due = True
@@ -6052,6 +6169,8 @@ class Engine:
             "fidelity": self.reconciler.snapshot() if self.reconciler_ready else {},
             "micro": self.micro.stats(),
             "option_oi_tracked": len(self.option_oi),
+            "oi_candles": self.oi_candles.stats(),
+            "oi_reference": {k: sum(1 for v in self._oi_ref_src.values() if v == k) for k in ("nse", "archive", "preopen")},
             "archive": self.archive.stats(),
             "tape": self.tape.stats(),
             "tape_full": self.fulltape.stats(),
