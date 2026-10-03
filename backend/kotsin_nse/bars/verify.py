@@ -39,10 +39,9 @@ import structlog
 
 from ..config import Segment
 from ..domain import Instrument, InstrumentKind
+from ..market.candles import snap_candles
 from ..market.session import (
     NSE_EQ_CONTINUOUS_UNTIL,
-    bucket_start,
-    in_session,
     ist_day,
     ist_naive_to_ts,
     on_session_grid,
@@ -249,7 +248,11 @@ class BarReconciler:
                     c = BarCheck(bar.symbol, bar.tf, bar.ts, found=False, error=str(exc)[:160], partial=bar.source is BarSource.PARTIAL)
                     self._record(c)
                     return c
-            match = next((r for r in rows if int(ist_naive_to_ts(r["dt"])) == bar.ts), None)
+            # by BUCKET: a candle stamped at its first trade (10:46) is the 10:45 bar. Matched by
+            # exact time, it was never found — the decision waited out the retry and then ran on
+            # the snapshot-built bar (review, 2026-10-03)
+            grid = snap_candles(rows, inst.segment, bar.tf).rows
+            match = next((r for r in grid if int(ist_naive_to_ts(r["dt"])) == bar.ts), None)
             if match is not None:
                 c = self._install(bar, match, inst)
                 self._record(c)
@@ -333,19 +336,10 @@ class BarReconciler:
             held = {int(b.ts): b for b in self.store.bars(symbol, self.decision_tf) if ist_day(b.ts) == day}
             prev_close = next(iter(held.values())).prev_close if held else None
             # each row onto its bucket: the broker stamps a candle with its first trade's minute
-            # (09:16, 10:46), which IS the bucket; a bucket's own on-grid row wins
-            by: dict[int, tuple[bool, dict[str, Any]]] = {}
-            for r in rows:
-                t = ist_naive_to_ts(str(r["dt"]))
-                if not in_session(inst.segment, t):
-                    continue
-                b_ts = int(bucket_start(inst.segment, t, self.decision_tf))
-                held_row = by.get(b_ts)
-                if held_row is not None and held_row[0] and int(t) != b_ts:
-                    continue
-                by[b_ts] = (int(t) == b_ts, r)
+            # (09:16, 10:46), which IS the bucket; a bucket's own on-grid row wins (market/candles.py)
+            by = {int(ist_naive_to_ts(str(r["dt"]))): r for r in snap_candles(rows, inst.segment, self.decision_tf).rows}
             for ts in sorted(by):
-                r = by[ts][1]
+                r = by[ts]
                 if not keep(inst, ts):
                     continue
                 out["bars"] += 1
@@ -408,7 +402,7 @@ class BarReconciler:
                     except Exception as exc:  # noqa: BLE001
                         self._record(BarCheck(symbol, tf, pending[-1].ts, found=False, error=str(exc)[:160]))
                         continue
-                by_ts = {int(ist_naive_to_ts(r["dt"])): r for r in rows}
+                by_ts = {int(ist_naive_to_ts(r["dt"])): r for r in snap_candles(rows, inst.segment, tf).rows}
                 for b in pending:
                     row = by_ts.get(b.ts)
                     if row is None:

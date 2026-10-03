@@ -387,7 +387,14 @@ class Backtester:
             rejections=0,
         )
         failed: list[str] = []
+        segments = store.segments()
         for symbol in symbols:
+            seg = segments.get(symbol.upper())
+            if seg in Segment.__members__ and Segment[seg].exch != self.p.segment.exch:
+                # a name decided on another exchange's session and costs is not a result: the five
+                # MCX names were replayed as NSE stocks (review, 2026-10-03)
+                log.info("backtest.segment_skipped", symbol=symbol, segment=seg, run=self.p.segment.name)
+                continue
             try:
                 self._run_symbol(store, symbol, result, start, end)
             except Exception as exc:  # noqa: BLE001 - one bad symbol must not void the sweep

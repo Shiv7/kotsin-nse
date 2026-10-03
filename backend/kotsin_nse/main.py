@@ -384,6 +384,9 @@ def build_parser() -> argparse.ArgumentParser:
     pv.add_argument("--for", dest="for_date", default=date.today().isoformat(), help="the session the levels were in force on (default: today)")
     pv.add_argument("--otm", type=int, default=4, help="OTM strikes per side to ladder (default: 4, the book's own)")
 
+    nh = sub.add_parser("normalize-history", help="put the cached intraday history on the session grid, in place (no broker needed)")
+    nh.add_argument("--tf", default="30m")
+
     fo = sub.add_parser("fetch-oi", help="NSE's F&O bhavcopy into the daily OI store — the official closing OI per contract (no broker needed)")
     fo.add_argument("--start", default=(today - timedelta(days=365)).isoformat())
     fo.add_argument("--end", default=today.isoformat())
@@ -425,6 +428,23 @@ def run_rl_cli(settings: Settings, args: argparse.Namespace) -> None:
     )
     print(json.dumps({"name": art["name"], "summary": art["summary"], "folds": art["folds"]}, indent=1, default=str))
     print(f"\nsaved {settings.data_dir / 'rl' / (art['name'] + '.json')}")
+
+
+def normalize_history(settings: Settings, args: argparse.Namespace) -> None:
+    """Repair a cache written before the session grid (research/history.py): every symbol's intraday
+    series snapped and filtered, its segment recorded — from segments.json where the fetch recorded
+    it, else guessed (bars after 17:00 IST are MCX's)."""
+    from .research.history import HistoryStore, guess_segment
+
+    store = HistoryStore(settings.data_dir / "history")
+    totals = {"symbols": 0, "moved": 0, "dropped": 0}
+    for sym in store.symbols(args.tf):
+        seg = store.segment_of(sym) or guess_segment(store.load(sym, args.tf))
+        out = store.normalize(sym, args.tf, seg)
+        totals["symbols"] += 1
+        totals["moved"] += out["moved"]
+        totals["dropped"] += out["dropped"]
+    print(json.dumps({**totals, "tf": args.tf, "store": str(store.root)}))
 
 
 async def fetch_oi(settings: Settings, args: argparse.Namespace) -> None:
@@ -487,6 +507,8 @@ def cli() -> None:
         show_tape(settings, args)
     elif command == "fetch-oi":
         asyncio.run(fetch_oi(settings, args))
+    elif command == "normalize-history":
+        normalize_history(settings, args)
     elif command == "oi":
         show_oi(settings, args)
     else:  # pragma: no cover - argparse rejects anything else

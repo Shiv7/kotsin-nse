@@ -113,6 +113,7 @@ from .instrument.select import (
 )
 from .instrument.universe import ScripGroup, UniverseBuilder, UniversePolicy
 from .ledger.db import Ledger, events
+from .market.candles import snap_candles
 from .market.fo_bhavcopy import OiDailyStore
 from .market.fo_bhavcopy import fetch_day as fetch_fo_bhavcopy
 from .market.indices import NIFTY50
@@ -552,6 +553,8 @@ class Engine:
         #: traded volume per scrip code, from the snapshot the selector already fetches. Kept
         #: because the strike chooser ranks on volume as well as open interest.
         self.option_volume: dict[str, float] = {}
+        #: every option strike the universe selected — the tick path writes their volume from the feed
+        self._option_codes: set[str] = set()
         self._decision_tasks: set[asyncio.Task[Any]] = set()
         #: when each code last printed on the feed (its quote's receive time): a carried trigger
         #: enters on its stock's FIRST print of the session, never on yesterday's close replayed
@@ -726,6 +729,9 @@ class Engine:
         #: where each reference came from — "nse" (the exchange's bhavcopy), "archive" (our own last
         #: print of that session) or "preopen" (today's first print before the open)
         self._oi_ref_src: dict[str, str] = {}
+        #: are 5paisa's own OI change fields ever non-zero? The percent never was (824,031 frames on
+        #: 1 Oct); nothing had ever looked at the absolute one. Counted, so the engine answers it.
+        self.oi_frames = {"frames": 0, "change_nonzero": 0, "change_pct_nonzero": 0}
         #: the exchange's closing OI per session (``market/fo_bhavcopy.py``) and the session whose
         #: file the references were last taken from
         self.oi_daily = OiDailyStore(settings.data_dir / "oi_daily")
@@ -1153,6 +1159,7 @@ class Engine:
         for g in groups.values():
             for o in g.options:
                 self._segment_by_code[o.scrip_code] = o.segment
+                self._option_codes.add(o.scrip_code)
         self._future_to_underlying = {f.scrip_code: g.root for g in groups.values() for f in g.futures}
         self._seed_oi_reference()
 
@@ -1602,6 +1609,11 @@ class Engine:
             int(tick.get("last_qty") or 0),
             int(tick.get("total_qty") or 0),
         )
+        if code in self._option_codes and (total := int(tick.get("total_qty") or 0)) > 0:
+            # the strike's traded volume from the feed itself: it was written only from REST
+            # snapshots, so a streaming strike read 0 and the liquidity comparison in the strike
+            # choice compared 0 against everything (review, 2026-10-03)
+            self.option_volume[code] = float(total)
         ltp = float(tick.get("ltp") or 0)
         if ltp > 0:
             self.ltps[code] = ltp
@@ -1624,6 +1636,11 @@ class Engine:
     async def _on_oi(self, oi: dict[str, Any]) -> None:
         fut_code = str(oi["scrip_code"])
         recv = float(oi.get("recv_ts") or time.time())
+        self.oi_frames["frames"] += 1
+        if oi.get("oi_change"):
+            self.oi_frames["change_nonzero"] += 1
+        if oi.get("oi_change_pct"):
+            self.oi_frames["change_pct_nonzero"] += 1
         self.archive.oi(
             fut_code,
             recv,
@@ -1798,7 +1815,8 @@ class Engine:
                 "candles30m": [c.to_json() for c in self.oi_candles.series(f.scrip_code, "30m", 14)],
             })
         return {"symbol": symbol, "reading": reading.to_json(), "refDay": self.calendar.previous_trading_day(today).isoformat(),
-                "bhavcopyDay": self._oi_bhav_day.isoformat() if self._oi_bhav_day else None, "legs": legs}
+                "bhavcopyDay": self._oi_bhav_day.isoformat() if self._oi_bhav_day else None, "legs": legs,
+                "brokerFields": dict(self.oi_frames)}
 
     def oi_relative(self, symbol: str, *, now: float | None = None) -> tuple[float | None, int]:
         """How far ``symbol``'s OI change stands from the NIFTY50's at this minute (a z-score in their
@@ -2005,6 +2023,7 @@ class Engine:
             fresh = [o for g in self.groups.values() for o in g.options if o.scrip_code not in before]
             for o in fresh:
                 self._segment_by_code[o.scrip_code] = o.segment
+                self._option_codes.add(o.scrip_code)
             if fresh:
                 # Price and OI only. Depth follows what is about to be priced (`_sync_depth`) —
                 # putting a strike listed this morning on the depth channel here would restore the
@@ -4560,19 +4579,8 @@ class Engine:
         of the futures rows in the Aug–Sep history are stamped so — and the readers compare ``dt``
         against the trigger bucket as a string, so each in-session row is snapped to its bucket
         start, ``dt`` rewritten (a bucket's own on-grid row wins, should both come). Rows outside the
-        session (a future trades 09:15–15:30) are not bars."""
-        by: dict[int, tuple[bool, dict[str, Any]]] = {}
-        for r in rows:
-            ts = ist_naive_to_ts(str(r["dt"]))
-            if not in_session(front.segment, ts):
-                continue
-            b = int(bucket_start(front.segment, ts, DECISION_TF))
-            on_grid = int(ts) == b
-            held = by.get(b)
-            if held is not None and held[0] and not on_grid:
-                continue
-            by[b] = (on_grid, r if on_grid else {**r, "dt": to_ist(b).strftime("%Y-%m-%dT%H:%M:%S"), "stamped": str(r["dt"])})
-        return [by[b][1] for b in sorted(by)]
+        session (a future trades 09:15–15:30) are not bars. One implementation: market/candles.py."""
+        return snap_candles(rows, front.segment, DECISION_TF).rows
 
     async def _fill_fut_gaps(self, front: Instrument, rows: list[dict[str, Any]], t_ts: int, *,
                              sem: asyncio.Semaphore | None = None) -> tuple[list[dict[str, Any]], bool]:
@@ -5068,10 +5076,13 @@ class Engine:
                     # the broker has seen a trade the held quote has not (HCLTECH 1240 PE,
                     # 2026-09-28 11:15:04: 44.85 held, 45.65 traded — the feed's frame came 0.1 s on)
                     self._quote_outdated[code] = now
-            if ltp > 0:
+            if ltp > 0 and r["ts"] >= self._ltp_ts.get(code, 0.0):
+                # never a cached REST price over a newer feed print: 5paisa caches the snapshot for
+                # 5 s, and an older price read as a fresh trade by a resting order (review, 2026-10-03)
                 self.ltps[code] = ltp
+                self._ltp_ts[code] = r["ts"]
             if r.get("volume"):
-                self.option_volume[code] = float(r["volume"])
+                self.option_volume[code] = max(float(r["volume"]), self.option_volume.get(code, 0.0))
             held = self.books.get(code)
             if held is None or held.age_ms(now) > limit:
                 # a side the snapshot does carry still makes a (one-sided) book to sell or buy into
@@ -6195,6 +6206,7 @@ class Engine:
             "micro": self.micro.stats(),
             "option_oi_tracked": len(self.option_oi),
             "oi_candles": self.oi_candles.stats(),
+            "oi_broker_fields": dict(self.oi_frames),
             "oi_reference": {k: sum(1 for v in self._oi_ref_src.values() if v == k) for k in ("nse", "archive", "preopen")},
             "archive": self.archive.stats(),
             "tape": self.tape.stats(),

@@ -24,8 +24,11 @@ import structlog
 
 from ...config import Segment, Settings
 from ...domain import Instrument, InstrumentKind, OptionType, OrderSide
+from ...market.candles import snap_candles
+from ...market.session import TF_SECONDS
 from ..base import VenueError
 from .auth import APIM_KEY, Authenticator
+from .ws import parse_broker_date
 
 log = structlog.get_logger(__name__)
 
@@ -146,6 +149,10 @@ class FivePaisaREST:
                     "v": float(row[5]),
                 }
             )
+        if interval in TF_SECONDS:
+            # On the session grid at the edge: a candle stamped at its first trade (09:16, 10:46,
+            # 15:28) is its bucket, a post-close row is no bar (market/candles.py).
+            return snap_candles(out, instrument.segment, interval).rows
         return out
 
     async def market_feed(self, instruments: list[Instrument]) -> dict[str, dict[str, Any]]:
@@ -162,6 +169,14 @@ class FivePaisaREST:
         }
         resp = await self._post("V1/MarketFeed", body)
         now = time.time()
+
+        def traded_at(row: dict[str, Any]) -> float:
+            """The broker's time of the last trade (``TickDt``), never later than now. It was stamped
+            with the time of the CALL, so a price minutes old passed every staleness guard as fresh
+            (review, 2026-10-03). No usable TickDt: the call time, as before."""
+            t = parse_broker_date(row.get("TickDt"))
+            return min(t, now) if t is not None and t > 0 else now
+
         out: dict[str, dict[str, Any]] = {}
         for row in resp.get("Data") or []:
             token = str(row.get("Token"))
@@ -177,7 +192,7 @@ class FivePaisaREST:
                 "bid_qty": int(row.get("BidQty") or 0),
                 "ask_qty": int(row.get("OfferQty") or 0),
                 "volume": int(row.get("Volume") or row.get("TotalQty") or 0),
-                "ts": now,
+                "ts": traded_at(row),
             }
         return out
 

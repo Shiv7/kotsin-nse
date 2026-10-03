@@ -29,11 +29,11 @@ import structlog
 
 from ..config import Segment
 from ..domain import Instrument
+from ..market.candles import snap_candles
 from ..market.session import (
     TF_SECONDS,
     bucket_end,
     bucket_start,
-    in_session,
     ist_day,
     session_close_ts,
     session_open_ts,
@@ -369,11 +369,14 @@ class Aggregator:
         last_day = ""
         dropped: list[str] = []
         by_bucket: dict[int, tuple[bool, float, dict[str, Any]]] = {}
+        if tf != "1d":
+            # the one implementation of the grid (market/candles.py) — idempotent on rows the
+            # 5paisa adapter already put there
+            snapped = snap_candles(rows, segment, tf)
+            dropped = snapped.dropped
+            rows = snapped.rows
         for row in rows:
             ts = ts_of(row["dt"])
-            if tf != "1d" and not in_session(segment, ts):
-                dropped.append(str(row["dt"]))
-                continue
             bucket = int(bucket_start(segment, ts, tf))
             on_grid = int(ts) == bucket
             held = by_bucket.get(bucket)
