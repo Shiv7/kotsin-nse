@@ -194,7 +194,12 @@ def levels_from_candles(
     prior = [r for r in rows if str(r.get("dt", ""))[:10] < today.isoformat()]
     if not prior:
         return None
-    last = prior[-1]
+    # 5paisa can serve the last session twice — its end-of-day candle stamped 00:00 and the
+    # provisional one stamped at the first trade, whose high and low can still be wrong. Sorted
+    # oldest first, the provisional came LAST and set the ladder; the end-of-day one wins
+    # (review, 2026-10-03). A session with one row keeps it.
+    day = str(prior[-1]["dt"])[:10]
+    last = next((r for r in prior if str(r["dt"])[:10] == day and str(r["dt"])[11:16] == "00:00"), prior[-1])
     raw = last.get("v")
     vol = None if raw is None else float(raw)
     if vol is not None and vol < min_volume:

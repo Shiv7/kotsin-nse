@@ -32,7 +32,7 @@ happened.
 
 On NSE cash at **₹33,000 a position**:
 
-* round trip **0.299%**, of which **81% was flat brokerage** (₹40/order × 2);
+* round trip **0.299%**, of which **81% was flat brokerage** (₹40/order × 2 — the old stack's measurement; this account is billed ₹20 per executed order, operator 2026-10-03, and every rate now lives in `charges.toml`);
 * break-even needed roughly **₹1.32 lakh** of position;
 * the best exit found was "flat at the close, no stop management", at **+0.118%/trade gross** —
   every stop, trail and target rule tested made it worse;

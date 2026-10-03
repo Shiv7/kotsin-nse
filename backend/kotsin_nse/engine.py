@@ -42,6 +42,7 @@ from .bars.daily import (
     MIN_DAILY_BARS,
     REPAIR_BATCH,
     DailyCache,
+    basis_ok,
     is_official,
     one_per_session,
     previous_session,
@@ -49,21 +50,26 @@ from .bars.daily import (
 from .bars.daily import audit as audit_daily
 from .bars.indicators import atr, dried_volume
 from .bars.micro import MicroAggregator
+from .bars.oi_candles import OiCandleBuilder
 from .bars.oi_read import OiReading, oi_quadrant, read_oi, relative_z
-from .bars.periods import monthly, previous_complete, weekly
 from .bars.pivots import (
-    ZONE_TOLERANCE_PCT,
     PivotPoint,
     Zone,
-    classic_pivots,
-    cluster_zones,
     compute_confluence,
     pivot_points,
 )
 from .bars.store import BarStore
 from .bars.unified import BarSource, UnifiedBar
 from .bars.verify import BarReconciler
-from .bars.volume_read import MarketVolume, VolBar, VolumeReading, market_volume, read_volume
+from .bars.volume_read import (
+    MarketVolume,
+    VolBar,
+    VolumeReading,
+    market_volume,
+    read_volume,
+    slot_reading,
+)
+from .bars.zones import build_zones, is_provisional, pivot_points_for
 from .bus import Bus, Topic
 from .committee.service import CommitteeService
 from .config import Segment, Settings
@@ -114,6 +120,9 @@ from .instrument.select import (
 )
 from .instrument.universe import ScripGroup, UniverseBuilder, UniversePolicy
 from .ledger.db import Ledger, events
+from .market.candles import snap_candles
+from .market.fo_bhavcopy import OiDailyStore
+from .market.fo_bhavcopy import fetch_day as fetch_fo_bhavcopy
 from .market.indices import NIFTY50
 from .market.iv import (
     MIN_HISTORY,
@@ -157,7 +166,9 @@ from .market.volatility import (
     regime_for_equity,
 )
 from .ops.archive import DailyArchive
+from .ops.feed_rate import FeedRate
 from .ops.fulltape import FullTape
+from .ops.guard import Guards
 from .ops.health import Check, HealthMonitor
 from .ops.tape import ROLE_EQUITY, ROLE_FUTURE, ROLE_INDEX, ROLE_OPTION, Tape
 from .ops.telegram import Telegram
@@ -323,6 +334,10 @@ EOD_PLAN_NEAR_PCT = 3.0
 #: How long after the NSE open a trigger carried from the last session's close waits for its stock's
 #: first print before it expires.
 CARRY_WINDOW_S = 300.0
+#: the feed probe's segments, from a frame's own Exch + ExchType (``ops/feed_rate.py``)
+#: bar close → decision start, p95, above which the latency check fails while a segment is open
+DECISION_LATENCY_P95_MAX_S = 15.0
+FEED_SEGMENTS: dict[str, str] = {"NC": "NSE_EQ", "ND": "NSE_FO", "MD": "MCX_FO", "NU": "NSE_CDS"}
 #: the books that take the counter-trend fade of it (CT-X's plan), each judging it for itself
 FADE_BOOKS = (StrategyKey.FUDKII_CT_X, StrategyKey.FUDKII_CT_Y)
 #: On an in-trend book's card for a trigger the route sends COUNTER-TREND, the live button is the
@@ -440,6 +455,22 @@ class AsOfContext:
     def session_phase(self, symbol: str, ts: int) -> str:
         return self.engine.session_phase(symbol, ts)
 
+    # The four readings FUKAA asks for (strategy/base.py Context). Only FUDKII replays through here
+    # today, but a context missing a method is how the backtester failed every symbol for a day
+    # (review, 2026-10-03). The volume reading is read off the store's slots up to the bar, which is
+    # point-in-time; OI is not — the engine holds only its latest levels — so it answers "unknown".
+    def volume_reading(self, symbol: str, ts: int) -> VolumeReading:
+        return self.engine._volume_reading(symbol, ts, self.upto(symbol, DECISION_TF))
+
+    def market_volume_surge(self, ts: int) -> tuple[float | None, int]:
+        return None, 0
+
+    def oi_reading(self, symbol: str) -> OiReading:
+        return OiReading(doubt="no point-in-time OI in a replay")
+
+    def oi_relative(self, symbol: str) -> tuple[float | None, int]:
+        return None, 0
+
     @property
     def state(self) -> MutableMapping[str, Any]:
         return self._state
@@ -555,6 +586,8 @@ class Engine:
         #: traded volume per scrip code, from the snapshot the selector already fetches. Kept
         #: because the strike chooser ranks on volume as well as open interest.
         self.option_volume: dict[str, float] = {}
+        #: every option strike the universe selected — the tick path writes their volume from the feed
+        self._option_codes: set[str] = set()
         self._decision_tasks: set[asyncio.Task[Any]] = set()
         #: when each code last printed on the feed (its quote's receive time): a carried trigger
         #: enters on its stock's FIRST print of the session, never on yesterday's close replayed
@@ -644,8 +677,15 @@ class Engine:
         self.quotes: dict[str, Quote] = {}
         self.ltps: dict[str, float] = {}
         self._zone_cache: dict[str, tuple[str, list[Zone]]] = {}
+        #: names with no zones today and why ("history", "provisional", "basis") — bars/zones.py
+        self.zone_refusals: dict[str, str] = {}
+        #: sessions whose daily and 30m series are on different price bases (a corporate action):
+        #: symbol -> (day, official close, 30m close)
+        self._basis_mismatch: dict[str, tuple[str, float, float]] = {}
         #: the front future's candles per symbol for the current trigger bar (see _fut_context)
         self._fut_cache: dict[str, tuple[int, dict[str, Any] | None]] = {}
+        #: each front future's daily candles, fetched once a day: (scrip code, day) -> rows
+        self._fut_daily_rows: dict[tuple[str, date], list[dict[str, Any]]] = {}
         #: (name, bar) -> the futures fetch in flight, shared by its concurrent readers
         self._fut_inflight: dict[tuple[str, int], asyncio.Future[dict[str, Any] | None]] = {}
         #: the choice's wait for strikes it cannot price yet (0 = never wait: the replay's frozen clock)
@@ -736,6 +776,27 @@ class Engine:
         self._fut_oi: dict[str, tuple[float, float]] = {}
         self._oi_ref: dict[str, float] = {}
         self._oi_ref_day: date | None = None
+        #: where each reference came from — "nse" (the exchange's bhavcopy), "archive" (our own last
+        #: print of that session) or "preopen" (today's first print before the open)
+        self._oi_ref_src: dict[str, str] = {}
+        #: are 5paisa's own OI change fields ever non-zero? The percent never was (824,031 frames on
+        #: 1 Oct); nothing had ever looked at the absolute one. Counted, so the engine answers it.
+        self.oi_frames = {"frames": 0, "change_nonzero": 0, "change_pct_nonzero": 0}
+        #: the exchange's closing OI per session (``market/fo_bhavcopy.py``) and the session whose
+        #: file the references were last taken from
+        self.oi_daily = OiDailyStore(settings.data_dir / "oi_daily")
+        self._oi_bhav_day: date | None = None
+        self._oi_bhav_tried = 0.0
+        self._oi_bhav_task: asyncio.Task[Any] | None = None
+        #: each future's OI as candles (``bars/oi_candles.py``), from the prints — never from the
+        #: broker's change field
+        self.oi_candles = OiCandleBuilder()
+        #: how fast the price feed really is, and whether it delivers every trade (``ops/feed_rate.py``)
+        self.feed_rate = FeedRate()
+        #: per-duty error accounting for the advisory loops (ops/guard.py) — /api/health duty_errors
+        self.guards = Guards()
+        #: bar close → the decision starting, seconds, the last few hundred 30m decisions
+        self._decision_lat: deque[float] = deque(maxlen=300)
         self._front_code: dict[tuple[str, date], str | None] = {}
         self._n50_oi: tuple[int, dict[str, float]] = (-1, {})
         self._n50_vol: dict[int, tuple[float | None, int]] = {}
@@ -786,6 +847,14 @@ class Engine:
         if warn:
             self.boot_notes.append(warn)
             log.warning("calendar.no_holidays", detail=warn)
+        ignored = sorted(k for k in self.s.model_fields_set if k.startswith("cost_"))
+        if ignored:
+            # Kept in Settings only so an old .env still boots; nothing reads them (review,
+            # 2026-10-03). A value set there and believed is how ₹40 vs ₹20 went unnoticed.
+            note = (f"ignored: {', '.join('KN_' + k.upper() for k in ignored)} — every charge comes from "
+                    f"{self.s.data_dir / 'charges.toml'} (the /charges page)")
+            self.boot_notes.append(note)
+            log.warning("config.cost_keys_ignored", keys=ignored)
 
         if not self.s.has_credentials:
             self.boot_notes.append(
@@ -999,16 +1068,21 @@ class Engine:
             self._decided |= {(str(k[0]), int(k[1])) for k in d.get("keys") or []}
             self._decided_saved = len(self._decided)
 
-    def _save_decided(self) -> None:
-        if len(self._decided) == self._decided_saved:
+    def _save_decided(self, keys: list[tuple[str, int]] | None = None) -> None:
+        """Persist today's decided buckets. ``keys`` is a copy taken ON the event loop when this runs
+        in a worker thread: iterating the live set there raced ``_decide`` adding to it ("set changed
+        size during iteration"), and the one try around housekeeping then skipped every duty after
+        it (review, 2026-10-03)."""
+        snapshot = list(self._decided) if keys is None else keys
+        if len(snapshot) == self._decided_saved:
             return
         path = self._decided_path()
         tmp = path.with_suffix(".tmp")
         today = ist_today()
-        keep = sorted(k for k in self._decided if ist_day(k[1]) == today)
+        keep = sorted(k for k in snapshot if ist_day(k[1]) == today)
         tmp.write_text(json.dumps({"day": today.isoformat(), "keys": keep}), encoding="utf-8")
         os.replace(tmp, path)
-        self._decided_saved = len(self._decided)
+        self._decided_saved = len(snapshot)
 
     async def fudkii_today(self) -> list[dict[str, Any]]:
         """Today's FUDKII signals from 09:00 IST, one row each, as the ledger holds them."""
@@ -1139,6 +1213,7 @@ class Engine:
         for g in groups.values():
             for o in g.options:
                 self._segment_by_code[o.scrip_code] = o.segment
+                self._option_codes.add(o.scrip_code)
         self._future_to_underlying = {f.scrip_code: g.root for g in groups.values() for f in g.futures}
         self._seed_oi_reference()
 
@@ -1236,38 +1311,57 @@ class Engine:
     async def _backfill(self, universe: list[Instrument]) -> None:
         """Warm the 30m series and the daily series (for pivots) from REST.
 
-        Sequential and rate-limit friendly: the broker's historical endpoint is the slowest thing
-        we touch, and hammering it at boot is how the old stack earned its retry storms.
+        Rate-limit friendly, but not one call at a time: 486 calls in sequence with a 0.15 s pause
+        took 153 s, and a mid-session restart was blind for all of it (review, 2026-10-03). At most
+        ``backfill_concurrency`` calls are in flight, each still paced, and the daily series is not
+        asked for a name whose cached candles already end at the previous session's final one —
+        most names on a normal boot (``_seed_daily_from_cache`` ran first).
         """
         end = ist_today()
         start_intraday = end - timedelta(days=max(7, self.s.backfill_days // 2))
         start_daily = end - timedelta(days=400)  # a year of dailies for monthly pivots
-        ok = failed = 0
-        for inst in universe:
-            for tf, start in ((DECISION_TF, start_intraday), ("1d", start_daily)):
+        expected_prev = self.calendar.previous_trading_day(end)
+        counts = {"ok": 0, "failed": 0, "daily_from_cache": 0}
+        sem = asyncio.Semaphore(max(1, self.s.backfill_concurrency))
+
+        def daily_current(inst: Instrument) -> bool:
+            prev = previous_session(self.store.bars(inst.symbol, "1d"), end)
+            return (prev is not None and is_official(prev) and ist_day(prev.ts) == expected_prev
+                    and not is_provisional(prev, inst.segment))
+
+        async def one(inst: Instrument, tf: str, start: date) -> None:
+            async with sem:
                 try:
-                    rows = await self.rest.candles(
-                        inst, tf, start.isoformat(), end.isoformat()
-                    )
+                    rows = await self.rest.candles(inst, tf, start.isoformat(), end.isoformat())
                 except Exception as exc:  # noqa: BLE001
-                    failed += 1
+                    counts["failed"] += 1
                     if tf == "1d":
                         self._daily_failed.add(inst.symbol)
                     log.warning("backfill.failed", symbol=inst.symbol, tf=tf, error=str(exc))
-                    continue
-                if not rows:
-                    if tf == "1d":
-                        self._daily_failed.add(inst.symbol)
-                    continue
+                    return
+                finally:
+                    await asyncio.sleep(0.15)
+            if not rows:
                 if tf == "1d":
-                    self._seed_daily(inst, rows)
-                else:
-                    self.aggregator.seed(inst, tf, rows, ts_of=ist_naive_to_ts)
-                    for lower in ("5m", "15m"):
-                        _ = lower  # lower frames rebuild from live ticks; no extra REST calls
-                ok += 1
-                await asyncio.sleep(0.15)
-        log.info("backfill.done", series_ok=ok, failed=failed)
+                    self._daily_failed.add(inst.symbol)
+                return
+            if tf == "1d":
+                self._seed_daily(inst, rows)
+            else:
+                self.aggregator.seed(inst, tf, rows, ts_of=ist_naive_to_ts)  # lower frames rebuild from ticks
+            counts["ok"] += 1
+
+        jobs = []
+        for inst in universe:
+            jobs.append(one(inst, DECISION_TF, start_intraday))
+            if daily_current(inst):
+                counts["daily_from_cache"] += 1
+            else:
+                jobs.append(one(inst, "1d", start_daily))
+        began = time.time()
+        await asyncio.gather(*jobs)
+        log.info("backfill.done", series_ok=counts["ok"], failed=counts["failed"],
+                 daily_from_cache=counts["daily_from_cache"], took_s=round(time.time() - began, 1))
 
     def _set_closing_auction_bars(self, universe: list[Instrument], *, now: float | None = None) -> int:
         """An NSE stock's 15:15 bar is its closing auction — one print at the official close, open =
@@ -1291,13 +1385,11 @@ class Engine:
 
         def auction_volume(symbol: str, d: date, t0: int) -> float | None:
             if d not in minutes:
-                path = self.s.data_dir / "archive" / "bars" / f"{d.isoformat()}.parquet"
                 try:
-                    import pandas as pd
-
-                    minutes[d] = pd.read_parquet(path, columns=["symbol", "ts", "v"]) if path.exists() else None
+                    got = self.archive.read_day("bars", d.isoformat(), columns=["symbol", "ts", "v"])
+                    minutes[d] = got if len(got) else None
                 except Exception as exc:  # noqa: BLE001 — an unreadable archive costs the volume, never the bar
-                    log.warning("archive.auction_volume_failed", path=str(path), error=str(exc)[:120])
+                    log.warning("archive.auction_volume_failed", day=d.isoformat(), error=str(exc)[:120])
                     minutes[d] = None
             df = minutes[d]
             if df is None:
@@ -1323,6 +1415,12 @@ class Engine:
                 if t1445 not in have:
                     continue
                 c = official[d]
+                if not basis_ok(c, have[t1445].close):
+                    # the daily series is adjusted for a corporate action and the 30m is not: the
+                    # "official close" would land the 15:15 bar ~60 % away and wreck SuperTrend and
+                    # Bollinger for ~50 bars (review, 2026-10-03)
+                    self._basis_mismatch[inst.symbol] = (d.isoformat(), c, have[t1445].close)
+                    continue
                 held = have.get(t1515)
                 tick = inst.tick_size or 0.05
                 if held is not None and held.high == held.low and abs(held.close - c) < tick / 2 and "closingAuction" in held.extra:
@@ -1351,15 +1449,12 @@ class Engine:
         next session's ticks (2026-09-29, restarts at 15:37 and 18:39). No broker call; nothing that
         decides a trade reads the 1m series. Returns the bars seeded."""
         day = day or ist_today()
-        path = self.s.data_dir / "archive" / "bars" / f"{day.isoformat()}.parquet"
-        if not path.exists():
-            return 0
         try:
-            import pandas as pd
-
-            df = pd.read_parquet(path, columns=["symbol", "ts", "o", "h", "l", "c", "v"])
+            df = self.archive.read_day("bars", day.isoformat(), columns=["symbol", "ts", "o", "h", "l", "c", "v"])
+            if df.empty:
+                return 0
         except Exception as exc:  # noqa: BLE001 — an unreadable archive costs the paths, never the boot
-            log.warning("archive.1m_seed_failed", path=str(path), error=str(exc)[:120])
+            log.warning("archive.1m_seed_failed", day=day.isoformat(), error=str(exc)[:120])
             return 0
         by_symbol = {i.symbol: i for i in universe}
         n = names = 0
@@ -1581,6 +1676,18 @@ class Engine:
 
     async def _on_tick(self, tick: dict[str, Any]) -> None:
         code = str(tick["scrip_code"])
+        self.feed_rate.on_tick(
+            code,
+            FEED_SEGMENTS.get(f"{tick.get('exch') or ''}{tick.get('exch_type') or ''}", "OTHER"),
+            float(tick.get("recv_ts") or time.time()),
+            int(tick.get("last_qty") or 0),
+            int(tick.get("total_qty") or 0),
+        )
+        if code in self._option_codes and (total := int(tick.get("total_qty") or 0)) > 0:
+            # the strike's traded volume from the feed itself: it was written only from REST
+            # snapshots, so a streaming strike read 0 and the liquidity comparison in the strike
+            # choice compared 0 against everything (review, 2026-10-03)
+            self.option_volume[code] = float(total)
         ltp = float(tick.get("ltp") or 0)
         if ltp > 0:
             self.ltps[code] = ltp
@@ -1592,7 +1699,8 @@ class Engine:
                 ts=float(tick.get("recv_ts") or time.time()),
             )
         await self.aggregator.on_tick(tick)
-        await self.bus.publish(Topic.TICK, tick)
+        # no TICK publish: nothing subscribes to it (/api/system: 'subscribers': []) and it ran on
+        # every frame (review, 2026-10-03). The BAR publish stays — once a bar, the hook for a reader.
 
     async def _on_depth(self, depth: dict[str, Any]) -> None:
         code = str(depth["scrip_code"])
@@ -1603,11 +1711,20 @@ class Engine:
     async def _on_oi(self, oi: dict[str, Any]) -> None:
         fut_code = str(oi["scrip_code"])
         recv = float(oi.get("recv_ts") or time.time())
+        self.oi_frames["frames"] += 1
+        if oi.get("oi_change"):
+            self.oi_frames["change_nonzero"] += 1
+        if oi.get("oi_change_pct"):
+            self.oi_frames["change_pct_nonzero"] += 1
         self.archive.oi(
             fut_code,
             recv,
             float(oi["open_interest"]),
             float(oi["oi_change_pct"]) if oi.get("oi_change_pct") is not None else None,
+            change=float(oi["oi_change"]) if oi.get("oi_change") is not None else None,
+            tick_ts=oi.get("tick_ts"),
+            ltp=float(oi["ltp"]) if oi.get("ltp") else None,
+            volume=float(oi["volume"]) if oi.get("volume") else None,
         )
         symbol = self._future_to_underlying.get(fut_code)
         if symbol is None:
@@ -1641,13 +1758,18 @@ class Engine:
         before become the previous-close reference (an engine running through midnight); a print
         before the open is the previous close itself (OI does not move pre-open)."""
         day = ist_day(ts)
+        seg = self._segment_by_code.get(code, Segment.NSE_FO)
         if self._oi_ref_day != day:
             if self._oi_ref_day is not None:
-                self._oi_ref.update({c: lv[0] for c, lv in self._fut_oi.items() if ist_day(lv[1]) < day and lv[0] > 0})
+                rolled = {c: lv[0] for c, lv in self._fut_oi.items() if ist_day(lv[1]) < day and lv[0] > 0}
+                self._oi_ref.update(rolled)
+                self._oi_ref_src.update(dict.fromkeys(rolled, "archive"))
             self._oi_ref_day = day
-        if code not in self._oi_ref and oi > 0 and ts < session_open_ts(self._segment_by_code.get(code, Segment.NSE_FO), day):
+        if code not in self._oi_ref and oi > 0 and ts < session_open_ts(seg, day):
             self._oi_ref[code] = oi
+            self._oi_ref_src[code] = "preopen"
         self._fut_oi[code] = (oi, ts)
+        self.oi_candles.on_print(code, oi, ts, seg)
 
     def _seed_oi_reference(self, *, today: date | None = None) -> int:
         """The previous session's closing OI for every future we map, from the engine's own OI archive
@@ -1655,24 +1777,71 @@ class Engine:
         neither has no reference — its readings are doubtful until tomorrow, never guessed."""
         today = today or ist_today()
         codes = set(self._future_to_underlying)
-        refs = self._oi_from_archive(self.calendar.previous_trading_day(today), codes, last=True)
-        missing = codes - set(refs)
-        if missing:
-            refs.update(self._oi_from_archive(today, missing, last=False, before=session_open_ts(Segment.NSE_EQ, today)))
-        self._oi_ref, self._oi_ref_day = refs, today
-        log.info("oi.reference_seeded", futures=len(codes), with_reference=len(refs))
+        prev = self.calendar.previous_trading_day(today)
+        refs: dict[str, float] = {}
+        src: dict[str, str] = {}
+        for source, read in (
+            ("nse", lambda want: self._oi_from_bhavcopy(prev, want)),
+            ("archive", lambda want: self._oi_from_archive(prev, want, last=True)),
+            ("preopen", lambda want: self._oi_from_archive(today, want, last=False, before=session_open_ts(Segment.NSE_EQ, today))),
+        ):
+            missing = codes - set(refs)
+            if not missing:
+                break
+            found = read(missing)
+            refs.update(found)
+            src.update(dict.fromkeys(found, source))
+        self._oi_ref, self._oi_ref_src, self._oi_ref_day = refs, src, today
+        if self.oi_daily.has(prev):
+            self._oi_bhav_day = prev
+        log.info("oi.reference_seeded", futures=len(codes), with_reference=len(refs),
+                 by_source={k: sum(1 for v in src.values() if v == k) for k in ("nse", "archive", "preopen")})
         return len(refs)
 
+    def _oi_from_bhavcopy(self, day: date, codes: set[str]) -> dict[str, float]:
+        try:
+            return self.oi_daily.closes(day, codes)
+        except Exception as exc:  # noqa: BLE001 — an unreadable file is no reference, never a failed boot
+            log.warning("oi.bhavcopy_read_failed", day=day.isoformat(), error=str(exc)[:120])
+            return {}
+
+    async def _ensure_oi_bhavcopy(self, *, today: date | None = None) -> bool:
+        """Hold the previous session's F&O bhavcopy and take every reference the exchange has from
+        it: its closing OI is the official one, so it replaces an archive print or a pre-open one
+        (operator, 2026-10-03). NSE publishes it in the evening, so this is asked again until it
+        answers. Returns whether the file is held."""
+        today = today or ist_today()
+        prev = self.calendar.previous_trading_day(today)
+        if not self.oi_daily.has(prev):
+            df = await fetch_fo_bhavcopy(self.http, prev)
+            if df is None or df.empty:
+                return False
+            try:
+                await asyncio.to_thread(self.oi_daily.write, prev, df)
+            except Exception as exc:  # noqa: BLE001 — a disk that refuses is the archive's references, not a crash
+                log.warning("oi.bhavcopy_write_failed", day=prev.isoformat(), error=str(exc)[:120])
+                return False
+        if self._oi_ref_day != today:
+            self._seed_oi_reference(today=today)  # the day turned: everything from the file first
+        else:
+            official = await asyncio.to_thread(self._oi_from_bhavcopy, prev, set(self._future_to_underlying))
+            self._oi_ref.update(official)
+            self._oi_ref_src.update(dict.fromkeys(official, "nse"))
+        self._oi_bhav_day = prev
+        log.info("oi.bhavcopy_reference", day=prev.isoformat(),
+                 from_nse=sum(1 for v in self._oi_ref_src.values() if v == "nse"), futures=len(self._future_to_underlying))
+        return True
+
     def _oi_from_archive(self, day: date, codes: set[str], *, last: bool, before: float | None = None) -> dict[str, float]:
-        path = self.s.data_dir / "archive" / "oi" / f"{day.isoformat()}.parquet"
-        if not codes or not path.exists():
+        if not codes:
             return {}
         try:
-            import pandas as pd
-
-            df = pd.read_parquet(path, columns=["scrip_code", "ts", "oi"])
+            # the day file and any parts today's flushes left (ops/archive.py)
+            df = self.archive.read_day("oi", day.isoformat(), columns=["scrip_code", "ts", "oi"])
         except Exception as exc:  # noqa: BLE001 — no archive is no reference, never a failed boot
-            log.warning("oi.archive_read_failed", path=str(path), error=str(exc)[:120])
+            log.warning("oi.archive_read_failed", day=day.isoformat(), error=str(exc)[:120])
+            return {}
+        if df.empty:
             return {}
         df = df[df.scrip_code.astype(str).isin(codes) & (df.oi > 0)]
         if before is not None:
@@ -1699,8 +1868,35 @@ class Engine:
             return OiReading(doubt="no unexpired future on the OI feed")
         expiry = date.fromisoformat(futs[0].expiry[:10])
         sessions = sum(1 for k in range((expiry - today).days + 1) if self.calendar.is_trading_day(today + timedelta(days=k)))
+        # Only a level received during TODAY's session is today's OI. 5paisa's OI frames carry no
+        # broker time, and at a subscribe it re-sends each contract's last print: on a Saturday
+        # JSWSTEEL's last 1 Oct print arrived fresh and read +1.05 % against NSE's official close
+        # (review, 2026-10-03). Before the open, or on a closed day, the reading is doubtful.
+        since = (session_open_ts(Segment.NSE_FO, today) if self.calendar.is_trading_day(today) else float("inf"))
         return read_oi([f.scrip_code for f in futs], sessions_left=sessions, levels=self._fut_oi, refs=self._oi_ref,
-                       now=time.time() if now is None else now)
+                       now=time.time() if now is None else now, ref_sources=self._oi_ref_src, session_open=since)
+
+    def oi_view(self, symbol: str) -> dict[str, Any]:
+        """Everything behind one underlying's OI reading: each future's level now, the previous close
+        it is measured from and where that came from, and its OI candles."""
+        symbol = symbol.upper()
+        reading = self.oi_reading(symbol)
+        today = ist_today()
+        futs = sorted((f for f in self.catalogue_loader.catalogue.futures_by_symbol.get(symbol, [])
+                       if f.expiry and f.expiry[:10] >= today.isoformat()), key=lambda f: f.expiry)
+        legs = []
+        for f in futs[:3]:
+            lv = self._fut_oi.get(f.scrip_code)
+            day = self.oi_candles.forming(f.scrip_code, "1d")
+            legs.append({
+                "code": f.scrip_code, "expiry": f.expiry[:10], "oi": lv[0] if lv else None, "at": lv[1] if lv else None,
+                "ref": self._oi_ref.get(f.scrip_code), "refSource": self._oi_ref_src.get(f.scrip_code),
+                "day": day.to_json() if day is not None else None,
+                "candles30m": [c.to_json() for c in self.oi_candles.series(f.scrip_code, "30m", 14)],
+            })
+        return {"symbol": symbol, "reading": reading.to_json(), "refDay": self.calendar.previous_trading_day(today).isoformat(),
+                "bhavcopyDay": self._oi_bhav_day.isoformat() if self._oi_bhav_day else None, "legs": legs,
+                "brokerFields": dict(self.oi_frames)}
 
     def oi_relative(self, symbol: str, *, now: float | None = None) -> tuple[float | None, int]:
         """How far ``symbol``'s OI change stands from the NIFTY50's at this minute (a z-score in their
@@ -1754,29 +1950,21 @@ class Engine:
         hit = self._zone_cache.get(symbol)
         if hit and hit[0] == key:
             return hit[1]
-        dailies = self.store.bars(symbol, "1d")
-        # Deliberately not cached, and deliberately empty: a name whose previous session is still
-        # the tick-built bar (its close is the last print, not the exchange's) gets no levels
-        # rather than wrong ones, and gets real ones the moment the repair loop lands the official
-        # candle — not at the next band change.
-        prev = previous_session(dailies, today)
-        if len(dailies) < MIN_DAILY_BARS or prev is None or not is_official(prev):
+        inst = self.underlyings.get(symbol)
+        # One builder for live and the backtest (bars/zones.py): the width from the sessions BEFORE
+        # today (a restart no longer changes it), no levels from a provisional daily candle or from
+        # a daily series on another price basis than the 30m one. A refusal is deliberately not
+        # cached: the name gets real levels the moment the repair loop lands the official candle.
+        built = build_zones(self.store.bars(symbol, "1d"), self.store.bars(symbol, DECISION_TF), today,
+                            k=regime.k, segment=inst.segment if inst is not None else Segment.NSE_EQ)
+        if built.refused:
+            self.zone_refusals[symbol] = f"{built.refused}: {built.detail}"
+            if built.refused == "basis":
+                log.warning("zones.basis_mismatch", symbol=symbol, detail=built.detail)
             return []
-        points = self._pivot_points(symbol)
-        atr_v = atr(self.store.bars(symbol, DECISION_TF, 60), 14)
-        px = self.ltps.get(
-            getattr(self.underlyings.get(symbol), 'scrip_code', '')
-        ) or (dailies[-1].close if dailies else 0.0)
-        # ATR expressed as a percentage of price, because cluster_zones works in percent — the
-        # conversion is what makes 'k x ATR' and a percentage tolerance the same statement.
-        tol = (
-            regime.k * atr_v / px * 100
-            if atr_v and px > 0
-            else ZONE_TOLERANCE_PCT
-        )
-        zones = cluster_zones(points, tolerance_pct=tol)
-        self._zone_cache[symbol] = (key, zones)
-        return zones
+        self.zone_refusals.pop(symbol, None)
+        self._zone_cache[symbol] = (key, built.zones)
+        return built.zones
 
     def volatility_regime(self, symbol: str) -> Regime:
         """India VIX for NSE, the contract's own realised vol for MCX."""
@@ -1891,10 +2079,9 @@ class Engine:
                 if "micro" in bar.extra and "micro" not in current.extra:
                     current.extra["micro"] = bar.extra["micro"]
         self.alerts.on_bar(current)
-        try:
+        self._decision_lat.append(max(0.0, time.time() - (bar.ts + TF_SECONDS.get(bar.tf, 0))))
+        async with self.guards.duty("decide"):
             await self._decide(current)
-        except Exception as exc:
-            log.exception("decide.failed", symbol=bar.symbol, error=str(exc))
 
     async def _intraday_universe_rebuild(self) -> None:
         if self.universe_builder is None:
@@ -1907,6 +2094,7 @@ class Engine:
             fresh = [o for g in self.groups.values() for o in g.options if o.scrip_code not in before]
             for o in fresh:
                 self._segment_by_code[o.scrip_code] = o.segment
+                self._option_codes.add(o.scrip_code)
             if fresh:
                 # Price and OI only. Depth follows what is about to be priced (`_sync_depth`) —
                 # putting a strike listed this morning on the depth channel here would restore the
@@ -2125,8 +2313,22 @@ class Engine:
             log.info("signal.routed", symbol=sig.symbol, to=segment_book)
             return await self._handle_signal(routed, bar, adopt=False)
 
+        gated = books is not None
+        # The volume reading is the trigger's, read once for every book that gates on it (the
+        # future's REST calls, not two per book) — and waited on by those books alone: a book
+        # without the gate (FUDKII) places its order at once, and a failed read blocks no one
+        # (review, 2026-09-26: read before the gather, FUDKII's order waited on it and an error in
+        # it cost every book its entry). It needs the trigger, not the strike, so it runs WHILE the
+        # strike is chosen — it used to start after (review, 2026-10-03).
+        vol = (
+            asyncio.ensure_future(self._volume_surges_safe(underlying, low_priority=not published(sig)))
+            if gated and any(self.limits_for(k).dried_volume_v for k in keys)
+            else None
+        )
         selection = await self._select_instrument(underlying, sig)
         if not selection.ok or selection.instrument is None:
+            if vol is not None:
+                vol.cancel()
             log.info("signal.no_instrument", symbol=sig.symbol, reason=selection.reason)
             return await everyone("NO_INSTRUMENT", selection.reason)
 
@@ -2148,17 +2350,6 @@ class Engine:
             equity_targets=sig.targets,
             option_premium=selection.premium,
             delta=delta,
-        )
-        gated = books is not None
-        # The volume reading is the trigger's, read once for every book that gates on it (the
-        # future's two REST calls, not two per book) — and waited on by those books alone: a book
-        # without the gate (FUDKII) places its order at once, and a failed read blocks no one
-        # (review, 2026-09-26: read before the gather, FUDKII's order waited on it and an error in
-        # it cost every book its entry).
-        vol = (
-            asyncio.ensure_future(self._volume_surges_safe(underlying, low_priority=not published(sig)))
-            if gated and any(self.limits_for(k).dried_volume_v for k in keys)
-            else None
         )
         results = await asyncio.gather(
             *(
@@ -4544,7 +4735,14 @@ class Engine:
         try:
             async with sem:
                 rows30 = await self.rest.candles(front, DECISION_TF, start30.isoformat(), today.isoformat())
-                rows1d = await self.rest.candles(front, "1d", (today - timedelta(days=35)).isoformat(), today.isoformat())
+                # the daily rows only set the previous sessions' levels: once a day per future, not
+                # once per trigger — it was the second serial call on every trigger (review, 2026-10-03)
+                held1d = self._fut_daily_rows.get((front.scrip_code, today))
+                if held1d is None:
+                    held1d = await self.rest.candles(front, "1d", (today - timedelta(days=35)).isoformat(), today.isoformat())
+                    self._fut_daily_rows = {k: v for k, v in self._fut_daily_rows.items() if k[1] == today}
+                    self._fut_daily_rows[(front.scrip_code, today)] = held1d
+                rows1d = held1d
         except Exception as exc:  # noqa: BLE001 — a route input must never fail the fill path
             log.warning("fut.context_unknown", symbol=underlying.symbol, error=str(exc)[:120])
             return None
@@ -4566,19 +4764,8 @@ class Engine:
         of the futures rows in the Aug–Sep history are stamped so — and the readers compare ``dt``
         against the trigger bucket as a string, so each in-session row is snapped to its bucket
         start, ``dt`` rewritten (a bucket's own on-grid row wins, should both come). Rows outside the
-        session (a future trades 09:15–15:30) are not bars."""
-        by: dict[int, tuple[bool, dict[str, Any]]] = {}
-        for r in rows:
-            ts = ist_naive_to_ts(str(r["dt"]))
-            if not in_session(front.segment, ts):
-                continue
-            b = int(bucket_start(front.segment, ts, DECISION_TF))
-            on_grid = int(ts) == b
-            held = by.get(b)
-            if held is not None and held[0] and not on_grid:
-                continue
-            by[b] = (on_grid, r if on_grid else {**r, "dt": to_ist(b).strftime("%Y-%m-%dT%H:%M:%S"), "stamped": str(r["dt"])})
-        return [by[b][1] for b in sorted(by)]
+        session (a future trades 09:15–15:30) are not bars. One implementation: market/candles.py."""
+        return snap_candles(rows, front.segment, DECISION_TF).rows
 
     async def _fill_fut_gaps(self, front: Instrument, rows: list[dict[str, Any]], t_ts: int, *,
                              sem: asyncio.Semaphore | None = None) -> tuple[list[dict[str, Any]], bool]:
@@ -4635,23 +4822,14 @@ class Engine:
 
     def _pivot_points(self, symbol: str) -> list[PivotPoint]:
         """The equity's classic levels for today — daily from the previous session, weekly and
-        monthly from the previous completed periods — with their timeframe weights."""
+        monthly from the previous completed periods — with their timeframe weights. None where the
+        zones refuse the name (bars/zones.py: history, a provisional candle, a basis mismatch)."""
         today = ist_today()
         dailies = self.store.bars(symbol, "1d")
         prev = previous_session(dailies, today)
         if len(dailies) < MIN_DAILY_BARS or prev is None or not is_official(prev):
             return []
-        points: list[PivotPoint] = []
-        lv = classic_pivots(prev.high, prev.low, prev.close)
-        if lv:
-            points += pivot_points(lv, "1d")
-        for tf, periods in (("1wk", weekly(list(dailies))), ("1mo", monthly(list(dailies)))):
-            p = previous_complete(periods, today)
-            if p:
-                lv = classic_pivots(p.high, p.low, p.close)
-                if lv:
-                    points += pivot_points(lv, tf)
-        return points
+        return pivot_points_for(dailies, today)
 
     async def _volume_surges_safe(self, underlying: Instrument, *, low_priority: bool = False) -> dict[str, tuple[float, float]]:
         """``_volume_surges`` that never raises: a reading that cannot be taken is no reading, and
@@ -4740,6 +4918,22 @@ class Engine:
         checks; a future trades to 15:30, so its 15:15 bar is a real (15-minute) bar."""
         bars = [VolBar(int(ist_naive_to_ts(str(r["dt"]))), float(r.get("v") or 0.0)) for r in rows]
         return read_volume(bars, segment=Segment.NSE_FO, t_ts=t_ts, calendar=self.calendar)
+
+    def volume_view(self, symbol: str, ts: int | None = None) -> dict[str, Any]:
+        """Both volume readings of one bar (the last closed 30m one by default): the T-2…T-7 reading
+        the gates use, and the same-slot reading (``bars/volume_read.slot_reading``) — side by side,
+        so the operator can see where the intraday U-shape is mistaken for drying up."""
+        symbol = symbol.upper()
+        held = self.store.bars(symbol, DECISION_TF)
+        if not held:
+            return {"symbol": symbol, "error": "no 30m bars held"}
+        t_ts = int(ts) if ts else int(held[-1].ts)
+        r = self._volume_reading(symbol, t_ts)
+        vb = [VolBar(int(b.ts), float(b.volume), str(b.extra.get("volume_doubt") or "")) for b in held]
+        slot = slot_reading(vb, t_ts)
+        return {"symbol": symbol, "ts": t_ts, "slot": slot.slot,
+                "window": {"surgeT": r.surge_t, "surgeT1": r.surge_t1, "baseline": r.baseline, "doubt": r.doubt},
+                "sameSlot": slot.to_json()}
 
     def _market_volume(self, ts: int) -> MarketVolume:
         """The market-wide check at one bar, once: every NSE stock's own reading there. A bar the
@@ -5074,10 +5268,13 @@ class Engine:
                     # the broker has seen a trade the held quote has not (HCLTECH 1240 PE,
                     # 2026-09-28 11:15:04: 44.85 held, 45.65 traded — the feed's frame came 0.1 s on)
                     self._quote_outdated[code] = now
-            if ltp > 0:
+            if ltp > 0 and r["ts"] >= self._ltp_ts.get(code, 0.0):
+                # never a cached REST price over a newer feed print: 5paisa caches the snapshot for
+                # 5 s, and an older price read as a fresh trade by a resting order (review, 2026-10-03)
                 self.ltps[code] = ltp
+                self._ltp_ts[code] = r["ts"]
             if r.get("volume"):
-                self.option_volume[code] = float(r["volume"])
+                self.option_volume[code] = max(float(r["volume"]), self.option_volume.get(code, 0.0))
             held = self.books.get(code)
             if held is None or held.age_ms(now) > limit:
                 # a side the snapshot does carry still makes a (one-sided) book to sell or buy into
@@ -5225,17 +5422,19 @@ class Engine:
         """Re-quote held contracts that have gone quiet, every few seconds, while their segment is
         open. One batched call covers them all; nothing is called when nothing is stale."""
         while not self._stop.is_set():
-            try:
+            # a missed refresh is retried next pass — but counted, and a programming error fails
+            # the tests: this one raised TypeError on every pass for days (review, 2026-10-03)
+            async with self.guards.duty("held_quotes.refresh"):
                 await self._refresh_held_quotes(time.time())
-            except Exception as exc:  # noqa: BLE001 - a missed refresh is retried next pass
-                log.warning("held_quotes.failed", error=str(exc)[:120])
             await asyncio.sleep(HELD_QUOTE_POLL_S)
 
     async def _refresh_held_quotes(self, now: float) -> int:
         limit_ms = self.matcher.age_limit_ms(now)
         stale: dict[str, Instrument] = {}
         for p in self.positions.values():
-            if p.status != "OPEN" or not is_open(p.underlying.segment, now):
+            # the calendar is required: without it this raised TypeError on every pass with a position
+            # open, swallowed as held_quotes.failed — no held quote was ever refreshed (review, 2026-10-03)
+            if p.status != "OPEN" or not is_open(p.underlying.segment, now, self.calendar):
                 continue
             code = p.instrument.scrip_code
             q, b = self.quotes.get(code), self.books.get(code)
@@ -5752,6 +5951,10 @@ class Engine:
             want.update(leg for leg, _role in self._tape_legs(w["symbol"]))
         return want
 
+    def _held_codes(self) -> set[str]:
+        """The contracts of every OPEN position."""
+        return {p.instrument.scrip_code for p in self.positions.values() if p.status == "OPEN"}
+
     async def _follow_depth(self, instruments: list[Instrument]) -> None:
         """Put these contracts on the depth channel now, ahead of an order, and register the same
         interest on the tape so ``_sync_depth`` knows they are wanted.
@@ -5786,7 +5989,13 @@ class Engine:
             return
         want = self.depth_wanted()
         if len(want) > self.s.depth_max_subscriptions:
-            want = set(sorted(want)[: self.s.depth_max_subscriptions])
+            # Over the cap, what is HELD keeps its book first — an exit with no depth to sell into
+            # is a refused exit. It used to keep the lowest scrip codes, which says nothing about
+            # what is held (review, 2026-10-03). The rest fill the remaining slots as before.
+            held_codes = self._held_codes()
+            held = sorted(want & held_codes)
+            rest = sorted(want - held_codes)
+            want = set((held + rest)[: self.s.depth_max_subscriptions])
         cat = self.catalogue_loader.catalogue
         add = [i for c in want - self._depth_following if (i := cat.get(c)) is not None]
         drop = [
@@ -5879,22 +6088,33 @@ class Engine:
         last_day = ist_day(time.time()).isoformat()
         while not self._stop.is_set():
             now = time.time()
-            try:
-                day = ist_day(now).isoformat()
+            day = ist_day(now).isoformat()
+            hm = ist_hm(now)
+            # One guard per duty (ops/guard.py): one try around all of them let any failure skip every
+            # duty after it, and counted nothing (review, 2026-10-03).
+            async with self.guards.duty("fudkii.rescan"):
                 if (
                     not self.booting
                     and now - float(self.last_fudkii_scan.get("ts") or 0) > 300
                     and (self._fudkii_scan_task is None or self._fudkii_scan_task.done())
                 ):
                     self._fudkii_scan_task = asyncio.create_task(self.scan_fudkii(), name="fudkii-rescan")
+
+            async with self.guards.duty("decided.save"):
                 if len(self._decided) != self._decided_saved:
-                    await asyncio.to_thread(self._save_decided)
+                    await asyncio.to_thread(self._save_decided, list(self._decided))
+
+            async with self.guards.duty("alerts.write"):
                 if self.alerts.dirty and self.alerts.store_dir is not None:
                     snap = self.alerts.snapshot()  # on the loop, where the rings are mutated
                     await asyncio.to_thread(self.alerts.write, snap)
+
+            async with self.guards.duty("archive.flush"):
                 if now - last_archive > self.s.archive_flush_s:
                     last_archive = now
                     await asyncio.to_thread(self.archive.flush)
+
+            async with self.guards.duty("tape_full.write"):
                 if now - last_fulltape > self.s.tape_full_flush_s:
                     last_fulltape = now
                     rows = self.fulltape.take()  # handed over here, in the loop that appends to it
@@ -5904,6 +6124,7 @@ class Engine:
                         except Exception as exc:  # noqa: BLE001 - never costs the housekeeping after it
                             log.warning("tape_full.write_failed", error=str(exc)[:120])
 
+            async with self.guards.duty("committee.autopilot"):
                 # The nightly research loop, once per day after its hour, only with every segment
                 # closed — it runs six backtests in a worker thread and spends Claude calls.
                 if (
@@ -5912,17 +6133,30 @@ class Engine:
                 ):
                     self._autopilot_day = day
                     self._decision_tasks.add(asyncio.create_task(self._autopilot()))
+
+            async with self.guards.duty("oi.candles_flush"):
+                self.oi_candles.flush(now, self._segment_by_code)
+
+            async with self.guards.duty("oi.bhavcopy"):
+                if (
+                    self.s.oi_bhavcopy_enabled
+                    and self.s.engine_enabled
+                    and self._future_to_underlying
+                    and self._oi_bhav_day != self.calendar.previous_trading_day(ist_today())
+                    and now - self._oi_bhav_tried > 600
+                    and (self._oi_bhav_task is None or self._oi_bhav_task.done())
+                ):
+                    self._oi_bhav_tried = now
+                    self._oi_bhav_task = asyncio.create_task(self._ensure_oi_bhavcopy(), name="oi-bhavcopy")
+
+            async with self.guards.duty("day_roll"):
                 if day != last_day:
                     last_day = day
-                    self._alerts_reset_done.clear()
-                    self._zone_cache.clear()
-                    self._daily_due = self._legs_due = True
-                    self._legs_reanchor_done.clear()
-                    self._daily_refresh_done.clear()
-                    self._handled_signals.clear()
+                    self._roll_day_state(ist_day(now))
                     if self.s.has_credentials and self.s.engine_enabled:
                         await self.catalogue_loader.ensure()
 
+            async with self.guards.duty("positions.reconcile"):
                 if self.reconciler_positions is not None and now - last_reconcile > 60:
                     last_reconcile = now
                     # LIVE every minute; PAPER only while frozen, so a failed boot read (the broker
@@ -5930,6 +6164,7 @@ class Engine:
                     if self.mode() in LIVE_MODES or self.reconciler_positions.frozen:
                         await self.reconciler_positions.run(self._venue_positions(), at_venue=self.mode() in LIVE_MODES)
 
+            async with self.guards.duty("feed.token_rollover"):
                 # The socket was opened with a token that dies at 23:59:59 IST. Once it has, drop
                 # the socket so the run loop reconnects with a fresh login — otherwise it can sit
                 # "connected" on a dead token and deliver nothing at the open. A minute of grace
@@ -5941,8 +6176,10 @@ class Engine:
                 ):
                     await self.feed.reconnect(reason="token expired")
 
+            async with self.guards.duty("feed.watchdog"):
                 await self._feed_watchdog(now)
 
+            async with self.guards.duty("bars.sweep"):
                 # Periodic REST sweep of the finer frames: the fidelity metric, and exact chart bars.
                 if (
                     self.reconciler_ready
@@ -5958,12 +6195,14 @@ class Engine:
                         self.reconciler.sweep(list(self.underlyings))
                     )
 
+            async with self.guards.duty("universe.rebuild"):
                 # scripFinder's 09:20 IST intraday rebuild: refetch the master, re-pick strikes,
                 # subscribe anything new. Strikes listed 09:00–09:15 are not in an overnight master.
                 if self.reconciler_ready and ist_hm(now) >= "09:20" and self._intraday_rebuild_day != day:
                     self._intraday_rebuild_day = day
                     self._decision_tasks.add(asyncio.create_task(self._intraday_universe_rebuild()))
 
+            async with self.guards.duty("volume.market_check"):
                 # The market-wide volume check on every NSE bar, trigger or not — an alarm the minute
                 # the data breaks, not the next time a trigger happens to read it. The bar judged is
                 # the one that closed at least 20 s ago (its candles reconciled).
@@ -5972,6 +6211,8 @@ class Engine:
                     if judged not in self._vol_market and on_session_grid(Segment.NSE_EQ, judged, DECISION_TF, until=NSE_EQ_CONTINUOUS_UNTIL) \
                             and self.calendar.is_trading_day(ist_day(judged)) and ist_day(judged) == ist_day(now):
                         self._market_volume(judged)
+
+            async with self.guards.duty("bars.audit"):
                 # After the NSE close, the day's decision bars against the broker's once more.
                 if (
                     self.reconciler_ready
@@ -5985,12 +6226,13 @@ class Engine:
                     self._bar_audit_day = day
                     self._bar_audit_task = asyncio.create_task(self._audit_bars(ist_day(now)), name="bar-audit")
 
+            async with self.guards.duty("iv.refresh"):
                 # Each name's own VIX, once a minute, from the quotes already in hand.
                 if self.reconciler_ready and self.groups and now - self._last_iv_refresh >= 60:
                     self._last_iv_refresh = now
                     self._refresh_stock_iv()
-                # The pivot data plane (docs/PIVOTS.md §3): refresh slots, then the periodic audit.
-                hm = ist_hm(now)
+
+            async with self.guards.duty("alerts.reset"):
                 # The alert page is emptied for the coming session, every book and twin together.
                 stamp = f"{day} {self.s.alerts_reset_ist}"
                 if hm >= self.s.alerts_reset_ist and stamp not in self._alerts_reset_done:
@@ -5999,6 +6241,8 @@ class Engine:
                     self._signals_today.clear()
                     self._counter_preview.clear()
                     self._fut_cache.clear()
+
+            async with self.guards.duty("pivots.slots"):
                 for slot in self.s.daily_refresh_hm:
                     stamp = f"{day} {slot}"
                     if hm >= slot and stamp not in self._daily_refresh_done:
@@ -6022,18 +6266,23 @@ class Engine:
                 ):
                     self._last_pivot_repair = now
                     self._pivot_repair_task = asyncio.create_task(self._pivot_repair())
+
+            async with self.guards.duty("wallets.upkeep"):
                 await self._wallet_upkeep(now)
+
+            async with self.guards.duty("gateway.breakers"):
                 for book in self.gateway.take_new_trips():
                     await self.ledger.event("gateway.book_breaker", {"book": book, "rejects": self.gateway.rejects_by_book.get(book)})
                     self.telegram.fire_and_forget(f"🛑 {BOOK_LABELS.get(book, book)}: order breaker tripped — its entries stop until reset")
                     log.error("gateway.book_breaker", book=book)
+
+            async with self.guards.duty("snapshot.persist"):
                 if now - last_snapshot > 300:
                     last_snapshot = now
                     await self._persist_wallets()
                     await self.ledger.insert_health(self.health_snapshot())
                     await asyncio.to_thread(self.iv_history.save_all)
-            except Exception as exc:
-                log.exception("housekeeping.failed", error=str(exc))
+
             await asyncio.sleep(5.0)
 
     # -- state -----------------------------------------------------------------------------------------
@@ -6145,6 +6394,57 @@ class Engine:
         segments = {g.segment for g in self.groups.values()} or set(self.s.segment_list)
         return any(is_open(seg, now, self.calendar) for seg in segments)
 
+    def _roll_day_state(self, today: date) -> None:
+        """Everything that is per IST day, reset in one place (review, 2026-10-03: the clears were
+        scattered, and several maps keyed by time were never pruned). State keyed by a SIGNAL —
+        breadth at a trigger, a gap fade — is left: the next morning's carry still reads it."""
+        log.info("feed.rate_day", segments=self.feed_rate.snapshot())
+        self.feed_rate.reset()
+        self._alerts_reset_done.clear()
+        self._zone_cache.clear()
+        self.zone_refusals.clear()
+        self._daily_due = self._legs_due = True
+        self._legs_reanchor_done.clear()
+        self._daily_refresh_done.clear()
+        self._handled_signals.clear()
+        start = session_open_ts(Segment.NSE_EQ, today) - 9.25 * 3600  # 00:00 IST
+        self._front_code = {k: v for k, v in self._front_code.items() if k[1] >= today}
+        self._fudkii_scanned = {k for k in self._fudkii_scanned if k[1] >= start}
+        self._confirm_attempts = {k: v for k, v in self._confirm_attempts.items() if k[1] >= start}
+        self._closes_seen = {k for k in self._closes_seen if k[1] >= start}
+        self._vol_market = {k: v for k, v in self._vol_market.items() if k >= start}
+        self._n50_vol = {k: v for k, v in self._n50_vol.items() if k >= start}
+
+    def _duty_check(self) -> Check:
+        """A programming error in any guarded duty in the last 15 minutes is a fault; market and I/O
+        failures are shown, not failed on."""
+        recent = self.guards.snapshot(since_s=900)
+        bad = {k: v for k, v in recent.items() if v["programmingErrors"]}
+        detail = "; ".join(f"{k}: {v['errors']}× {v['lastError']}" for k, v in list(recent.items())[:4]) or "no duty failed in 15 min"
+        return Check("duty_errors", not bad, detail=detail, value=float(len(recent)))
+
+    def _zones_check(self) -> Check:
+        """No levels for a name because its daily and 30m series are on different price bases (a
+        corporate action) is a data fault; history / provisional refusals are shown."""
+        reasons: dict[str, int] = {}
+        for why in self.zone_refusals.values():
+            reasons[why.split(":")[0]] = reasons.get(why.split(":")[0], 0) + 1
+        basis = sorted(k for k, v in self.zone_refusals.items() if v.startswith("basis"))
+        detail = (", ".join(f"{k} {n}" for k, n in sorted(reasons.items())) or "every name has levels") + (
+            f" — basis mismatch: {', '.join(basis[:6])}" if basis else "")
+        return Check("zones", not basis, detail=detail, value=float(len(basis)))
+
+    def _latency_check(self) -> Check:
+        """Bar close → the decision starting (the exchange-candle reconcile is inside it), and the
+        broker's REST calls; slow is a fault only while a segment is open."""
+        lat = sorted(self._decision_lat)
+        p95 = lat[min(len(lat) - 1, int(0.95 * len(lat)))] if lat else None
+        rest = self.rest.stats()
+        slow = p95 is not None and p95 > DECISION_LATENCY_P95_MAX_S and self.market_open_now()
+        detail = (f"decision p95 {p95:.1f}s over {len(lat)}" if p95 is not None else "no 30m decision yet") + (
+            f"; 5paisa REST p50 {rest.get('latency_p50_s')}s p95 {rest.get('latency_p95_s')}s")
+        return Check("latency", not slow, detail=detail, value=p95)
+
     def health_snapshot(self) -> dict[str, Any]:
         fh = self.feed.health
         open_now = self.market_open_now()
@@ -6216,6 +6516,9 @@ class Engine:
             ),
             self._volume_check(),
             self._bar_audit_check(),
+            self._duty_check(),
+            self._zones_check(),
+            self._latency_check(),
             Check(
                 "pivots_ready",
                 (daily.ready and not self._daily_failed and not self.leg_pivots.failed_codes)
@@ -6262,6 +6565,11 @@ class Engine:
             "fidelity": self.reconciler.snapshot() if self.reconciler_ready else {},
             "micro": self.micro.stats(),
             "option_oi_tracked": len(self.option_oi),
+            "oi_candles": self.oi_candles.stats(),
+            "duties": self.guards.snapshot(),
+            "feed_rate": self.feed_rate.snapshot(),
+            "oi_broker_fields": dict(self.oi_frames),
+            "oi_reference": {k: sum(1 for v in self._oi_ref_src.values() if v == k) for k in ("nse", "archive", "preopen")},
             "archive": self.archive.stats(),
             "tape": self.tape.stats(),
             "tape_full": self.fulltape.stats(),

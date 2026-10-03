@@ -79,7 +79,10 @@ def parse_broker_date(raw: Any) -> float | None:
             digits += ch
         else:
             break
-    return int(digits) / 1000 if digits else None
+    if not digits or digits == "-":
+        return None
+    ms = int(digits)
+    return ms / 1000 if ms > 0 else None  # .NET's minimum date (negative) is "no date", not 1969
 
 
 @dataclass(slots=True)
@@ -306,7 +309,9 @@ class FivePaisaFeed:
 
     @staticmethod
     def _tick(row: dict[str, Any], arrived: float | None = None) -> dict[str, Any]:
-        ts = parse_broker_date(row.get("TickDt")) or float(row.get("Time") or 0) or time.time()
+        # ``Time`` is seconds since midnight, not an epoch: as a fallback it put a frame in 1970.
+        # No usable TickDt → the arrival time.
+        ts = parse_broker_date(row.get("TickDt")) or (arrived if arrived is not None else time.time())
         return {
             "scrip_code": str(row.get("Token")),
             "exch": str(row.get("Exch") or ""),
@@ -336,6 +341,9 @@ class FivePaisaFeed:
             "open_interest": int(row.get("OpenInterest") or 0),
             "oi_change": int(row.get("OIChange") or 0),
             "oi_change_pct": float(row.get("OIChangePercent") or 0),
+            #: the broker's own time when the frame carries one — GetScripInfoForFuture frames have
+            #: been seen without TickDt (2026-10-03); ``ts`` then falls back to the arrival
+            "tick_ts": parse_broker_date(row.get("TickDt")),
             "ltp": float(row.get("LastRate") or 0),
             "volume": int(row.get("Volume") or 0),
             "ts": parse_broker_date(row.get("TickDt")) or time.time(),

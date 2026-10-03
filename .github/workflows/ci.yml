@@ -21,8 +21,10 @@ jobs:
         run: uv run ruff check kotsin_nse tests
       - name: import contracts
         run: uv run lint-imports
+      - name: types (no new mypy errors — scripts/mypy_gate.py, baseline backend/mypy-baseline.txt)
+        run: uv run python ../scripts/mypy_gate.py
       - name: tests (offline only — `-m live` needs broker credentials)
-        run: uv run pytest -m "not live" -q
+        run: uv run pytest -m "not live" -q -n auto
 
   frontend:
     runs-on: ubuntu-latest

@@ -181,14 +181,18 @@ def test_entry_fills_on_the_next_bar_open_not_the_signal_bar(settings, store):
 
 def test_zones_are_point_in_time(settings, store):
     """A pivot derived from a session that has not happened yet is lookahead of the worst kind."""
+    from dataclasses import replace
+
     from kotsin_nse.bars.store import BarStore
+    from kotsin_nse.bars.unified import BarSource
     from kotsin_nse.research.backtest import BacktestContext
 
     from .conftest import bar as mk
 
+    # the backtest's dailies are the broker's end-of-day candles: REST, stamped 00:00 IST
     dailies = {
         "X": [
-            mk(ist_ts(d, "09:15"), 100, 110, 90, 105, tf="1d", symbol="X")
+            replace(mk(ist_ts(d, "00:00"), 100, 110, 90, 105, tf="1d", symbol="X"), source=BarSource.REST)
             for d in _weekdays(date(2026, 1, 5), 40)
         ]
     }
