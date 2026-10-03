@@ -161,6 +161,39 @@ def test_one_builder_refuses_a_provisional_candle_and_a_corporate_action_basis()
     assert basis_ok(1000.0, 1050.0) and not basis_ok(374.0, 1000.0)
 
 
+def _mcx_session(day: date, before: float, after: float) -> list[UnifiedBar]:
+    """MCX's 29 thirty-minute buckets, 09:00-23:00: ``before`` until 15:00, ``after`` from 15:00."""
+    from kotsin_nse.market.session import boundaries
+
+    out = []
+    for hm in boundaries(Segment.MCX_FO, "30m"):
+        px = before if hm < "15:00" else after
+        ts = int(from_ist(datetime(day.year, day.month, day.day, *map(int, hm.split(":")))))
+        out.append(UnifiedBar("X", "1", "30m", ts, px, px + 2, px - 2, px, 1e3, source=BarSource.REST, complete=True))
+    return out
+
+
+def test_an_mcx_evening_move_is_the_session_not_a_basis_mismatch():
+    """The basis is read on MCX's own last bar (23:00), not NSE's 14:45 (review, 2026-10-03)."""
+    today = date(2026, 10, 6)
+    days = _weekdays(40, today)
+    intraday = [b for d in days[:-1] for b in _mcx_session(d, 1000.0, 1000.0)] + _mcx_session(days[-1], 1000.0, 1090.0)
+    dailies = [_daily(d, 1000.0, hm="09:00") for d in days[:-1]] + [_daily(days[-1], 1090.0, hm="09:00")]
+    got = build_zones(dailies, intraday, today, k=0.30, segment=Segment.MCX_FO)
+    assert got.zones and got.refused == "", "a 9 % rally after 15:00 is the session's own move"
+
+
+def test_an_nse_stocks_auction_bar_never_vouches_for_the_basis():
+    """The 15:15 bar of an NSE stock is set FROM the official close, so it cannot confirm it: a series
+    adjusted for a corporate action is still refused although that bar agrees with it."""
+    today = date(2026, 10, 6)
+    days = _weekdays(40, today)
+    auction = [replace(b, ts=b.ts + 1800, open=374.0, high=374.0, low=374.0, close=374.0) for b in _thirty(days[-1], 1000.0)[-1:]]
+    intraday = [b for d in days for b in _thirty(d, 1000.0)] + auction
+    dailies = [_daily(d, 374.0) for d in days]
+    assert build_zones(dailies, intraday, today, k=0.30, segment=Segment.NSE_EQ).refused == "basis"
+
+
 def test_the_backtest_and_live_build_identical_zones_from_identical_data(settings):
     from kotsin_nse.engine import Engine
     from kotsin_nse.market.session import ist_today

@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from ..config import Segment
-from ..market.session import ist_day, ist_hm
+from ..market.session import NSE_EQ_CONTINUOUS_UNTIL, ist_day, ist_hm, last_bucket_start
 from .daily import MIN_DAILY_BARS, basis_ok, is_official, previous_session
 from .indicators import atr
 from .periods import monthly, previous_complete, weekly
@@ -111,8 +111,15 @@ def build_zones(
                          detail=f"{ist_day(prev.ts)} is still the provisional 09:15 candle")
     session = [b for b in intraday if ist_day(b.ts) == ist_day(prev.ts)]
     if session:
-        # the last CONTINUOUS bar: an NSE stock's 15:15 bar is set from the official close itself
-        last = next((b for b in reversed(session) if ist_hm(b.ts) <= "14:45"), session[-1])
+        # the session's last CONTINUOUS bar, on its own exchange's clock: an NSE stock's 15:15 bar is
+        # set from the official close itself (``Engine._set_closing_auction_bars``), so it may not
+        # vouch for the basis; a future's or an index's 15:15 is a real bar; MCX runs to 23:30, its
+        # last bar 23:00. A fixed "14:45" compared MCX's 23:30 close with the price 8½ hours earlier
+        # and refused any contract that moved 8 % in the evening — no levels, every trigger grade F,
+        # for the whole next session (review, 2026-10-03)
+        last_start = last_bucket_start(segment, ist_day(prev.ts), session[-1].tf,
+                                       until=NSE_EQ_CONTINUOUS_UNTIL if segment is Segment.NSE_EQ else None)
+        last = next((b for b in reversed(session) if b.ts <= last_start), session[-1])
         if not basis_ok(prev.close, last.close):
             return ZoneBuild([], ZONE_TOLERANCE_PCT, refused="basis",
                              detail=f"{ist_day(prev.ts)} official close {prev.close:g} vs its 30m close {last.close:g}")
