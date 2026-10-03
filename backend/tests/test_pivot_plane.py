@@ -104,3 +104,55 @@ def test_a_provisional_previous_session_sets_no_levels_until_the_end_of_day_cand
                              low=990.0, close=1003.0, volume=1e6, source=BarSource.REST, complete=True))
     e.store.seed(equity.symbol, "1d", series)
     assert e.zones_for(equity.symbol) == [] and e.zone_refusals[equity.symbol].startswith("provisional")
+
+
+def _provisional_engine(settings, equity) -> tuple[Engine, date]:
+    e = Engine(settings)
+    e.underlyings[equity.symbol] = equity
+    yday = ist_today() - timedelta(days=1)
+    while yday.weekday() >= 5:
+        yday -= timedelta(days=1)
+    series = [b for b in _official_series(equity.symbol, equity.scrip_code) if b.ts < from_ist(datetime(yday.year, yday.month, yday.day))]
+    series.append(UnifiedBar(symbol=equity.symbol, scrip_code=equity.scrip_code, tf="1d",
+                             ts=from_ist(datetime(yday.year, yday.month, yday.day, 9, 15)), open=1000.0, high=1010.0,
+                             low=990.0, close=1003.0, volume=1e6, source=BarSource.REST, complete=True))
+    e.store.seed(equity.symbol, "1d", series)
+    e._daily_due = e._legs_due = False
+    return e, yday
+
+
+async def test_a_provisional_name_is_re_asked_on_a_backoff_until_the_end_of_day_candle_lands(settings, equity):
+    """Review, 2026-10-03: asked once a session, a name still provisional at 08:30 stayed without
+    levels until 15:45. It is re-asked every PROVISIONAL_RETRY_S until the 00:00 candle lands."""
+    e, yday = _provisional_engine(settings, equity)
+    asked: list[str] = []
+    stamp = ["09:15:00"]
+
+    async def candles(inst, tf, start, end):
+        asked.append(inst.symbol)
+        return [{"dt": f"{yday.isoformat()}T{stamp[0]}", "o": 1000.0, "h": 1010.0, "l": 990.0, "c": 1003.0, "v": 1e6}]
+
+    e.rest.candles = candles  # type: ignore[method-assign]
+    await e._pivot_repair()
+    assert asked == [equity.symbol] and e.daily_audit().provisional == [equity.symbol], "the broker still has the provisional one"
+    await e._pivot_repair()
+    assert asked == [equity.symbol], "not again within the backoff"
+    e._daily_provisional_asked[equity.symbol] = 0.0
+    stamp[0] = "00:00:00"  # the end-of-day candle has landed
+    await e._pivot_repair()
+    assert asked == [equity.symbol, equity.symbol] and e.daily_audit().ok == [equity.symbol]
+    assert e.zones_for(equity.symbol), "levels again"
+
+
+def test_the_zones_line_alarms_on_a_provisional_candle_once_the_session_is_under_way(settings, equity):
+    e, _ = _provisional_engine(settings, equity)
+    e.booting = False
+    tue = date(2026, 10, 6)
+
+    def at(hm: str) -> float:
+        return from_ist(datetime(tue.year, tue.month, tue.day, *map(int, hm.split(":"))))
+
+    a = e.daily_audit()
+    early, late = e._zones_check(a, now=at("09:00")), e._zones_check(a, now=at("10:30"))
+    assert early.ok and "provisional candle: 1" in early.detail
+    assert not late.ok and equity.symbol in late.detail and "provisional after 09:20" in late.detail

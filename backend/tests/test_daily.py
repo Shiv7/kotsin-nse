@@ -10,7 +10,8 @@ TODAY = date(2026, 9, 23)
 
 
 def _bar(day: date, close: float = 100.0, *, source=BarSource.REST, complete=True) -> UnifiedBar:
-    ts = datetime(day.year, day.month, day.day, 9, 15).timestamp()
+    # the end-of-day candle's stamp (00:00); 09:15 is 5paisa's PROVISIONAL one (review, 2026-10-03)
+    ts = datetime(day.year, day.month, day.day, 0, 0).timestamp()
     return UnifiedBar(symbol="X", scrip_code="1", tf="1d", ts=ts, open=close, high=close + 1,
                       low=close - 1, close=close, volume=1000, source=source, complete=complete)
 
@@ -96,3 +97,20 @@ def test_a_contract_with_no_candles_at_all_is_dormant_not_missing():
     a = audit({"OK": _series(date(2026, 9, 22)), "COTTON": []}, TODAY, CAL)
     assert a.dormant == ["COTTON"] and a.missing == [] and a.ok == ["OK"]
     assert a.ready and a.needs_refresh == [] and "1 dormant" in a.summary()
+
+
+def test_a_provisional_previous_session_is_re_asked_not_ok():
+    """Review, 2026-10-03: a previous session still on 5paisa's 09:15 (provisional) candle read "ok"
+    here, so the repair never asked again and the name had no levels until the 15:45 refresh."""
+    from dataclasses import replace
+
+    from kotsin_nse.config import Segment
+
+    series = _series(date(2026, 9, 11))
+    prov = [*series[:-1], replace(series[-1], ts=datetime(2026, 9, 11, 9, 15).timestamp())]
+    a = audit({"P": prov}, date(2026, 9, 15), CAL)
+    assert a.provisional == ["P"] and a.needs_refresh == ["P"], "re-asked by the repair loop"
+    assert a.ready, "the broker publishes on its own clock: the zones health line alarms if it is late"
+    assert "1 on the provisional 09:15 candle" in a.summary()
+    m = audit({"P": prov}, date(2026, 9, 15), CAL, segments={"P": Segment.MCX_FO})
+    assert m.ok == ["P"] and not m.provisional, "MCX stamps its candle at the first trade: no such test"

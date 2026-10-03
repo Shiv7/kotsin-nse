@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
+from ..config import Segment
 from ..market.session import TradingCalendar, ist_day, ist_hm
 from .unified import BarSource, UnifiedBar
 
@@ -105,6 +106,17 @@ def previous_session(bars: Iterable[UnifiedBar], today: date) -> UnifiedBar | No
     return None
 
 
+#: an NSE daily candle stamped at the open is the provisional one
+NSE_PROVISIONAL_HM = "09:15"
+
+
+def is_provisional(bar: UnifiedBar, segment: Segment) -> bool:
+    """An NSE daily row stamped at the session open is 5paisa's provisional candle: its high and low
+    can still be wrong, and it sets no levels until the end-of-day (00:00) row replaces it. MCX
+    stamps its daily candle at the first trade and never at 00:00 — no such test there."""
+    return segment is not Segment.MCX_FO and ist_hm(bar.ts) == NSE_PROVISIONAL_HM
+
+
 @dataclass(slots=True)
 class DailyAudit:
     today: date
@@ -117,6 +129,9 @@ class DailyAudit:
     unofficial: list[str] = field(default_factory=list)  # previous bar built from ticks, not REST
     stale: list[str] = field(default_factory=list)  # previous bar older than expected_prev
     short: list[str] = field(default_factory=list)  # fewer than MIN_DAILY_BARS
+    #: the previous session is still 5paisa's provisional 09:15 candle: the zones refuse it until the
+    #: end-of-day one lands, so it is re-asked (review, 2026-10-03: it was "ok" here and never re-asked)
+    provisional: list[str] = field(default_factory=list)
     #: no candle of any kind at the broker — a listed contract nobody trades (COTTON, KAPAS,
     #: MCXBULLDEX…). Reported, never a fault: there is no session to be missing from.
     dormant: list[str] = field(default_factory=list)
@@ -137,17 +152,19 @@ class DailyAudit:
 
     @property
     def needs_refresh(self) -> list[str]:
-        bad = set(self.missing) | set(self.unofficial) | set(self.short)
+        bad = set(self.missing) | set(self.unofficial) | set(self.short) | set(self.provisional)
         if not self.holiday_suspected:
             bad |= set(self.stale)
         return sorted(bad)
 
     @property
     def ready(self) -> bool:
-        return not self.needs_refresh
+        """Every series can carry its levels — a provisional candle aside: the broker publishes the
+        end-of-day one on its own clock, and the ``zones`` health line alarms if it is late."""
+        return not (set(self.needs_refresh) - set(self.provisional))
 
     def summary(self) -> str:
-        total = len(self.ok) + len(self.missing) + len(self.unofficial) + len(self.stale) + len(self.short)
+        total = len(self.ok) + len(self.missing) + len(self.unofficial) + len(self.stale) + len(self.short) + len(self.provisional)
         parts = [f"{len(self.ok)}/{total} names on the official previous session"]
         if self.dormant:
             parts.append(f"{len(self.dormant)} dormant (no candles at the broker)")
@@ -162,13 +179,17 @@ class DailyAudit:
             )
         if self.short:
             parts.append(f"{len(self.short)} under {MIN_DAILY_BARS} bars")
+        if self.provisional:
+            parts.append(f"{len(self.provisional)} on the provisional 09:15 candle")
         return "; ".join(parts)
 
 
 def audit(
-    series: Mapping[str, list[UnifiedBar]], today: date, calendar: TradingCalendar
+    series: Mapping[str, list[UnifiedBar]], today: date, calendar: TradingCalendar,
+    segments: Mapping[str, Segment] | None = None,
 ) -> DailyAudit:
-    """Classify every name's daily series by whether its previous-session bar can carry a pivot."""
+    """Classify every name's daily series by whether its previous-session bar can carry a pivot.
+    ``segments`` names each series' exchange (default NSE_EQ, as ``Engine.zones_for`` assumes)."""
     expected = calendar.previous_trading_day(today)
     prevs = {sym: previous_session(bars, today) for sym, bars in series.items()}
     consensus = max((ist_day(p.ts) for p in prevs.values() if p is not None), default=None)
@@ -181,6 +202,8 @@ def audit(
             out.missing.append(sym)
         elif not is_official(prev):
             out.unofficial.append(sym)
+        elif is_provisional(prev, (segments or {}).get(sym, Segment.NSE_EQ)):
+            out.provisional.append(sym)
         elif ist_day(prev.ts) < expected:
             out.stale.append(sym)
         elif len(bars) < MIN_DAILY_BARS:

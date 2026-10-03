@@ -249,6 +249,12 @@ OPEN_SETTLE_S = 60.0
 FUT_GAP_SLOTS = 15
 #: the after-close audit of the day's 30m bars (``_audit_bars``), IST — NSE closes 15:30
 BAR_AUDIT_HM = "15:40"
+#: a name whose previous session is still 5paisa's provisional 09:15 daily candle is re-asked this
+#: often (not once a session: the broker's answer changes during the morning), and the ``zones``
+#: health line fails from this IST minute while any is left — it has no levels, so every trigger on
+#: it grades F (review, 2026-10-03)
+PROVISIONAL_RETRY_S = 600.0
+PROVISIONAL_ALARM_HM = "09:20"
 #: the audit alerts when more bars than this share (or this many) had to be repaired or added
 BAR_AUDIT_ALERT_SHARE, BAR_AUDIT_ALERT_MIN = 0.01, 5
 #: a feed with no frame for this long in an open session is dead, whatever its socket says
@@ -750,6 +756,7 @@ class Engine:
         self.daily_cache = DailyCache(settings.data_dir / "daily")
         self._daily_failed: set[str] = set()  # 1d fetch raised; the repair loop retries every pass
         self._daily_confirmed: dict[str, date] = {}  # asked once for this expected session already
+        self._daily_provisional_asked: dict[str, float] = {}  # a provisional name, when last re-asked
         self._daily_due = False  # a full refetch is owed: day roll or a refresh slot
         self._legs_due = False  # a full leg reload is owed: day roll
         self._legs_reanchor_due = False  # re-band the OTM legs on the session's real spot
@@ -1573,7 +1580,8 @@ class Engine:
     def daily_audit(self) -> Any:
         """Every underlying's daily series, classified by whether it can carry today's pivots."""
         return audit_daily(
-            {sym: self.store.bars(sym, "1d") for sym in self.underlyings}, ist_today(), self.calendar
+            {sym: self.store.bars(sym, "1d") for sym in self.underlyings}, ist_today(), self.calendar,
+            segments={sym: inst.segment for sym, inst in self.underlyings.items()},
         )
 
     async def _pivot_repair(self) -> None:
@@ -1592,13 +1600,19 @@ class Engine:
                 self._set_closing_auction_bars(list(self.underlyings.values()))
             a = self.daily_audit()
             # A call that raised is retried every pass whatever the audit calls the name; a
-            # dormant name (nothing at the broker) is asked once per session and left alone.
+            # dormant name (nothing at the broker) is asked once per session and left alone; a
+            # provisional one every PROVISIONAL_RETRY_S until the end-of-day candle lands.
+            now = time.time()
+            prov = set(a.provisional)
             wanted = sorted(
-                {sym for sym in a.needs_refresh if self._daily_confirmed.get(sym) != a.expected_prev}
+                {sym for sym in a.needs_refresh if sym not in prov and self._daily_confirmed.get(sym) != a.expected_prev}
+                | {sym for sym in prov if now - self._daily_provisional_asked.get(sym, 0.0) >= PROVISIONAL_RETRY_S}
                 | {sym for sym in self._daily_failed if sym in self.underlyings}
             )
             for sym in wanted:
-                if a.expected_prev is not None:
+                if sym in prov:
+                    self._daily_provisional_asked[sym] = now
+                elif a.expected_prev is not None:
                     self._daily_confirmed[sym] = a.expected_prev
             if wanted:
                 n = await self._refetch_daily(wanted[:REPAIR_BATCH])
@@ -6427,6 +6441,7 @@ class Engine:
         self._zone_cache.clear()
         self.zone_refusals.clear()
         self._daily_due = self._legs_due = True
+        self._daily_provisional_asked.clear()
         self._legs_reanchor_done.clear()
         self._daily_refresh_done.clear()
         self._handled_signals.clear()
@@ -6446,16 +6461,24 @@ class Engine:
         detail = "; ".join(f"{k}: {v['errors']}× {v['lastError']}" for k, v in list(recent.items())[:4]) or "no duty failed in 15 min"
         return Check("duty_errors", not bad, detail=detail, value=float(len(recent)))
 
-    def _zones_check(self) -> Check:
+    def _zones_check(self, daily: Any = None, now: float | None = None) -> Check:
         """No levels for a name because its daily and 30m series are on different price bases (a
-        corporate action) is a data fault; history / provisional refusals are shown."""
+        corporate action) is a data fault; so is a previous session still on 5paisa's provisional
+        candle once the session is under way (``PROVISIONAL_ALARM_HM``) — read from the daily audit,
+        which covers every name, not only those a trigger asked about. History refusals are shown."""
+        now = time.time() if now is None else now
         reasons: dict[str, int] = {}
         for why in self.zone_refusals.values():
             reasons[why.split(":")[0]] = reasons.get(why.split(":")[0], 0) + 1
         basis = sorted(k for k, v in self.zone_refusals.items() if v.startswith("basis"))
+        provisional = sorted(daily.provisional) if daily is not None else []
+        late = (not self.booting and self.calendar.is_trading_day(ist_day(now)) and ist_hm(now) >= PROVISIONAL_ALARM_HM
+                and bool(provisional))
         detail = (", ".join(f"{k} {n}" for k, n in sorted(reasons.items())) or "every name has levels") + (
-            f" — basis mismatch: {', '.join(basis[:6])}" if basis else "")
-        return Check("zones", not basis, detail=detail, value=float(len(basis)))
+            f" — basis mismatch: {', '.join(basis[:6])}" if basis else "") + (
+            f" — provisional {'after ' + PROVISIONAL_ALARM_HM if late else 'candle'}: {len(provisional)} ({', '.join(provisional[:6])})"
+            if provisional else "")
+        return Check("zones", not basis and not late, detail=detail, value=float(len(basis) + (len(provisional) if late else 0)))
 
     def _latency_check(self) -> Check:
         """Bar close → the decision starting (the exchange-candle reconcile is inside it), and the
@@ -6540,7 +6563,7 @@ class Engine:
             self._volume_check(),
             self._bar_audit_check(),
             self._duty_check(),
-            self._zones_check(),
+            self._zones_check(daily),
             self._latency_check(),
             Check(
                 "pivots_ready",

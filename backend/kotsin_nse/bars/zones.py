@@ -27,8 +27,15 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from ..config import Segment
-from ..market.session import NSE_EQ_CONTINUOUS_UNTIL, ist_day, ist_hm, last_bucket_start
-from .daily import MIN_DAILY_BARS, basis_ok, is_official, previous_session
+from ..market.session import NSE_EQ_CONTINUOUS_UNTIL, ist_day, last_bucket_start
+from .daily import (
+    MIN_DAILY_BARS,
+    NSE_PROVISIONAL_HM,
+    basis_ok,
+    is_official,
+    is_provisional,
+    previous_session,
+)
 from .indicators import atr
 from .periods import monthly, previous_complete, weekly
 from .pivots import (
@@ -44,10 +51,6 @@ from .unified import UnifiedBar
 #: the ATR the width is measured in: ATR(14) over the last 60 decision bars before the session
 ATR_PERIOD = 14
 ATR_BARS = 60
-#: an NSE daily candle stamped at the open is the provisional one
-NSE_PROVISIONAL_HM = "09:15"
-
-
 @dataclass(frozen=True, slots=True)
 class ZoneBuild:
     zones: list[Zone]
@@ -56,11 +59,6 @@ class ZoneBuild:
     #: why there are no zones — "history", "provisional", "basis" — or "" when there are
     refused: str = ""
     detail: str = ""
-
-
-def is_provisional(bar: UnifiedBar, segment: Segment) -> bool:
-    """An NSE daily row stamped at the session open is 5paisa's provisional candle."""
-    return segment is not Segment.MCX_FO and ist_hm(bar.ts) == NSE_PROVISIONAL_HM
 
 
 def pivot_points_for(dailies: Sequence[UnifiedBar], today: date) -> list[PivotPoint]:
@@ -128,4 +126,5 @@ def build_zones(
     return ZoneBuild(cluster_zones(points, tolerance_pct=tol), tol, points)
 
 
-__all__ = ["ATR_BARS", "ATR_PERIOD", "ZoneBuild", "build_zones", "is_provisional", "pivot_points_for", "session_tolerance"]
+__all__ = ["ATR_BARS", "ATR_PERIOD", "NSE_PROVISIONAL_HM", "ZoneBuild", "build_zones", "is_provisional", "pivot_points_for",
+           "session_tolerance"]
