@@ -139,6 +139,8 @@ async def test_a_strike_not_on_the_feed_is_not_waited_for(settings):
 @pytest.mark.asyncio
 async def test_a_strike_ahead_that_never_quotes_costs_only_its_grace(settings, monkeypatch):
     monkeypatch.setattr(eng, "STRIKE_GRACE_S", 0.5)
+    # after the open settles, whatever the wall clock says (before 09:16 IST the open rule waits longer)
+    monkeypatch.setattr(eng, "OPEN_SETTLE_S", -86_400.0)
     e = await _engine(settings)
     e.quote_wait_s = 5.0
     a, b = _put("X", 100.0, "1", 100), _put("X", 99.0, "2", 100)

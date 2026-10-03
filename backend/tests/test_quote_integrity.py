@@ -127,10 +127,14 @@ async def test_the_0945_hdfcbank_trigger_gets_its_first_choice(settings):
 
 
 @pytest.mark.asyncio
-async def test_the_choice_waits_for_a_strikes_first_frame_and_never_past_its_cap(settings):
+async def test_the_choice_waits_for_a_strikes_first_frame_and_never_past_its_cap(settings, monkeypatch):
     """HDFCBANK 710 PE, 2026-09-28: subscribed at the trigger, its first feed frame 1.1 s later. Until
     then it holds only the broker's snapshot (no bid, no ask): UNPRICED — the choice waits for the
     frame, returns on it, and never waits past its cap."""
+    import kotsin_nse.engine as eng
+
+    # after the open settles, whatever the wall clock says (before 09:16 IST the open rule waits longer)
+    monkeypatch.setattr(eng, "OPEN_SETTLE_S", -86_400.0)
     e = await _engine(settings)
     e.quote_wait_s = 1.0
     await e.feed.subscribe("mf", [P710])
