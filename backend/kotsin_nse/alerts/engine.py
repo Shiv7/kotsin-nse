@@ -22,7 +22,7 @@ from typing import Any
 
 import structlog
 
-from ..bars.indicators import atr
+from ..bars.indicators import SUPERTREND_CONVERGED_BARS, atr
 from ..bars.pivots import PivotLevels, classic_pivots
 from ..bars.unified import UnifiedBar
 from ..market.session import TF_SECONDS, to_ist
@@ -50,7 +50,7 @@ RING = 5000
 TAPE_CARD_TTL_S = 1800.0
 #: Bars of history a detector is handed. Enough for BB(20), SuperTrend(7) and a 20-bar volume
 #: median with room to warm.
-LOOKBACK = 120
+LOOKBACK = SUPERTREND_CONVERGED_BARS
 
 
 class AlertEngine:

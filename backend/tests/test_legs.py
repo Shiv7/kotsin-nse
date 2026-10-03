@@ -255,3 +255,14 @@ def test_a_load_reports_what_it_fetched_itself_not_the_days_running_total():
     assert asyncio.run(ld.load([_leg(str(k)) for k in range(5)], date(2026, 9, 23))) == 5
     assert asyncio.run(ld.load([_leg("100"), _leg("101")], date(2026, 9, 23))) == 2
     assert ld.loaded == 7
+
+
+def test_the_end_of_day_candle_wins_over_the_provisional_one_of_the_same_session():
+    """5paisa served 22 Sep twice: provisional at the first trade (a wrong high) and end-of-day at
+    00:00. Sorted oldest first the provisional came last and set the ladder."""
+    rows = [
+        {"dt": "2026-09-22T00:00:00", "o": 12, "h": 20, "l": 5, "c": 18, "v": 46_418},
+        {"dt": "2026-09-22T09:16:00", "o": 12, "h": 26, "l": 5, "c": 18, "v": 30_000},
+    ]
+    got = levels_from_candles(rows, date(2026, 9, 23))
+    assert got is not None and got[1] == "2026-09-22" and got[3] == 46_418

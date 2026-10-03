@@ -81,6 +81,10 @@ class SymbolState:
     #: the stub bar made of the late ticks alone replaced the full one in the store. A REST-seeded
     #: bucket is not in here, so the live build still closes the bucket a mid-session boot joined.
     closed_upto: dict[str, int] = field(default_factory=dict)
+    #: volume of frames that arrived after their bucket had closed, per timeframe, waiting for the
+    #: next bar of that timeframe — volume is shifted a bucket, never lost (review, 2026-10-03: a
+    #: +30k frame stamped 10:44:59 after the clock closed 10:30 reached no intraday bar at all)
+    late_qty: dict[str, float] = field(default_factory=dict)
 
 
 class Aggregator:
@@ -194,7 +198,20 @@ class Aggregator:
         # (NSE's 09:00–09:15 pre-open prints); `bucket_start` would clamp the latter INTO the 09:15
         # bar and open new buckets for the former. Both corrupt the series. Ticks outside the
         # session still update the LTP upstream; they just never become a bar.
-        if ts < session_open_ts(segment, day_d) or ts >= session_close_ts(segment, day_d):
+        if ts < session_open_ts(segment, day_d):
+            # A pre-open frame is no bar, but its TotalQty is the day's volume so far — the opening
+            # auction. It primes the baseline, so the 09:15 bar carries continuous trading only, as
+            # the broker's own candle does. Dropped before the delta was taken, the auction's volume
+            # landed in the 09:15 bar (a 09:07 total of 50,000 read as a 50,400 bar; the live 09:15
+            # bar ran 12 % over the broker's — review, 2026-10-03).
+            if day != st.day:
+                self._roll_day(st, day, tick)
+            total = int(tick.get("total_qty") or 0)
+            if total > 0 and (st.last_total_qty is None or total >= st.last_total_qty):
+                st.last_total_qty = total
+            self.out_of_session_ticks += 1
+            return
+        if ts >= session_close_ts(segment, day_d):
             self.out_of_session_ticks += 1
             return
         if day != st.day:
@@ -207,6 +224,7 @@ class Aggregator:
     def _roll_day(self, st: SymbolState, day: str, tick: dict[str, Any]) -> None:
         prev = float(tick.get("prev_close") or 0)
         st.day = day
+        st.late_qty.clear()
         st.session_pv = st.session_v = 0.0
         st.day_high = st.day_low = 0.0
         # A zero baseline claims we watched this session from its first trade. That is true only if
@@ -241,8 +259,10 @@ class Aggregator:
         if st.last_total_qty is None:  # first tick for this symbol; no baseline to subtract
             st.last_total_qty = total
             return 0.0
-        if total < st.last_total_qty:  # session reset or a stale frame; do not emit negative volume
-            st.last_total_qty = total
+        if total < st.last_total_qty:
+            # a stale frame: book nothing and KEEP the higher baseline — lowering it booked the
+            # same volume twice on the next frame (200, then a stale 100, then 250 booked 350;
+            # review, 2026-10-03). A new session resets the baseline in _roll_day, never here.
             return 0.0
         delta = total - st.last_total_qty
         st.last_total_qty = total
@@ -270,10 +290,17 @@ class Aggregator:
                 await self._close(cur)
                 cur = None
             elif cur is not None and bucket < cur.ts:
-                self.late_ticks += 1  # a tick older than the bar we are on; count, do not rewrite
+                # a tick older than the bar we are on: its price is not rewritten into a closed
+                # bar, but its volume moves to the bar forming now — shifted, never lost
+                self.late_ticks += 1
+                cur.volume += qty
                 continue
             if cur is None and bucket <= st.closed_upto.get(tf, -1):
-                self.late_ticks += 1  # its bucket is already closed; the reconciler owns it now
+                # its bucket is already closed (the reconciler owns it now); its volume waits for
+                # this timeframe's next bar
+                self.late_ticks += 1
+                if qty:
+                    st.late_qty[tf] = st.late_qty.get(tf, 0.0) + qty
                 continue
             if cur is None and bucket_end(segment, bucket, tf) <= st.connected_since:
                 # The first frame after a subscribe re-sends the last trade, stamped with its own
@@ -284,6 +311,7 @@ class Aggregator:
                 continue
             if cur is None:
                 cur = self._open_bar(st, tf, bucket, price, segment)
+                cur.volume += st.late_qty.pop(tf, 0.0)
                 self.store.set_forming(cur)
             cur.merge_tick(price, qty)
             if new_high is not None and new_high > cur.high:

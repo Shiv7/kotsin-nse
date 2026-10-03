@@ -43,11 +43,11 @@ import pandas as pd
 import structlog
 
 from ..bars.oi_read import OiReading
-from ..bars.periods import monthly, previous_complete, weekly
-from ..bars.pivots import Zone, classic_pivots, cluster_zones, pivot_points
+from ..bars.pivots import Zone
 from ..bars.store import BarStore
 from ..bars.unified import BarSource, UnifiedBar
 from ..bars.volume_read import VolumeReading
+from ..bars.zones import ATR_BARS, build_zones
 from ..config import Segment, Settings
 from ..domain import Direction, ExitReason, Instrument, InstrumentKind, OrderSide
 from ..instrument.select import estimate_delta, map_levels_to_option
@@ -76,10 +76,15 @@ class BacktestContext:
     so a strategy can never see a pivot derived from a session that has not happened yet.
     """
 
-    def __init__(self, store: BarStore, dailies: dict[str, list[UnifiedBar]], segment: Segment):
+    def __init__(self, store: BarStore, dailies: dict[str, list[UnifiedBar]], segment: Segment, *, zone_k: float = 0.30):
         self.store = store
         self.dailies = dailies
         self.segment = segment
+        #: live's cluster width multiplier. India VIX history is not archived, so it is pinned at
+        #: the NEUTRAL band's 0.30, where VIX has sat (12-16) for the period cached
+        self.zone_k = zone_k
+        #: (symbol, day) whose daily and 30m series were on different price bases — no zones
+        self.basis_refused: set[tuple[str, date]] = set()
         self.today: date = date(1970, 1, 1)
         self._zone_cache: dict[tuple[str, date], list[Zone]] = {}
         self._state: dict[str, Any] = {}
@@ -88,28 +93,19 @@ class BacktestContext:
         return self.store.bars(symbol, tf, n)
 
     def zones(self, symbol: str) -> list[Zone]:
+        """Live's zones (bars/zones.py), from what the replay holds: the dailies before the day and
+        the decision bars so far. It clustered at a flat 0.25 % while live clusters at k × ATR30 —
+        14.5 % of the publish decisions differed (review, 2026-10-03)."""
         key = (symbol, self.today)
         hit = self._zone_cache.get(key)
         if hit is not None:
             return hit
-        rows = [b for b in self.dailies.get(symbol, []) if ist_day(b.ts) < self.today]
-        if len(rows) < 25:
-            self._zone_cache[key] = []
-            return []
-        points = []
-        d = rows[-1]
-        lv = classic_pivots(d.high, d.low, d.close)
-        if lv:
-            points += pivot_points(lv, "1d")
-        for tf, periods in (("1wk", weekly(rows)), ("1mo", monthly(rows))):
-            p = previous_complete(periods, self.today)
-            if p:
-                lv = classic_pivots(p.high, p.low, p.close)
-                if lv:
-                    points += pivot_points(lv, tf)
-        zones = cluster_zones(points)
-        self._zone_cache[key] = zones
-        return zones
+        built = build_zones(self.dailies.get(symbol, []), self.store.bars(symbol, DECISION_TF, ATR_BARS + 20), self.today,
+                            k=self.zone_k, segment=self.segment)
+        if built.refused == "basis":
+            self.basis_refused.add((symbol, self.today))
+        self._zone_cache[key] = built.zones
+        return built.zones
 
     def exchange(self, symbol: str) -> str:
         return self.segment.exch
@@ -313,6 +309,8 @@ class BacktestParams:
     #: "intraday" (the cost model's STT) or "delivery": STT on both legs, and NO SHORTS — retail
     #: cash equity cannot be carried short overnight, so bearish signals are not trades.
     holding: str = "intraday"
+    #: live's zone width multiplier (k in k × ATR30 / price) — bars/zones.py
+    zone_k: float = 0.30
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -325,6 +323,7 @@ class BacktestParams:
             "model_option_leg": self.model_option_leg,
             "decision_tf": self.decision_tf,
             "holding": self.holding,
+            "zone_k": self.zone_k,
         }
 
 
@@ -448,10 +447,10 @@ class Backtester:
         dailies = {symbol: self._to_bars(daily, symbol, symbol, "1d")}
 
         bar_store = BarStore(max_bars=4000)
-        ctx = BacktestContext(bar_store, dailies, self.p.segment)
+        ctx = BacktestContext(bar_store, dailies, self.p.segment, zone_k=self.p.zone_k)
         fudkii = Fudkii(self.p.fudkii)
         fukaa = Fukaa(self.p.fukaa)
-        fukaa_ctx = BacktestContext(bar_store, dailies, self.p.segment)
+        fukaa_ctx = BacktestContext(bar_store, dailies, self.p.segment, zone_k=self.p.zone_k)
         fukaa_ctx._zone_cache = ctx._zone_cache  # one cache; the zones are the same
 
         open_trade: OpenTrade | None = None

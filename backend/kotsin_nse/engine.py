@@ -41,6 +41,7 @@ from .bars.daily import (
     MIN_DAILY_BARS,
     REPAIR_BATCH,
     DailyCache,
+    basis_ok,
     is_official,
     one_per_session,
     previous_session,
@@ -50,20 +51,24 @@ from .bars.indicators import atr, dried_volume
 from .bars.micro import MicroAggregator
 from .bars.oi_candles import OiCandleBuilder
 from .bars.oi_read import OiReading, oi_quadrant, read_oi, relative_z
-from .bars.periods import monthly, previous_complete, weekly
 from .bars.pivots import (
-    ZONE_TOLERANCE_PCT,
     PivotPoint,
     Zone,
-    classic_pivots,
-    cluster_zones,
     compute_confluence,
     pivot_points,
 )
 from .bars.store import BarStore
 from .bars.unified import BarSource, UnifiedBar
 from .bars.verify import BarReconciler
-from .bars.volume_read import MarketVolume, VolBar, VolumeReading, market_volume, read_volume
+from .bars.volume_read import (
+    MarketVolume,
+    VolBar,
+    VolumeReading,
+    market_volume,
+    read_volume,
+    slot_reading,
+)
+from .bars.zones import build_zones, pivot_points_for
 from .bus import Bus, Topic
 from .committee.service import CommitteeService
 from .config import Segment, Settings
@@ -634,6 +639,11 @@ class Engine:
         self.quotes: dict[str, Quote] = {}
         self.ltps: dict[str, float] = {}
         self._zone_cache: dict[str, tuple[str, list[Zone]]] = {}
+        #: names with no zones today and why ("history", "provisional", "basis") — bars/zones.py
+        self.zone_refusals: dict[str, str] = {}
+        #: sessions whose daily and 30m series are on different price bases (a corporate action):
+        #: symbol -> (day, official close, 30m close)
+        self._basis_mismatch: dict[str, tuple[str, float, float]] = {}
         #: the front future's candles per symbol for the current trigger bar (see _fut_context)
         self._fut_cache: dict[str, tuple[int, dict[str, Any] | None]] = {}
         #: (name, bar) -> the futures fetch in flight, shared by its concurrent readers
@@ -1344,6 +1354,12 @@ class Engine:
                 if t1445 not in have:
                     continue
                 c = official[d]
+                if not basis_ok(c, have[t1445].close):
+                    # the daily series is adjusted for a corporate action and the 30m is not: the
+                    # "official close" would land the 15:15 bar ~60 % away and wreck SuperTrend and
+                    # Bollinger for ~50 bars (review, 2026-10-03)
+                    self._basis_mismatch[inst.symbol] = (d.isoformat(), c, have[t1445].close)
+                    continue
                 held = have.get(t1515)
                 tick = inst.tick_size or 0.05
                 if held is not None and held.high == held.low and abs(held.close - c) < tick / 2 and "closingAuction" in held.extra:
@@ -1870,29 +1886,21 @@ class Engine:
         hit = self._zone_cache.get(symbol)
         if hit and hit[0] == key:
             return hit[1]
-        dailies = self.store.bars(symbol, "1d")
-        # Deliberately not cached, and deliberately empty: a name whose previous session is still
-        # the tick-built bar (its close is the last print, not the exchange's) gets no levels
-        # rather than wrong ones, and gets real ones the moment the repair loop lands the official
-        # candle — not at the next band change.
-        prev = previous_session(dailies, today)
-        if len(dailies) < MIN_DAILY_BARS or prev is None or not is_official(prev):
+        inst = self.underlyings.get(symbol)
+        # One builder for live and the backtest (bars/zones.py): the width from the sessions BEFORE
+        # today (a restart no longer changes it), no levels from a provisional daily candle or from
+        # a daily series on another price basis than the 30m one. A refusal is deliberately not
+        # cached: the name gets real levels the moment the repair loop lands the official candle.
+        built = build_zones(self.store.bars(symbol, "1d"), self.store.bars(symbol, DECISION_TF), today,
+                            k=regime.k, segment=inst.segment if inst is not None else Segment.NSE_EQ)
+        if built.refused:
+            self.zone_refusals[symbol] = f"{built.refused}: {built.detail}"
+            if built.refused == "basis":
+                log.warning("zones.basis_mismatch", symbol=symbol, detail=built.detail)
             return []
-        points = self._pivot_points(symbol)
-        atr_v = atr(self.store.bars(symbol, DECISION_TF, 60), 14)
-        px = self.ltps.get(
-            getattr(self.underlyings.get(symbol), 'scrip_code', '')
-        ) or (dailies[-1].close if dailies else 0.0)
-        # ATR expressed as a percentage of price, because cluster_zones works in percent — the
-        # conversion is what makes 'k x ATR' and a percentage tolerance the same statement.
-        tol = (
-            regime.k * atr_v / px * 100
-            if atr_v and px > 0
-            else ZONE_TOLERANCE_PCT
-        )
-        zones = cluster_zones(points, tolerance_pct=tol)
-        self._zone_cache[symbol] = (key, zones)
-        return zones
+        self.zone_refusals.pop(symbol, None)
+        self._zone_cache[symbol] = (key, built.zones)
+        return built.zones
 
     def volatility_regime(self, symbol: str) -> Regime:
         """India VIX for NSE, the contract's own realised vol for MCX."""
@@ -4637,23 +4645,14 @@ class Engine:
 
     def _pivot_points(self, symbol: str) -> list[PivotPoint]:
         """The equity's classic levels for today — daily from the previous session, weekly and
-        monthly from the previous completed periods — with their timeframe weights."""
+        monthly from the previous completed periods — with their timeframe weights. None where the
+        zones refuse the name (bars/zones.py: history, a provisional candle, a basis mismatch)."""
         today = ist_today()
         dailies = self.store.bars(symbol, "1d")
         prev = previous_session(dailies, today)
         if len(dailies) < MIN_DAILY_BARS or prev is None or not is_official(prev):
             return []
-        points: list[PivotPoint] = []
-        lv = classic_pivots(prev.high, prev.low, prev.close)
-        if lv:
-            points += pivot_points(lv, "1d")
-        for tf, periods in (("1wk", weekly(list(dailies))), ("1mo", monthly(list(dailies)))):
-            p = previous_complete(periods, today)
-            if p:
-                lv = classic_pivots(p.high, p.low, p.close)
-                if lv:
-                    points += pivot_points(lv, tf)
-        return points
+        return pivot_points_for(dailies, today)
 
     async def _volume_surges_safe(self, underlying: Instrument, *, low_priority: bool = False) -> dict[str, tuple[float, float]]:
         """``_volume_surges`` that never raises: a reading that cannot be taken is no reading, and
@@ -4742,6 +4741,22 @@ class Engine:
         checks; a future trades to 15:30, so its 15:15 bar is a real (15-minute) bar."""
         bars = [VolBar(int(ist_naive_to_ts(str(r["dt"]))), float(r.get("v") or 0.0)) for r in rows]
         return read_volume(bars, segment=Segment.NSE_FO, t_ts=t_ts, calendar=self.calendar)
+
+    def volume_view(self, symbol: str, ts: int | None = None) -> dict[str, Any]:
+        """Both volume readings of one bar (the last closed 30m one by default): the T-2…T-7 reading
+        the gates use, and the same-slot reading (``bars/volume_read.slot_reading``) — side by side,
+        so the operator can see where the intraday U-shape is mistaken for drying up."""
+        symbol = symbol.upper()
+        held = self.store.bars(symbol, DECISION_TF)
+        if not held:
+            return {"symbol": symbol, "error": "no 30m bars held"}
+        t_ts = int(ts) if ts else int(held[-1].ts)
+        r = self._volume_reading(symbol, t_ts)
+        vb = [VolBar(int(b.ts), float(b.volume), str(b.extra.get("volume_doubt") or "")) for b in held]
+        slot = slot_reading(vb, t_ts)
+        return {"symbol": symbol, "ts": t_ts, "slot": slot.slot,
+                "window": {"surgeT": r.surge_t, "surgeT1": r.surge_t1, "baseline": r.baseline, "doubt": r.doubt},
+                "sameSlot": slot.to_json()}
 
     def _market_volume(self, ts: int) -> MarketVolume:
         """The market-wide check at one bar, once: every NSE stock's own reading there. A bar the

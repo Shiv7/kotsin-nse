@@ -28,7 +28,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from ..bars.daily import previous_session
-from ..bars.indicators import atr, bollinger, supertrend
+from ..bars.indicators import SUPERTREND_CONVERGED_BARS, atr, bollinger, supertrend
 from ..bars.unified import UnifiedBar
 from ..config import Segment
 from ..domain import Instrument, InstrumentKind, OptionType
@@ -107,6 +107,12 @@ def build_app(engine: Engine) -> FastAPI:
         reference it is measured from (and whether that is the exchange's, ours or a pre-open print),
         and its OI candles."""
         return engine.oi_view(symbol)
+
+    @api.get("/volume/{symbol}")
+    async def volume_view(symbol: str, ts: int | None = None) -> dict[str, Any]:
+        """A bar's volume read two ways: against the six bars before it (what the gates read) and
+        against the same time slot on earlier sessions."""
+        return engine.volume_view(symbol, ts)
 
     @api.get("/feed/rate")
     async def feed_rate(code: str | None = None) -> dict[str, Any]:
@@ -642,8 +648,8 @@ def build_app(engine: Engine) -> FastAPI:
         disagree with a signal, the signal is wrong, not the chart."""
         cfg = engine.fudkii.cfg
         sym = symbol.upper()
-        warm = max(cfg.bb_period, cfg.st_atr_period) + 1
-        bars = engine.store.bars(sym, tf, n + warm + 60)
+        # every shown bar has the converged window behind it, as FUDKII's decision does
+        bars = engine.store.bars(sym, tf, n + SUPERTREND_CONVERGED_BARS)
         if not bars:
             raise HTTPException(404, f"no {tf} bars for {sym}")
         closes = [b.close for b in bars]

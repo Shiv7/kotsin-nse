@@ -384,6 +384,13 @@ def build_parser() -> argparse.ArgumentParser:
     pv.add_argument("--for", dest="for_date", default=date.today().isoformat(), help="the session the levels were in force on (default: today)")
     pv.add_argument("--otm", type=int, default=4, help="OTM strikes per side to ladder (default: 4, the book's own)")
 
+    zs = sub.add_parser("zones", help="the pivot zones at a width and wall threshold, from the cache — a measuring tool, not a calibration")
+    zs.add_argument("symbol", help="an underlying, or ALL for the distribution over every cached name")
+    zs.add_argument("--for", dest="for_date", default=date.today().isoformat(), help="the session (one symbol)")
+    zs.add_argument("--k", type=float, default=0.30, help="cluster width in ATR30 (live NEUTRAL: 0.30)")
+    zs.add_argument("--wall", type=float, default=5.2, help="the strength a zone needs to be a wall (live: 5.2)")
+    zs.add_argument("--sessions", type=int, default=60, help="ALL: the last N sessions of each name")
+
     nh = sub.add_parser("normalize-history", help="put the cached intraday history on the session grid, in place (no broker needed)")
     nh.add_argument("--tf", default="30m")
 
@@ -428,6 +435,25 @@ def run_rl_cli(settings: Settings, args: argparse.Namespace) -> None:
     )
     print(json.dumps({"name": art["name"], "summary": art["summary"], "folds": art["folds"]}, indent=1, default=str))
     print(f"\nsaved {settings.data_dir / 'rl' / (art['name'] + '.json')}")
+
+
+def show_zones(settings: Settings, args: argparse.Namespace) -> None:
+    from .research.history import HistoryStore
+    from .research.zone_stats import distribution, zones_on
+
+    store = HistoryStore(settings.data_dir / "history")
+    if args.symbol.upper() == "ALL":
+        d = distribution(store, k=args.k, wall=args.wall, sessions=args.sessions)
+        print(json.dumps({"k": args.k, "wall": args.wall, "sessions": args.sessions, **d.to_json()}, indent=1))
+        return
+    built = zones_on(store, args.symbol.upper(), date.fromisoformat(args.for_date), k=args.k)
+    if built.refused:
+        print(f"no zones: {built.refused} — {built.detail}")
+        return
+    print(f"{args.symbol.upper()} {args.for_date}: {len(built.zones)} zones at {built.tolerance_pct:.3f} % (k {args.k})")
+    for z in sorted(built.zones, key=lambda z: -z.price):
+        tag = "WALL" if z.strength >= args.wall else "    "
+        print(f"  {z.price:>11,.2f}  {z.strength:5.1f} {tag}  {', '.join(z.members)}")
 
 
 def normalize_history(settings: Settings, args: argparse.Namespace) -> None:
@@ -509,6 +535,8 @@ def cli() -> None:
         asyncio.run(fetch_oi(settings, args))
     elif command == "normalize-history":
         normalize_history(settings, args)
+    elif command == "zones":
+        show_zones(settings, args)
     elif command == "oi":
         show_oi(settings, args)
     else:  # pragma: no cover - argparse rejects anything else

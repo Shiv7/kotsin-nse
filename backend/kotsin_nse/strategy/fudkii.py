@@ -29,7 +29,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..bars.indicators import atr, bars_in_trend, bollinger, supertrend
+from ..bars.indicators import SUPERTREND_CONVERGED_BARS, atr, bars_in_trend, bollinger, supertrend
 from ..bars.pivots import GradePolicy, compute_confluence
 from ..bars.unified import UnifiedBar
 from ..domain import Direction
@@ -106,7 +106,9 @@ class Fudkii:
         if bar.tf != cfg.tf or not bar.complete:
             return out
 
-        hist = list(ctx.bars(bar.symbol, cfg.tf, cfg.warm_bars + 5))
+        # at least the window SuperTrend has converged over, so this flip is the chart's and the
+        # cards' flip — 55 bars put 16.7 % of flips on another bar (bars/indicators.py)
+        hist = list(ctx.bars(bar.symbol, cfg.tf, max(cfg.warm_bars + 5, SUPERTREND_CONVERGED_BARS)))
         if not hist or hist[-1].ts != bar.ts:
             return out
 

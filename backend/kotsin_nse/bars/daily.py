@@ -78,6 +78,20 @@ def one_per_session(
     return [best[d][1] for d in sorted(best)]
 
 
+#: how far apart a session's official daily close and its own last intraday close may be before the
+#: two series are taken to be on different price bases — a corporate action adjusted the daily
+#: candles and not the 30m ones (VEDL ×0.374 for 148 days, TMPV ×0.60; review, 2026-10-03). A real
+#: session's 14:45 close and its official close are never 8 % apart on an F&O stock.
+BASIS_TOLERANCE = 0.08
+
+
+def basis_ok(official_close: float, intraday_close: float, *, tolerance: float = BASIS_TOLERANCE) -> bool:
+    """Are a session's daily close and its last intraday close on the same price basis?"""
+    if official_close <= 0 or intraday_close <= 0:
+        return True  # nothing to compare: no verdict, never a refusal
+    return abs(official_close / intraday_close - 1.0) <= tolerance
+
+
 def previous_session(bars: Iterable[UnifiedBar], today: date) -> UnifiedBar | None:
     """The last bar strictly before ``today``. Today's own bar can never set today's levels."""
     prior = [b for b in bars if ist_day(b.ts) < today]

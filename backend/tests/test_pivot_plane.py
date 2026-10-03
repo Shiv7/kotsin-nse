@@ -5,11 +5,13 @@ from datetime import date, datetime, timedelta
 from kotsin_nse.bars.daily import MIN_DAILY_BARS, is_official
 from kotsin_nse.bars.unified import BarSource, UnifiedBar
 from kotsin_nse.engine import Engine
-from kotsin_nse.market.session import ist_today
+from kotsin_nse.market.session import from_ist, ist_today
 
 
 def _bar(sym: str, code: str, day: date, close: float, *, source=BarSource.REST, complete=True) -> UnifiedBar:
-    ts = datetime(day.year, day.month, day.day, 9, 15).timestamp()
+    # 5paisa's END-OF-DAY daily row is stamped 00:00 IST; the 09:15 stamp is its provisional one,
+    # which sets no levels (bars/zones.py)
+    ts = from_ist(datetime(day.year, day.month, day.day, 0, 0))
     return UnifiedBar(symbol=sym, scrip_code=code, tf="1d", ts=ts, open=close, high=close * 1.01,
                       low=close * 0.99, close=close, volume=1e6, source=source, complete=complete)
 
@@ -40,7 +42,7 @@ def test_zones_are_not_served_or_cached_from_a_tick_built_previous_session(setti
 
     # the official candle lands (what _seed_daily / the repair loop do) → real zones, now cached
     yday = (ist_today() - timedelta(days=1)).isoformat()
-    e._seed_daily(equity, [{"dt": f"{yday}T09:15:00", "o": 1003.0, "h": 1013.0, "l": 993.0, "c": 1003.0, "v": 1e6}])
+    e._seed_daily(equity, [{"dt": f"{yday}T00:00:00", "o": 1003.0, "h": 1013.0, "l": 993.0, "c": 1003.0, "v": 1e6}])
     zones = e.zones_for(equity.symbol)
     assert zones and equity.symbol in e._zone_cache
     assert e.daily_audit().ready
@@ -85,3 +87,20 @@ def test_seed_daily_writes_the_cache_and_voids_the_zone_cache(settings, equity):
 def test_expected_legs_is_empty_without_groups(settings):
     e = Engine(settings)
     assert e._expected_legs([]) == []
+
+
+def test_a_provisional_previous_session_sets_no_levels_until_the_end_of_day_candle_lands(settings, equity):
+    """5paisa serves an NSE session twice: the provisional row stamped 09:15 (its high and low can
+    still be wrong) and the end-of-day row stamped 00:00. Only the latter sets levels."""
+    e = Engine(settings)
+    e.underlyings[equity.symbol] = equity
+    series = _official_series(equity.symbol, equity.scrip_code)
+    yday = ist_today() - timedelta(days=1)
+    while yday.weekday() >= 5:
+        yday -= timedelta(days=1)
+    series = [b for b in series if b.ts < from_ist(datetime(yday.year, yday.month, yday.day))]
+    series.append(UnifiedBar(symbol=equity.symbol, scrip_code=equity.scrip_code, tf="1d",
+                             ts=from_ist(datetime(yday.year, yday.month, yday.day, 9, 15)), open=1000.0, high=1010.0,
+                             low=990.0, close=1003.0, volume=1e6, source=BarSource.REST, complete=True))
+    e.store.seed(equity.symbol, "1d", series)
+    assert e.zones_for(equity.symbol) == [] and e.zone_refusals[equity.symbol].startswith("provisional")
