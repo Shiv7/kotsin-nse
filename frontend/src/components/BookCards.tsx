@@ -58,6 +58,8 @@ export const BOOK_TABS: [string, string][] = [
   ['FUDKII_CT_X', 'FUDKII-CT-X'], ['FUDKII_CT_Y', 'FUDKII-CT-Y'], ['FUDKII_RT_MCX', 'FUDKII-RT-MCX'],
   // the graded-F shadow (2026-09-29): its own wallet, cards of the triggers FUDKII did not publish — paper, no TAKE
   ['FUDKII_RT_Y_F', 'FUDKII-RT-Y-F'],
+  // the market-against fade shadow (2026-10-03): CT-Y's fade where ≤ 45 % of the market agrees with the trigger — paper
+  ['FUDKII_CT_M', 'FUDKII-CT-M'],
 ]
 const BOOK_LABEL = Object.fromEntries(BOOK_TABS)
 

@@ -301,6 +301,29 @@ BOOKS: tuple[Book, ...] = (
         ),
     ),
     Book(
+        key="FUDKII_CT_M",
+        label="FUDKII-CT-M · market-against fade (shadow)",
+        tf="30m entry, 1s exit",
+        summary=(
+            "A shadow with entries of its own: every published NSE trigger the market is clearly against — at most 45 % "
+            "of the NSE names past today's open the trigger's way — is faded with CT-Y's plan (the opposite OTM, the "
+            "stock stop 1 ATR30 past the close, the walls on the fade's side) and traded under CT-Y's exits."
+        ),
+        status="live",
+        params={
+            "entries": "published NSE triggers with breadth ≤ 45 % (risk/limits.py CT_M_MARKET_AGAINST_MAX)",
+            "plan": "CT-Y's fade plan (Engine.fade_plan): stop 1 ATR30 past the close, the fade side's walls, else 1 ATR30",
+            "exits": "CT-Y's: RT-Y's policy incl. the +5 % T1 floor, no 25 % premium cap",
+        },
+        have=("30m/1m bars on the session grid", "market breadth at the trigger", "MTF pivot zones"),
+        source="kotsin_nse/engine.py (_market_fade, fade_plan); kotsin_nse/risk/limits.py CT_M_LIMITS",
+        note=(
+            "Operator, 2026-10-03. 25 Sep - 1 Oct actual replay: 3 fades, all won, +₹19,127 (two more had no option "
+            "prices). Option model 24 Aug - 1 Oct: lost before 11 Sep, won after. Paper, shown on the Shadow page; its "
+            "P&L is never added to the trading books'."
+        ),
+    ),
+    Book(
         key="FUDKII_RT",
         label="FUDKII-RT",
         tf="1m on a 30m signal",

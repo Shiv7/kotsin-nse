@@ -46,6 +46,11 @@ class StrategyKey(StrEnum):
     #: publish — which RT-Y never sees — with the raw pivots ahead as targets when no cluster makes
     #: one (2026-09-28). Its own wallet; on the Shadow page, off the trading tabs.
     FUDKII_RT_Y_F = "FUDKII_RT_Y_F"
+    #: A SHADOW with entries of its own: the fade of a published trigger the market is clearly
+    #: against — at most CT_M_MARKET_AGAINST_MAX of the NSE names past today's open its way — under
+    #: CT-Y's fade plan and exits (operator, 2026-10-03: "fade when the market is clearly against" as
+    #: a shadow, named FUDKII-CT-M). Its own wallet; on the Shadow page, off the trading totals.
+    FUDKII_CT_M = "FUDKII_CT_M"
 
     @property
     def display_name(self) -> str:
@@ -60,6 +65,7 @@ class StrategyKey(StrEnum):
             StrategyKey.FUDKII_CT_Y: "FUDKII-CT-Y",
             StrategyKey.FUDKII_RT_Y_W1: "RT-Y · wide stop (shadow)",
             StrategyKey.FUDKII_RT_Y_F: "RT-Y · graded F (shadow)",
+            StrategyKey.FUDKII_CT_M: "FUDKII-CT-M · market-against fade (shadow)",
         }[self]
 
     @property
@@ -83,4 +89,4 @@ SHADOW_OF: dict[StrategyKey, StrategyKey] = {
 #: Every book shown on the Shadow page instead of the trading tabs, and left out of the day's
 #: totals: the mirrors above, and the graded-F shadow, which places entries of its own on triggers
 #: no trading book takes.
-SHADOW_BOOKS: frozenset[StrategyKey] = frozenset({*SHADOW_OF, StrategyKey.FUDKII_RT_Y_F})
+SHADOW_BOOKS: frozenset[StrategyKey] = frozenset({*SHADOW_OF, StrategyKey.FUDKII_RT_Y_F, StrategyKey.FUDKII_CT_M})

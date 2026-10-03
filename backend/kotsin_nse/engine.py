@@ -163,6 +163,8 @@ from .risk.costs import CostModel
 from .risk.exits import ExitEngine, MarketView, apply_exit
 from .risk.exposure import ExposureBook
 from .risk.limits import (
+    CT_M_LIMITS,
+    CT_M_MARKET_AGAINST_MAX,
     CT_X_LIMITS,
     CT_Y_LIMITS,
     FIXED_LOTS_UNDER_INR,
@@ -205,6 +207,7 @@ SELECTION_POLICY = SelectionPolicy()
 NO_PREMIUM_FLOOR = frozenset({
     StrategyKey.FUDKII, StrategyKey.FUDKII_RT_X, StrategyKey.FUDKII_RT_N, StrategyKey.FUDKII_RT_Y,
     StrategyKey.FUDKII_CT_X, StrategyKey.FUDKII_CT_Y, StrategyKey.FUDKII_RT_Y_W1, StrategyKey.FUDKII_RT_Y_F,
+    StrategyKey.FUDKII_CT_M,
 })
 MIN_STOP_TICKS = 8
 #: How long an entry may wait for the chosen strike's own previous-session ladder. Bounded
@@ -243,6 +246,7 @@ BOOK_LABELS = {
     "FUDKII": "FUDKII", "FUDKII_RT_X": "RT-X", "FUDKII_RT_N": "RT-N", "FUDKII_RT_Y": "RT-Y",
     "FUDKII_CT_X": "CT-X", "FUDKII_CT_Y": "CT-Y", "FUDKII_RT_MCX": "RT-MCX",
     "FUDKII_RT_Y_W1": "RT-Y wide (shadow)", "FUDKII_RT_Y_F": "RT-Y graded F (shadow)",
+    "FUDKII_CT_M": "CT-M market-against fade (shadow)",
 }
 
 
@@ -266,7 +270,7 @@ _RESTING_DECISIONS = frozenset({"RESTING", "PARENT_HALTED_TWINS_RESTING", "PAREN
 #: 38 characters of an id the broker keeps; the descriptive rest may be cut there without a collision.
 ORDER_CODES = {
     "FUDKII": "FII-P", "FUDKII_RT_X": "FII-RTX", "FUDKII_RT_N": "FII-RTN", "FUDKII_RT_Y": "FII-RTY",
-    "FUDKII_CT_X": "FII-CTX", "FUDKII_CT_Y": "FII-CTY", "FUDKII_RT_MCX": "FII-RTM", "FUDKII_RT_Y_W1": "FII-RYW", "FUDKII_RT_Y_F": "FII-RYF",
+    "FUDKII_CT_X": "FII-CTX", "FUDKII_CT_Y": "FII-CTY", "FUDKII_RT_MCX": "FII-RTM", "FUDKII_RT_Y_W1": "FII-RYW", "FUDKII_RT_Y_F": "FII-RYF", "FUDKII_CT_M": "FII-CTM",
     "FUKAA": "FKA",
 }
 _ORDER_REF_RE = re.compile(r"^([A-Z]{3}(?:-[A-Z]{1,3})?)-(\d{6})-\d{6}-(\d{3,})(?:-|$)")
@@ -466,6 +470,7 @@ class Engine:
             StrategyKey.FUDKII_RT_Y_W1.value: ExitEngine(RT_Y_W1_LIMITS),
             # the graded-F shadow: RT-Y's policy, 25 % cap included, on the triggers RT-Y never sees
             StrategyKey.FUDKII_RT_Y_F.value: ExitEngine(RT_Y_F_LIMITS),
+            StrategyKey.FUDKII_CT_M.value: ExitEngine(CT_M_LIMITS),
         }
         #: Each twin is checked against its own pool — 30 slots, its own lot cap — rather than
         #: skipping the check entirely, which is what it did when first written.
@@ -3553,7 +3558,8 @@ class Engine:
             # What the card describes: a fade book with a fade shows the FADE's direction, levels,
             # zones and plan; everything else shows the trigger. (NAM-INDIA, 2026-09-25: the CT-Y
             # card showed the bullish trigger's CE, stop and targets although CT-Y's trade is a PE.)
-            vs = fade if (key.value in counter_books and fade is not None) else sgn
+            vs = fade if (key.value in counter_books and fade is not None) else (
+                own if (key is StrategyKey.FUDKII_CT_M and own is not None) else sgn)
             ctx = vs.get("context") or {}
             conf = ctx.get("confluence") or {}
             pros, cons = [], []
@@ -3936,6 +3942,7 @@ class Engine:
             "FUDKII_RT_Y_F": "RT-Y graded F (shadow): RT-Y's gates and exits on the triggers FUDKII grades F",
             "FUDKII_CT_X": "CT-X: the fade under RT-X's exits",
             "FUDKII_CT_Y": "CT-Y: the fade under RT-Y's exits",
+            "FUDKII_CT_M": "CT-M (shadow): CT-Y's fade on a trigger the market is clearly against (≤ 45 % agree)",
             "FUDKII_RT_MCX": "RT-MCX: RT-X's exits on commodities",
         }.get(key.value, key.value)
         return {"policy": policy, "rows": rows}
@@ -4163,6 +4170,10 @@ class Engine:
             await self._gap_fade(sig, bar, underlying)
         except Exception as exc:  # the gap fade may never cost the counter route
             log.exception("gap_fade.failed", symbol=sig.symbol, error=str(exc)[:160])
+        try:
+            await self._market_fade(sig, bar, underlying)
+        except Exception as exc:  # nor the market fade (a shadow)
+            log.exception("market_fade.failed", symbol=sig.symbol, error=str(exc)[:160])
         legs = await self._counter_legs(underlying, bar, low_priority=not published(sig))
         atr_v = legs[0].atr if legs else 0.0
         dec = counter_route(legs, bullish=sig.direction is Direction.BULLISH, st_flipped="ST flip" in sig.reason)
@@ -4209,6 +4220,16 @@ class Engine:
         gap = ctx.get("gapDatr")
         if lim.gap_fade_datr is None or not ctx.get("openBar") or gap is None or gap < lim.gap_fade_datr:
             return None
+        plan = self.fade_plan(sig, ctx)
+        if plan is not None:
+            plan["gapDatr"] = gap
+        return plan
+
+    def fade_plan(self, sig: Signal, ctx: dict[str, Any] | None) -> dict[str, Any] | None:
+        """The fade of a trigger, as CT-Y's gap fade plans it: the opposite direction from the trigger's
+        close, the equity stop 1 ATR30 past the close, the walls on the fade's side as its targets —
+        or, with none, one target 1 ATR30 away. None off NSE cash or without an ATR30."""
+        ctx = ctx or {}
         und = self.underlyings.get(sig.symbol)
         if und is None or und.segment is not Segment.NSE_EQ:
             return None
@@ -4231,9 +4252,54 @@ class Engine:
         grade = "A" if rr >= pol.rr_a else "B" if rr >= pol.rr_b else "C" if rr >= pol.rr_c else "F"
         return {
             "direction": (Direction.BULLISH if fade_bull else Direction.BEARISH).value, "side": "CE" if fade_bull else "PE",
-            "entry": close, "stop": stop, "targets": targets, "rr": round(rr, 2), "grade": grade, "gapDatr": gap,
+            "entry": close, "stop": stop, "targets": targets, "rr": round(rr, 2), "grade": grade,
             "atr30": round(atr30, 4), "targetNote": "walls on the fade's side" if conf.targets else "no wall on the fade's side — 1 ATR30",
         }
+
+    async def _market_fade(self, sig: Signal, bar: UnifiedBar | None, underlying: Instrument) -> None:
+        """FUDKII-CT-M, a shadow (operator, 2026-10-03): fade a published NSE trigger the market is
+        clearly against — at most CT_M_MARKET_AGAINST_MAX of the NSE names past today's open its way —
+        with CT-Y's fade plan, under CT-M's own key and wallet. A trigger the market is not against is
+        recorded on CT-M's card as a skip with the share; a breadth that cannot be read decides nothing."""
+        key = StrategyKey.FUDKII_CT_M
+        if underlying.segment is not Segment.NSE_EQ or not self.book_trades(key.value, underlying.segment):
+            return
+        ctx = self._trigger_ctx(sig.signal_id, sig.direction)  # as logged at the trigger, else measured now
+        share = ctx.get("share")
+        if share is None:
+            await self._book_skip(key.value, sig, "market breadth could not be read — CT-M decides nothing", gate="breadth_unread")
+            return
+        if share > CT_M_MARKET_AGAINST_MAX:
+            await self._book_skip(key.value, sig, f"market not against the trigger: {share:.0%} of {ctx.get('names')} names agree "
+                                  f"> {CT_M_MARKET_AGAINST_MAX:.0%}", gate="market_with", breadth=share)
+            return
+        plan = self.fade_plan(sig, ctx)
+        if plan is None:
+            await self._book_skip(key.value, sig, "no fade plan (no ATR30)", gate="no_plan", breadth=share)
+            return
+        plan["breadth"] = share
+        fade = replace(
+            sig,
+            strategy=key,
+            direction=Direction(plan["direction"]),
+            stop=plan["stop"],
+            targets=tuple(plan["targets"]),
+            grade=plan["grade"],
+            rr=plan["rr"],
+            reason=(f"MARKET FADE of {sig.signal_id}: {share:.0%} of {ctx.get('names')} names agree with the trigger "
+                    f"≤ {CT_M_MARKET_AGAINST_MAX:.0%}; stop 1 ATR past the close"),
+            source_signal_id=sig.signal_id,
+            evidence={**dict(sig.evidence), "breadth": share, "rr": plan["rr"]},
+            context={
+                **dict(sig.context),
+                "market_fade": plan,
+                "confluence": {"stop": plan["stop"], "stop_zone": "1 ATR30 past the close", "targets": plan["targets"],
+                               "target_zones": [plan["targetNote"]], "grade": plan["grade"], "rr": plan["rr"]},
+            },
+        )
+        await self.ledger.event("counter.market_fade", {"signal_id": sig.signal_id, "symbol": sig.symbol, "fade_signal_id": fade.signal_id, **plan})
+        log.info("market_fade", symbol=sig.symbol, side=plan["side"], breadth=share, stop=plan["stop"], t1=plan["targets"][0])
+        await self._handle_signal(fade, bar, adopt=False)
 
     async def _gap_fade(self, sig: Signal, bar: UnifiedBar | None, underlying: Instrument) -> None:
         """CT-Y's entry on a 09:45 gap-with trigger: the plan above, through the ordinary entry

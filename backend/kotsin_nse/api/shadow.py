@@ -24,9 +24,9 @@ from ..strategy.regime_gates import trigger_verdicts
 from .daybook import _CSS, _fmt, render_ab
 
 #: the books whose status each trigger row shows, in the order the cards show them
-BOOKS = ("FUDKII", "FUDKII_RT_X", "FUDKII_RT_N", "FUDKII_RT_Y", "FUDKII_CT_X", "FUDKII_CT_Y", "FUDKII_RT_MCX")
+BOOKS = ("FUDKII", "FUDKII_RT_X", "FUDKII_RT_N", "FUDKII_RT_Y", "FUDKII_CT_X", "FUDKII_CT_Y", "FUDKII_CT_M", "FUDKII_RT_MCX")
 LABELS = {"FUDKII": "FUDKII", "FUDKII_RT_X": "RT-X", "FUDKII_RT_N": "RT-N", "FUDKII_RT_Y": "RT-Y",
-          "FUDKII_CT_X": "CT-X", "FUDKII_CT_Y": "CT-Y", "FUDKII_RT_MCX": "RT-MCX"}
+          "FUDKII_CT_X": "CT-X", "FUDKII_CT_Y": "CT-Y", "FUDKII_CT_M": "CT-M", "FUDKII_RT_MCX": "RT-MCX"}
 COUNTER = ("FUDKII_CT_X", "FUDKII_CT_Y")
 
 

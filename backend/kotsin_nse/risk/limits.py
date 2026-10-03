@@ -318,3 +318,10 @@ RT_Y_W1_LIMITS = replace(RT_Y_LIMITS, equity_stop_buffer_pct=1.0,
 #: kept off the trading tabs and shown on the Shadow page. Replay 1–28 Sep (inside RT-Y's purse):
 #: 16 trades, 11 won, −₹2,364 — DIXON −13,251, BLUESTARCO −12,782, SBICARD −7,340.
 RT_Y_F_LIMITS = replace(RT_Y_LIMITS, min_equity_stop_atr=None)  # RT-Y's floor is not the shadow's (mixed in the study)
+
+#: FUDKII-CT-M (operator, 2026-10-03), a shadow: CT-Y's fade plan and exits on every published NSE trigger the
+#: market is clearly against — at most this share of the NSE names past today's open the trigger's way (RT-Y
+#: trades only above 50 %). The 25 Sep - 1 Oct actual replay: 3 fades, all won (+₹19,127); over 24 Aug - 1 Oct on
+#: the option model the same rule lost before 11 Sep and won after — unproven, hence a shadow.
+CT_M_MARKET_AGAINST_MAX = 0.45
+CT_M_LIMITS = replace(CT_Y_LIMITS, gap_fade_datr=None)  # its own fade route, not CT-Y's 09:45 gap rule
