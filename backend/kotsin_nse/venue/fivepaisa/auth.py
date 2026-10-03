@@ -23,7 +23,9 @@ import base64
 import json
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 import pyotp
@@ -45,6 +47,7 @@ WINDOW_EDGE_TAIL_S = 2.0
 #: A session younger than this is not the reason a call failed, so an error path may not drop
 #: it. Longer than the 30s OTP window, so a genuine re-auth still gets a fresh code.
 MIN_SESSION_AGE_S = 90.0
+_IST = ZoneInfo("Asia/Kolkata")
 #: Vendor-wide subscription key that ships inside py5paisa; it identifies the API product, not the
 #: user, and the historical-data host rejects the request without it.
 APIM_KEY = "c89fab8d895a426d9e00db380b433027"
@@ -168,6 +171,19 @@ class Authenticator:
             log.info("fivepaisa.totp_window_wait", seconds=round(sleep_s, 1), reason=why)
             await asyncio.sleep(sleep_s)
 
+    async def _wait_for_login_hour(self) -> None:
+        """Hold a login until ``fp_login_not_before_ist`` on the day it is asked for — a second engine
+        on the same account leaves the post-midnight windows to the first."""
+        at = getattr(getattr(self, "s", None), "fp_login_not_before_ist", None)
+        if not at:
+            return
+        hh, mm = (int(x) for x in at.split(":"))
+        now = time.time()
+        start = datetime.fromtimestamp(now, _IST).replace(hour=hh, minute=mm, second=0, microsecond=0).timestamp()
+        if now < start:
+            log.info("fivepaisa.login_held", until_ist=at, seconds=round(start - now, 1))
+            await asyncio.sleep(start - now)
+
     async def _login(self) -> Session:
         s = self.s
         if not s.has_credentials:
@@ -175,6 +191,7 @@ class Authenticator:
                 "5paisa credentials missing — set KN_FP_CLIENT_CODE / KN_FP_APP_KEY / "
                 "KN_FP_ENCRYPT_KEY / KN_FP_USER_ID / KN_FP_PIN / KN_FP_TOTP_SECRET in backend/.env"
             )
+        await self._wait_for_login_hour()
         window = await self._wait_for_fresh_window()
         ip = await self.public_ip()
         code = pyotp.TOTP(s.fp_totp_secret.get_secret_value()).now()  # type: ignore[union-attr]

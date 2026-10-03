@@ -94,3 +94,25 @@ async def test_used_window_waits_for_the_next(clock: _Clock) -> None:
     assert window == base // TOTP_WINDOW_S + 1
     assert len(clock.slept) == 1
     assert clock.t - window * TOTP_WINDOW_S == pytest.approx(WINDOW_EDGE_HEAD_S)
+
+
+def _held(at: str | None) -> Authenticator:
+    a = _auth()
+    a.s = type("S", (), {"fp_login_not_before_ist": at})()
+    return a
+
+
+async def test_a_second_engine_holds_its_post_midnight_login_until_its_hour(clock: _Clock) -> None:
+    """Two engines on one account (2026-10-03): the second leaves the post-midnight windows to the
+    first. 2026-10-05 00:01:00 IST → held to 00:45; at 09:00 the same day it logs in at once."""
+    clock.t = 1_791_138_660.0  # 2026-10-05 00:01:00 IST
+    await _held("00:45")._wait_for_login_hour()
+    assert clock.slept == [pytest.approx(44 * 60)]
+    clock.slept.clear()
+    clock.t = 1_791_052_200.0 + 9 * 3600  # 09:00 IST
+    await _held("00:45")._wait_for_login_hour()
+    assert clock.slept == []
+    await _held(None)._wait_for_login_hour()  # unset: the live engine's behaviour, unchanged
+    clock.t = 1_791_138_660.0
+    await _held(None)._wait_for_login_hour()
+    assert clock.slept == []

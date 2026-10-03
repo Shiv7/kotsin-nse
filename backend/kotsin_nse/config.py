@@ -101,6 +101,11 @@ class Settings(BaseSettings):
     fp_app_source: int = 23312
     fp_app_name: str | None = None
     fp_public_ip: str | None = None  # RMS rejects orders when this is wrong; auto-detected if unset
+    #: "HH:MM" IST: no login before this time of day. For a second engine on the same 5paisa account
+    #: (operator, 2026-10-03: phase34 and phase35 side by side): the TOTP code is single-use per 30 s
+    #: window and every token dies at 23:59:59, so both engines re-log after midnight — this one
+    #: waits until the first has logged in (~00:20) instead of racing it for the same window.
+    fp_login_not_before_ist: str | None = None
 
     # ---- universe -----------------------------------------------------------------------------
     segments: str = "NSE_EQ"  # comma-separated Segment names
