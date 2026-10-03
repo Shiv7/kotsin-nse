@@ -39,7 +39,7 @@ from ..ledger.db import events, rejections, signals, trades
 from ..market.session import IST, TF_SECONDS, ist_day, ist_hm, ist_today, to_ist
 from ..strategy.catalog import BOOKS, LIVE_KEYS
 from ..strategy.keys import ALL_KEYS, SHADOW_BOOKS, StrategyKey
-from . import daybook, export, shadow
+from . import daybook, export, peer, shadow
 from .ws import Hub, handle, pump
 
 
@@ -98,6 +98,8 @@ def build_app(engine: Engine) -> FastAPI:
     temp_page = daybook.TemporaryPage(engine.s.data_dir)
     api = APIRouter(prefix="/api")
     hot_stocks_service = HotStocksService(engine, engine.s.data_dir / "hotstocks-sectors.tsv")
+    # this engine's name and its twin's books (phase 34 / phase 35 side by side, 2026-10-03)
+    peer.register(api, engine.s.data_dir)
 
     # -- health & system ---------------------------------------------------------------------------
 

@@ -13,11 +13,12 @@ const TONE: Record<string, string> = {
  * that ran in paper for eight weeks while everyone believed it was live; the only tell was one
  * line in a boot banner nobody re-read.
  */
-export function ModeBanner({ health, error }: { health: Health | null; error: string | null }) {
+export function ModeBanner({ health, error, engine = '' }: { health: Health | null; error: string | null; engine?: string }) {
   const mode = health?.mode ?? 'SHADOW'
   const armed = health?.armed_until ?? null
   return (
     <div className="flex items-center gap-3 border-b border-slate-800 bg-slate-900 px-4 py-2 text-xs">
+      {engine && <span className="rounded bg-violet-900/60 px-2 py-0.5 font-bold tracking-wide text-violet-100">{engine}</span>}
       <span className={cls('rounded px-2 py-0.5 font-bold tracking-wide', TONE[mode] ?? TONE.SHADOW)}>{mode}</span>
       {armed && <span className="text-amber-300">armed until {ist(armed, true)} IST</span>}
       {health?.halted && <span className="rounded bg-rose-900 px-2 py-0.5 font-semibold text-rose-100">HALTED</span>}
@@ -32,7 +33,7 @@ export function ModeBanner({ health, error }: { health: Health | null; error: st
           {health.positions_open} open
         </span>
       )}
-      <span className="ml-auto text-slate-600">{error ? <span className="text-rose-400">{error}</span> : 'kotsin-nse'}</span>
+      <span className="ml-auto text-slate-600">{error ? <span className="text-rose-400">{error}</span> : engine ? `kotsin-nse · ${engine}` : 'kotsin-nse'}</span>
     </div>
   )
 }
