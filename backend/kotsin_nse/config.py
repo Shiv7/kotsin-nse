@@ -274,7 +274,9 @@ class Settings(BaseSettings):
 
     # ---- cost model ----------------------------------------------------------------------------
     # SUPERSEDED 2026-09-26: every rate below now comes from <data_dir>/charges.toml (risk/charge_rates.py,
-    # per product, Zerodha's table). These fields stay only so an .env that sets KN_COST_* still boots.
+    # per product). These fields stay only so an .env that sets KN_COST_* still boots; NOTHING reads
+    # them (2026-10-03), and the engine lists any that are set in its boot notes as ignored. The
+    # account's brokerage is ₹20 per executed order (operator, 2026-10-03) — charges.toml's value.
     # Measured on this book, not assumed: at ₹33,000/position the NSE cash round trip was 0.299%,
     # of which 81% was flat brokerage (₹40/order × 2) — see kotsin-box/SESSION-PRIMER.md. These are
     # the numbers the backtester and the paper filler both use, so a strategy cannot look profitable

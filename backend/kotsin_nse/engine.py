@@ -787,6 +787,14 @@ class Engine:
         if warn:
             self.boot_notes.append(warn)
             log.warning("calendar.no_holidays", detail=warn)
+        ignored = sorted(k for k in self.s.model_fields_set if k.startswith("cost_"))
+        if ignored:
+            # Kept in Settings only so an old .env still boots; nothing reads them (review,
+            # 2026-10-03). A value set there and believed is how ₹40 vs ₹20 went unnoticed.
+            note = (f"ignored: {', '.join('KN_' + k.upper() for k in ignored)} — every charge comes from "
+                    f"{self.s.data_dir / 'charges.toml'} (the /charges page)")
+            self.boot_notes.append(note)
+            log.warning("config.cost_keys_ignored", keys=ignored)
 
         if not self.s.has_credentials:
             self.boot_notes.append(
@@ -1000,16 +1008,21 @@ class Engine:
             self._decided |= {(str(k[0]), int(k[1])) for k in d.get("keys") or []}
             self._decided_saved = len(self._decided)
 
-    def _save_decided(self) -> None:
-        if len(self._decided) == self._decided_saved:
+    def _save_decided(self, keys: list[tuple[str, int]] | None = None) -> None:
+        """Persist today's decided buckets. ``keys`` is a copy taken ON the event loop when this runs
+        in a worker thread: iterating the live set there raced ``_decide`` adding to it ("set changed
+        size during iteration"), and the one try around housekeeping then skipped every duty after
+        it (review, 2026-10-03)."""
+        snapshot = list(self._decided) if keys is None else keys
+        if len(snapshot) == self._decided_saved:
             return
         path = self._decided_path()
         tmp = path.with_suffix(".tmp")
         today = ist_today()
-        keep = sorted(k for k in self._decided if ist_day(k[1]) == today)
+        keep = sorted(k for k in snapshot if ist_day(k[1]) == today)
         tmp.write_text(json.dumps({"day": today.isoformat(), "keys": keep}), encoding="utf-8")
         os.replace(tmp, path)
-        self._decided_saved = len(self._decided)
+        self._decided_saved = len(snapshot)
 
     async def fudkii_today(self) -> list[dict[str, Any]]:
         """Today's FUDKII signals from 09:00 IST, one row each, as the ledger holds them."""
@@ -5216,7 +5229,9 @@ class Engine:
         limit_ms = self.matcher.age_limit_ms(now)
         stale: dict[str, Instrument] = {}
         for p in self.positions.values():
-            if p.status != "OPEN" or not is_open(p.underlying.segment, now):
+            # the calendar is required: without it this raised TypeError on every pass with a position
+            # open, swallowed as held_quotes.failed — no held quote was ever refreshed (review, 2026-10-03)
+            if p.status != "OPEN" or not is_open(p.underlying.segment, now, self.calendar):
                 continue
             code = p.instrument.scrip_code
             q, b = self.quotes.get(code), self.books.get(code)
@@ -5646,6 +5661,10 @@ class Engine:
             want.update(leg for leg, _role in self._tape_legs(w["symbol"]))
         return want
 
+    def _held_codes(self) -> set[str]:
+        """The contracts of every OPEN position."""
+        return {p.instrument.scrip_code for p in self.positions.values() if p.status == "OPEN"}
+
     async def _follow_depth(self, instruments: list[Instrument]) -> None:
         """Put these contracts on the depth channel now, ahead of an order, and register the same
         interest on the tape so ``_sync_depth`` knows they are wanted.
@@ -5680,7 +5699,13 @@ class Engine:
             return
         want = self.depth_wanted()
         if len(want) > self.s.depth_max_subscriptions:
-            want = set(sorted(want)[: self.s.depth_max_subscriptions])
+            # Over the cap, what is HELD keeps its book first — an exit with no depth to sell into
+            # is a refused exit. It used to keep the lowest scrip codes, which says nothing about
+            # what is held (review, 2026-10-03). The rest fill the remaining slots as before.
+            held_codes = self._held_codes()
+            held = sorted(want & held_codes)
+            rest = sorted(want - held_codes)
+            want = set((held + rest)[: self.s.depth_max_subscriptions])
         cat = self.catalogue_loader.catalogue
         add = [i for c in want - self._depth_following if (i := cat.get(c)) is not None]
         drop = [
@@ -5782,7 +5807,7 @@ class Engine:
                 ):
                     self._fudkii_scan_task = asyncio.create_task(self.scan_fudkii(), name="fudkii-rescan")
                 if len(self._decided) != self._decided_saved:
-                    await asyncio.to_thread(self._save_decided)
+                    await asyncio.to_thread(self._save_decided, list(self._decided))
                 if self.alerts.dirty and self.alerts.store_dir is not None:
                     snap = self.alerts.snapshot()  # on the loop, where the rings are mutated
                     await asyncio.to_thread(self.alerts.write, snap)

@@ -28,6 +28,7 @@ from typing import Any
 from ..bars.pivots import WALL_MIN_STRENGTH, Zone
 from ..bars.unified import UnifiedBar
 from ..instrument.select import map_levels_to_option
+from ..market.session import ist_hm
 
 #: Delta is restamped at least this often. Spot moves, so a level computed off a stale delta is a
 #: level in the wrong place.
@@ -132,10 +133,10 @@ def same_slot_volume(history: list[UnifiedBar], bar: UnifiedBar) -> dict[str, An
     Median, not mean: one event day in the lookback would otherwise move the baseline more than the
     bar being judged.
     """
-    slot = bar.ist[-5:] if getattr(bar, "ist", None) else None
-    if not slot:
-        return None
-    prior = [b.volume for b in history if b.ts != bar.ts and getattr(b, "ist", "")[-5:] == slot]
+    # The slot is the bar's IST HH:MM. It read ``bar.ist``, which UnifiedBar has never had, so the
+    # card's volumeBaseline was always None (review, 2026-10-03).
+    slot = ist_hm(bar.ts)
+    prior = [b.volume for b in history if b.ts != bar.ts and ist_hm(b.ts) == slot]
     if len(prior) < 3:
         return None
     med = statistics.median(prior)
