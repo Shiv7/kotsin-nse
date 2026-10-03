@@ -242,3 +242,21 @@ def test_the_health_page_fails_on_a_recent_programming_error_and_a_basis_mismatc
     checks = {c["name"]: c for c in e.health_snapshot()["checks"]}
     assert checks["duty_errors"]["ok"] is False and "ExposureVerdict" in checks["duty_errors"]["detail"]
     assert checks["zones"]["ok"] is False and "VEDL" in checks["zones"]["detail"]
+
+
+def test_the_day_roll_clears_per_day_state_and_a_withheld_auction_bar_is_shown(settings):
+    """Review, 2026-10-03: option_volume (a running max on the snapshot path) and the withheld 15:15
+    bars (_basis_mismatch: written, never read) were never cleared or surfaced."""
+    from datetime import date
+
+    from kotsin_nse.engine import Engine
+
+    e = Engine(settings)
+    e._basis_mismatch["TMPV"] = ("2026-10-01", 286.6, 766.0)
+    zones = e._zones_check()
+    assert not zones.ok and "TMPV" in zones.detail and "auction bar withheld" in zones.detail
+    e.option_volume["123"] = 125_000.0
+    e._daily_provisional_asked["X"] = 1.0
+    e._roll_day_state(date(2026, 10, 6))
+    assert not e.option_volume and not e._basis_mismatch and not e._daily_provisional_asked
+    assert e._zones_check().ok

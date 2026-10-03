@@ -693,7 +693,8 @@ class Engine:
         #: names with no zones today and why ("history", "provisional", "basis") — bars/zones.py
         self.zone_refusals: dict[str, str] = {}
         #: sessions whose daily and 30m series are on different price bases (a corporate action):
-        #: symbol -> (day, official close, 30m close)
+        #: symbol -> (day, official close, 30m close) — the 15:15 auction bar was withheld for them;
+        #: shown on the zones health line, cleared when the series heals and at the day roll
         self._basis_mismatch: dict[str, tuple[str, float, float]] = {}
         #: the front future's candles per symbol for the current trigger bar (see _fut_context)
         self._fut_cache: dict[str, tuple[int, dict[str, Any] | None]] = {}
@@ -1421,6 +1422,7 @@ class Engine:
             series = self.store.bars(inst.symbol, DECISION_TF)
             if not series:
                 continue
+            self._basis_mismatch.pop(inst.symbol, None)  # re-judged below: a healed series clears it
             official = {ist_day(b.ts): b.close for b in self.store.bars(inst.symbol, "1d")
                         if is_official(b) and b.close > 0 and to_ist(b.ts).time() == dt_time(0, 0)}
             have = {int(b.ts): b for b in series}
@@ -6465,6 +6467,10 @@ class Engine:
         self.zone_refusals.clear()
         self._daily_due = self._legs_due = True
         self._daily_provisional_asked.clear()
+        # 5paisa's TotalQty restarts at 0 each session; the snapshot writer keeps a running max, so a
+        # REST-only strike kept yesterday's total until today's passed it (review, 2026-10-03)
+        self.option_volume.clear()
+        self._basis_mismatch.clear()
         self._legs_reanchor_done.clear()
         self._daily_refresh_done.clear()
         self._handled_signals.clear()
@@ -6494,14 +6500,18 @@ class Engine:
         for why in self.zone_refusals.values():
             reasons[why.split(":")[0]] = reasons.get(why.split(":")[0], 0) + 1
         basis = sorted(k for k, v in self.zone_refusals.items() if v.startswith("basis"))
+        withheld = sorted(self._basis_mismatch)
         provisional = sorted(daily.provisional) if daily is not None else []
         late = (not self.booting and self.calendar.is_trading_day(ist_day(now)) and ist_hm(now) >= PROVISIONAL_ALARM_HM
                 and bool(provisional))
         detail = (", ".join(f"{k} {n}" for k, n in sorted(reasons.items())) or "every name has levels") + (
             f" — basis mismatch: {', '.join(basis[:6])}" if basis else "") + (
+            f" — 15:15 auction bar withheld (daily/30m basis): {', '.join(withheld[:6])}" if withheld else "") + (
             f" — provisional {'after ' + PROVISIONAL_ALARM_HM if late else 'candle'}: {len(provisional)} ({', '.join(provisional[:6])})"
             if provisional else "")
-        return Check("zones", not basis and not late, detail=detail, value=float(len(basis) + (len(provisional) if late else 0)))
+        ok = not basis and not withheld and not late
+        return Check("zones", ok, detail=detail,
+                     value=float(len(basis) + len(withheld) + (len(provisional) if late else 0)))
 
     def _latency_check(self) -> Check:
         """Bar close → the decision starting (the exchange-candle reconcile is inside it), and the
