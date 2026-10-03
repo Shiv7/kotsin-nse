@@ -36,6 +36,7 @@ import websockets
 from ...config import Settings
 from ...domain import Instrument
 from .auth import Authenticator
+from .hub import LINE_LIMIT, HubLink
 
 log = structlog.get_logger(__name__)
 
@@ -46,6 +47,22 @@ OPERATION = {"s": "Subscribe", "u": "Unsubscribe"}
 MAX_ENTRIES_PER_FRAME = 200
 #: a connection that lived this long was healthy: the next drop starts the backoff from 1 s again
 HEALTHY_CONNECTION_S = 60.0
+#: the twin reading from a feed hub retries this often at most: the hub is on this machine
+HUB_BACKOFF_MAX_S = 5.0
+
+
+def row_channel_code(row: dict[str, Any]) -> tuple[str, str] | None:
+    """Which subscription a broker row answers — the channel ``_dispatch`` routes it to, and its code."""
+    code = row.get("Token") or row.get("ScripCode")
+    if code is None:
+        return None
+    if "Details" in row or "MarketDepthData" in row:
+        return "md", str(code)
+    if "OpenInterest" in row:
+        return "oi", str(code)
+    if "LastRate" in row or "Token" in row:
+        return "mf", str(code)
+    return None
 
 
 def build_frame(
@@ -153,6 +170,17 @@ class FivePaisaFeed:
         self._lock = asyncio.Lock()
         #: expiry of the token this socket was opened with; None until connected
         self.token_expires_at: float | None = None
+        # -- feed hub (hub.py; phase 34 and phase 35 on one broker socket, 2026-10-04) --------------
+        #: serving side: every raw message, the instant it is read, and the socket's up/down
+        self.tap: Callable[[str | bytes, float], None] | None = None
+        self.on_state: Callable[[bool], None] | None = None
+        #: serving side: twin -> channel -> code -> instrument the twin asked for (held at the broker)
+        self._twins: dict[str, dict[str, dict[str, Instrument]]] = {}
+        #: reading side: the hub to read from instead of opening a broker socket
+        self.hub: tuple[str, int] | None = None
+        self.hub_lines = 0
+        self.hub_lag_ms = 0.0
+        self.hub_lag_max_ms = 0.0
 
     # -- subscription state ----------------------------------------------------------------------
 
@@ -163,6 +191,8 @@ class FivePaisaFeed:
             self._desired[channel][i.scrip_code] = i
             self._since.setdefault(channel, {})[i.scrip_code] = now
         self.health.subscriptions = {k: len(v) for k, v in self._desired.items()}
+        held = self._twin_codes(channel)
+        fresh = [i for i in fresh if i.scrip_code not in held]  # already at the broker for the twin
         if fresh and self._ws is not None:
             await self._send_batched(channel, "s", fresh)
 
@@ -179,8 +209,60 @@ class FivePaisaFeed:
         for i in gone:
             self._since.get(channel, {}).pop(i.scrip_code, None)
         self.health.subscriptions = {k: len(v) for k, v in self._desired.items()}
+        held = self._twin_codes(channel)
+        gone = [i for i in gone if i.scrip_code not in held]  # the twin still wants it
         if gone and self._ws is not None:
             await self._send_batched(channel, "u", gone)
+
+    # -- the twin's subscriptions (serving side) ---------------------------------------------------
+
+    def _twin_codes(self, channel: str, *, but: str | None = None) -> set[str]:
+        return {c for t, chans in self._twins.items() if t != but for c in chans.get(channel, {})}
+
+    def pinned_counts(self) -> dict[str, int]:
+        return {ch: len(self._twin_codes(ch)) for ch in self._desired}
+
+    async def pin(self, twin: str, channel: str, op: str, instruments: list[Instrument]) -> None:
+        """The twin's subscribe / unsubscribe, held at the broker on its behalf: a code this engine
+        or another twin already holds is not sent again, nor dropped while either still wants it."""
+        if channel not in self._desired:
+            return
+        mine = self._twins.setdefault(twin, {}).setdefault(channel, {})
+        others = self._twin_codes(channel, but=twin) | set(self._desired[channel])
+        if op == "s":
+            fresh = [i for i in instruments if i.scrip_code not in mine]
+            for i in fresh:
+                mine[i.scrip_code] = i
+            send = [i for i in fresh if i.scrip_code not in others]
+        else:
+            send = [mine.pop(i.scrip_code) for i in instruments if i.scrip_code in mine]
+            send = [i for i in send if i.scrip_code not in others]
+        if send and self._ws is not None:
+            await self._send_batched(channel, op, send)
+
+    async def unpin_all(self, twin: str) -> None:
+        for channel, codes in list(self._twins.get(twin, {}).items()):
+            await self.pin(twin, channel, "u", list(codes.values()))
+        self._twins.pop(twin, None)
+
+    def _wants(self, row: dict[str, Any]) -> bool:
+        """Every engine reads only what it subscribed, as on a socket of its own: the serving side
+        skips the rows only its twin asked for, the reading side the rows only the hub's engine did."""
+        cc = row_channel_code(row)
+        if cc is None:
+            return True
+        channel, code = cc
+        if code in self._desired.get(channel, {}):
+            return True
+        if self.hub is not None:
+            return False
+        return code not in self._twin_codes(channel)
+
+    def hub_stats(self) -> dict[str, Any] | None:
+        if self.hub is None:
+            return None
+        return {"role": "connect", "address": f"{self.hub[0]}:{self.hub[1]}", "messages": self.hub_lines,
+                "lag_ms": round(self.hub_lag_ms, 2), "lag_max_ms": round(self.hub_lag_max_ms, 2)}
 
     async def _send_batched(self, channel: str, op: str, instruments: list[Instrument]) -> None:
         ws = self._ws
@@ -218,7 +300,7 @@ class FivePaisaFeed:
                     backoff = 1.0
                 log.warning("feed.reconnect", error=str(exc), backoff_s=round(backoff, 1))
                 await asyncio.sleep(backoff + random.uniform(0, 0.5))
-                backoff = min(backoff * 2, 60.0)
+                backoff = min(backoff * 2, HUB_BACKOFF_MAX_S if self.hub is not None else 60.0)
 
     async def stop(self) -> None:
         self._stop.set()
@@ -236,6 +318,9 @@ class FivePaisaFeed:
             await self._ws.close()
 
     async def _connect_and_read(self) -> None:
+        if self.hub is not None:
+            await self._connect_hub_and_read()
+            return
         session = await self.auth.token()
         self.token_expires_at = session.expires_at
         url = f"{self.s.endpoints.ws}{session.access_token}|{session.client_code}"
@@ -245,9 +330,8 @@ class FivePaisaFeed:
             self.health.connected = True
             self.health.connected_since = time.time()
             log.info("feed.connected", subscriptions=self.health.subscriptions)
-            for channel, wanted in self._desired.items():
-                if wanted:
-                    await self._send_batched(channel, "s", list(wanted.values()))
+            await self._subscribe_everything()
+            self._state(True)
             again = self._connects > 0
             self._connects += 1
             if self.on_connect is not None:
@@ -262,6 +346,65 @@ class FivePaisaFeed:
                 async with self._lock:
                     self._ws = None
                 self.health.connected = False
+                self._state(False)
+
+    async def _subscribe_everything(self) -> None:
+        """A fresh broker socket: this engine's desired set and every code a twin holds through it."""
+        for channel, wanted in self._desired.items():
+            union = {**wanted, **{c: i for t in self._twins.values() for c, i in t.get(channel, {}).items()}}
+            if union:
+                await self._send_batched(channel, "s", list(union.values()))
+
+    def _state(self, up: bool) -> None:
+        if self.on_state is not None:
+            try:
+                self.on_state(up)
+            except Exception as exc:  # noqa: BLE001 - the twin never costs the socket
+                log.warning("feed_hub.state_failed", error=str(exc)[:120])
+
+    async def _connect_hub_and_read(self) -> None:
+        """The twin's side: read the hub's lines as if they came off a broker socket of its own.
+        ``connected`` follows the hub's broker socket (``#up`` / ``#down``), not the local link."""
+        assert self.hub is not None
+        host, port = self.hub
+        reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port, limit=LINE_LIMIT), timeout=5.0)
+        async with self._lock:
+            self._ws = HubLink(writer)
+        self.health.connected_since = time.time()
+        log.info("feed.hub_connected", hub=f"{host}:{port}", subscriptions=self.health.subscriptions)
+        try:
+            for channel, wanted in self._desired.items():
+                if wanted:
+                    await self._send_batched(channel, "s", list(wanted.values()))
+            again = self._connects > 0
+            self._connects += 1
+            if self.on_connect is not None:
+                try:
+                    await self.on_connect(again)
+                except Exception as exc:  # noqa: BLE001 - a repair hook never costs the link
+                    log.warning("feed.on_connect_failed", error=str(exc)[:160])
+            while True:
+                line = await reader.readline()
+                if not line:
+                    raise ConnectionError("feed hub closed the link")
+                if line.startswith(b"#"):
+                    self.health.connected = line.strip() == b"#up"
+                    continue
+                stamp, _, raw = line.partition(b" ")
+                try:
+                    lag = max(0.0, (time.time() - float(stamp)) * 1000)
+                except ValueError:
+                    self.health.parse_errors += 1
+                    continue
+                self.hub_lines += 1
+                self.hub_lag_ms = lag if self.hub_lines == 1 else self.hub_lag_ms * 0.99 + lag * 0.01
+                self.hub_lag_max_ms = max(self.hub_lag_max_ms, lag)
+                await self._handle(raw.rstrip(b"\r\n"))
+        finally:
+            async with self._lock:
+                self._ws = None
+            self.health.connected = False
+            writer.close()
 
     # -- message handling ---------------------------------------------------------------------------
 
@@ -271,6 +414,12 @@ class FivePaisaFeed:
         # is the data — rather than "how long since we last got round to it", which is what a
         # dispatch-time stamp measures and why a busy loop looked like a stale exchange.
         arrived = time.time()
+        if self.tap is not None:
+            # to the twin before any work of ours: its delay is the loopback hop, not our processing
+            try:
+                self.tap(raw, arrived)
+            except Exception as exc:  # noqa: BLE001 - the twin never costs the socket
+                log.warning("feed_hub.tap_failed", error=str(exc)[:120])
         self.health.messages += 1
         self.health.last_message_ts = arrived
         try:
@@ -280,7 +429,7 @@ class FivePaisaFeed:
             return
         rows = payload if isinstance(payload, list) else [payload]
         for row in rows:
-            if not isinstance(row, dict):
+            if not isinstance(row, dict) or not self._wants(row):
                 continue
             try:
                 await self._dispatch(row, arrived)

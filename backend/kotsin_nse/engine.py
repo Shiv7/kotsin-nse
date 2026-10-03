@@ -195,6 +195,7 @@ from .strategy.fukaa import Fukaa, FukaaConfig, select
 from .strategy.keys import ALL_KEYS, INITIAL_INR, SHADOW_BOOKS, SHADOW_OF, StrategyKey
 from .strategy.regime_gates import rt_gate_reasons, trigger_verdicts, volume_labels
 from .venue.fivepaisa.auth import Authenticator
+from .venue.fivepaisa.hub import HubServer, read_hub_config
 from .venue.fivepaisa.rest import FivePaisaREST
 from .venue.fivepaisa.ws import FivePaisaFeed
 
@@ -537,6 +538,8 @@ class Engine:
             on_oi=self._on_oi,
             on_connect=self._on_feed_connect,
         )
+        #: the feed hub this engine serves to its twin (venue/fivepaisa/hub.py), when it does
+        self.feed_hub: HubServer | None = None
         self.aggregator = Aggregator(self.store, on_bar_close=self._on_bar_close)
         #: Advisory books — they read the same closed bars the decision path does and emit
         #: alerts only. Deliberately outside the gateway: nothing here can place an order.
@@ -804,6 +807,18 @@ class Engine:
             asyncio.create_task(self._housekeeping(), name="housekeeping"),
         ]
         if self.s.engine_enabled and self.s.feed_enabled and self.s.has_credentials:
+            # one broker socket for two engines (data/engine.json "feed_hub", 2026-10-04): serve it to
+            # the twin, or read the twin's instead of opening one
+            hub = read_hub_config(self.s.data_dir)
+            if hub.connect is not None:
+                self.feed.hub = hub.connect
+            elif hub.serve is not None:
+                try:
+                    self.feed_hub = HubServer(self.feed, *hub.serve)
+                    await self.feed_hub.start()
+                except OSError as exc:  # the trading engine never waits on its twin's plumbing
+                    self.feed_hub = None
+                    log.error("feed_hub.serve_failed", address=f"{hub.serve[0]}:{hub.serve[1]}", error=str(exc)[:160])
             self._tasks.append(asyncio.create_task(self.feed.run(), name="feed"))
             self._tasks.append(asyncio.create_task(self._keep_held_quotes(), name="held-quotes"))
             self._live_from_ts = time.time()
@@ -1047,6 +1062,8 @@ class Engine:
         except Exception as exc:  # noqa: BLE001 - a failed save must not block the shutdown
             log.warning("alerts.save_failed", error=str(exc)[:120])
         await self.feed.stop()
+        if self.feed_hub is not None:
+            await self.feed_hub.stop()
         await self.committee.stop()
         try:
             await asyncio.to_thread(self.archive.flush, final=True)
@@ -6274,6 +6291,8 @@ class Engine:
                 "reconnects": fh.reconnects,
                 "silence_s": fh.silence_s,
                 "subscriptions": fh.subscriptions,
+                # one broker socket for two engines: who serves, who reads, and the hop's delay
+                "hub": self.feed_hub.stats() if self.feed_hub is not None else self.feed.hub_stats(),
             },
             "bars": self.aggregator.stats() | self.store.stats() | {"duplicate_closes": self._duplicate_closes},
             # broker snapshots with no bid/ask: held quotes confirmed as current / kept as they were
