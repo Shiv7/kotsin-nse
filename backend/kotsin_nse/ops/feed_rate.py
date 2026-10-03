@@ -11,13 +11,21 @@ I see the real-time websocket"). Two questions, answered from the frames themsel
   that sends the latest state instead of every trade (conflation) shows less — the share it shows is
   ``volume_seen_pct``, and 100 % means a tick-by-tick feed.
 
-Pure counters fed from the tick path; reset each IST day by the caller.
+Pure counters fed from the tick path; reset each IST day by the caller. The gaps are a rolling
+window (the latest ``keep_gaps``), and ``snapshot`` is held for ``SNAPSHOT_TTL_S``: ``/api/health``
+asks for it every 3-4 s per open tab, and recomputing every contract's medians took ~72 ms on the
+event loop at 3,000 contracts (review, 2026-10-03).
 """
 
 from __future__ import annotations
 
 import statistics
+import time
+from collections import deque
 from dataclasses import dataclass
+
+#: how long a computed snapshot is served again before it is recomputed
+SNAPSHOT_TTL_S = 10.0
 
 
 @dataclass(slots=True)
@@ -32,24 +40,27 @@ class _Code:
     qty_seen: int = 0
     #: frames whose TotalQty grew — a frame that repeats the same state carries no new trade
     trade_frames: int = 0
-    gaps: list[float] | None = None
+    #: the latest gaps between frames — a rolling window: the first 400 described the open, not the day
+    gaps: deque[float] | None = None
 
 
 class FeedRate:
     def __init__(self, keep_gaps: int = 400) -> None:
         self.keep_gaps = keep_gaps
         self._codes: dict[str, _Code] = {}
+        self._held: tuple[float, int, dict[str, object]] | None = None
 
     def reset(self) -> None:
         self._codes.clear()
+        self._held = None
 
     def on_tick(self, code: str, segment: str, recv_ts: float, last_qty: int, total_qty: int) -> None:
         c = self._codes.get(code)
         if c is None:
-            c = self._codes[code] = _Code(segment=segment, gaps=[])
+            c = self._codes[code] = _Code(segment=segment, gaps=deque(maxlen=self.keep_gaps))
         if c.frames:
             gap = recv_ts - c.last_recv
-            if c.gaps is not None and len(c.gaps) < self.keep_gaps and gap >= 0:
+            if c.gaps is not None and gap >= 0:
                 c.gaps.append(gap)
         else:
             c.first_recv = recv_ts
@@ -63,9 +74,18 @@ class FeedRate:
                 c.qty_seen += max(0, int(last_qty))
             c.last_total = max(c.last_total, total_qty)
 
-    def snapshot(self, *, min_frames: int = 20) -> dict[str, object]:
+    def snapshot(self, *, min_frames: int = 20, now: float | None = None) -> dict[str, object]:
         """Per segment: how many contracts, their median frames a minute and gap, and the share of
-        the traded volume the frames' own trade sizes account for."""
+        the traded volume the frames' own trade sizes account for. Served from memory for
+        ``SNAPSHOT_TTL_S``."""
+        now = time.time() if now is None else now
+        if self._held is not None and self._held[1] == min_frames and 0 <= now - self._held[0] < SNAPSHOT_TTL_S:
+            return self._held[2]
+        out = self._compute(min_frames)
+        self._held = (now, min_frames, out)
+        return out
+
+    def _compute(self, min_frames: int) -> dict[str, object]:
         by: dict[str, list[_Code]] = {}
         for c in self._codes.values():
             if c.frames >= min_frames and c.last_recv > c.first_recv:

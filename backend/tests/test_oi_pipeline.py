@@ -353,3 +353,21 @@ def test_a_level_re_sent_on_a_saturday_is_no_candle(settings):
     e = _engine(settings)
     e._note_oi("48900", 40_321_800.0, _at(sat, "10:00"))
     assert e.oi_candles.forming("48900", "1d") is None, "the engine asks its calendar"
+
+
+def test_the_feed_rate_keeps_a_rolling_window_and_answers_the_health_poll_from_memory():
+    """Review, 2026-10-03: the gaps kept were the FIRST 400 of the day (the open), and every
+    /api/health poll recomputed every contract's medians on the event loop."""
+    f = FeedRate(keep_gaps=400)
+    t = 0.0
+    for _ in range(501):  # 500 one-second gaps at the open
+        f.on_tick("A", "NSE_FO", t, 1, 0)
+        t += 1.0
+    for _ in range(400):  # then 400 nine-second ones
+        t += 9.0
+        f.on_tick("A", "NSE_FO", t, 1, 0)
+    assert f.code("A")["gap_s_median"] == 9.0, "the latest 400 gaps, not the open's"
+    snap = f.snapshot(now=100.0)
+    assert f.snapshot(now=105.0) is snap and f.snapshot(now=111.0) is not snap
+    f.reset()
+    assert f.snapshot(now=112.0) == {}
