@@ -729,9 +729,12 @@ class AlertEngine:
                     continue
                 # Nothing it reads has moved since the last pass: the same inputs give the same
                 # numbers, so they are not recomputed — it re-derived every card of the day every
-                # second (review, 2026-10-03). The marks are still current, and say so.
+                # second (review, 2026-10-03). The marks are still current, and say so. The book's
+                # age is an input too: the exit walks leave the ladder for the touch when it crosses
+                # MAX_QUOTE_AGE_S with nothing else moving (a stalled feed, after the close).
+                stale_book = (now - book.ts > entry_model.MAX_QUOTE_AGE_S) if book is not None else None
                 inputs = (getattr(q, "ltp", None), getattr(q, "bid", None), getattr(q, "ask", None), round(float(spot), 4),
-                          getattr(book, "ts", None))
+                          getattr(book, "ts", None), stale_book)
                 ident = (a.book, a.symbol, a.ts, a.fired_at)
                 if self._card_inputs.get(ident) == inputs:
                     card["marksTs"] = now
