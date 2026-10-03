@@ -121,6 +121,9 @@ class Settings(BaseSettings):
     #: closing OI every OI change is measured from when the engine's own archive lacks that day.
     #: Public exchange data, no broker session needed; off only for an engine with no internet.
     oi_bhavcopy_enabled: bool = True
+    #: broker calls in flight during the boot backfill, each still paced 0.15 s (it was one at a
+    #: time: 153 s, blind, for a mid-session restart)
+    backfill_concurrency: int = 4
     #: rolling window for the **tape** (``quotes``): day files kept after each flush (sessions,
     #: not calendar days — a file exists only for a day something was recorded); 0 keeps
     #: everything. Fifteen sessions is three weeks of second-by-second replays for ~120 MB

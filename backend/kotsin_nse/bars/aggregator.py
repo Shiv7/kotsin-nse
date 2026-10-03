@@ -219,7 +219,7 @@ class Aggregator:
 
         qty = self._volume_delta(st, tick)
         new_high, new_low = self._day_extreme_moves(st, tick)
-        await self._apply(st, segment, ts, price, qty, new_high, new_low)
+        await self._apply(st, segment, ts, price, qty, new_high, new_low, open_ts=session_open_ts(segment, day_d))
 
     def _roll_day(self, st: SymbolState, day: str, tick: dict[str, Any]) -> None:
         prev = float(tick.get("prev_close") or 0)
@@ -277,14 +277,22 @@ class Aggregator:
         qty: float,
         new_high: float | None = None,
         new_low: float | None = None,
+        *,
+        open_ts: float | None = None,
     ) -> None:
         typical_v = price * qty
         st.session_pv += typical_v
         st.session_v += qty
         sess_vwap = (st.session_pv / st.session_v) if st.session_v > 0 else price
 
+        # the session open once per frame, not once per timeframe: bucket_start re-derived the day
+        # and its open for each of the seven, 60 % of this method's time (review, 2026-10-03). The
+        # frame is inside the session here, so the arithmetic is bucket_start's own.
+        if open_ts is None:
+            open_ts = session_open_ts(segment, ist_day(ts))
         for tf in self.timeframes:
-            bucket = int(bucket_start(segment, ts, tf))
+            step = TF_SECONDS.get(tf)
+            bucket = int(open_ts) if step is None else int(open_ts + ((ts - open_ts) // step) * step)
             cur = self.store.forming(st.instrument.symbol, tf)
             if cur is not None and bucket > cur.ts:
                 await self._close(cur)

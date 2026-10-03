@@ -68,6 +68,10 @@ class AlertEngine:
         self._pending_fired_at = 0.0
         self.started_ts = time.time()
         self.last_refresh_ts = 0.0
+        #: what each live card's numbers were last computed from, and each contract's last archived
+        #: quote row — refresh_live recomputes and archives only on a change
+        self._card_inputs: dict[tuple[str, str, int, float], tuple[Any, ...]] = {}
+        self._quote_rows: dict[str, tuple[Any, ...]] = {}
         self.refreshes = 0
         #: the session the rings were last emptied for; "" until the first reset
         self.reset_day_stamp = ""
@@ -658,6 +662,8 @@ class AlertEngine:
         """
         cleared = {book: len(ring) for book, ring in self.alerts.items() if ring}
         self.alerts.clear()
+        self._card_inputs.clear()
+        self._quote_rows.clear()
         self.counts.clear()
         self.evaluated.clear()
         self._cpr_avg.clear()
@@ -721,6 +727,16 @@ class AlertEngine:
                 spot = self.engine.ltps.get(getattr(inst, "scrip_code", "")) or plan.get("entry")
                 if not spot:
                     continue
+                # Nothing it reads has moved since the last pass: the same inputs give the same
+                # numbers, so they are not recomputed — it re-derived every card of the day every
+                # second (review, 2026-10-03). The marks are still current, and say so.
+                inputs = (getattr(q, "ltp", None), getattr(q, "bid", None), getattr(q, "ask", None), round(float(spot), 4),
+                          getattr(book, "ts", None))
+                ident = (a.book, a.symbol, a.ts, a.fired_at)
+                if self._card_inputs.get(ident) == inputs:
+                    card["marksTs"] = now
+                    continue
+                self._card_inputs[ident] = inputs
                 bullish = a.direction == "BULLISH"
                 delta = abs(
                     estimate_delta(
@@ -762,15 +778,11 @@ class AlertEngine:
                 # of them every second would pin every contract ever carded onto the tape.
                 if now - a.fired_at <= TAPE_CARD_TTL_S:
                     self.engine.tape.follow(a.symbol, [code], now=now)
-                self.engine.archive.option_quote(
-                    code,
-                    now,
-                    ltp=ltp,
-                    bid=getattr(q, "bid", None) if q else None,
-                    ask=getattr(q, "ask", None) if q else None,
-                    spot=spot,
-                    delta=delta,
-                )
+                row = (ltp, getattr(q, "bid", None) if q else None, getattr(q, "ask", None) if q else None, spot, round(delta, 4))
+                if self._quote_rows.get(code) != row:
+                    # a row when the quote, the spot or the delta moved — not one a second per card
+                    self._quote_rows[code] = row
+                    self.engine.archive.option_quote(code, now, ltp=row[0], bid=row[1], ask=row[2], spot=spot, delta=delta)
                 touched += 1
         self.last_refresh_ts = now
         self.refreshes += 1

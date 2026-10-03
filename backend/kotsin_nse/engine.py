@@ -68,7 +68,7 @@ from .bars.volume_read import (
     read_volume,
     slot_reading,
 )
-from .bars.zones import build_zones, pivot_points_for
+from .bars.zones import build_zones, is_provisional, pivot_points_for
 from .bus import Bus, Topic
 from .committee.service import CommitteeService
 from .config import Segment, Settings
@@ -646,6 +646,8 @@ class Engine:
         self._basis_mismatch: dict[str, tuple[str, float, float]] = {}
         #: the front future's candles per symbol for the current trigger bar (see _fut_context)
         self._fut_cache: dict[str, tuple[int, dict[str, Any] | None]] = {}
+        #: each front future's daily candles, fetched once a day: (scrip code, day) -> rows
+        self._fut_daily_rows: dict[tuple[str, date], list[dict[str, Any]]] = {}
         #: (name, bar) -> the futures fetch in flight, shared by its concurrent readers
         self._fut_inflight: dict[tuple[str, int], asyncio.Future[dict[str, Any] | None]] = {}
         #: the choice's wait for strikes it cannot price yet (0 = never wait: the replay's frozen clock)
@@ -1267,38 +1269,57 @@ class Engine:
     async def _backfill(self, universe: list[Instrument]) -> None:
         """Warm the 30m series and the daily series (for pivots) from REST.
 
-        Sequential and rate-limit friendly: the broker's historical endpoint is the slowest thing
-        we touch, and hammering it at boot is how the old stack earned its retry storms.
+        Rate-limit friendly, but not one call at a time: 486 calls in sequence with a 0.15 s pause
+        took 153 s, and a mid-session restart was blind for all of it (review, 2026-10-03). At most
+        ``backfill_concurrency`` calls are in flight, each still paced, and the daily series is not
+        asked for a name whose cached candles already end at the previous session's final one —
+        most names on a normal boot (``_seed_daily_from_cache`` ran first).
         """
         end = ist_today()
         start_intraday = end - timedelta(days=max(7, self.s.backfill_days // 2))
         start_daily = end - timedelta(days=400)  # a year of dailies for monthly pivots
-        ok = failed = 0
-        for inst in universe:
-            for tf, start in ((DECISION_TF, start_intraday), ("1d", start_daily)):
+        expected_prev = self.calendar.previous_trading_day(end)
+        counts = {"ok": 0, "failed": 0, "daily_from_cache": 0}
+        sem = asyncio.Semaphore(max(1, self.s.backfill_concurrency))
+
+        def daily_current(inst: Instrument) -> bool:
+            prev = previous_session(self.store.bars(inst.symbol, "1d"), end)
+            return (prev is not None and is_official(prev) and ist_day(prev.ts) == expected_prev
+                    and not is_provisional(prev, inst.segment))
+
+        async def one(inst: Instrument, tf: str, start: date) -> None:
+            async with sem:
                 try:
-                    rows = await self.rest.candles(
-                        inst, tf, start.isoformat(), end.isoformat()
-                    )
+                    rows = await self.rest.candles(inst, tf, start.isoformat(), end.isoformat())
                 except Exception as exc:  # noqa: BLE001
-                    failed += 1
+                    counts["failed"] += 1
                     if tf == "1d":
                         self._daily_failed.add(inst.symbol)
                     log.warning("backfill.failed", symbol=inst.symbol, tf=tf, error=str(exc))
-                    continue
-                if not rows:
-                    if tf == "1d":
-                        self._daily_failed.add(inst.symbol)
-                    continue
+                    return
+                finally:
+                    await asyncio.sleep(0.15)
+            if not rows:
                 if tf == "1d":
-                    self._seed_daily(inst, rows)
-                else:
-                    self.aggregator.seed(inst, tf, rows, ts_of=ist_naive_to_ts)
-                    for lower in ("5m", "15m"):
-                        _ = lower  # lower frames rebuild from live ticks; no extra REST calls
-                ok += 1
-                await asyncio.sleep(0.15)
-        log.info("backfill.done", series_ok=ok, failed=failed)
+                    self._daily_failed.add(inst.symbol)
+                return
+            if tf == "1d":
+                self._seed_daily(inst, rows)
+            else:
+                self.aggregator.seed(inst, tf, rows, ts_of=ist_naive_to_ts)  # lower frames rebuild from ticks
+            counts["ok"] += 1
+
+        jobs = []
+        for inst in universe:
+            jobs.append(one(inst, DECISION_TF, start_intraday))
+            if daily_current(inst):
+                counts["daily_from_cache"] += 1
+            else:
+                jobs.append(one(inst, "1d", start_daily))
+        began = time.time()
+        await asyncio.gather(*jobs)
+        log.info("backfill.done", series_ok=counts["ok"], failed=counts["failed"],
+                 daily_from_cache=counts["daily_from_cache"], took_s=round(time.time() - began, 1))
 
     def _set_closing_auction_bars(self, universe: list[Instrument], *, now: float | None = None) -> int:
         """An NSE stock's 15:15 bar is its closing auction — one print at the official close, open =
@@ -1322,13 +1343,11 @@ class Engine:
 
         def auction_volume(symbol: str, d: date, t0: int) -> float | None:
             if d not in minutes:
-                path = self.s.data_dir / "archive" / "bars" / f"{d.isoformat()}.parquet"
                 try:
-                    import pandas as pd
-
-                    minutes[d] = pd.read_parquet(path, columns=["symbol", "ts", "v"]) if path.exists() else None
+                    got = self.archive.read_day("bars", d.isoformat(), columns=["symbol", "ts", "v"])
+                    minutes[d] = got if len(got) else None
                 except Exception as exc:  # noqa: BLE001 — an unreadable archive costs the volume, never the bar
-                    log.warning("archive.auction_volume_failed", path=str(path), error=str(exc)[:120])
+                    log.warning("archive.auction_volume_failed", day=d.isoformat(), error=str(exc)[:120])
                     minutes[d] = None
             df = minutes[d]
             if df is None:
@@ -1388,15 +1407,12 @@ class Engine:
         next session's ticks (2026-09-29, restarts at 15:37 and 18:39). No broker call; nothing that
         decides a trade reads the 1m series. Returns the bars seeded."""
         day = day or ist_today()
-        path = self.s.data_dir / "archive" / "bars" / f"{day.isoformat()}.parquet"
-        if not path.exists():
-            return 0
         try:
-            import pandas as pd
-
-            df = pd.read_parquet(path, columns=["symbol", "ts", "o", "h", "l", "c", "v"])
+            df = self.archive.read_day("bars", day.isoformat(), columns=["symbol", "ts", "o", "h", "l", "c", "v"])
+            if df.empty:
+                return 0
         except Exception as exc:  # noqa: BLE001 — an unreadable archive costs the paths, never the boot
-            log.warning("archive.1m_seed_failed", path=str(path), error=str(exc)[:120])
+            log.warning("archive.1m_seed_failed", day=day.isoformat(), error=str(exc)[:120])
             return 0
         by_symbol = {i.symbol: i for i in universe}
         n = names = 0
@@ -1641,7 +1657,8 @@ class Engine:
                 ts=float(tick.get("recv_ts") or time.time()),
             )
         await self.aggregator.on_tick(tick)
-        await self.bus.publish(Topic.TICK, tick)
+        # no TICK publish: nothing subscribes to it (/api/system: 'subscribers': []) and it ran on
+        # every frame (review, 2026-10-03). The BAR publish stays — once a bar, the hook for a reader.
 
     async def _on_depth(self, depth: dict[str, Any]) -> None:
         code = str(depth["scrip_code"])
@@ -1774,15 +1791,15 @@ class Engine:
         return True
 
     def _oi_from_archive(self, day: date, codes: set[str], *, last: bool, before: float | None = None) -> dict[str, float]:
-        path = self.s.data_dir / "archive" / "oi" / f"{day.isoformat()}.parquet"
-        if not codes or not path.exists():
+        if not codes:
             return {}
         try:
-            import pandas as pd
-
-            df = pd.read_parquet(path, columns=["scrip_code", "ts", "oi"])
+            # the day file and any parts today's flushes left (ops/archive.py)
+            df = self.archive.read_day("oi", day.isoformat(), columns=["scrip_code", "ts", "oi"])
         except Exception as exc:  # noqa: BLE001 — no archive is no reference, never a failed boot
-            log.warning("oi.archive_read_failed", path=str(path), error=str(exc)[:120])
+            log.warning("oi.archive_read_failed", day=day.isoformat(), error=str(exc)[:120])
+            return {}
+        if df.empty:
             return {}
         df = df[df.scrip_code.astype(str).isin(codes) & (df.oi > 0)]
         if before is not None:
@@ -2250,8 +2267,22 @@ class Engine:
             log.info("signal.routed", symbol=sig.symbol, to=segment_book)
             return await self._handle_signal(routed, bar, adopt=False)
 
+        gated = books is not None
+        # The volume reading is the trigger's, read once for every book that gates on it (the
+        # future's REST calls, not two per book) — and waited on by those books alone: a book
+        # without the gate (FUDKII) places its order at once, and a failed read blocks no one
+        # (review, 2026-09-26: read before the gather, FUDKII's order waited on it and an error in
+        # it cost every book its entry). It needs the trigger, not the strike, so it runs WHILE the
+        # strike is chosen — it used to start after (review, 2026-10-03).
+        vol = (
+            asyncio.ensure_future(self._volume_surges_safe(underlying, low_priority=not published(sig)))
+            if gated and any(self.limits_for(k).dried_volume_v for k in keys)
+            else None
+        )
         selection = await self._select_instrument(underlying, sig)
         if not selection.ok or selection.instrument is None:
+            if vol is not None:
+                vol.cancel()
             log.info("signal.no_instrument", symbol=sig.symbol, reason=selection.reason)
             return await everyone("NO_INSTRUMENT", selection.reason)
 
@@ -2273,17 +2304,6 @@ class Engine:
             equity_targets=sig.targets,
             option_premium=selection.premium,
             delta=delta,
-        )
-        gated = books is not None
-        # The volume reading is the trigger's, read once for every book that gates on it (the
-        # future's two REST calls, not two per book) — and waited on by those books alone: a book
-        # without the gate (FUDKII) places its order at once, and a failed read blocks no one
-        # (review, 2026-09-26: read before the gather, FUDKII's order waited on it and an error in
-        # it cost every book its entry).
-        vol = (
-            asyncio.ensure_future(self._volume_surges_safe(underlying, low_priority=not published(sig)))
-            if gated and any(self.limits_for(k).dried_volume_v for k in keys)
-            else None
         )
         results = await asyncio.gather(
             *(
@@ -4565,7 +4585,14 @@ class Engine:
         try:
             async with sem:
                 rows30 = await self.rest.candles(front, DECISION_TF, start30.isoformat(), today.isoformat())
-                rows1d = await self.rest.candles(front, "1d", (today - timedelta(days=35)).isoformat(), today.isoformat())
+                # the daily rows only set the previous sessions' levels: once a day per future, not
+                # once per trigger — it was the second serial call on every trigger (review, 2026-10-03)
+                held1d = self._fut_daily_rows.get((front.scrip_code, today))
+                if held1d is None:
+                    held1d = await self.rest.candles(front, "1d", (today - timedelta(days=35)).isoformat(), today.isoformat())
+                    self._fut_daily_rows = {k: v for k, v in self._fut_daily_rows.items() if k[1] == today}
+                    self._fut_daily_rows[(front.scrip_code, today)] = held1d
+                rows1d = held1d
         except Exception as exc:  # noqa: BLE001 — a route input must never fail the fill path
             log.warning("fut.context_unknown", symbol=underlying.symbol, error=str(exc)[:120])
             return None

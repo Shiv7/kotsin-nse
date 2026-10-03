@@ -68,6 +68,43 @@ KEYS: dict[str, tuple[str, ...]] = {
 #: streams whose ``held`` rows are moved to a longer-lived stream before their day is pruned
 HELD_ASIDE: dict[str, str] = {"quotes": "quotes_held"}
 _DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+#: today's flushes: ``<kind>/<day>.part-<ns>.parquet``, compacted into ``<kind>/<day>.parquet`` once the
+#: day is over (or at the final flush). Rewriting the whole day file at every flush re-read the day so
+#: far each time — a 2.4M-row OI day grew a flush from 60 ms to 1.3 s, ~50 s of CPU a day (review,
+#: 2026-10-03).
+_PART = re.compile(r"^(\d{4}-\d{2}-\d{2})\.part-\d+$")
+
+
+def day_paths(root: Path, kind: str, day: str) -> list[Path]:
+    """A stream's files for one day: the compacted day file first, then today's parts in order."""
+    d = root / kind
+    main = d / f"{day}.parquet"
+    # never a part still being written (its temp file matches the glob too)
+    parts = sorted(p for p in d.glob(f"{day}.part-*.parquet") if not p.name.endswith(".tmp.parquet")) if d.exists() else []
+    return ([main] if main.exists() else []) + parts
+
+
+def read_day_frame(root: Path, kind: str, day: str, columns: list[str] | None = None, *, strict: bool = False) -> pd.DataFrame:
+    """One day of a stream as one frame — the day file and any parts, de-duplicated on the stream's
+    key (the last write wins). Every reader goes through here, so a crash mid-day that left parts
+    behind reads the same as a compacted day. Empty when there is nothing."""
+    frames = []
+    for path in day_paths(root, kind, day):
+        try:
+            frames.append(pd.read_parquet(path, columns=columns))
+        except (OSError, ValueError) as exc:
+            if strict:
+                # the archive's own compaction and set-aside: an unreadable file is never
+                # overwritten or deleted on the strength of what could be read around it
+                raise
+            log.warning("archive.unreadable", path=str(path), error=str(exc)[:120])
+    if not frames:
+        return pd.DataFrame(columns=columns or list(KEYS.get(kind, ())))
+    df = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
+    keys = [k for k in KEYS.get(kind, ()) if k in df.columns]
+    if keys and len(frames) > 1:
+        df = df.drop_duplicates(keys, keep="last").sort_values(keys).reset_index(drop=True)
+    return df
 
 
 class DailyArchive:
@@ -251,6 +288,7 @@ class DailyArchive:
                     self.last_error = f"{kind}/{day}: {exc}"[:200]
                     by_day[day].extend(rows)  # keep them for the next attempt
                     log.warning("archive.write_failed", kind=kind, day=day, error=str(exc))
+        self._compact_finished_days(final=final)
         self.rows_buffered = sum(len(r) for by_day in self._rows.values() for r in by_day.values())
         self.flushes += 1
         self.last_flush_ts = time.time()
@@ -266,20 +304,63 @@ class DailyArchive:
         return written
 
     def _write(self, kind: str, day: str, rows: list[dict[str, Any]]) -> int:
+        """Today's rows go to a new part file — nothing is re-read; a past day's rows (a late
+        flush, a set-aside) are merged into its day file at once."""
+        if day == ist_day(time.time()).isoformat():
+            d = self.root / kind
+            d.mkdir(parents=True, exist_ok=True)
+            part = d / f"{day}.part-{time.time_ns()}.parquet"
+            tmp = part.with_name(part.name.replace(".parquet", ".tmp.parquet"))
+            pd.DataFrame(rows).to_parquet(tmp, index=False)
+            tmp.replace(part)
+            self.rows_written += len(rows)
+            self.files_written += 1
+            return len(rows)
+        return self._compact(kind, day, rows)
+
+    def _compact(self, kind: str, day: str, rows: list[dict[str, Any]] | None = None) -> int:
+        """Fold a day's parts (and ``rows``) into its day file, then drop the parts."""
         path = self.root / kind / f"{day}.parquet"
         path.parent.mkdir(parents=True, exist_ok=True)
-        fresh = pd.DataFrame(rows)
-        if path.exists():
-            existing = pd.read_parquet(path)
-            fresh = pd.concat([existing, fresh], ignore_index=True)
+        parts = [p for p in day_paths(self.root, kind, day) if p != path]
+        frames = [read_day_frame(self.root, kind, day, strict=True)] if (parts or path.exists()) else []
+        if rows:
+            frames.append(pd.DataFrame(rows))
+        frames = [f for f in frames if len(f)]
+        if not frames:
+            return 0
+        fresh = pd.concat(frames, ignore_index=True)
         keys = list(KEYS[kind])
         fresh = fresh.drop_duplicates(keys, keep="last").sort_values(keys).reset_index(drop=True)
         tmp = path.with_suffix(".tmp.parquet")
         fresh.to_parquet(tmp, index=False)
         tmp.replace(path)
-        self.rows_written += len(rows)
+        for p in parts:
+            p.unlink(missing_ok=True)
+        n = len(rows or [])
+        self.rows_written += n
         self.files_written += 1
-        return len(rows)
+        return n
+
+    def read_day(self, kind: str, day: str, columns: list[str] | None = None) -> pd.DataFrame:
+        return read_day_frame(self.root, kind, day, columns)
+
+    def _compact_finished_days(self, *, final: bool) -> None:
+        """Every day with parts that is over — and at the final flush, today's too."""
+        today = ist_day(time.time()).isoformat()
+        for kind in KEYS:
+            d = self.root / kind
+            if not d.exists():
+                continue
+            pending = {m.group(1) for p in d.glob("*.part-*.parquet") if (m := _PART.match(p.name.removesuffix(".parquet")))}
+            for day in sorted(pending):
+                if final or day < today:
+                    try:
+                        self._compact(kind, day)
+                    except Exception as exc:  # noqa: BLE001 - the parts stay and are read as they are
+                        self.errors += 1
+                        self.last_error = f"compact {kind}/{day}: {exc}"[:200]
+                        log.warning("archive.compact_failed", kind=kind, day=day, error=str(exc))
 
     def days(self, kind: str) -> list[str]:
         """The day files a stream holds, oldest first. A ``*.tmp.parquet`` left by a crash is not
@@ -287,7 +368,9 @@ class DailyArchive:
         d = self.root / kind
         if not d.exists():
             return []
-        return sorted(p.stem for p in d.glob("*.parquet") if _DAY.match(p.stem))
+        out = {p.stem for p in d.glob("*.parquet") if _DAY.match(p.stem)}
+        out |= {m.group(1) for p in d.glob("*.part-*.parquet") if (m := _PART.match(p.name.removesuffix(".parquet")))}
+        return sorted(out)
 
     @property
     def _any_window(self) -> bool:
@@ -326,7 +409,8 @@ class DailyArchive:
                     # only sign would be a log line. Keep the file; the next flush tries again.
                     self.set_aside_failed += 1
                     continue
-                (self.root / kind / f"{day}.parquet").unlink(missing_ok=True)
+                for p in day_paths(self.root, kind, day):
+                    p.unlink(missing_ok=True)
                 removed[kind] = removed.get(kind, 0) + 1
                 self.files_pruned += 1
             # Only temp files for days that are themselves gone: a live ``_write`` uses a fixed
@@ -345,9 +429,8 @@ class DailyArchive:
         """Move ``day``'s held rows into the longer-lived stream. True when the source may now be
         deleted — including when there was genuinely nothing to preserve. False means the rows are
         still only in the source file, so the caller must keep it."""
-        src = self.root / kind / f"{day}.parquet"
         try:
-            df = pd.read_parquet(src)
+            df = read_day_frame(self.root, kind, day, strict=True)
         except (OSError, ValueError) as exc:
             log.warning("archive.set_aside_unreadable", kind=kind, day=day, error=str(exc)[:120])
             return False
@@ -390,4 +473,4 @@ class DailyArchive:
         }
 
 
-__all__ = ["HELD_ASIDE", "KEYS", "DailyArchive"]
+__all__ = ["HELD_ASIDE", "KEYS", "DailyArchive", "day_paths", "read_day_frame"]

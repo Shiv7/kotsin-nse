@@ -25,7 +25,7 @@ fresh REST bar win over a same-day cached one.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -93,9 +93,16 @@ def basis_ok(official_close: float, intraday_close: float, *, tolerance: float =
 
 
 def previous_session(bars: Iterable[UnifiedBar], today: date) -> UnifiedBar | None:
-    """The last bar strictly before ``today``. Today's own bar can never set today's levels."""
-    prior = [b for b in bars if ist_day(b.ts) < today]
-    return prior[-1] if prior else None
+    """The last bar strictly before ``today``. Today's own bar can never set today's levels.
+
+    Scanned from the end: the same bar as filtering the whole series, for any order, without turning
+    every timestamp into a date — /api/health ran this over every name's year of dailies on each poll
+    (31 ms a call, on the event loop, every 3-4 s per open tab; review, 2026-10-03)."""
+    seq = bars if isinstance(bars, Sequence) else list(bars)
+    for b in reversed(seq):
+        if ist_day(b.ts) < today:
+            return b
+    return None
 
 
 @dataclass(slots=True)

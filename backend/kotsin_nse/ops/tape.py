@@ -285,14 +285,9 @@ def read_day(root: Path, day: str, *, codes: Iterable[str] | None = None) -> Any
     may be in either or, mid-prune, both. Empty frame when there is nothing."""
     import pandas as pd
 
-    frames = []
-    for kind in ("quotes", "quotes_held"):
-        path = root / kind / f"{day}.parquet"
-        if path.exists():
-            try:
-                frames.append(pd.read_parquet(path))
-            except (OSError, ValueError) as exc:
-                log.warning("tape.unreadable", path=str(path), error=str(exc)[:120])
+    from .archive import read_day_frame  # the day file and today's parts (ops/archive.py)
+
+    frames = [f for kind in ("quotes", "quotes_held") if len(f := read_day_frame(root, kind, day))]
     if not frames:
         return pd.DataFrame(columns=["scrip_code", "ts", "symbol", "role", "ltp", "bid", "ask", "quote_ts", "held"])
     df = pd.concat(frames, ignore_index=True).drop_duplicates(["scrip_code", "ts"], keep="last")
@@ -317,7 +312,8 @@ def days(root: Path) -> list[str]:
     for kind in ("quotes", "quotes_held"):
         d = root / kind
         if d.exists():
-            out |= {p.stem for p in d.glob("*.parquet") if len(p.stem) == 10 and p.stem[4] == "-"}
+            out |= {p.name[:10] for p in d.glob("*.parquet")
+                    if p.name[4:5] == "-" and (p.stem == p.name[:10] or ".part-" in p.name) and not p.name.endswith(".tmp.parquet")}
     return sorted(out)
 
 

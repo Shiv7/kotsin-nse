@@ -1,0 +1,160 @@
+"""Stage 4 of the data-pipeline plan (2026-10-03): the same answers, sooner — each speed-up pinned to
+the result it must not change."""
+
+from __future__ import annotations
+
+import asyncio
+import random
+import time
+from datetime import date, timedelta
+
+import pandas as pd
+import pytest
+
+from kotsin_nse.bars.daily import previous_session
+from kotsin_nse.bars.unified import UnifiedBar
+from kotsin_nse.config import Segment
+from kotsin_nse.market.session import bucket_start, ist_today, session_close_ts, session_open_ts
+from kotsin_nse.ops.archive import DailyArchive, day_paths, read_day_frame
+
+from .conftest import ist_ts
+
+# -- the archive: parts today, one file once the day is over ---------------------------------------
+
+
+def test_todays_flushes_write_parts_and_every_reader_sees_one_day(tmp_path):
+    a = DailyArchive(tmp_path / "archive")
+    now = time.time()
+    a.oi("48900", now - 10, 40_000_000.0, 0.0)
+    a.flush()
+    a.oi("48900", now - 5, 40_100_000.0, 0.0)
+    a.oi("61619", now - 5, 570_000.0, 0.0)
+    a.flush()
+    today = ist_today().isoformat()
+    files = day_paths(tmp_path / "archive", "oi", today)
+    assert len(files) == 2 and all(".part-" in p.name for p in files), "nothing re-read or rewritten"
+    df = a.read_day("oi", today)
+    assert len(df) == 3 and a.days("oi") == [today]
+    a.flush(final=True)
+    assert [p.name for p in day_paths(tmp_path / "archive", "oi", today)] == [f"{today}.parquet"], "compacted at the end"
+    assert len(read_day_frame(tmp_path / "archive", "oi", today)) == 3
+
+
+def test_a_finished_days_parts_are_folded_in_at_the_next_flush(tmp_path):
+    root = tmp_path / "archive"
+    a = DailyArchive(root)
+    past = (ist_today() - timedelta(days=3)).isoformat()
+    (root / "oi").mkdir(parents=True)
+    # parts a crash left behind on a past day
+    pd.DataFrame([{"scrip_code": "1", "ts": 1.0, "oi": 10.0, "change_pct": 0.0}]).to_parquet(root / "oi" / f"{past}.part-1.parquet")
+    pd.DataFrame([{"scrip_code": "1", "ts": 2.0, "oi": 11.0, "change_pct": 0.0}]).to_parquet(root / "oi" / f"{past}.part-2.parquet")
+    assert len(a.read_day("oi", past)) == 2, "read as they are before compaction"
+    a.flush()
+    assert [p.name for p in day_paths(root, "oi", past)] == [f"{past}.parquet"]
+    assert list(a.read_day("oi", past).oi) == [10.0, 11.0]
+
+
+def test_a_part_still_being_written_is_never_read(tmp_path):
+    root = tmp_path / "archive"
+    (root / "oi").mkdir(parents=True)
+    today = ist_today().isoformat()
+    (root / "oi" / f"{today}.part-9.tmp.parquet").write_bytes(b"half written")
+    assert day_paths(root, "oi", today) == [] and DailyArchive(root).days("oi") == []
+
+
+# -- the same bar, without converting every timestamp -----------------------------------------------
+
+
+def test_previous_session_from_the_end_is_the_same_bar_in_any_order():
+    days = [date(2026, 9, d) for d in (21, 22, 23, 24, 25, 28, 29, 30)]
+    bars = [UnifiedBar("X", "1", "1d", int(ist_ts(d.isoformat(), "00:00")), 1, 1, 1, float(i), 1) for i, d in enumerate(days)]
+    rng = random.Random(7)
+    for _ in range(20):
+        shuffled = bars[:]
+        rng.shuffle(shuffled)
+        today = rng.choice(days)
+        want = [b for b in shuffled if b.ts < ist_ts(today.isoformat(), "00:00")]
+        assert previous_session(shuffled, today) is (want[-1] if want else None)
+        assert previous_session(iter(shuffled), today) is (want[-1] if want else None)
+
+
+# -- the aggregator's bucket arithmetic is bucket_start's -------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_aggregators_buckets_are_bucket_starts_own(equity):
+    from kotsin_nse.bars.aggregator import TIMEFRAMES, Aggregator
+    from kotsin_nse.bars.store import BarStore
+
+    store = BarStore()
+    agg = Aggregator(store)
+    agg.track(equity)
+    day = date(2026, 10, 6)
+    open_ts, close_ts = session_open_ts(Segment.NSE_EQ, day), session_close_ts(Segment.NSE_EQ, day)
+    agg.state[equity.scrip_code].connected_since = open_ts - 60
+    rng = random.Random(3)
+    for ts in sorted(rng.uniform(open_ts, close_ts - 1) for _ in range(400)):
+        await agg.on_tick({"scrip_code": equity.scrip_code, "ltp": 100.0, "ts": ts, "total_qty": 0})
+        for tf in TIMEFRAMES:
+            cur = store.forming(equity.symbol, tf)
+            assert cur is not None and cur.ts == int(bucket_start(Segment.NSE_EQ, ts, tf)), (tf, ts)
+
+
+# -- REST at the trigger: the future's daily rows once a day -------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_futures_daily_rows_are_fetched_once_a_day_not_once_a_trigger(settings, equity):
+    from kotsin_nse.domain import Instrument, InstrumentKind
+    from kotsin_nse.engine import Engine
+
+    e = Engine(settings)
+    fut = Instrument("48900", equity.symbol, Segment.NSE_FO, InstrumentKind.FUTURE, expiry="2026-10-27", underlying=equity.symbol)
+    calls: list[str] = []
+
+    async def candles(inst, tf, start, end):
+        calls.append(tf)
+        return []
+
+    e.rest.candles = candles  # type: ignore[method-assign]
+    sem = asyncio.Semaphore(4)
+    for bucket in (1_000, 2_800, 4_600):
+        await e._fut_context_fetch(equity, fut, bucket, sem)
+    assert calls.count("1d") == 1 and calls.count("30m") == 3
+
+
+# -- the boot backfill: bounded, and the cached dailies are not asked for again --------------------
+
+
+@pytest.mark.asyncio
+async def test_the_backfill_runs_bounded_in_parallel_and_skips_current_dailies(settings):
+    from dataclasses import replace
+
+    from kotsin_nse.bars.unified import BarSource
+    from kotsin_nse.domain import Instrument, InstrumentKind
+    from kotsin_nse.engine import Engine
+
+    e = Engine(settings.model_copy(update={"backfill_concurrency": 3}))
+    names = [Instrument(str(1000 + i), f"S{i}", Segment.NSE_EQ, InstrumentKind.EQUITY) for i in range(8)]
+    prev = e.calendar.previous_trading_day(ist_today())
+    current = names[0]
+    e.store.seed(current.symbol, "1d", [replace(UnifiedBar(current.symbol, current.scrip_code, "1d",
+                                                           int(ist_ts(prev.isoformat(), "00:00")), 1, 1, 1, 1, 1),
+                                                source=BarSource.REST, complete=True)])
+    live = peak = 0
+    asked: list[tuple[str, str]] = []
+
+    async def candles(inst, tf, start, end):
+        nonlocal live, peak
+        live += 1
+        peak = max(peak, live)
+        asked.append((inst.symbol, tf))
+        await asyncio.sleep(0.01)
+        live -= 1
+        return []
+
+    e.rest.candles = candles  # type: ignore[method-assign]
+    await e._backfill(names)
+    assert peak == 3, "never more than backfill_concurrency in flight"
+    assert (current.symbol, "1d") not in asked and (current.symbol, "30m") in asked
+    assert sum(1 for _, tf in asked if tf == "1d") == 7
