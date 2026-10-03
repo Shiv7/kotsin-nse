@@ -78,9 +78,14 @@ def health(port: int) -> str:
     except Exception as exc:  # noqa: BLE001 - a report line, not a failure
         return f"not answering ({exc.__class__.__name__})"
     f = h.get("feed") or {}
+    hub = f.get("hub") or {}
+    hub_text = ("" if not hub else
+                f" | hub {hub.get('role')}: twins {hub.get('twins')} pinned {hub.get('pinned')} dropped {hub.get('twins_dropped')}"
+                if hub.get("role") == "serve" else
+                f" | hub {hub.get('role')}: {hub.get('messages')} msgs, delay mean {hub.get('lag_ms')} ms max {hub.get('lag_max_ms')} ms")
     return (f"{h.get('status')} {h.get('degraded') or ''} | feed connected {f.get('connected')} reconnects {f.get('reconnects')} "
             f"ticks {f.get('ticks')} silence {round(f.get('silence_s') or 0)} s | rest {(h.get('rest') or {}).get('calls')} calls "
-            f"{(h.get('rest') or {}).get('failures')} failed | open {h.get('positions_open')}")
+            f"{(h.get('rest') or {}).get('failures')} failed | open {h.get('positions_open')}" + hub_text)
 
 
 def main() -> None:
