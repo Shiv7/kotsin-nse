@@ -1,6 +1,7 @@
 import { BrowserRouter, NavLink, Route, Routes, useLocation } from 'react-router-dom'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { ModeBanner } from './components/ModeBanner'
+import { useEngine } from './lib/engine'
 import { usePoll } from './lib/usePoll'
 import { Alerts } from './pages/Alerts'
 import { AllStrategies } from './pages/AllStrategies'
@@ -61,12 +62,16 @@ function Pages() {
 
 export default function App() {
   const { data: health, error } = usePoll<Health>('/api/health', 4000)
+  const engine = useEngine()
   return (
     <BrowserRouter>
-      <ModeBanner health={health} error={error} />
+      <ModeBanner health={health} error={error} engine={engine?.name ?? ''} />
       <div className="flex min-h-screen">
         <nav className="w-40 shrink-0 space-y-1 border-r border-slate-800 p-3">
-          <div className="px-2 pb-3 text-sm font-bold tracking-wide text-slate-200">kotsin-nse</div>
+          <div className="px-2 pb-3 text-sm font-bold tracking-wide text-slate-200">
+            kotsin-nse
+            {engine?.name && <div className="mt-1 inline-block rounded bg-violet-900/60 px-1.5 py-0.5 text-[11px] font-semibold text-violet-100">{engine.name}</div>}
+          </div>
           {PAGES.map(([to, label]) => (
             <NavLink
               key={to}

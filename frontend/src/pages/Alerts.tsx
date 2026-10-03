@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { BOOK_TABS, BookCards } from '../components/BookCards'
+import { useEngine } from '../lib/engine'
 import { usePoll } from '../lib/usePoll'
 
 // Realtime firings, one tab per book. Polls every 3s while the market is open.
@@ -700,15 +701,37 @@ function Row({ a }: { a: Alert }) {
 export function Alerts() {
   const [book, setBook] = useState<string>('ALL')
   const [bookView, setBookView] = useState<string | null>(null)
+  // Two engines side by side (operator, 2026-10-03: "include their strategies in
+  // http://127.0.0.1:8500/alerts"): the twin's alerts and trigger cards, read through /api/peer.
+  const engine = useEngine()
+  const [side, setSide] = useState<'self' | 'peer'>('self')
+  const peer = side === 'peer' && engine?.peer ? engine.peer : null
+  const base = peer ? '/api/peer' : '/api'
   // No limit: the page shows every signal of the session, for every book and twin. The rings are
   // emptied at 00:30 IST, so "the session" is what it says.
-  const path = book === 'ALL' ? '/api/alerts' : `/api/alerts?book=${book}`
+  const path = book === 'ALL' ? `${base}/alerts` : `${base}/alerts?book=${book}`
   const { data, error } = usePoll<Resp>(path, 3000)
+  const switcher = engine?.peer ? (
+    <div className="mb-3 flex items-center gap-1 text-xs">
+      <span className="mr-1 text-[10px] uppercase tracking-wide text-slate-500">engine</span>
+      {([['self', engine.name || 'this engine'], ['peer', engine.peer.name || 'twin']] as const).map(([k, label]) => (
+        <button
+          key={k}
+          onClick={() => setSide(k)}
+          className={`rounded px-2.5 py-1 font-semibold ${side === k ? 'bg-violet-900/70 text-violet-100' : 'text-slate-400 hover:text-white'}`}
+        >
+          {label}
+        </button>
+      ))}
+      {peer && <span className="ml-2 text-[11px] text-violet-300">showing {peer.name}'s books, read-only</span>}
+    </div>
+  ) : null
 
   if (error) {
     return (
       <div className="p-6">
-        <h1 className="mb-4 text-2xl font-semibold text-slate-100">Live Alerts</h1>
+        <h1 className="mb-4 text-2xl font-semibold text-slate-100">Live Alerts{peer ? ` · ${peer.name}` : ''}</h1>
+        {switcher}
         <div className="text-sm text-rose-400">Failed to load: {String(error)}</div>
       </div>
     )
@@ -716,7 +739,8 @@ export function Alerts() {
   if (!data) {
     return (
       <div className="p-6">
-        <h1 className="mb-4 text-2xl font-semibold text-slate-100">Live Alerts</h1>
+        <h1 className="mb-4 text-2xl font-semibold text-slate-100">Live Alerts{peer ? ` · ${peer.name}` : ''}</h1>
+        {switcher}
         <div className="text-sm text-slate-500">Loading…</div>
       </div>
     )
@@ -729,8 +753,11 @@ export function Alerts() {
 
   return (
     <div className="p-6">
+      {switcher}
       <div className="mb-3 flex items-baseline justify-between gap-4">
-        <h1 className="text-2xl font-semibold text-slate-100">Live Alerts</h1>
+        <h1 className="text-2xl font-semibold text-slate-100">
+          Live Alerts{engine?.peer ? ` · ${peer ? peer.name : engine.name}` : ''}
+        </h1>
         <div className="text-right text-xs text-slate-500">
           <div>
             {total} fired this session · {shown} shown · {data.living} living signals ·{' '}
@@ -808,7 +835,7 @@ export function Alerts() {
       </div>
 
       {bookView ? (
-        <BookCards book={bookView} />
+        <BookCards key={`${side}-${bookView}`} book={bookView} apiBase={base} readOnly={!!peer} />
       ) : data.alerts.length === 0 ? (
         <div className="rounded border border-slate-700/40 bg-slate-900/40 p-4 text-sm text-slate-500">
           {book === 'ALL' ? (

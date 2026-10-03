@@ -651,7 +651,7 @@ function KV({ k, v, tone, title }: { k: string; v: React.ReactNode; tone?: strin
   return <span title={title} className="whitespace-nowrap text-[13.5px] text-slate-400">{k} <b className={`font-semibold ${tone ?? 'text-slate-100'}`}>{v}</b></span>
 }
 
-function TriggerCard({ book, c, open, onToggle, refresh }: { book: string; c: Card; open: boolean; onToggle: () => void; refresh: () => void }) {
+function TriggerCard({ book, c, open, onToggle, refresh, readOnly = false }: { book: string; c: Card; open: boolean; onToggle: () => void; refresh: () => void; readOnly?: boolean }) {
   const st = stateOf(c.state)
   const bull = c.direction === 'BULLISH'
   const conf = c.confluence ?? {}
@@ -749,7 +749,7 @@ function TriggerCard({ book, c, open, onToggle, refresh }: { book: string; c: Ca
         {c.books?.length ? <BookDots books={c.books} current={book} /> : null}
 
         <div className="mt-4 flex items-center justify-between gap-3 border-t border-slate-800 pt-4">
-          <Cta book={book} c={c} onDone={refresh} />
+          {readOnly ? <span className="text-[12.5px] text-violet-300">read-only here — Take / Skip on the twin's own page</span> : <Cta book={book} c={c} onDone={refresh} />}
           <button onClick={onToggle} className="inline-flex flex-none items-center gap-1.5 rounded-lg px-3 py-1.5 text-[14px] font-semibold text-sky-300 hover:bg-sky-400/10 hover:text-sky-200" aria-expanded={open}>{open ? 'Hide details' : 'Details — levels, exit plan, reads, timeline'}<I d={IC.open} className={open ? 'rotate-180' : ''} /></button>
         </div>
       </div>
@@ -865,10 +865,12 @@ function Expanded({ book, c }: { book: string; c: Card }) {
   )
 }
 
-export function BookCards({ book }: { book: string }) {
+/** ``apiBase`` '/api/peer' reads the twin engine's book through this one (phase 34 / phase 35 side by
+ * side); ``readOnly`` hides Take / Skip, which would act on this engine, not the twin. */
+export function BookCards({ book, apiBase = '/api', readOnly = false }: { book: string; apiBase?: string; readOnly?: boolean }) {
   // a past session's cards: /alerts?day=2026-09-29 (the page opens on today's)
   const day = new URLSearchParams(window.location.search).get('day')
-  const { data, error, refresh } = usePoll<Resp>(`/api/books/${book}/cards${day && /^\d{4}-\d{2}-\d{2}$/.test(day) ? `?day=${day}` : ''}`, 2000)
+  const { data, error, refresh } = usePoll<Resp>(`${apiBase}/books/${book}/cards${day && /^\d{4}-\d{2}-\d{2}$/.test(day) ? `?day=${day}` : ''}`, 2000)
   const [filter, setFilter] = useState<string>('ALL')
   const [open, setOpen] = useState<string | null>(null)
   const cards = useMemo(() => (data?.cards ?? []).filter((c) => filter === 'ALL' || c.state === filter).slice().sort((a, b) => b.ts - a.ts), [data, filter])
@@ -903,7 +905,7 @@ export function BookCards({ book }: { book: string }) {
         <div className="rounded-xl border border-slate-700/40 bg-slate-900/40 p-5 text-[15px] text-slate-400">No FUDKII trigger today yet. The book decides on each closed 30m bar.</div>
       ) : (
         <div className="flex flex-col gap-5">
-          {cards.map((c) => <TriggerCard key={c.signalId} book={book} c={c} open={open === c.signalId} onToggle={() => setOpen(open === c.signalId ? null : c.signalId)} refresh={doRefresh} />)}
+          {cards.map((c) => <TriggerCard key={c.signalId} book={book} c={c} open={open === c.signalId} onToggle={() => setOpen(open === c.signalId ? null : c.signalId)} refresh={doRefresh} readOnly={readOnly} />)}
         </div>
       )}
     </div>
