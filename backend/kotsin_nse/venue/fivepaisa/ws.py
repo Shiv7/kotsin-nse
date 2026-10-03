@@ -341,6 +341,9 @@ class FivePaisaFeed:
             "open_interest": int(row.get("OpenInterest") or 0),
             "oi_change": int(row.get("OIChange") or 0),
             "oi_change_pct": float(row.get("OIChangePercent") or 0),
+            #: the broker's own time when the frame carries one — GetScripInfoForFuture frames have
+            #: been seen without TickDt (2026-10-03); ``ts`` then falls back to the arrival
+            "tick_ts": parse_broker_date(row.get("TickDt")),
             "ltp": float(row.get("LastRate") or 0),
             "volume": int(row.get("Volume") or 0),
             "ts": parse_broker_date(row.get("TickDt")) or time.time(),

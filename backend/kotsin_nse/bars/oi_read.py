@@ -66,6 +66,7 @@ def read_oi(
     now: float,
     max_age_s: float = MAX_AGE_S,
     ref_sources: Mapping[str, str] | None = None,
+    session_open: float | None = None,
 ) -> OiReading:
     """``futures``: the unexpired futures' codes, nearest first. ``sessions_left``: sessions to the
     nearest one's expiry, today and the expiry day both counted. ``levels``: code → (OI, when);
@@ -82,6 +83,8 @@ def read_oi(
         lv = levels.get(code)
         if lv is None or lv[0] <= 0:
             return OiReading(contracts=tuple(use), doubt=f"no OI print for {code}")
+        if session_open is not None and lv[1] < session_open:
+            return OiReading(contracts=tuple(use), doubt=f"no OI print for {code} in today's session yet")
         oldest = max(oldest, now - lv[1])
         ref_sum += ref
         now_sum += lv[0]

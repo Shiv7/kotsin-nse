@@ -168,9 +168,12 @@ def _archive_prints(settings, day: date, rows: list[tuple[str, str, float]]) -> 
         oi_dir / f"{day}.parquet")
 
 
-def test_the_exchanges_close_comes_first_then_our_archive_then_the_pre_open_print(settings):
+def test_the_exchanges_close_comes_first_then_our_archive_then_the_pre_open_print(settings, monkeypatch):
+    import kotsin_nse.engine as engine_mod
+
     e = _engine(settings)
     today = date(2026, 10, 5)
+    monkeypatch.setattr(engine_mod, "ist_today", lambda: today)
     prev = e.calendar.previous_trading_day(today)
     e.oi_daily.write(prev, parse(_bhavcopy([JSW[0]])))  # the exchange has the near month only
     _archive_prints(settings, prev, [("48900", "15:29", 40_321_800.0), ("61619", "15:29", 570_000.0)])
@@ -288,18 +291,19 @@ def test_the_daily_table_sums_every_expiry_and_names_the_quadrant(tmp_path):
     assert last.px_chg_pct < 0 and last.quadrant == "long unwinding"
 
 
-def test_a_level_resent_at_subscribe_is_as_old_as_its_trade_not_its_arrival(settings):
-    """At a subscribe 5paisa re-sends each contract's last print: on a Saturday JSWSTEEL's 1 Oct level
-    arrived 'now' and read +1.05 % against the official close. Aged by its own time it is doubtful."""
-    import asyncio as _asyncio
+def test_a_level_from_before_todays_session_is_not_todays_oi(settings, monkeypatch):
+    """5paisa's OI frames carry no broker time, and at a subscribe it re-sends each contract's last
+    print: on a Saturday JSWSTEEL's last 1 Oct print arrived fresh and read +1.05 % against NSE's
+    official close. Received outside today's session, it is doubtful."""
+    import kotsin_nse.engine as engine_mod
 
     e = _engine(settings)
-    today = date(2026, 10, 3)
-    e.oi_daily.write(e.calendar.previous_trading_day(today), parse(_bhavcopy(JSW)))
-    e._seed_oi_reference(today=today)
-    arrived = _at(today, "16:40")
-    printed = _at(date(2026, 10, 1), "15:29")
-    _asyncio.run(e._on_oi({"scrip_code": "48900", "open_interest": 40_321_800, "oi_change": 0, "oi_change_pct": 0.0,
-                           "ts": printed, "recv_ts": arrived, "ltp": 1236.6, "volume": 0}))
-    r = e.oi_reading("JSWSTEEL", now=arrived + 1)
-    assert not r.ok and "old" in r.doubt
+    tuesday = date(2026, 10, 6)
+    monkeypatch.setattr(engine_mod, "ist_today", lambda: tuesday)
+    e.oi_daily.write(e.calendar.previous_trading_day(tuesday), parse(_bhavcopy(JSW)))
+    e._seed_oi_reference(today=tuesday)
+    e._note_oi("48900", 40_321_800.0, _at(tuesday, "08:55"))  # re-sent at a pre-open subscribe
+    pre = e.oi_reading("JSWSTEEL", now=_at(tuesday, "08:55") + 1)
+    assert not pre.ok and "today's session" in pre.doubt
+    e._note_oi("48900", 40_500_000.0, _at(tuesday, "09:20"))
+    assert e.oi_reading("JSWSTEEL", now=_at(tuesday, "09:20") + 1).ok
