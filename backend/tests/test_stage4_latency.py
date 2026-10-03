@@ -260,3 +260,22 @@ def test_the_day_roll_clears_per_day_state_and_a_withheld_auction_bar_is_shown(s
     e._roll_day_state(date(2026, 10, 6))
     assert not e.option_volume and not e._basis_mismatch and not e._daily_provisional_asked
     assert e._zones_check().ok
+
+
+def test_a_failed_decision_names_its_symbol_and_bar_with_the_traceback(monkeypatch):
+    """Review, 2026-10-03: the duty guard replaced log.exception("decide.failed", symbol=…) with one
+    rate-limited line a minute, no symbol, no traceback — a failure across 200 names left one line."""
+    from structlog.testing import capture_logs
+
+    from kotsin_nse.ops.guard import Guards
+
+    g = Guards()
+    with capture_logs() as logs:
+        for sym, ts in (("VEDL", 1_000), ("TMPV", 1_000)):
+            with g.duty("decide", symbol=sym, ts=ts):
+                raise TimeoutError("5paisa slow")
+    per_symbol = [x for x in logs if x["event"] == "decide.failed"]
+    assert [(x["symbol"], x["ts"]) for x in per_symbol] == [("VEDL", 1_000), ("TMPV", 1_000)]
+    assert all(isinstance(x["exc_info"], TimeoutError) for x in per_symbol), "the traceback travels with it"
+    assert sum(1 for x in logs if x["event"] == "duty.failed") == 1, "the aggregate line stays rate-limited"
+    assert g.snapshot()["decide"]["errors"] == 2

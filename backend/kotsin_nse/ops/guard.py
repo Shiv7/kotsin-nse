@@ -11,6 +11,10 @@ broker timeout.
 * every failure is counted per duty, with its last message and time, and shown in ``/api/health``
   (``duty_errors``) — a duty that keeps failing is visible the same day;
 * the log line is rate-limited per duty, so a duty failing every 5 s does not drown the log;
+* a duty opened WITH context (``duty("decide", symbol=…, ts=…)``) also logs every failure as
+  ``<name>.failed`` with that context and the traceback — one line per symbol per bar for the
+  decision, which the rate-limited line alone reduced to one line a minute with no symbol and no
+  traceback (review, 2026-10-03: it replaced ``log.exception("decide.failed", symbol=…)``);
 * under test (pytest, or ``KN_STRICT_GUARDS=1``) a PROGRAMMING error — ``TypeError``,
   ``AttributeError``, ``NameError`` — is re-raised instead of swallowed: the suite fails where
   production would have hidden it. Market and I/O failures are still swallowed there, as in
@@ -52,10 +56,10 @@ class DutyStats:
 class Guards:
     duties: dict[str, DutyStats] = field(default_factory=dict)
 
-    def duty(self, name: str) -> _Duty:
-        return _Duty(self, name)
+    def duty(self, name: str, **context: Any) -> _Duty:
+        return _Duty(self, name, context)
 
-    def record(self, name: str, exc: BaseException | None) -> bool:
+    def record(self, name: str, exc: BaseException | None, *, context: dict[str, Any] | None = None) -> bool:
         """Count one run of ``name``. Returns True when the exception is to be swallowed."""
         st = self.duties.setdefault(name, DutyStats())
         st.runs += 1
@@ -67,6 +71,8 @@ class Guards:
         st.last_error = f"{type(exc).__name__}: {exc}"[:200]
         now = time.time()
         st.last_error_ts = now
+        if context:
+            log.error(f"{name}.failed", **context, error=st.last_error, programming=programming, exc_info=exc)
         if programming and strict():
             return False
         if now - st.last_logged_ts >= LOG_EVERY_S:
@@ -88,11 +94,12 @@ class Guards:
 
 
 class _Duty:
-    __slots__ = ("guards", "name")
+    __slots__ = ("context", "guards", "name")
 
-    def __init__(self, guards: Guards, name: str) -> None:
+    def __init__(self, guards: Guards, name: str, context: dict[str, Any] | None = None) -> None:
         self.guards = guards
         self.name = name
+        self.context = context or {}
 
     def __enter__(self) -> _Duty:
         return self
@@ -100,7 +107,7 @@ class _Duty:
     def __exit__(self, et: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None) -> bool:
         if exc is not None and not isinstance(exc, Exception):
             return False  # CancelledError, KeyboardInterrupt, SystemExit: never a duty's to swallow
-        return self.guards.record(self.name, exc)
+        return self.guards.record(self.name, exc, context=self.context)
 
     async def __aenter__(self) -> _Duty:
         return self

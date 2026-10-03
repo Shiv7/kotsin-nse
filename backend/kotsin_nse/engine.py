@@ -2125,7 +2125,7 @@ class Engine:
                     current.extra["micro"] = bar.extra["micro"]
         self.alerts.on_bar(current)
         self._decision_lat.append(max(0.0, time.time() - (bar.ts + TF_SECONDS.get(bar.tf, 0))))
-        async with self.guards.duty("decide"):
+        async with self.guards.duty("decide", symbol=current.symbol, ts=int(current.ts)):
             await self._decide(current)
 
     async def _intraday_universe_rebuild(self) -> None:
