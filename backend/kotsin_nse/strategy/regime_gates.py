@@ -111,7 +111,7 @@ def market_fade_verdict(evs: list[dict[str, Any]], ctx: dict[str, Any] | None, f
     fade = next((e for e in reversed(evs) if e.get("kind") == "counter.market_fade"), None)
     skip = next((e for e in reversed(evs) if e.get("kind") == "rt_twin.skipped" and e.get("book") == "FUDKII_CT_M"), None)
     share = (ctx or {}).get("share")
-    blank = {"side": fade_side, "stop": None, "targets": [], "rr": None, "grade": None}
+    blank: dict[str, Any] = {"side": fade_side, "stop": None, "targets": [], "rr": None, "grade": None}
     if fade is not None:
         b = float(fade.get("breadth") or 0.0)
         return {"action": "FADE", "side": fade.get("side") or fade_side, "stop": fade.get("stop"), "targets": fade.get("targets") or [],

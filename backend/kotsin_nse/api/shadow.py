@@ -232,7 +232,7 @@ def graded_f_summary(*, signals: list[dict], positions: list[dict], trades: list
     skip_by = {e["signal_id"]: e for e in events
                if e.get("kind") == "rt_twin.skipped" and e.get("book") == GRADED_F_BOOK and e.get("signal_id")}
     offered = {e["signal_id"] for e in events if e.get("kind") == "regime.breadth" and e.get("signal_id")}
-    rows = []
+    rows: list[dict[str, Any]] = []
     for sg in sorted(latest.values(), key=lambda x: x["ts"]):
         sid = sg["signal_id"]
         if sg.get("strategy") != "FUDKII" or sg.get("decision") != "NOT_PUBLISHED" or sid not in offered:
@@ -246,7 +246,7 @@ def graded_f_summary(*, signals: list[dict], positions: list[dict], trades: list
             "status": "NONE" if p is None else ("EXITED" if closed else "OPEN"),
             "contract": ((p or {}).get("instrument") or {}).get("name"), "entry": (p or {}).get("entry"),
             "exit_reason": (p or {}).get("exit_reason") if closed else None,
-            "net": trade_by.get(p["id"]) if closed else None,
+            "net": trade_by.get(p["id"]) if (closed and p is not None) else None,
             "skip": (sk or {}).get("reason") if p is None else None, "gate": (sk or {}).get("gate") if p is None else None,
         })
     done = [r for r in rows if r["net"] is not None]
@@ -284,7 +284,7 @@ def gap_fade_summary(*, signals: list[dict], positions: list[dict], trades: list
         return {"status": "EXITED" if closed else "OPEN", "net": float(t["net"]) if (closed and t is not None) else None,
                 "pos": p, "reason": (t or {}).get("exit_reason") or p.get("exit_reason")}
 
-    rows = []
+    rows: list[dict[str, Any]] = []
     for sid, ev in sorted(plans.items(), key=lambda kv: float((latest.get(kv[0]) or {}).get("ts") or 0)):
         trig = latest.get(sid) or {}
         fade = own_by.get(("FUDKII_CT_Y", sid))
@@ -355,7 +355,7 @@ def market_fade_summary(*, signals: list[dict], positions: list[dict], trades: l
         trig = latest.get(sid) or {}
         return float(trig.get("created_ts") or (float(trig["ts"]) + 1800 if trig.get("ts") else 0)) or None
 
-    rows = []
+    rows: list[dict[str, Any]] = []
     for sid, ev in sorted(fades.items(), key=lambda kv: fired(kv[0]) or 0.0):
         trig = latest.get(sid) or {}
         own = own_by.get((MARKET_FADE_BOOK, sid))
@@ -373,7 +373,7 @@ def market_fade_summary(*, signals: list[dict], positions: list[dict], trades: l
             "rt_y": _book_on(pos_by, net_by, "FUDKII_RT_Y", sid),
             "ct_y": _book_on(pos_by, net_by, "FUDKII_CT_Y", gap["signal_id"]) if gap else {"status": "NONE", "net": None},
         })
-    skipped = sorted(({"signal_id": sid, "symbol": e.get("symbol") or (latest.get(sid) or {}).get("symbol"),
+    skipped: list[dict[str, Any]] = sorted(({"signal_id": sid, "symbol": e.get("symbol") or (latest.get(sid) or {}).get("symbol"),
                        "trigger": (latest.get(sid) or {}).get("direction"), "fired": fired(sid),
                        "breadth": e.get("breadth"), "gate": e.get("gate"), "reason": e.get("reason")} for sid, e in skips.items()),
                      key=lambda r: r["fired"] or 0.0)
