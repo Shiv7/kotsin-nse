@@ -68,13 +68,15 @@ class OiCandleBuilder:
         self.out_of_session = 0
         self.late = 0
 
-    def on_print(self, code: str, oi: float, ts: float, segment: Segment) -> list[OiCandle]:
+    def on_print(self, code: str, oi: float, ts: float, segment: Segment, *, trading_day: bool = True) -> list[OiCandle]:
         """Take one OI print; returns the candles it closed (a print in a later bucket closes the
-        one before). A print outside the session, or older than the bucket forming, is counted and
-        dropped — the bucket it belongs to is already decided."""
+        one before). A print outside the session — or on a day the exchange is shut, which the
+        caller's calendar answers (``trading_day``): 5paisa re-sends each contract's last level at a
+        weekend subscribe, and between 09:15 and 15:30 it made a "Saturday" candle (review,
+        2026-10-03) — or older than the bucket forming, is counted and dropped."""
         if oi <= 0:
             return []
-        if not in_session(segment, ts):
+        if not trading_day or not in_session(segment, ts):
             self.out_of_session += 1
             return []
         self.prints += 1

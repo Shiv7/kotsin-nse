@@ -341,3 +341,15 @@ def test_fridays_last_print_rolls_into_saturday_and_no_further(settings):
     assert (e._oi_ref["48900"], e._oi_ref_src["48900"]) == (40_321_800.0, "archive")
     e._note_oi("48900", 40_500_000.0, _at(mon, "09:16"))
     assert e._oi_ref["48900"] == 40_321_800.0, "Saturday's re-send is not a session's close"
+
+
+def test_a_level_re_sent_on_a_saturday_is_no_candle(settings):
+    """5paisa re-sends each contract's last level at a subscribe; on a Saturday between 09:15 and
+    15:30 the clock alone called it in session and it became a candle (review, 2026-10-03)."""
+    sat = date(2026, 10, 10)
+    b = OiCandleBuilder()
+    assert b.on_print("48900", 40_321_800, _at(sat, "10:00"), Segment.NSE_FO, trading_day=False) == []
+    assert b.forming("48900", "1d") is None and b.stats()["out_of_session"] == 1
+    e = _engine(settings)
+    e._note_oi("48900", 40_321_800.0, _at(sat, "10:00"))
+    assert e.oi_candles.forming("48900", "1d") is None, "the engine asks its calendar"

@@ -1806,7 +1806,7 @@ class Engine:
             self._oi_ref[code] = oi
             self._oi_ref_src[code] = "preopen"
         self._fut_oi[code] = (oi, ts)
-        self.oi_candles.on_print(code, oi, ts, seg)
+        self.oi_candles.on_print(code, oi, ts, seg, trading_day=self.calendar.is_trading_day(day))
 
     def _seed_oi_reference(self, *, today: date | None = None) -> int:
         """The previous session's closing OI for every future we map, from the engine's own OI archive
