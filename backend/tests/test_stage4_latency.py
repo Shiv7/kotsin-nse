@@ -114,13 +114,35 @@ async def test_the_futures_daily_rows_are_fetched_once_a_day_not_once_a_trigger(
 
     async def candles(inst, tf, start, end):
         calls.append(tf)
-        return []
+        return [{"dt": "2026-10-01T00:00:00", "o": 100.0, "h": 101.0, "l": 99.0, "c": 100.5, "v": 1e5}] if tf == "1d" else []
 
     e.rest.candles = candles  # type: ignore[method-assign]
     sem = asyncio.Semaphore(4)
     for bucket in (1_000, 2_800, 4_600):
         await e._fut_context_fetch(equity, fut, bucket, sem)
     assert calls.count("1d") == 1 and calls.count("30m") == 3
+
+
+@pytest.mark.asyncio
+async def test_an_empty_daily_answer_is_asked_again_by_the_next_bar(settings, equity):
+    """Review, 2026-10-03: an empty 200 was held for the whole day, and the future had no daily or
+    weekly levels until midnight."""
+    from kotsin_nse.domain import Instrument, InstrumentKind
+    from kotsin_nse.engine import Engine
+
+    e = Engine(settings)
+    fut = Instrument("48900", equity.symbol, Segment.NSE_FO, InstrumentKind.FUTURE, expiry="2026-10-27", underlying=equity.symbol)
+    calls: list[str] = []
+
+    async def candles(inst, tf, start, end):
+        calls.append(tf)
+        return []
+
+    e.rest.candles = candles  # type: ignore[method-assign]
+    sem = asyncio.Semaphore(4)
+    for bucket in (1_000, 2_800, 4_600):
+        await e._fut_context_fetch(equity, fut, bucket, sem)
+    assert calls.count("1d") == 3
 
 
 # -- the boot backfill: bounded, and the cached dailies are not asked for again --------------------

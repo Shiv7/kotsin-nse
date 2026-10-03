@@ -4775,7 +4775,11 @@ class Engine:
                 if held1d is None:
                     held1d = await self.rest.candles(front, "1d", (today - timedelta(days=35)).isoformat(), today.isoformat())
                     self._fut_daily_rows = {k: v for k, v in self._fut_daily_rows.items() if k[1] == today}
-                    self._fut_daily_rows[(front.scrip_code, today)] = held1d
+                    if held1d:
+                        # only an answer with candles is held for the day: an empty 200 is asked again
+                        # by the next bar, as before Stage 4 — held, the future had no daily or weekly
+                        # levels for the rest of the session (review, 2026-10-03)
+                        self._fut_daily_rows[(front.scrip_code, today)] = held1d
                 rows1d = held1d
         except Exception as exc:  # noqa: BLE001 — a route input must never fail the fill path
             log.warning("fut.context_unknown", symbol=underlying.symbol, error=str(exc)[:120])
