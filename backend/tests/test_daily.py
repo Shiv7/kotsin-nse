@@ -114,3 +114,20 @@ def test_a_provisional_previous_session_is_re_asked_not_ok():
     assert "1 on the provisional 09:15 candle" in a.summary()
     m = audit({"P": prov}, date(2026, 9, 15), CAL, segments={"P": Segment.MCX_FO})
     assert m.ok == ["P"] and not m.provisional, "MCX stamps its candle at the first trade: no such test"
+
+
+def test_a_quiet_name_behind_is_reported_never_a_fault_and_leaves_once_current():
+    """Operator, 2026-10-03: "keep cardamom but name it quiet for now" — CARDAMOM's last candle
+    was 30 Sep on 3 Oct; a name not listed quiet that is behind is still a fault."""
+    prev = CAL.previous_trading_day(TODAY)
+    series = {"OK": _series(prev), "CARDAMOM": _series(prev - timedelta(days=1)), "LEAD": _series(prev, n=MIN_DAILY_BARS - 7),
+              "NIFTYFPI": _series(prev - timedelta(days=1))}
+    a = audit(series, TODAY, CAL, quiet={"CARDAMOM"})
+    assert a.quiet == ["CARDAMOM"] and a.stale == ["NIFTYFPI"] and a.short == ["LEAD"]
+    assert "CARDAMOM" in a.needs_refresh, "still re-asked, so it recovers on its own"
+    assert not a.ready, "LEAD and NIFTYFPI still fail"
+    assert "1 quiet, alerts only (CARDAMOM)" in a.summary() and a.summary().startswith("1/4 names")
+    only = audit({"OK": series["OK"], "CARDAMOM": series["CARDAMOM"]}, TODAY, CAL, quiet={"CARDAMOM"})
+    assert only.ready, "a quiet name alone never makes the pivots line fail"
+    back = audit({"CARDAMOM": _series(prev)}, TODAY, CAL, quiet={"CARDAMOM"})
+    assert back.ok == ["CARDAMOM"] and not back.quiet, "traded again: no longer quiet"

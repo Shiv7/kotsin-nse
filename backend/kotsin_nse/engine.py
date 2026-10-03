@@ -1592,7 +1592,34 @@ class Engine:
         return audit_daily(
             {sym: self.store.bars(sym, "1d") for sym in self.underlyings}, ist_today(), self.calendar,
             segments={sym: inst.segment for sym, inst in self.underlyings.items()},
+            quiet=self.quiet_listed(),
         )
+
+    def quiet_listed(self) -> frozenset[str]:
+        """``data/quiet.txt``: names the operator keeps but calls quiet while they do not trade
+        (operator, 2026-10-03: "keep cardamom but name it quiet for now. show alerts but dont trade
+        till there is liquidity"). One symbol a line, ``#`` comments; read on every call, so an edit
+        needs no restart."""
+        try:
+            text = (self.s.data_dir / "quiet.txt").read_text()
+        except OSError:
+            return frozenset()
+        return frozenset(w.upper() for line in text.splitlines() if (w := line.split("#", 1)[0].strip()))
+
+    def quiet_reason(self, symbol: str) -> str | None:
+        """Why ``symbol`` takes no trade now: listed quiet AND its daily series behind — no recent
+        trade at the broker. None once it trades again (its previous session is current)."""
+        if symbol.upper() not in self.quiet_listed():
+            return None
+        inst = self.underlyings.get(symbol)
+        one = audit_daily({symbol: self.store.bars(symbol, "1d")}, ist_today(), self.calendar,
+                          segments={symbol: inst.segment} if inst is not None else None, quiet={symbol})
+        if symbol not in one.quiet:
+            return None
+        prev = previous_session(self.store.bars(symbol, "1d"), ist_today())
+        last = ist_day(prev.ts).isoformat() if prev is not None else "never"
+        return (f"{symbol} is quiet (data/quiet.txt): no daily candle at the broker since {last} — "
+                "alerts only, no trade until it trades again")
 
     async def _pivot_repair(self) -> None:
         """docs/PIVOTS.md §3–4: refetch what the audit flags, reload what the ladders lack.
@@ -2346,6 +2373,10 @@ class Engine:
         underlying = self.underlyings.get(sig.symbol)
         if underlying is None:
             return await everyone("NO_UNDERLYING", "not in the universe")
+        # a quiet name: the trigger and its alert stand, no book trades it (an operator TAKE still may)
+        if not take and (quiet := self.quiet_reason(sig.symbol)):
+            log.info("signal.quiet", symbol=sig.symbol, signal=sig.signal_id)
+            return await everyone("QUIET", quiet)
         segment_book = next((k for k, seg in self.SEGMENT_BOOKS.items() if seg is underlying.segment), None)
         if (sig.strategy is StrategyKey.FUDKII and published(sig) and segment_book is not None
                 and not self.book_trades(sig.strategy.value, underlying.segment)):

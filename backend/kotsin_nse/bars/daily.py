@@ -25,7 +25,7 @@ fresh REST bar win over a same-day cached one.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -135,6 +135,11 @@ class DailyAudit:
     #: no candle of any kind at the broker — a listed contract nobody trades (COTTON, KAPAS,
     #: MCXBULLDEX…). Reported, never a fault: there is no session to be missing from.
     dormant: list[str] = field(default_factory=list)
+    #: names the operator marked quiet (``data/quiet.txt``) whose series is behind — an illiquid
+    #: contract with no recent trade (operator, 2026-10-03: "keep cardamom but name it quiet for
+    #: now. show alerts but dont trade till there is liquidity"). Re-asked like any stale name, never
+    #: a fault; no book trades it until its series is current again, when it leaves this list.
+    quiet: list[str] = field(default_factory=list)
 
     @property
     def holiday_suspected(self) -> bool:
@@ -152,7 +157,7 @@ class DailyAudit:
 
     @property
     def needs_refresh(self) -> list[str]:
-        bad = set(self.missing) | set(self.unofficial) | set(self.short) | set(self.provisional)
+        bad = set(self.missing) | set(self.unofficial) | set(self.short) | set(self.provisional) | set(self.quiet)
         if not self.holiday_suspected:
             bad |= set(self.stale)
         return sorted(bad)
@@ -160,14 +165,18 @@ class DailyAudit:
     @property
     def ready(self) -> bool:
         """Every series can carry its levels — a provisional candle aside: the broker publishes the
-        end-of-day one on its own clock, and the ``zones`` health line alarms if it is late."""
-        return not (set(self.needs_refresh) - set(self.provisional))
+        end-of-day one on its own clock, and the ``zones`` health line alarms if it is late — and a
+        quiet name aside (operator-listed, alerts only until it trades again)."""
+        return not (set(self.needs_refresh) - set(self.provisional) - set(self.quiet))
 
     def summary(self) -> str:
-        total = len(self.ok) + len(self.missing) + len(self.unofficial) + len(self.stale) + len(self.short) + len(self.provisional)
+        total = (len(self.ok) + len(self.missing) + len(self.unofficial) + len(self.stale) + len(self.short)
+                 + len(self.provisional) + len(self.quiet))
         parts = [f"{len(self.ok)}/{total} names on the official previous session"]
         if self.dormant:
             parts.append(f"{len(self.dormant)} dormant (no candles at the broker)")
+        if self.quiet:
+            parts.append(f"{len(self.quiet)} quiet, alerts only ({', '.join(sorted(self.quiet))})")
         if self.missing:
             parts.append(f"{len(self.missing)} missing")
         if self.unofficial:
@@ -187,9 +196,11 @@ class DailyAudit:
 def audit(
     series: Mapping[str, list[UnifiedBar]], today: date, calendar: TradingCalendar,
     segments: Mapping[str, Segment] | None = None,
+    quiet: Collection[str] = (),
 ) -> DailyAudit:
     """Classify every name's daily series by whether its previous-session bar can carry a pivot.
-    ``segments`` names each series' exchange (default NSE_EQ, as ``Engine.zones_for`` assumes)."""
+    ``segments`` names each series' exchange (default NSE_EQ, as ``Engine.zones_for`` assumes). A name
+    in ``quiet`` that is behind (missing, stale, short) is classed quiet, not a fault."""
     expected = calendar.previous_trading_day(today)
     prevs = {sym: previous_session(bars, today) for sym, bars in series.items()}
     consensus = max((ist_day(p.ts) for p in prevs.values() if p is not None), default=None)
@@ -210,6 +221,11 @@ def audit(
             out.short.append(sym)
         else:
             out.ok.append(sym)
+    for sym in quiet:
+        for behind in (out.missing, out.stale, out.short):
+            if sym in behind:
+                behind.remove(sym)
+                out.quiet.append(sym)
     return out
 
 
