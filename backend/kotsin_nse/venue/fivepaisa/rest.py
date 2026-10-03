@@ -17,6 +17,8 @@ looking like a successful placement.
 from __future__ import annotations
 
 import time
+from collections import deque
+from collections.abc import Iterable
 from typing import Any
 
 import httpx
@@ -24,8 +26,11 @@ import structlog
 
 from ...config import Segment, Settings
 from ...domain import Instrument, InstrumentKind, OptionType, OrderSide
+from ...market.candles import snap_candles
+from ...market.session import TF_SECONDS
 from ..base import VenueError
 from .auth import APIM_KEY, Authenticator
+from .ws import parse_broker_date
 
 log = structlog.get_logger(__name__)
 
@@ -46,6 +51,8 @@ class FivePaisaREST:
         self.http = client
         self.auth = auth
         self.calls = 0
+        #: the last few hundred calls' durations in seconds — the REST p95 in /api/health
+        self.latencies: deque[float] = deque(maxlen=400)
         self.failures = 0
         self.last_error: str = ""
 
@@ -69,12 +76,14 @@ class FivePaisaREST:
         self.calls += 1
         headers = await self._bearer()
         url = self.s.endpoints.rest + path
+        began = time.perf_counter()
         try:
             r = await self.http.post(
                 url, json={"head": self._head(), "body": body}, headers=headers, timeout=30
             )
             r.raise_for_status()
             data = r.json()
+            self.latencies.append(time.perf_counter() - began)
         except Exception as exc:
             self.failures += 1
             self.last_error = f"{path}: {exc}"
@@ -123,10 +132,12 @@ class FivePaisaREST:
             f"{instrument.scrip_code}/{interval}?from={start}&end={end}"
         )
         headers = {"Ocp-Apim-Subscription-Key": APIM_KEY, **await self._bearer()}
+        began = time.perf_counter()
         try:
             r = await self.http.get(url, headers=headers, timeout=60)
             r.raise_for_status()
             payload = r.json()
+            self.latencies.append(time.perf_counter() - began)
         except Exception as exc:
             self.failures += 1
             self.last_error = f"historical {instrument.symbol}: {exc}"
@@ -146,6 +157,10 @@ class FivePaisaREST:
                     "v": float(row[5]),
                 }
             )
+        if interval in TF_SECONDS:
+            # On the session grid at the edge: a candle stamped at its first trade (09:16, 10:46,
+            # 15:28) is its bucket, a post-close row is no bar (market/candles.py).
+            return snap_candles(out, instrument.segment, interval).rows
         return out
 
     async def market_feed(self, instruments: list[Instrument]) -> dict[str, dict[str, Any]]:
@@ -162,6 +177,14 @@ class FivePaisaREST:
         }
         resp = await self._post("V1/MarketFeed", body)
         now = time.time()
+
+        def traded_at(row: dict[str, Any]) -> float:
+            """The broker's time of the last trade (``TickDt``), never later than now. It was stamped
+            with the time of the CALL, so a price minutes old passed every staleness guard as fresh
+            (review, 2026-10-03). No usable TickDt: the call time, as before."""
+            t = parse_broker_date(row.get("TickDt"))
+            return min(t, now) if t is not None and t > 0 else now
+
         out: dict[str, dict[str, Any]] = {}
         for row in resp.get("Data") or []:
             token = str(row.get("Token"))
@@ -177,7 +200,7 @@ class FivePaisaREST:
                 "bid_qty": int(row.get("BidQty") or 0),
                 "ask_qty": int(row.get("OfferQty") or 0),
                 "volume": int(row.get("Volume") or row.get("TotalQty") or 0),
-                "ts": now,
+                "ts": traded_at(row),
             }
         return out
 
@@ -323,7 +346,14 @@ class FivePaisaREST:
             "failures": self.failures,
             "last_error": self.last_error,
             "session": bool(self.auth.session and self.auth.session.valid),
+            "latency_p50_s": _pct(self.latencies, 50),
+            "latency_p95_s": _pct(self.latencies, 95),
         }
+
+
+def _pct(xs: Iterable[float], p: float) -> float | None:
+    s = sorted(xs)
+    return round(s[min(len(s) - 1, int(p / 100 * len(s)))], 3) if s else None
 
 
 def kind_for(segment: Segment, scrip_type: str, strike: float) -> InstrumentKind:

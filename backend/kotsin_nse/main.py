@@ -384,6 +384,25 @@ def build_parser() -> argparse.ArgumentParser:
     pv.add_argument("--for", dest="for_date", default=date.today().isoformat(), help="the session the levels were in force on (default: today)")
     pv.add_argument("--otm", type=int, default=4, help="OTM strikes per side to ladder (default: 4, the book's own)")
 
+    zs = sub.add_parser("zones", help="the pivot zones at a width and wall threshold, from the cache — a measuring tool, not a calibration")
+    zs.add_argument("symbol", help="an underlying, or ALL for the distribution over every cached name")
+    zs.add_argument("--for", dest="for_date", default=date.today().isoformat(), help="the session (one symbol)")
+    zs.add_argument("--k", type=float, default=0.30, help="cluster width in ATR30 (live NEUTRAL: 0.30)")
+    zs.add_argument("--wall", type=float, default=5.2, help="the strength a zone needs to be a wall (live: 5.2)")
+    zs.add_argument("--sessions", type=int, default=60, help="ALL: the last N sessions of each name")
+
+    nh = sub.add_parser("normalize-history", help="put the cached intraday history on the session grid, in place (no broker needed)")
+    nh.add_argument("--tf", default="30m")
+
+    fo = sub.add_parser("fetch-oi", help="NSE's F&O bhavcopy into the daily OI store — the official closing OI per contract (no broker needed)")
+    fo.add_argument("--start", default=(today - timedelta(days=365)).isoformat())
+    fo.add_argument("--end", default=today.isoformat())
+    fo.add_argument("--refetch", action="store_true", help="fetch again days already held")
+
+    oi = sub.add_parser("oi", help="an underlying's daily futures OI from the store: the change, the price, the quadrant")
+    oi.add_argument("symbol", help="underlying root, e.g. RELIANCE")
+    oi.add_argument("--days", type=int, default=20, help="the last N sessions held (default 20)")
+
     tp = sub.add_parser("tape", help="the tick tape: what was recorded on a day, or one contract second by second (no engine needed)")
     tp.add_argument("--day", default=date.today().isoformat(), help="IST session (default: today)")
     tp.add_argument("--symbol", default=None, help="only this underlying")
@@ -418,6 +437,75 @@ def run_rl_cli(settings: Settings, args: argparse.Namespace) -> None:
     print(f"\nsaved {settings.data_dir / 'rl' / (art['name'] + '.json')}")
 
 
+def show_zones(settings: Settings, args: argparse.Namespace) -> None:
+    from .research.history import HistoryStore
+    from .research.zone_stats import distribution, zones_on
+
+    store = HistoryStore(settings.data_dir / "history")
+    if args.symbol.upper() == "ALL":
+        d = distribution(store, k=args.k, wall=args.wall, sessions=args.sessions)
+        print(json.dumps({"k": args.k, "wall": args.wall, "sessions": args.sessions, **d.to_json()}, indent=1))
+        return
+    built = zones_on(store, args.symbol.upper(), date.fromisoformat(args.for_date), k=args.k)
+    if built.refused:
+        print(f"no zones: {built.refused} — {built.detail}")
+        return
+    print(f"{args.symbol.upper()} {args.for_date}: {len(built.zones)} zones at {built.tolerance_pct:.3f} % (k {args.k})")
+    for z in sorted(built.zones, key=lambda z: -z.price):
+        tag = "WALL" if z.strength >= args.wall else "    "
+        print(f"  {z.price:>11,.2f}  {z.strength:5.1f} {tag}  {', '.join(z.members)}")
+
+
+def normalize_history(settings: Settings, args: argparse.Namespace) -> None:
+    """Repair a cache written before the session grid (research/history.py): every symbol's intraday
+    series snapped and filtered, its segment recorded — from segments.json where the fetch recorded
+    it, else guessed (bars after 17:00 IST are MCX's)."""
+    from .research.history import HistoryStore, guess_segment
+
+    store = HistoryStore(settings.data_dir / "history")
+    totals = {"symbols": 0, "moved": 0, "dropped": 0}
+    for sym in store.symbols(args.tf):
+        seg = store.segment_of(sym) or guess_segment(store.load(sym, args.tf))
+        out = store.normalize(sym, args.tf, seg)
+        totals["symbols"] += 1
+        totals["moved"] += out["moved"]
+        totals["dropped"] += out["dropped"]
+    print(json.dumps({**totals, "tf": args.tf, "store": str(store.root)}))
+
+
+async def fetch_oi(settings: Settings, args: argparse.Namespace) -> None:
+    import httpx
+
+    from .market.fo_bhavcopy import OiDailyStore, backfill
+
+    store = OiDailyStore(settings.data_dir / "oi_daily")
+    start, end = date.fromisoformat(args.start), date.fromisoformat(args.end)
+    async with httpx.AsyncClient(timeout=60, follow_redirects=True) as http:
+        out = await backfill(http, store, start, end, refetch=args.refetch)
+    days = store.days()
+    print(json.dumps({**out, "store": str(store.root), "sessions_held": len(days),
+                      "first": days[0].isoformat() if days else None, "last": days[-1].isoformat() if days else None}))
+
+
+def show_oi(settings: Settings, args: argparse.Namespace) -> None:
+    import pandas as pd
+
+    from .market.fo_bhavcopy import OiDailyStore
+    from .research.oi_daily import futures_oi, with_changes
+
+    store = OiDailyStore(settings.data_dir / "oi_daily")
+    t = with_changes(futures_oi(store, [args.symbol]))
+    if t.empty:
+        print(f"no OI held for {args.symbol.upper()} — run `kotsin-nse fetch-oi` first", file=sys.stderr)
+        raise SystemExit(1)
+    t = t.tail(args.days)
+    print(f"{'day':10s} {'front':10s} {'front OI':>12s} {'all futures OI':>15s} {'OI chg':>8s} {'close':>10s} {'px chg':>7s}  quadrant")
+    for r in t.itertuples():
+        oi_chg = "" if pd.isna(r.oi_chg_pct) else f"{r.oi_chg_pct:+.2f}%"
+        px_chg = "" if pd.isna(r.px_chg_pct) else f"{r.px_chg_pct:+.2f}%"
+        print(f"{r.day!s:10s} {r.front_expiry:10s} {r.front_oi:>12,.0f} {r.total_oi:>15,.0f} {oi_chg:>8s} {r.front_close:>10,.2f} {px_chg:>7s}  {r.quadrant or ''}")
+
+
 def cli() -> None:
     args = build_parser().parse_args()
     try:
@@ -443,6 +531,14 @@ def cli() -> None:
         asyncio.run(show_pivots(settings, args))
     elif command == "tape":
         show_tape(settings, args)
+    elif command == "fetch-oi":
+        asyncio.run(fetch_oi(settings, args))
+    elif command == "normalize-history":
+        normalize_history(settings, args)
+    elif command == "zones":
+        show_zones(settings, args)
+    elif command == "oi":
+        show_oi(settings, args)
     else:  # pragma: no cover - argparse rejects anything else
         raise SystemExit(f"unknown command {command}")
 

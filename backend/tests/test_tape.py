@@ -290,7 +290,11 @@ def test_a_replay_on_the_tape_exits_where_the_policy_did_and_fills_at_the_bid(op
     first = rep.events[0]
     assert first.ts >= t0 + 300 and first.reason in {"SL-OP", "TRAIL", "SL-EQ"} and first.fill == 7.45
     assert sum(ev.qty for ev in rep.events) == 500 and rep.gross == pytest.approx((7.45 - 10.0) * 500)
-    assert rep.peak_mid == 10.0 and rep.seconds == 301 and rep.skipped_stale == 0, "evaluation stops at the exit"
+    # The position's stamped 8.00 stop holds, so the option-side sustain (75 s) decides: exit at
+    # +376 s. It used to read +301 — the old re-projection replaced the stamped stop with 8.50 (the
+    # formula through the 1500 CE's 0.15 delta) inside 10 s, and the 9 % hard floor under 8.50 fired
+    # the moment the mid printed 7.50 (review, 2026-10-03).
+    assert rep.peak_mid == 10.0 and rep.seconds == 376 and rep.skipped_stale == 0, "evaluation stops at the exit"
 
     # never breached → nothing fires; the end of the tape flattens at the last bid
     calm = Series("45678", [Tick(t0 + i, 10.0, 9.95, 10.05, t0 + i) for i in range(120)])

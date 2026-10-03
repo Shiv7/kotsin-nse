@@ -111,12 +111,17 @@ def test_an_engine_running_through_midnight_rolls_its_reference(settings):
 
 
 @pytest.mark.asyncio
-async def test_a_stocks_bars_carry_the_front_months_computed_change_never_the_broker_zero(settings):
+async def test_a_stocks_bars_carry_the_front_months_computed_change_never_the_broker_zero(settings, monkeypatch):
+    import kotsin_nse.engine as engine_mod
+
+    # a trading day's session: a reading counts only a level received during today's session
+    day = date(2026, 10, 6)
+    monkeypatch.setattr(engine_mod, "ist_today", lambda: day)
     e = _engine(settings)
     e.aggregator.track(e.underlyings["JSWSTEEL"])
     e._oi_ref = {"48900": 40_000_000.0, "61619": 500_000.0}
-    e._oi_ref_day = date.today()
-    now = time.time()
+    e._oi_ref_day = day
+    now = from_ist(datetime.combine(day, dt_time(10, 0)))
     await e._on_oi({"scrip_code": "61619", "open_interest": 600_000, "oi_change_pct": 0.0, "recv_ts": now})
     st = e.aggregator.state["11723"]
     assert st.oi_change_pct is None and st.oi in (None, 0), "the next month never stamps the stock's bars"

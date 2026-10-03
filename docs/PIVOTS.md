@@ -295,3 +295,33 @@ Not IV/realised — a single stock's IV always sits above its realised. History 
 option candles the legs fetch and replaced by live once-a-minute points, persisted under
 `data/iv/<SYMBOL>.json`. The equity zones stay on the India VIX band. `/api/chain/{symbol}.stockIv`
 shows the IV, the median, the band and the `k` in force.
+
+## Zones: one builder for live and the backtest (2026-10-03)
+
+`bars/zones.py build_zones` is the only place zones are built — `Engine.zones_for` and
+`BacktestContext.zones` both call it (the backtest used to cluster at a flat 0.25 % while live used
+`k × ATR30 / price`; 14.5 % of publish decisions differed). It also:
+
+* fixes the width **before the session**: ATR(14) over the 60 decision bars before today, over the
+  previous close — a restart at 13:15 gives the same zones as the 09:00 boot (it used to take the
+  ATR and LTP at the first call, which changed the clustering on ~30 % of symbol-days);
+* refuses an NSE previous session that is still 5paisa's **provisional** daily candle (stamped
+  09:15) until the end-of-day one (00:00) lands; MCX stamps its daily candle at the first trade and
+  is not tested;
+* refuses a session whose official close and its own last 30m close are more than 8 % apart — a
+  corporate action adjusted the daily series and not the 30m one (VEDL ×0.374).
+
+A refusal is listed in `Engine.zone_refusals` and is never cached.
+
+`kotsin-nse zones SYMBOL --for DATE` prints one day's zones; `kotsin-nse zones ALL --k K --wall W`
+prints the distribution over the cache. Measured 2026-10-03 (40 sessions × 212 names):
+
+| | k 0.30 (live NEUTRAL) | k 0.45 |
+|---|---|---|
+| zones that are a single level | 88.8 % | 84.5 % |
+| walls per symbol-day | 3.2 | 4.1 |
+| a wall within 3 ATR above / below the close | 62 % / 52 % | 71 % / 62 % |
+| no wall above at all | 13.5 % | 6.8 % |
+| median width | 0.138 % | 0.207 % |
+
+`k` and `WALL_MIN_STRENGTH` are the operator's to choose; this is the measurement.

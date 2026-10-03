@@ -111,6 +111,13 @@ class SuperTrendPoint:
     value: float  # the active band — the line a chart would draw
 
 
+#: SuperTrend is path-dependent: each window seeds its own bands, so two readers with different
+#: windows disagree. Measured 2026-10-03 on 60 names × a year of 30m bars against the full history:
+#: a 55-bar window put 16.7 % of the flips on a different bar (FUDKII used 55, the cards 120, the chart
+#: ~81); at 120 bars and beyond, 0 of 1,633 differed. Every reader computes over at least this many.
+SUPERTREND_CONVERGED_BARS = 120
+
+
 def supertrend(
     bars: Sequence[OHLCV], atr_period: int = 7, mult: float = 3.0
 ) -> list[SuperTrendPoint | None]:

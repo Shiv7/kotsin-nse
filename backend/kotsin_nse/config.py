@@ -117,6 +117,13 @@ class Settings(BaseSettings):
     #: be tested without, went unrecorded.
     archive_enabled: bool = True
     archive_flush_s: float = 300.0
+    #: fetch NSE's F&O bhavcopy for the previous session (``market/fo_bhavcopy.py``) — the official
+    #: closing OI every OI change is measured from when the engine's own archive lacks that day.
+    #: Public exchange data, no broker session needed; off only for an engine with no internet.
+    oi_bhavcopy_enabled: bool = True
+    #: broker calls in flight during the boot backfill, each still paced 0.15 s (it was one at a
+    #: time: 153 s, blind, for a mid-session restart)
+    backfill_concurrency: int = 4
     #: rolling window for the **tape** (``quotes``): day files kept after each flush (sessions,
     #: not calendar days — a file exists only for a day something was recorded); 0 keeps
     #: everything. Fifteen sessions is three weeks of second-by-second replays for ~120 MB
@@ -270,7 +277,9 @@ class Settings(BaseSettings):
 
     # ---- cost model ----------------------------------------------------------------------------
     # SUPERSEDED 2026-09-26: every rate below now comes from <data_dir>/charges.toml (risk/charge_rates.py,
-    # per product, Zerodha's table). These fields stay only so an .env that sets KN_COST_* still boots.
+    # per product). These fields stay only so an .env that sets KN_COST_* still boots; NOTHING reads
+    # them (2026-10-03), and the engine lists any that are set in its boot notes as ignored. The
+    # account's brokerage is ₹20 per executed order (operator, 2026-10-03) — charges.toml's value.
     # Measured on this book, not assumed: at ₹33,000/position the NSE cash round trip was 0.299%,
     # of which 81% was flat brokerage (₹40/order × 2) — see kotsin-box/SESSION-PRIMER.md. These are
     # the numbers the backtester and the paper filler both use, so a strategy cannot look profitable

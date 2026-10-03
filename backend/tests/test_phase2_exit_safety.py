@@ -205,9 +205,11 @@ async def test_quiet_held_contracts_are_requoted_in_the_background(settings, mon
         return {OPT.scrip_code: {"ltp": 0.55, "bid": 0.54, "ask": 0.0, "bid_qty": 60000, "ask_qty": 0, "ts": time.time()}}
 
     monkeypatch.setattr(e.rest, "market_feed", market_feed)
-    monkeypatch.setattr(engine_mod, "is_open", lambda *_a: False)
+    # the real signature, so a call that forgets the calendar fails here instead of in production,
+    # where it was swallowed as held_quotes.failed on every pass (review, 2026-10-03)
+    monkeypatch.setattr(engine_mod, "is_open", lambda segment, ts, calendar: False)
     assert await e._refresh_held_quotes(now) == 0 and calls == [], "closed segment: no calls"
-    monkeypatch.setattr(engine_mod, "is_open", lambda *_a: True)
+    monkeypatch.setattr(engine_mod, "is_open", lambda segment, ts, calendar: True)
     assert await e._refresh_held_quotes(now) == 1 and calls == [[OPT.scrip_code]]
     b = e.books[OPT.scrip_code]
     assert b.bids == [(0.54, 60000)] and b.asks == [] and b.age_ms(time.time()) < 1000, "a fresh one-sided book to sell into"

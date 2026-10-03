@@ -31,6 +31,14 @@ from .indicators import volume_surges
 
 WINDOW = 6
 FLOOR = 1000.0
+#: the baseline floor in the segment's own units. NSE volume is in shares; MCX volume is in LOTS
+#: (30m medians GOLD 214, COPPER 137, CRUDEOIL 870), where a floor of 1,000 set the baseline in
+#: 98-99 % of GOLD and COPPER readings and read 93-95 % of them as "dried" (review, 2026-10-03).
+FLOORS: dict[Segment, float] = {Segment.MCX_FO: 10.0}
+
+
+def floor_for(segment: Segment) -> float:
+    return FLOORS.get(segment, FLOOR)
 #: the market-wide check: a bar whose median T or T-1 across the NSE names is outside this band,
 #: or whose doubtful readings exceed this share, is a data fault, not a market
 MARKET_SANE = (0.1, 10.0)
@@ -72,7 +80,7 @@ def read_volume(
     tf: str = "30m",
     until: time | None = None,
     window: int = WINDOW,
-    floor: float = FLOOR,
+    floor: float | None = None,
     prev_day: Callable[[date], date] | None = None,
 ) -> VolumeReading:
     """The reading at the bucket starting ``t_ts``, or a doubtful one saying why. ``bars`` are the
@@ -92,7 +100,8 @@ def read_volume(
     flagged = [s for s in slots if by_ts[s].doubt]
     if flagged:
         return VolumeReading(doubt=f"bar {_when(flagged[0])}: {by_ts[flagged[0]].doubt}", kind="flagged")
-    s_t, s_t1, base = volume_surges([by_ts[s].volume for s in slots], window=window, floor=floor)
+    s_t, s_t1, base = volume_surges([by_ts[s].volume for s in slots], window=window,
+                                    floor=floor_for(segment) if floor is None else floor)
     if s_t is None or s_t1 is None:
         return VolumeReading(doubt="no baseline", kind="baseline")
     return VolumeReading(s_t, s_t1, base)
@@ -142,3 +151,52 @@ def market_volume(ts: int, readings: Sequence[VolumeReading]) -> MarketVolume:
     elif mv.median_t is not None and not lo <= mv.median_t <= hi:
         mv.alarm = f"market median T {mv.median_t:.3f}x (outside {lo:g}–{hi:g}x)"
     return mv
+
+
+@dataclass(frozen=True, slots=True)
+class SlotReading:
+    """A bar's volume against the SAME time slot on earlier sessions — the reading that does not
+    mistake the intraday U-shape for a market drying up or surging."""
+
+    ratio: float | None = None
+    median: float | None = None
+    sessions: int = 0
+    slot: str = ""
+    doubt: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return not self.doubt and self.ratio is not None
+
+    def to_json(self) -> dict[str, object]:
+        return {"ratio": None if self.ratio is None else round(self.ratio, 3), "median": self.median,
+                "sessions": self.sessions, "slot": self.slot, "doubt": self.doubt}
+
+
+#: sessions of the same slot the median is taken over, and the fewest it may stand on
+SLOT_SESSIONS = 20
+SLOT_MIN_SESSIONS = 5
+
+
+def slot_reading(bars: Sequence[VolBar], t_ts: int, *, sessions: int = SLOT_SESSIONS,
+                 min_sessions: int = SLOT_MIN_SESSIONS) -> SlotReading:
+    """The bar starting ``t_ts`` against the median of the same IST HH:MM slot over up to ``sessions``
+    earlier sessions. The T-2…T-7 reading compares a bar with the six before it, so it reads the
+    normal U-shape as signal: 0 % of 09:15 bars read "dried" against 60-68 % of late-morning ones and
+    1 % at 14:45; divided by its own slot's median, 25 % / 35 % / 27 % (review, 2026-10-03). Reported,
+    gating nothing — whether a book gates on it is the operator's call."""
+    slot = to_ist(t_ts).strftime("%H:%M")
+    by_ts = {b.ts: b for b in bars}
+    t = by_ts.get(int(t_ts))
+    if t is None:
+        return SlotReading(slot=slot, doubt="no bar at that time")
+    if t.doubt or t.volume <= 0:
+        return SlotReading(slot=slot, doubt=t.doubt or "zero volume")
+    same = sorted((b for b in bars if b.ts < t_ts and to_ist(b.ts).strftime("%H:%M") == slot
+                   and b.volume > 0 and not b.doubt), key=lambda b: b.ts)[-sessions:]
+    if len(same) < min_sessions:
+        return SlotReading(slot=slot, sessions=len(same), doubt=f"only {len(same)} earlier sessions at {slot}")
+    med = statistics.median(b.volume for b in same)
+    return SlotReading(ratio=t.volume / med if med > 0 else None, median=med, sessions=len(same), slot=slot,
+                       doubt="" if med > 0 else "median volume is zero")
+

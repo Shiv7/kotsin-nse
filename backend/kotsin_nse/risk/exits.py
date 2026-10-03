@@ -318,33 +318,52 @@ class ExitEngine:
         )
 
     def _reproject_stop(self, pos: Position, view: MarketView) -> None:
-        """The option-side stop is the equity stop expressed through delta — and delta moves.
+        """Keep the option-side stop where the equity stop is on the premium, every ``reproject_stop_s``.
 
-        Re-derived every ``reproject_stop_s`` from the underlying's live price, so the level is
-        where the equity stop *is* on the premium now, not where it was at entry. Never below
-        ``ratchet_sl``: once the ratchet has claimed ground, a falling delta may not give it back.
+        Two ways, per book:
+
+        * **priced** (``priced_option_stop``, RT-N): the option repriced with the underlying AT its
+          stop, on the option's own implied volatility and the time left (``value_at``) — it follows
+          the volatility and the clock, so it needs a live mid;
+        * **the delta line** (every other book): the level mapped at the fill — entry premium less
+          the equity risk through the delta at the ENTRY spot — held. It used to be re-derived with
+          the delta at TODAY's spot against the entry premium: on an adverse move delta falls, so the
+          line ROSE toward the entry and stopped the option out before the stock reached its stop
+          (review, 2026-10-03: CE 1010, stock 1000 → 985 stop, stopped at 988). Held, it is
+          independent of the option's own price, so it still catches what only the option suffers
+          (a volatility crush, the clock, a wide book).
+
+        Both then take the book's premium cap and tick floor, and never go below ``ratchet_sl``.
+        A future's stop IS the underlying's (delta 1 at the fill) and is never re-projected:
+        estimate_delta's 0.5 for a contract without a strike put an MCX future's 5600 → 5560 stop at
+        5580 (review, 2026-10-03).
         """
         lim = self.limits
         if lim.reproject_stop_s is None or view.underlying_ltp is None or pos.equity_sl <= 0:
             return
+        if not pos.instrument.is_option:
+            return
         if view.now - pos.last_reproject_ts < lim.reproject_stop_s:
             return
-        pos.last_reproject_ts = view.now
-        delta = abs(
-            estimate_delta(
-                spot=view.underlying_ltp,
-                strike=pos.instrument.strike,
-                option_type=pos.instrument.option_type,
-            )
-        )
-        projected = max(0.05, pos.entry - abs(pos.equity_entry - pos.equity_sl) * delta)
-        if lim.priced_option_stop and view.option_mid and view.option_mid > 0 and pos.instrument.expiry:
+        if lim.priced_option_stop:
+            mid = view.option_mid if view.option_mid and view.option_mid > 0 and view.quote_ok else None
+            if mid is None or not pos.instrument.expiry:
+                return  # a stale mid against a live spot would misprice it: the stop stands
             priced = value_at(
-                option_price=view.option_mid, spot=view.underlying_ltp, target_spot=pos.equity_sl, strike=pos.instrument.strike,
+                option_price=mid, spot=view.underlying_ltp, target_spot=pos.equity_sl, strike=pos.instrument.strike,
                 expiry=pos.instrument.expiry, now=view.now, call=pos.instrument.option_type is OptionType.CE,
             )
-            if priced is not None:
-                projected = max(0.05, priced)
+            if priced is None:
+                return
+            projected = max(0.05, priced)
+        else:
+            projected = pos.initial_option_sl if pos.initial_option_sl > 0 else max(
+                0.05,
+                pos.entry - abs(pos.equity_entry - pos.equity_sl) * abs(
+                    estimate_delta(spot=pos.equity_entry, strike=pos.instrument.strike, option_type=pos.instrument.option_type)
+                ),
+            )
+        pos.last_reproject_ts = view.now
         if lim.max_premium_loss_pct is not None:
             projected = max(projected, pos.entry * (1 - lim.max_premium_loss_pct / 100))
         if lim.min_stop_ticks:
