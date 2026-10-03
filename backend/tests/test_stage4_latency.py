@@ -182,6 +182,35 @@ async def test_the_backfill_runs_bounded_in_parallel_and_skips_current_dailies(s
     assert sum(1 for _, tf in asked if tf == "1d") == 7
 
 
+@pytest.mark.asyncio
+async def test_the_backfill_holds_twelve_sessions_whatever_the_holidays(settings, monkeypatch):
+    """SuperTrend reads 120 bars (10 NSE sessions); 15 calendar days before Tue 6 Oct with 29 Sep and
+    2 Oct shut held 9 sessions — 117 bars (review, 2026-10-03)."""
+    from datetime import date
+
+    import kotsin_nse.engine as engine_mod
+    from kotsin_nse.domain import Instrument, InstrumentKind
+    from kotsin_nse.engine import BACKFILL_SESSIONS, Engine
+    from kotsin_nse.market.session import TradingCalendar
+
+    e = Engine(settings)
+    e.calendar = TradingCalendar(frozenset({date(2026, 9, 29), date(2026, 10, 2)}))
+    tue = date(2026, 10, 6)
+    monkeypatch.setattr(engine_mod, "ist_today", lambda: tue)
+    starts: list[str] = []
+
+    async def candles(inst, tf, start, end):
+        if tf == "30m":
+            starts.append(start)
+        return []
+
+    e.rest.candles = candles  # type: ignore[method-assign]
+    await e._backfill([Instrument("1001", "S", Segment.NSE_EQ, InstrumentKind.EQUITY)])
+    start = date.fromisoformat(starts[0][:10])
+    sessions = sum(1 for k in range((tue - start).days) if e.calendar.is_trading_day(start + timedelta(days=k)))
+    assert sessions >= BACKFILL_SESSIONS == 12
+
+
 # -- Stage 5: a duty's failure is counted, and a programming error fails the tests ---------------
 
 

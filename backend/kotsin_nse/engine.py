@@ -254,6 +254,11 @@ BAR_AUDIT_HM = "15:40"
 #: it grades F (review, 2026-10-03)
 PROVISIONAL_RETRY_S = 600.0
 PROVISIONAL_ALARM_HM = "09:20"
+#: the 30m backfill reaches back this many trading SESSIONS, not calendar days: FUDKII reads
+#: SuperTrend over 120 bars (bars/indicators.py SUPERTREND_CONVERGED_BARS) = 10 NSE sessions of 13,
+#: plus two for buckets the broker returns nothing for. Fifteen calendar days held 117 bars on a
+#: Monday after a holiday week (review, 2026-10-03); MCX's 29 bars a session are covered too.
+BACKFILL_SESSIONS = 12
 #: the audit alerts when more bars than this share (or this many) had to be repaired or added
 BAR_AUDIT_ALERT_SHARE, BAR_AUDIT_ALERT_MIN = 0.01, 5
 #: a feed with no frame for this long in an open session is dead, whatever its socket says
@@ -1328,6 +1333,10 @@ class Engine:
         """
         end = ist_today()
         start_intraday = end - timedelta(days=max(7, self.s.backfill_days // 2))
+        first = end
+        for _ in range(BACKFILL_SESSIONS):
+            first = self.calendar.previous_trading_day(first)
+        start_intraday = min(start_intraday, first - timedelta(days=1))
         start_daily = end - timedelta(days=400)  # a year of dailies for monthly pivots
         expected_prev = self.calendar.previous_trading_day(end)
         counts = {"ok": 0, "failed": 0, "daily_from_cache": 0}
