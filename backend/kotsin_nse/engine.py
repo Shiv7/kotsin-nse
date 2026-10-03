@@ -23,6 +23,7 @@ import os
 import re
 import time
 from bisect import bisect_right
+from collections import deque
 from collections.abc import Awaitable, MutableMapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
@@ -166,6 +167,7 @@ from .market.volatility import (
 from .ops.archive import DailyArchive
 from .ops.feed_rate import FeedRate
 from .ops.fulltape import FullTape
+from .ops.guard import Guards
 from .ops.health import Check, HealthMonitor
 from .ops.tape import ROLE_EQUITY, ROLE_FUTURE, ROLE_INDEX, ROLE_OPTION, Tape
 from .ops.telegram import Telegram
@@ -325,6 +327,8 @@ FORCE_FLAT_HM: dict[str, str] = {StrategyKey.FUDKII_RT_Y_F.value: "15:24"}
 #: first print before it expires.
 CARRY_WINDOW_S = 300.0
 #: the feed probe's segments, from a frame's own Exch + ExchType (``ops/feed_rate.py``)
+#: bar close → decision start, p95, above which the latency check fails while a segment is open
+DECISION_LATENCY_P95_MAX_S = 15.0
 FEED_SEGMENTS: dict[str, str] = {"NC": "NSE_EQ", "ND": "NSE_FO", "MD": "MCX_FO", "NU": "NSE_CDS"}
 #: the books that take the counter-trend fade of it (CT-X's plan), each judging it for itself
 FADE_BOOKS = (StrategyKey.FUDKII_CT_X, StrategyKey.FUDKII_CT_Y)
@@ -442,6 +446,22 @@ class AsOfContext:
 
     def session_phase(self, symbol: str, ts: int) -> str:
         return self.engine.session_phase(symbol, ts)
+
+    # The four readings FUKAA asks for (strategy/base.py Context). Only FUDKII replays through here
+    # today, but a context missing a method is how the backtester failed every symbol for a day
+    # (review, 2026-10-03). The volume reading is read off the store's slots up to the bar, which is
+    # point-in-time; OI is not — the engine holds only its latest levels — so it answers "unknown".
+    def volume_reading(self, symbol: str, ts: int) -> VolumeReading:
+        return self.engine._volume_reading(symbol, ts, self.upto(symbol, DECISION_TF))
+
+    def market_volume_surge(self, ts: int) -> tuple[float | None, int]:
+        return None, 0
+
+    def oi_reading(self, symbol: str) -> OiReading:
+        return OiReading(doubt="no point-in-time OI in a replay")
+
+    def oi_relative(self, symbol: str) -> tuple[float | None, int]:
+        return None, 0
 
     @property
     def state(self) -> MutableMapping[str, Any]:
@@ -755,6 +775,10 @@ class Engine:
         self.oi_candles = OiCandleBuilder()
         #: how fast the price feed really is, and whether it delivers every trade (``ops/feed_rate.py``)
         self.feed_rate = FeedRate()
+        #: per-duty error accounting for the advisory loops (ops/guard.py) — /api/health duty_errors
+        self.guards = Guards()
+        #: bar close → the decision starting, seconds, the last few hundred 30m decisions
+        self._decision_lat: deque[float] = deque(maxlen=300)
         self._front_code: dict[tuple[str, date], str | None] = {}
         self._n50_oi: tuple[int, dict[str, float]] = (-1, {})
         self._n50_vol: dict[int, tuple[float | None, int]] = {}
@@ -2032,10 +2056,9 @@ class Engine:
                 if "micro" in bar.extra and "micro" not in current.extra:
                     current.extra["micro"] = bar.extra["micro"]
         self.alerts.on_bar(current)
-        try:
+        self._decision_lat.append(max(0.0, time.time() - (bar.ts + TF_SECONDS.get(bar.tf, 0))))
+        async with self.guards.duty("decide"):
             await self._decide(current)
-        except Exception as exc:
-            log.exception("decide.failed", symbol=bar.symbol, error=str(exc))
 
     async def _intraday_universe_rebuild(self) -> None:
         if self.universe_builder is None:
@@ -5272,10 +5295,10 @@ class Engine:
         """Re-quote held contracts that have gone quiet, every few seconds, while their segment is
         open. One batched call covers them all; nothing is called when nothing is stale."""
         while not self._stop.is_set():
-            try:
+            # a missed refresh is retried next pass — but counted, and a programming error fails
+            # the tests: this one raised TypeError on every pass for days (review, 2026-10-03)
+            async with self.guards.duty("held_quotes.refresh"):
                 await self._refresh_held_quotes(time.time())
-            except Exception as exc:  # noqa: BLE001 - a missed refresh is retried next pass
-                log.warning("held_quotes.failed", error=str(exc)[:120])
             await asyncio.sleep(HELD_QUOTE_POLL_S)
 
     async def _refresh_held_quotes(self, now: float) -> int:
@@ -5851,22 +5874,33 @@ class Engine:
         last_day = ist_day(time.time()).isoformat()
         while not self._stop.is_set():
             now = time.time()
-            try:
-                day = ist_day(now).isoformat()
+            day = ist_day(now).isoformat()
+            hm = ist_hm(now)
+            # One guard per duty (ops/guard.py): one try around all of them let any failure skip every
+            # duty after it, and counted nothing (review, 2026-10-03).
+            async with self.guards.duty("fudkii.rescan"):
                 if (
                     not self.booting
                     and now - float(self.last_fudkii_scan.get("ts") or 0) > 300
                     and (self._fudkii_scan_task is None or self._fudkii_scan_task.done())
                 ):
                     self._fudkii_scan_task = asyncio.create_task(self.scan_fudkii(), name="fudkii-rescan")
+
+            async with self.guards.duty("decided.save"):
                 if len(self._decided) != self._decided_saved:
                     await asyncio.to_thread(self._save_decided, list(self._decided))
+
+            async with self.guards.duty("alerts.write"):
                 if self.alerts.dirty and self.alerts.store_dir is not None:
                     snap = self.alerts.snapshot()  # on the loop, where the rings are mutated
                     await asyncio.to_thread(self.alerts.write, snap)
+
+            async with self.guards.duty("archive.flush"):
                 if now - last_archive > self.s.archive_flush_s:
                     last_archive = now
                     await asyncio.to_thread(self.archive.flush)
+
+            async with self.guards.duty("tape_full.write"):
                 if now - last_fulltape > self.s.tape_full_flush_s:
                     last_fulltape = now
                     rows = self.fulltape.take()  # handed over here, in the loop that appends to it
@@ -5876,6 +5910,7 @@ class Engine:
                         except Exception as exc:  # noqa: BLE001 - never costs the housekeeping after it
                             log.warning("tape_full.write_failed", error=str(exc)[:120])
 
+            async with self.guards.duty("committee.autopilot"):
                 # The nightly research loop, once per day after its hour, only with every segment
                 # closed — it runs six backtests in a worker thread and spends Claude calls.
                 if (
@@ -5884,7 +5919,11 @@ class Engine:
                 ):
                     self._autopilot_day = day
                     self._decision_tasks.add(asyncio.create_task(self._autopilot()))
+
+            async with self.guards.duty("oi.candles_flush"):
                 self.oi_candles.flush(now, self._segment_by_code)
+
+            async with self.guards.duty("oi.bhavcopy"):
                 if (
                     self.s.oi_bhavcopy_enabled
                     and self.s.engine_enabled
@@ -5895,19 +5934,15 @@ class Engine:
                 ):
                     self._oi_bhav_tried = now
                     self._oi_bhav_task = asyncio.create_task(self._ensure_oi_bhavcopy(), name="oi-bhavcopy")
+
+            async with self.guards.duty("day_roll"):
                 if day != last_day:
                     last_day = day
-                    log.info("feed.rate_day", segments=self.feed_rate.snapshot())
-                    self.feed_rate.reset()
-                    self._alerts_reset_done.clear()
-                    self._zone_cache.clear()
-                    self._daily_due = self._legs_due = True
-                    self._legs_reanchor_done.clear()
-                    self._daily_refresh_done.clear()
-                    self._handled_signals.clear()
+                    self._roll_day_state(ist_day(now))
                     if self.s.has_credentials and self.s.engine_enabled:
                         await self.catalogue_loader.ensure()
 
+            async with self.guards.duty("positions.reconcile"):
                 if self.reconciler_positions is not None and now - last_reconcile > 60:
                     last_reconcile = now
                     # LIVE every minute; PAPER only while frozen, so a failed boot read (the broker
@@ -5915,6 +5950,7 @@ class Engine:
                     if self.mode() in LIVE_MODES or self.reconciler_positions.frozen:
                         await self.reconciler_positions.run(self._venue_positions(), at_venue=self.mode() in LIVE_MODES)
 
+            async with self.guards.duty("feed.token_rollover"):
                 # The socket was opened with a token that dies at 23:59:59 IST. Once it has, drop
                 # the socket so the run loop reconnects with a fresh login — otherwise it can sit
                 # "connected" on a dead token and deliver nothing at the open. A minute of grace
@@ -5926,8 +5962,10 @@ class Engine:
                 ):
                     await self.feed.reconnect(reason="token expired")
 
+            async with self.guards.duty("feed.watchdog"):
                 await self._feed_watchdog(now)
 
+            async with self.guards.duty("bars.sweep"):
                 # Periodic REST sweep of the finer frames: the fidelity metric, and exact chart bars.
                 if (
                     self.reconciler_ready
@@ -5943,12 +5981,14 @@ class Engine:
                         self.reconciler.sweep(list(self.underlyings))
                     )
 
+            async with self.guards.duty("universe.rebuild"):
                 # scripFinder's 09:20 IST intraday rebuild: refetch the master, re-pick strikes,
                 # subscribe anything new. Strikes listed 09:00–09:15 are not in an overnight master.
                 if self.reconciler_ready and ist_hm(now) >= "09:20" and self._intraday_rebuild_day != day:
                     self._intraday_rebuild_day = day
                     self._decision_tasks.add(asyncio.create_task(self._intraday_universe_rebuild()))
 
+            async with self.guards.duty("volume.market_check"):
                 # The market-wide volume check on every NSE bar, trigger or not — an alarm the minute
                 # the data breaks, not the next time a trigger happens to read it. The bar judged is
                 # the one that closed at least 20 s ago (its candles reconciled).
@@ -5957,6 +5997,8 @@ class Engine:
                     if judged not in self._vol_market and on_session_grid(Segment.NSE_EQ, judged, DECISION_TF, until=NSE_EQ_CONTINUOUS_UNTIL) \
                             and self.calendar.is_trading_day(ist_day(judged)) and ist_day(judged) == ist_day(now):
                         self._market_volume(judged)
+
+            async with self.guards.duty("bars.audit"):
                 # After the NSE close, the day's decision bars against the broker's once more.
                 if (
                     self.reconciler_ready
@@ -5970,12 +6012,13 @@ class Engine:
                     self._bar_audit_day = day
                     self._bar_audit_task = asyncio.create_task(self._audit_bars(ist_day(now)), name="bar-audit")
 
+            async with self.guards.duty("iv.refresh"):
                 # Each name's own VIX, once a minute, from the quotes already in hand.
                 if self.reconciler_ready and self.groups and now - self._last_iv_refresh >= 60:
                     self._last_iv_refresh = now
                     self._refresh_stock_iv()
-                # The pivot data plane (docs/PIVOTS.md §3): refresh slots, then the periodic audit.
-                hm = ist_hm(now)
+
+            async with self.guards.duty("alerts.reset"):
                 # The alert page is emptied for the coming session, every book and twin together.
                 stamp = f"{day} {self.s.alerts_reset_ist}"
                 if hm >= self.s.alerts_reset_ist and stamp not in self._alerts_reset_done:
@@ -5984,6 +6027,8 @@ class Engine:
                     self._signals_today.clear()
                     self._counter_preview.clear()
                     self._fut_cache.clear()
+
+            async with self.guards.duty("pivots.slots"):
                 for slot in self.s.daily_refresh_hm:
                     stamp = f"{day} {slot}"
                     if hm >= slot and stamp not in self._daily_refresh_done:
@@ -6007,18 +6052,23 @@ class Engine:
                 ):
                     self._last_pivot_repair = now
                     self._pivot_repair_task = asyncio.create_task(self._pivot_repair())
+
+            async with self.guards.duty("wallets.upkeep"):
                 await self._wallet_upkeep(now)
+
+            async with self.guards.duty("gateway.breakers"):
                 for book in self.gateway.take_new_trips():
                     await self.ledger.event("gateway.book_breaker", {"book": book, "rejects": self.gateway.rejects_by_book.get(book)})
                     self.telegram.fire_and_forget(f"🛑 {BOOK_LABELS.get(book, book)}: order breaker tripped — its entries stop until reset")
                     log.error("gateway.book_breaker", book=book)
+
+            async with self.guards.duty("snapshot.persist"):
                 if now - last_snapshot > 300:
                     last_snapshot = now
                     await self._persist_wallets()
                     await self.ledger.insert_health(self.health_snapshot())
                     await asyncio.to_thread(self.iv_history.save_all)
-            except Exception as exc:
-                log.exception("housekeeping.failed", error=str(exc))
+
             await asyncio.sleep(5.0)
 
     # -- state -----------------------------------------------------------------------------------------
@@ -6130,6 +6180,57 @@ class Engine:
         segments = {g.segment for g in self.groups.values()} or set(self.s.segment_list)
         return any(is_open(seg, now, self.calendar) for seg in segments)
 
+    def _roll_day_state(self, today: date) -> None:
+        """Everything that is per IST day, reset in one place (review, 2026-10-03: the clears were
+        scattered, and several maps keyed by time were never pruned). State keyed by a SIGNAL —
+        breadth at a trigger, a gap fade — is left: the next morning's carry still reads it."""
+        log.info("feed.rate_day", segments=self.feed_rate.snapshot())
+        self.feed_rate.reset()
+        self._alerts_reset_done.clear()
+        self._zone_cache.clear()
+        self.zone_refusals.clear()
+        self._daily_due = self._legs_due = True
+        self._legs_reanchor_done.clear()
+        self._daily_refresh_done.clear()
+        self._handled_signals.clear()
+        start = session_open_ts(Segment.NSE_EQ, today) - 9.25 * 3600  # 00:00 IST
+        self._front_code = {k: v for k, v in self._front_code.items() if k[1] >= today}
+        self._fudkii_scanned = {k for k in self._fudkii_scanned if k[1] >= start}
+        self._confirm_attempts = {k: v for k, v in self._confirm_attempts.items() if k[1] >= start}
+        self._closes_seen = {k for k in self._closes_seen if k[1] >= start}
+        self._vol_market = {k: v for k, v in self._vol_market.items() if k >= start}
+        self._n50_vol = {k: v for k, v in self._n50_vol.items() if k >= start}
+
+    def _duty_check(self) -> Check:
+        """A programming error in any guarded duty in the last 15 minutes is a fault; market and I/O
+        failures are shown, not failed on."""
+        recent = self.guards.snapshot(since_s=900)
+        bad = {k: v for k, v in recent.items() if v["programmingErrors"]}
+        detail = "; ".join(f"{k}: {v['errors']}× {v['lastError']}" for k, v in list(recent.items())[:4]) or "no duty failed in 15 min"
+        return Check("duty_errors", not bad, detail=detail, value=float(len(recent)))
+
+    def _zones_check(self) -> Check:
+        """No levels for a name because its daily and 30m series are on different price bases (a
+        corporate action) is a data fault; history / provisional refusals are shown."""
+        reasons: dict[str, int] = {}
+        for why in self.zone_refusals.values():
+            reasons[why.split(":")[0]] = reasons.get(why.split(":")[0], 0) + 1
+        basis = sorted(k for k, v in self.zone_refusals.items() if v.startswith("basis"))
+        detail = (", ".join(f"{k} {n}" for k, n in sorted(reasons.items())) or "every name has levels") + (
+            f" — basis mismatch: {', '.join(basis[:6])}" if basis else "")
+        return Check("zones", not basis, detail=detail, value=float(len(basis)))
+
+    def _latency_check(self) -> Check:
+        """Bar close → the decision starting (the exchange-candle reconcile is inside it), and the
+        broker's REST calls; slow is a fault only while a segment is open."""
+        lat = sorted(self._decision_lat)
+        p95 = lat[min(len(lat) - 1, int(0.95 * len(lat)))] if lat else None
+        rest = self.rest.stats()
+        slow = p95 is not None and p95 > DECISION_LATENCY_P95_MAX_S and self.market_open_now()
+        detail = (f"decision p95 {p95:.1f}s over {len(lat)}" if p95 is not None else "no 30m decision yet") + (
+            f"; 5paisa REST p50 {rest.get('latency_p50_s')}s p95 {rest.get('latency_p95_s')}s")
+        return Check("latency", not slow, detail=detail, value=p95)
+
     def health_snapshot(self) -> dict[str, Any]:
         fh = self.feed.health
         open_now = self.market_open_now()
@@ -6201,6 +6302,9 @@ class Engine:
             ),
             self._volume_check(),
             self._bar_audit_check(),
+            self._duty_check(),
+            self._zones_check(),
+            self._latency_check(),
             Check(
                 "pivots_ready",
                 (daily.ready and not self._daily_failed and not self.leg_pivots.failed_codes)
@@ -6248,6 +6352,8 @@ class Engine:
             "micro": self.micro.stats(),
             "option_oi_tracked": len(self.option_oi),
             "oi_candles": self.oi_candles.stats(),
+            "duties": self.guards.snapshot(),
+            "feed_rate": self.feed_rate.snapshot(),
             "oi_broker_fields": dict(self.oi_frames),
             "oi_reference": {k: sum(1 for v in self._oi_ref_src.values() if v == k) for k in ("nse", "archive", "preopen")},
             "archive": self.archive.stats(),

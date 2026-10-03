@@ -1,0 +1,54 @@
+kotsin_nse/alerts/engine.py: Incompatible types in assignment (expression has type "None", variable has type "TradePlan")  [assignment]	1
+kotsin_nse/alerts/engine.py: Incompatible types in assignment (expression has type "TradePlan | None", variable has type "TradePlan")  [assignment]	1
+kotsin_nse/api/routes.py: Argument 1 to "asdict" has incompatible type "DataclassInstance | type[DataclassInstance]"; expected "DataclassInstance"  [arg-type]	1
+kotsin_nse/api/shadow.py: Generator has incompatible item type "Any | str"; expected "bool"  [misc]	1
+kotsin_nse/api/shadow.py: Generator has incompatible item type "int"; expected "bool"  [misc]	1
+kotsin_nse/api/shadow.py: Invalid index type "str" for "str"; expected type "SupportsIndex | slice[SupportsIndex | None, SupportsIndex | None, SupportsIndex | None]"  [index]	3
+kotsin_nse/api/shadow.py: No overload variant of "__getitem__" of "list" matches argument type "str"  [call-overload]	3
+kotsin_nse/api/shadow.py: Unsupported operand types for > ("str" and "int")  [operator]	1
+kotsin_nse/api/shadow.py: Value of type "dict[Any, Any] | None" is not indexable  [index]	1
+kotsin_nse/api/shadow.py: Value of type "dict[str, Any] | list[Any] | str | Any | float | None" is not indexable  [index]	3
+kotsin_nse/bars/daily.py: Argument "ts" to "UnifiedBar" has incompatible type "float"; expected "int"  [arg-type]	1
+kotsin_nse/committee/experiments.py: Argument 1 to "sum" has incompatible type "list[object]"; expected "Iterable[bool]"  [arg-type]	1
+kotsin_nse/committee/experiments.py: Generator has incompatible item type "int"; expected "bool"  [misc]	1
+kotsin_nse/committee/experiments.py: Generator has incompatible item type "object"; expected "bool"  [misc]	1
+kotsin_nse/committee/experiments.py: Unsupported left operand type for > ("object")  [operator]	1
+kotsin_nse/committee/experiments.py: Unsupported operand types for < ("int" and "object")  [operator]	1
+kotsin_nse/committee/experiments.py: Value of type variable "_DataclassT" of "replace" cannot be "DataclassInstance | type[DataclassInstance]"  [type-var]	2
+kotsin_nse/committee/llm.py: Argument "output_config" to "parse" of "AsyncMessages" has incompatible type "dict[str, str]"; expected "OutputConfigParam | Omit"  [arg-type]	1
+kotsin_nse/engine.py: Argument 1 to "_commit_outlay" of "Engine" has incompatible type "Wallet | None"; expected "Wallet"  [arg-type]	1
+kotsin_nse/engine.py: Argument 2 to "_handle_unpublished" of "Engine" has incompatible type "None"; expected "UnifiedBar"  [arg-type]	1
+kotsin_nse/engine.py: Argument 2 to "sample" of "FullTape" has incompatible type "dict[str, Quote]"; expected "Mapping[str, QuoteLike]"  [arg-type]	1
+kotsin_nse/engine.py: Argument 2 to "sample" of "Tape" has incompatible type "dict[str, Quote]"; expected "Mapping[str, QuoteLike]"  [arg-type]	1
+kotsin_nse/engine.py: Cannot infer type of lambda  [misc]	1
+kotsin_nse/engine.py: Incompatible types in assignment (expression has type "Position | None", variable has type "Position")  [assignment]	1
+kotsin_nse/engine.py: Item "None" of "Any | None" has no attribute "get"  [union-attr]	1
+kotsin_nse/engine.py: Item "None" of "Fill | None" has no attribute "price"  [union-attr]	6
+kotsin_nse/engine.py: Item "None" of "Fill | None" has no attribute "qty"  [union-attr]	2
+kotsin_nse/engine.py: Item "None" of "Wallet | None" has no attribute "apply_charges"  [union-attr]	1
+kotsin_nse/engine.py: Item "None" of "Wallet | None" has no attribute "release"  [union-attr]	1
+kotsin_nse/engine.py: Item "None" of "Wallet | None" has no attribute "strategy"  [union-attr]	1
+kotsin_nse/engine.py: Item "None" of "Wallet | None" has no attribute "to_json"  [union-attr]	1
+kotsin_nse/engine.py: Need type annotation for "cons" (hint: "cons: list[<type>] = ...")  [var-annotated]	1
+kotsin_nse/engine.py: Value of type "dict[str, Any] | None" is not indexable  [index]	1
+kotsin_nse/exec/paper.py: Dict entry 6 has incompatible type "str": "str"; expected "str": "float"  [dict-item]	1
+kotsin_nse/exec/reconcile.py: Incompatible types in assignment (expression has type "Any | None", variable has type "Position")  [assignment]	1
+kotsin_nse/hotstocks/service.py: Need type annotation for "fno" (hint: "fno: list[<type>] = ...")  [var-annotated]	1
+kotsin_nse/hotstocks/service.py: Need type annotation for "non_fno" (hint: "non_fno: list[<type>] = ...")  [var-annotated]	1
+kotsin_nse/instrument/legs.py: Argument "ts" to "UnifiedBar" has incompatible type "float"; expected "int"  [arg-type]	1
+kotsin_nse/instrument/select.py: Item "None" of "Instrument | None" has no attribute "scrip_code"  [union-attr]	1
+kotsin_nse/instrument/select.py: Item "None" of "Instrument | None" has no attribute "strike"  [union-attr]	1
+kotsin_nse/instrument/select.py: List item 0 has incompatible type "Instrument | None"; expected "Instrument"  [list-item]	2
+kotsin_nse/instrument/select.py: List item 1 has incompatible type "Instrument | None"; expected "Instrument"  [list-item]	2
+kotsin_nse/ops/guard.py: Unsupported operand type for unary - ("object")  [operator]	1
+kotsin_nse/research/backtest.py: Enum index should be a string (actual index type "str | None")  [misc]	1
+kotsin_nse/research/history.py: Enum index should be a string (actual index type "str | None")  [misc]	1
+kotsin_nse/research/pivot_report.py: Argument "ts" to "UnifiedBar" has incompatible type "float"; expected "int"  [arg-type]	1
+kotsin_nse/research/rl/exit_policy.py: Argument 1 to "collect_transitions" has incompatible type "dict[str, list[UnifiedBar]]"; expected "dict[str, Sequence[UnifiedBar]]"  [arg-type]	2
+kotsin_nse/research/rl/exit_policy.py: Argument 1 to "evaluate" has incompatible type "dict[str, list[UnifiedBar]]"; expected "dict[str, Sequence[UnifiedBar]]"  [arg-type]	4
+kotsin_nse/risk/sizing.py: Incompatible types in assignment (expression has type "int | None", variable has type "int")  [assignment]	1
+kotsin_nse/strategy/gapscore.py: Argument 4 to "F14Read" has incompatible type "**dict[str, float]"; expected "bool"  [arg-type]	2
+kotsin_nse/strategy/gapscore.py: Argument 4 to "F14Read" has incompatible type "**dict[str, float]"; expected "int"  [arg-type]	2
+kotsin_nse/strategy/gapscore.py: Argument 4 to "F14Read" has incompatible type "**dict[str, float]"; expected "tuple[str, ...]"  [arg-type]	2
+kotsin_nse/strategy/gapscore.py: Argument 5 to "F14Read" has incompatible type "**dict[str, float]"; expected "bool"  [arg-type]	1
+kotsin_nse/strategy/gapscore.py: Argument 5 to "F14Read" has incompatible type "**dict[str, float]"; expected "int"  [arg-type]	1

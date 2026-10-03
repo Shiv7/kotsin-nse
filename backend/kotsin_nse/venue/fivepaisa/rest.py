@@ -17,6 +17,8 @@ looking like a successful placement.
 from __future__ import annotations
 
 import time
+from collections import deque
+from collections.abc import Iterable
 from typing import Any
 
 import httpx
@@ -49,6 +51,8 @@ class FivePaisaREST:
         self.http = client
         self.auth = auth
         self.calls = 0
+        #: the last few hundred calls' durations in seconds — the REST p95 in /api/health
+        self.latencies: deque[float] = deque(maxlen=400)
         self.failures = 0
         self.last_error: str = ""
 
@@ -72,12 +76,14 @@ class FivePaisaREST:
         self.calls += 1
         headers = await self._bearer()
         url = self.s.endpoints.rest + path
+        began = time.perf_counter()
         try:
             r = await self.http.post(
                 url, json={"head": self._head(), "body": body}, headers=headers, timeout=30
             )
             r.raise_for_status()
             data = r.json()
+            self.latencies.append(time.perf_counter() - began)
         except Exception as exc:
             self.failures += 1
             self.last_error = f"{path}: {exc}"
@@ -126,10 +132,12 @@ class FivePaisaREST:
             f"{instrument.scrip_code}/{interval}?from={start}&end={end}"
         )
         headers = {"Ocp-Apim-Subscription-Key": APIM_KEY, **await self._bearer()}
+        began = time.perf_counter()
         try:
             r = await self.http.get(url, headers=headers, timeout=60)
             r.raise_for_status()
             payload = r.json()
+            self.latencies.append(time.perf_counter() - began)
         except Exception as exc:
             self.failures += 1
             self.last_error = f"historical {instrument.symbol}: {exc}"
@@ -338,7 +346,14 @@ class FivePaisaREST:
             "failures": self.failures,
             "last_error": self.last_error,
             "session": bool(self.auth.session and self.auth.session.valid),
+            "latency_p50_s": _pct(self.latencies, 50),
+            "latency_p95_s": _pct(self.latencies, 95),
         }
+
+
+def _pct(xs: Iterable[float], p: float) -> float | None:
+    s = sorted(xs)
+    return round(s[min(len(s) - 1, int(p / 100 * len(s)))], 3) if s else None
 
 
 def kind_for(segment: Segment, scrip_type: str, strike: float) -> InstrumentKind:

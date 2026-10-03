@@ -158,3 +158,36 @@ async def test_the_backfill_runs_bounded_in_parallel_and_skips_current_dailies(s
     assert peak == 3, "never more than backfill_concurrency in flight"
     assert (current.symbol, "1d") not in asked and (current.symbol, "30m") in asked
     assert sum(1 for _, tf in asked if tf == "1d") == 7
+
+
+# -- Stage 5: a duty's failure is counted, and a programming error fails the tests ---------------
+
+
+def test_a_guarded_duty_counts_its_failures_and_strict_mode_reraises_programming_errors(monkeypatch):
+    from kotsin_nse.ops.guard import Guards
+
+    g = Guards()
+    with g.duty("broker"):
+        raise TimeoutError("5paisa slow")
+    assert g.snapshot()["broker"]["errors"] == 1, "a market or I/O failure is swallowed and counted"
+    with pytest.raises(TypeError):
+        with g.duty("held_quotes.refresh"):
+            raise TypeError("is_open() missing 1 required positional argument: 'calendar'")
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    with g.duty("held_quotes.refresh"):
+        raise TypeError("is_open() missing 1 required positional argument: 'calendar'")
+    snap = g.snapshot()
+    assert snap["held_quotes.refresh"]["programmingErrors"] == 2 and list(snap)[0] == "held_quotes.refresh"
+
+
+def test_the_health_page_fails_on_a_recent_programming_error_and_a_basis_mismatch(settings, monkeypatch):
+    from kotsin_nse.engine import Engine
+
+    e = Engine(settings)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    with e.guards.duty("decide"):
+        raise AttributeError("'ExposureVerdict' object has no attribute 'ok'")
+    e.zone_refusals["VEDL"] = "basis: 2026-04-15 official close 286.6 vs its 30m close 766"
+    checks = {c["name"]: c for c in e.health_snapshot()["checks"]}
+    assert checks["duty_errors"]["ok"] is False and "ExposureVerdict" in checks["duty_errors"]["detail"]
+    assert checks["zones"]["ok"] is False and "VEDL" in checks["zones"]["detail"]

@@ -312,10 +312,10 @@ class CatalogueLoader:
                 rec.update(added=rows, removed=0)
             path.write_bytes(text.encode())  # byte for byte: no newline translation either way
             rec.update(file=path.name, changed=True)
-            for old in files:  # every earlier master, compressed: only the newest is read daily
-                if old != path and old.name.endswith(".csv"):
-                    old.with_name(old.name + ".gz").write_bytes(gzip.compress(old.read_bytes()))
-                    old.unlink(missing_ok=True)
+            for earlier in files:  # every earlier master, compressed: only the newest is read daily
+                if earlier != path and earlier.name.endswith(".csv"):
+                    earlier.with_name(earlier.name + ".gz").write_bytes(gzip.compress(earlier.read_bytes()))
+                    earlier.unlink(missing_ok=True)
         with (self._cache_dir / self.LOG_NAME).open("a") as fh:
             fh.write(json.dumps(rec) + "\n")
         log.info("catalogue.master_kept", **{k: v for k, v in rec.items() if k != "sha1"})

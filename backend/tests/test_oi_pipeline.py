@@ -246,11 +246,14 @@ def test_a_feed_that_sends_every_trade_shows_all_the_volume_and_a_conflated_one_
 # -- the backtester ---------------------------------------------------------------------------------
 
 
-def test_the_backtest_context_answers_everything_a_strategy_may_ask():
+def test_every_context_answers_everything_a_strategy_may_ask(settings):
+    from kotsin_nse.engine import AsOfContext, Engine
+
     asked = {n for n, v in vars(Context).items() if not n.startswith("_") and (callable(v) or isinstance(v, property))}
     ctx = BacktestContext(BarStore(), {}, Segment.NSE_EQ)
-    missing = sorted(n for n in asked if not hasattr(ctx, n))
-    assert not missing, f"a Context method the backtest cannot answer fails every symbol: {missing}"
+    for impl in (ctx, AsOfContext(Engine(settings))):
+        missing = sorted(n for n in asked if not hasattr(impl, n))
+        assert not missing, f"{type(impl).__name__}: a Context method it cannot answer fails every symbol: {missing}"
     assert not ctx.oi_reading("RELIANCE").ok and ctx.oi_reading("RELIANCE").doubt
     assert not ctx.volume_reading("RELIANCE", 0).ok
 
