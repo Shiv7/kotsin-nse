@@ -756,6 +756,7 @@ function TriggerCard({ book, c, open, onToggle, refresh, readOnly = false }: { b
         </div>
 
         {c.books?.length ? <BookDots books={c.books} current={book} /> : null}
+        {c.stopRules && c.stopRules.length > 0 ? <div className="mt-4"><StopRules rows={c.stopRules} /></div> : null}
 
         <div className="mt-4 flex items-center justify-between gap-3 border-t border-slate-800 pt-4">
           {readOnly ? <span className="text-[12.5px] text-violet-300">read-only here — Take / Skip on the twin's own page</span> : <Cta book={book} c={c} onDone={refresh} />}
@@ -896,7 +897,6 @@ function Expanded({ book, c }: { book: string; c: Card }) {
               <div className="text-[14px] text-slate-300">{stateOf(c.state).label} — {c.skip ? c.skip.reason : c.parentReason ?? c.route?.summary ?? ''}{c.plan && !c.plan.ok ? <div className="mt-1 text-slate-500">preview: {c.plan.reason}</div> : null}</div>
             )}
           </Section>
-          {c.stopRules && c.stopRules.length > 0 && <StopRules rows={c.stopRules} />}
           {(c.pending || c.execLog || c.restingTarget || (c.restingTargets ?? []).length > 0) && (
             <Section icon={IC.ticket} title="order trail · limit orders">
               <div className="text-[13.5px] leading-relaxed">
