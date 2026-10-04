@@ -6,7 +6,11 @@ usage: compare_ab.py [YYYY-MM-DD]   (default: today IST)
 
 Per book: closed trades and net (realised gross − charges) in each engine; every position that one engine
 took and the other did not, or closed differently; every FUDKII trigger graded or published differently;
-both engines' feed health. Read-only: the databases are opened read-only, the health pages only read."""
+both engines' feed health. The stop-rule mirrors (books ending _SE / _SA, 4 Oct: every book's fill copied
+under stop E and the adaptive stop) are left out of that comparison — they re-trade their book's fills, so
+counting them in would count every trade three times — and shown apart: per engine and book, the trades
+closed under all three stops, with the current stop's net beside stop E's and the adaptive stop's.
+Read-only: the databases are opened read-only, the health pages only read."""
 
 from __future__ import annotations
 
@@ -26,6 +30,33 @@ ENGINES = {
 LABEL = {"FUDKII": "FUDKII", "FUDKII_RT_X": "RT-X", "FUDKII_RT_N": "RT-N", "FUDKII_RT_Y": "RT-Y", "FUDKII_RT_Y_W1": "RT-Y-W1",
          "FUDKII_RT_Y_F": "RT-Y-F", "FUDKII_CT_X": "CT-X", "FUDKII_CT_Y": "CT-Y", "FUDKII_CT_M": "CT-M",
          "FUDKII_RT_MCX": "RT-MCX", "FUKAA": "FUKAA"}
+#: shadow books: compared like the others, but not a strategy's money in the stop-rule total
+SHADOWS = {"FUDKII_RT_Y_W1", "FUDKII_RT_Y_F", "FUDKII_CT_M"}
+
+
+def _mirror(book: str) -> bool:
+    return book.endswith(("_SE", "_SA"))
+
+
+def stop_rules(pos: dict) -> dict:
+    """Per book: the triggers closed under all three stops (n, and each rule's net), and those still open
+    under one of them (waiting). A trigger without either mirror predates them, or their purse refused it."""
+    out: dict = {}
+    for (book, sid), v in pos.items():
+        if _mirror(book):
+            continue
+        e, a = pos.get((book + "_SE", sid)), pos.get((book + "_SA", sid))
+        if e is None and a is None:
+            continue
+        row = out.setdefault(book, {"n": 0, "current": 0.0, "E": 0.0, "A": 0.0, "waiting": 0})
+        if all(x is not None and x["open"] == 0 for x in (v, e, a)):
+            row["n"] += 1
+            row["current"] += v["net"]
+            row["E"] += e["net"]
+            row["A"] += a["net"]
+        else:
+            row["waiting"] += 1
+    return out
 
 
 def _obj(v):
@@ -93,8 +124,10 @@ def main() -> None:
     lo = datetime.combine(day, datetime.min.time(), IST).timestamp()
     hi = lo + 86400
     (na, (dba, pa)), (nb, (dbb, pb)) = ENGINES.items()
-    A, SA = load(dba, lo, hi)
-    B, SB = load(dbb, lo, hi)
+    A_all, SA = load(dba, lo, hi)
+    B_all, SB = load(dbb, lo, hi)
+    A = {k: v for k, v in A_all.items() if not _mirror(k[0])}
+    B = {k: v for k, v in B_all.items() if not _mirror(k[0])}
     print(f"== {day:%a %d %b %Y}: {na} vs {nb}")
     for n, (_, port) in ENGINES.items():
         print(f"  {n} health: {health(port)}")
@@ -133,6 +166,24 @@ def main() -> None:
         sd.append(f"  {t} {k[0]:<11} {k[2][:4]} | A {fa:<30} | B {fb}")
     print(f"\n  FUDKII triggers: A {len(SA)}, B {len(SB)}; graded or published differently: {len(sd)}")
     print("\n".join(sd) if sd else "  — none")
+    for name, allpos in ((na, A_all), (nb, B_all)):
+        rules = stop_rules(allpos)
+        print(f"\n  stop rules · {name}: the same trades, closed under all three stops (net after charges)")
+        if not rules:
+            print("  — no mirrored trade")
+            continue
+        print(f"  {'book':<8} {'trades':>6} {'current':>10} {'stop E':>10} {'adaptive':>10} | {'E − cur':>9} {'A − cur':>9}")
+        tot = {"n": 0, "current": 0.0, "E": 0.0, "A": 0.0, "waiting": 0}
+        for b in sorted(rules, key=lambda b: list(LABEL).index(b) if b in LABEL else 99):
+            r = rules[b]
+            if b not in SHADOWS:
+                for k in tot:
+                    tot[k] += r[k]
+            print(f"  {LABEL.get(b, b):<8} {r['n']:>6} {r['current']:>10,.0f} {r['E']:>10,.0f} {r['A']:>10,.0f} | "
+                  f"{r['E'] - r['current']:>+9,.0f} {r['A'] - r['current']:>+9,.0f}"
+                  + (f"   ({r['waiting']} still open under a rule)" if r["waiting"] else "") + ("   shadow" if b in SHADOWS else ""))
+        print(f"  {'trading':<8} {tot['n']:>6} {tot['current']:>10,.0f} {tot['E']:>10,.0f} {tot['A']:>10,.0f} | "
+              f"{tot['E'] - tot['current']:>+9,.0f} {tot['A'] - tot['current']:>+9,.0f}")
 
 
 if __name__ == "__main__":
