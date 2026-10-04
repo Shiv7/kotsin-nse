@@ -217,3 +217,49 @@ async def test_a_mirrors_close_sends_nothing_to_the_review_committee(settings, c
         assert not any(s.endswith(("_SE", "_SA")) for s in sent) and "FUDKII_RT_Y" in sent
     finally:
         await e.stop()
+
+
+def test_the_max_drawdown_is_the_deepest_fall_from_the_best_point_so_far_the_entry_first():
+    """Operator, 2026-10-04: "max drawdown since the time it has been trading ... in each active trade row"."""
+    from kotsin_nse.engine import _position_from_json, _position_json
+    from kotsin_nse.risk.exits import ExitEngine
+    from kotsin_nse.risk.limits import RT_Y_LIMITS
+    from tests.test_equity_stop import _pos
+
+    eng, pos = ExitEngine(RT_Y_LIMITS), _pos(entry=12.0, option_sl=9.0)  # 1R = 3.00
+    dd = []
+    for bid in (11.4, 13.5, 12.75, 11.7, 14.0):
+        eng._track(pos, bid + 0.1, bid)
+        dd.append(round(pos.max_dd_r, 3))
+    # 11.4: 0.2R under the entry, the first best · 13.5 (+0.5R): a peak · 12.75: 0.25R off it · 11.7: 0.6R off it, though
+    # only 0.1R under the entry · 14.0: a new peak never shrinks the drawdown already seen
+    assert dd == [0.2, 0.2, 0.25, 0.6, 0.6]
+    assert pos.max_dd_inr() == pytest.approx(-0.6 * 3.0 * 2000)
+    assert _position_from_json(_position_json(pos)).max_dd_r == pytest.approx(0.6), "it survives a restart"
+    old = _position_json(pos)
+    old.pop("max_dd_r")
+    assert _position_from_json(old).max_dd_r == pytest.approx(-pos.mae_r), "a position saved before it: its MAE"
+
+
+@pytest.mark.asyncio
+async def test_each_active_trade_row_and_its_open_mirrors_carry_their_max_drawdown(settings, clock):
+    e = await _engine(settings, clock)
+    try:
+        _book(e, 16.95, 17.25, clock[0])
+        await e._handle_signal(_sig(clock), None, books=(StrategyKey.FUDKII_RT_X,))
+        clock[0] += 22
+        _book(e, 16.95, 17.10, clock[0])
+        e.ltps[UND.scrip_code] = 186.5
+        await e._manage_positions()
+        for bid in (16.60, 16.90):  # down 0.35 below the entry, back up
+            clock[0] += 1
+            _book(e, bid, bid + 0.15, clock[0])
+            await e._manage_positions()
+        async with _client(e) as c:
+            o = (await c.get("/api/overview")).json()
+        x = next(p for p in o["positions"] if p["strategy"] == "FUDKII_RT_X")
+        assert x["max_dd_r"] > 0 and x["max_dd_inr"] < 0
+        for r in x["stopRules"]:
+            assert r["live"]["maxDdR"] > 0 and r["live"]["maxDdInr"] < 0
+    finally:
+        await e.stop()

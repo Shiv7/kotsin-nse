@@ -1331,6 +1331,7 @@ def _position_view(engine: Engine, p: Any) -> dict[str, Any]:
     d["ltp"] = ltp
     d["unrealized"] = round(p.unrealized(ltp), 2) if ltp else None
     d["r_now"] = round(p.r_now(ltp), 3) if ltp else None
+    d["max_dd_inr"] = p.max_dd_inr()
     d["underlying_ltp"] = engine.ltps.get(p.underlying.scrip_code)
     d["opened_ist"] = to_ist(p.opened_ts).strftime("%Y-%m-%d %H:%M:%S")
     return d

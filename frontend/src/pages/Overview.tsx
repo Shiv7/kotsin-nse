@@ -1,9 +1,13 @@
 import { Fragment } from 'react'
-import { MirrorSubRow, RULE_TONE, StopRuleGridTable } from '../components/StopRuleGrid'
+import { MaxDd, MirrorSubRow, RULE_TONE, StopRuleGridTable } from '../components/StopRuleGrid'
 import { Card, ErrorLine, GradeBadge, Notes, Stat, StrategyBadge, Table } from '../components/Ui'
 import { contractName, fmt, ist, pnlColor } from '../lib/api'
 import { usePoll } from '../lib/usePoll'
 import type { Overview as OverviewData, StopRuleGrid } from '../types'
+
+/** Max drawdown, on hover (operator, 2026-10-04: "max drawdown since the time it has been trading"). */
+const MAX_DD_TIP =
+  'Max drawdown since the trade opened: the most it has fallen from its best point so far (the entry counting as the first) to a later low, marked on what it could be sold for (the bid; the last trade when there is none). In ₹ on the full size, then in R. A trade that has only ever risen shows ₹0.'
 
 export function Overview() {
   const { data, error } = usePoll<OverviewData>('/api/overview', 3000)
@@ -75,7 +79,8 @@ export function Overview() {
 
       <Card title="Open positions" right="levels are on the underlying; the trade is the option · under each, the same trade under stop E and the adaptive stop">
         <Table
-          head={['Book', 'Underlying', 'Instrument', 'Qty', 'Entry', 'LTP', 'Unreal', 'R', 'Opt SL', 'Eq SL', 'T hit', 'Grade', 'Opened']}
+          head={['Book', 'Underlying', 'Instrument', 'Qty', 'Entry', 'LTP', 'Unreal', 'R', 'Max DD', 'Opt SL', 'Eq SL', 'T hit', 'Grade', 'Opened']}
+          tips={{ 'Max DD': MAX_DD_TIP }}
           empty="flat"
         >
           {data.positions.map((p) => (
@@ -99,6 +104,7 @@ export function Overview() {
               <td className="px-2 py-1.5">{fmt.n(p.ltp)}</td>
               <td className={`px-2 py-1.5 ${pnlColor(p.unrealized)}`}>{fmt.signedInr(p.unrealized)}</td>
               <td className={`px-2 py-1.5 ${pnlColor(p.r_now)}`}>{fmt.r(p.r_now)}</td>
+              <td className="px-2 py-1.5"><MaxDd inr={p.max_dd_inr} r={p.max_dd_r} /></td>
               <td className="px-2 py-1.5 text-rose-400/80">{fmt.n(p.option_sl)}</td>
               <td className="px-2 py-1.5 text-rose-400/60">{fmt.n(p.equity_sl)}</td>
               <td className="px-2 py-1.5 text-slate-400">
@@ -119,7 +125,7 @@ export function Overview() {
 
       {(data.mirrors_alone?.length ?? 0) > 0 && (
         <Card title="Stop-rule mirrors still running" right="the real trade is closed; each mirror keeps its own rule until it exits">
-          <Table head={['Strategy', 'Stop rule', 'Underlying', 'Instrument', 'Qty', 'Entry', 'LTP', 'Unreal', 'Stop now', 'The real trade']}>
+          <Table head={['Strategy', 'Stop rule', 'Underlying', 'Instrument', 'Qty', 'Entry', 'LTP', 'Unreal', 'Max DD', 'Stop now', 'The real trade']} tips={{ 'Max DD': MAX_DD_TIP }}>
             {data.mirrors_alone!.map((m) => {
               const t = m.stopRule?.live?.through
               return (
@@ -132,6 +138,7 @@ export function Overview() {
                   <td className="px-2 py-1.5">{fmt.n(m.entry)}</td>
                   <td className="px-2 py-1.5">{fmt.n(m.ltp)}</td>
                   <td className={`px-2 py-1.5 ${pnlColor(m.unrealized)}`}>{fmt.signedInr(m.unrealized)}</td>
+                  <td className="px-2 py-1.5"><MaxDd inr={m.max_dd_inr} r={m.max_dd_r} /></td>
                   <td className="px-2 py-1.5 text-slate-400">
                     stock {fmt.n(m.equity_sl)} · {m.stopRule?.live?.trailStop != null ? `trail ${fmt.n(m.stopRule.live.trailStop)}` : `cap ${fmt.n(m.stopRule?.live?.premiumCap)}`}
                     {t && <div className="text-[10px] text-amber-300">through {t.seconds}s{t.areaNeeded != null ? ` · ${t.area.toFixed(2)} of ${t.areaNeeded} %·s` : ` of ${t.maxSeconds}s`}</div>}
