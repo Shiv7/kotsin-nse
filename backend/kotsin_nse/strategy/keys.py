@@ -90,3 +90,19 @@ SHADOW_OF: dict[StrategyKey, StrategyKey] = {
 #: totals: the mirrors above, and the graded-F shadow, which places entries of its own on triggers
 #: no trading book takes.
 SHADOW_BOOKS: frozenset[StrategyKey] = frozenset({*SHADOW_OF, StrategyKey.FUDKII_RT_Y_F, StrategyKey.FUDKII_CT_M})
+
+#: The books that fade the trigger — they buy the opposite option to the one the SuperTrend flip asks
+#: for (strategy/counter.py, CT-Y's gap fade, CT-M's market-against fade). Every other book trades the
+#: trigger's own way: with the new trend.
+COUNTER_TREND: frozenset[StrategyKey] = frozenset({StrategyKey.FUDKII_CT_X, StrategyKey.FUDKII_CT_Y, StrategyKey.FUDKII_CT_M})
+
+
+def describe_book(strategy: str) -> dict[str, str]:
+    """A ledger row's ``strategy`` as the trades page shows it (operator, 2026-10-04: "add the strategy
+    name and counter-trend/trend"): the book's name and the side of the trigger it trades. A key no
+    longer in the registry keeps its raw string and an unknown side."""
+    try:
+        key = StrategyKey(strategy)
+    except ValueError:
+        return {"strategy_label": strategy, "trend": ""}
+    return {"strategy_label": key.display_name, "trend": "counter-trend" if key in COUNTER_TREND else "trend"}

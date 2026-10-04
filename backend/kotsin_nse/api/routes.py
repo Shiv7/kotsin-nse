@@ -38,7 +38,7 @@ from ..hotstocks.service import HotStocksService
 from ..ledger.db import events, rejections, signals, trades
 from ..market.session import IST, TF_SECONDS, ist_day, ist_hm, ist_today, to_ist
 from ..strategy.catalog import BOOKS, LIVE_KEYS
-from ..strategy.keys import ALL_KEYS, SHADOW_BOOKS, StrategyKey
+from ..strategy.keys import ALL_KEYS, SHADOW_BOOKS, StrategyKey, describe_book
 from . import daybook, export, peer, shadow
 from .ws import Hub, handle, pump
 
@@ -257,7 +257,9 @@ def build_app(engine: Engine) -> FastAPI:
 
     @api.get("/trades")
     async def recent_trades(limit: int = Query(100, le=500)) -> list[dict[str, Any]]:
-        return await engine.ledger.recent(trades, limit)
+        # the book's name and its side of the trigger come from the registry as the rows are served:
+        # rows already stored never carried them
+        return [{**t, **describe_book(str(t.get("strategy") or ""))} for t in await engine.ledger.recent(trades, limit)]
 
     @api.get("/events")
     async def recent_events(limit: int = Query(100, le=500)) -> list[dict[str, Any]]:
