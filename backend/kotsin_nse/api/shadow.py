@@ -21,7 +21,7 @@ from ..market.session import IST
 from ..risk.limits import RiskLimits
 from ..strategy.regime_gates import GATE_B as GATE_B_GATES
 from ..strategy.regime_gates import trigger_verdicts
-from .daybook import _CSS, _fmt, render_ab
+from .daybook import _CSS, _fmt, contract_label, render_ab
 
 #: the books whose status each trigger row shows, in the order the cards show them
 BOOKS = ("FUDKII", "FUDKII_RT_X", "FUDKII_RT_N", "FUDKII_RT_Y", "FUDKII_CT_X", "FUDKII_CT_Y", "FUDKII_CT_M", "FUDKII_RT_MCX")
@@ -557,7 +557,7 @@ def _render_wide(d: ShadowData) -> str:
     t = w.get("total") or {}
     body = "".join(
         f'<tr><td class="sym">{_ist(p["opened"])}</td><td class="sym l">{html.escape(str(p["symbol"]))}</td>'
-        f'<td class="l">{html.escape(str(p["contract"] or "—"))}</td><td>{_fmt(p["entry"])}</td>'
+        f'<td class="l">{html.escape(contract_label(str(p["contract"] or "—")))}</td><td>{_fmt(p["entry"])}</td>'
         f'<td>{_fmt(p["y"]["stop"])}</td><td>{_ist(p["y"]["closed"]) if p["y"]["status"] == "EXITED" else "—"}</td>'
         f'<td class="l">{html.escape(str(p["y"]["reason"] or "—"))}</td>{_net_cell(p["y"]["net"], p["y"]["status"])}'
         f'<td>{_fmt(p["w"]["stop"])}</td><td>{_ist(p["w"]["closed"]) if p["w"]["status"] == "EXITED" else "—"}</td>'
@@ -598,7 +598,7 @@ def _render_graded_f(d: ShadowData) -> str:
         f'<tr><td class="sym">{_ist(r["fired"])}</td><td class="sym l">{html.escape(str(r["symbol"]))}</td>'
         f'<td class="{"pos" if r["direction"] == "BULLISH" else "neg"}">{"BULL" if r["direction"] == "BULLISH" else "BEAR"}</td>'
         f'<td class="l">{html.escape(str(r["why_f"] or "—"))}</td><td class="l">{" · ".join(_fmt(x) for x in r["targets"]) or "—"}</td>'
-        f'<td class="l">{html.escape(str(r["contract"] or "—"))}</td><td>{_fmt(r["entry"])}</td>'
+        f'<td class="l">{html.escape(contract_label(str(r["contract"] or "—")))}</td><td>{_fmt(r["entry"])}</td>'
         f'<td class="l">{html.escape(str(r["exit_reason"] or r["skip"] or "—"))}</td>{_net_cell(r["net"], r["status"])}</tr>'
         for r in g["rows"]
     )
@@ -625,7 +625,7 @@ def _render_gap(d: ShadowData) -> str:
         f'<td>{_fmt(r["gap"])}</td><td class="{"pos" if r["side"] == "CE" else "neg"}">{html.escape(str(r["side"] or "—"))}</td>'
         f'<td>{_fmt(r["stop"])}</td><td class="l">{" · ".join(_fmt(x) for x in r["targets"]) or "—"}</td>'
         f'<td>{_fmt(r["rr"])}</td><td>{html.escape(str(r["grade"] or "—"))}</td>'
-        f'<td class="l">{html.escape(str(r["blocked"] or r["contract"] or "—"))}</td><td>{_fmt(r["fill"])}</td>'
+        f'<td class="l">{html.escape(contract_label(str(r["blocked"] or r["contract"] or "—")))}</td><td>{_fmt(r["fill"])}</td>'
         f'<td class="l">{html.escape(str(r["ct"].get("reason") or "—"))}</td>{_net_cell(r["ct"]["net"], r["ct"]["status"])}'
         f'{_net_cell(r["parent"]["net"], r["parent"]["status"])}{_net_cell(r["x"]["net"], r["x"]["status"])}{_net_cell(r["n"]["net"], r["n"]["status"])}</tr>'
         for r in g["rows"]
@@ -659,7 +659,7 @@ def _render_market_fade(d: ShadowData) -> str:
         f'<td>{_pct_of(r["breadth"])}</td><td class="{"pos" if r["side"] == "CE" else "neg"}">{html.escape(str(r["side"] or "—"))}</td>'
         f'<td>{_fmt(r["stop"])}</td><td class="l">{" · ".join(_fmt(x) for x in r["targets"]) or "—"}</td>'
         f'<td>{_fmt(r["rr"])}</td><td>{html.escape(str(r["grade"] or "—"))}</td>'
-        f'<td class="l">{html.escape(str(r["contract"] or r["not_taken"] or "—"))}</td><td>{_fmt(r["fill"])}</td>'
+        f'<td class="l">{html.escape(contract_label(str(r["contract"] or r["not_taken"] or "—")))}</td><td>{_fmt(r["fill"])}</td>'
         f'<td class="l">{html.escape(str(r["exit_reason"] or "—"))}</td>{_net_cell(r["ct_m"]["net"], r["ct_m"]["status"])}'
         f'{_net_cell(r["rt_x"]["net"], r["rt_x"]["status"])}{_net_cell(r["rt_n"]["net"], r["rt_n"]["status"])}'
         f'{_net_cell(r["rt_y"]["net"], r["rt_y"]["status"])}{_net_cell(r["ct_y"]["net"], r["ct_y"]["status"])}</tr>'

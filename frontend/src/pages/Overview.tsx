@@ -1,5 +1,5 @@
 import { Card, ErrorLine, GradeBadge, Notes, Stat, StrategyBadge, Table } from '../components/Ui'
-import { fmt, pnlColor } from '../lib/api'
+import { contractName, fmt, pnlColor } from '../lib/api'
 import { usePoll } from '../lib/usePoll'
 import type { Overview as OverviewData } from '../types'
 
@@ -82,7 +82,7 @@ export function Overview() {
                   {p.direction === 'BULLISH' ? '▲' : '▼'}
                 </span>
               </td>
-              <td className="px-2 py-1.5 text-slate-400">{p.instrument.name || p.instrument.scrip_code}</td>
+              <td className="px-2 py-1.5 text-slate-400">{contractName(p.instrument.name) || p.instrument.scrip_code}</td>
               <td className="px-2 py-1.5">
                 {p.qty_remaining}
                 {p.qty_remaining !== p.qty && <span className="text-slate-600">/{p.qty}</span>}

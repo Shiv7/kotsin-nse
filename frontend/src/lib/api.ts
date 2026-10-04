@@ -72,6 +72,15 @@ export const fmt = {
   },
 }
 
+/** A contract as a person reads it (operator, 2026-10-04): the strike keeps only the decimals it needs —
+ *  "KEI 29 SEP 2026 CE 4700.00" → "… CE 4700", "GAIL 27 OCT 2026 PE 167.50" → "… PE 167.5". Display only:
+ *  the engine's names are the scrip master's, unchanged. */
+export function contractName(name: string): string
+export function contractName(name: string | null | undefined): string | null | undefined
+export function contractName(name: string | null | undefined) {
+  return name == null ? name : name.replace(/\b(CE|PE) (\d+)\.(\d*?)0*$/, (_m, t: string, i: string, d: string) => `${t} ${i}${d ? `.${d}` : ''}`)
+}
+
 export const cls = (...xs: (string | false | null | undefined)[]) => xs.filter(Boolean).join(' ')
 
 export const pnlColor = (v: number | null | undefined) =>

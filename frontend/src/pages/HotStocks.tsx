@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { contractName } from '../lib/api'
 import { usePoll } from '../lib/usePoll'
 
 // Ported from trading-dashboard's HotStocksPage/HotStocksCard. Two books side by side: CAN1
@@ -353,7 +354,7 @@ function LiveBook({ data }: { data: Can2 | null }) {
                       {p.grade}
                     </span>
                   </div>
-                  <div className="truncate text-[11px] text-slate-500">{p.contract}</div>
+                  <div className="truncate text-[11px] text-slate-500">{contractName(p.contract)}</div>
                 </div>
                 <div className="shrink-0 text-right">
                   <div className={`text-sm font-semibold tabular-nums ${tone(p.unrealizedPct)}`}>

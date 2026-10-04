@@ -96,7 +96,7 @@ def test_the_page_has_both_tabs_the_ct_m_column_and_the_tallies():
         day=DAY, days=[DAY.isoformat()], rows=rows, ab=ab_summary(signals=signals, positions=positions, trades=trades, events=events),
         market_fade=market_fade_summary(signals=signals, positions=positions, trades=trades, events=events),
         fukaa=fukaa_shadow_summary(signals=signals, positions=positions, trades=trades, events=events)))
-    for s in ("Market fade · CT-M ≤45%", "Market fade · every fade · 1", "the closest skips", "INFY 27 OCT 2026 PE 1500.00",
+    for s in ("Market fade · CT-M ≤45%", "Market fade · every fade · 1", "the closest skips", "INFY 27 OCT 2026 PE 1500</td>",
               "FUKAA · shadow", "FUKAA · every shadow signal · 1", "long build-up", "<th>CT-M</th>", "CT-M fades", "FUKAA signals",
               "market not against the trigger: 48%"):
         assert s in page, s

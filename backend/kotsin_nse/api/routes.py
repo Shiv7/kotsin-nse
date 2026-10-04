@@ -93,6 +93,25 @@ class ProposeRequest(BaseModel):
     segment: str = "NSE_EQ"
 
 
+def _excursions(t: dict[str, Any]) -> dict[str, float | None]:
+    """MFE and MAE in money as well as R (operator, 2026-10-04: "add the actual values of MFE and MAE in the
+    table"): the option's price at the best and worst moment, and the rupees open then, before charges.
+    Worked back from the stored R and R unit — the position kept no price — so a figure is within half a
+    thousandth of an R unit of the price seen (a paisa or less on most contracts). A row without an R unit
+    has neither."""
+    r_unit, entry = float(t.get("r_unit") or 0.0), float(t.get("entry") or 0.0)
+    if r_unit <= 0 or entry <= 0:
+        return {"mfe_price": None, "mae_price": None, "mfe_inr": None, "mae_inr": None}
+    sign = -1.0 if t.get("side") == "SHORT" else 1.0
+    units = float(t.get("qty") or 0) * float(t.get("multiplier") or 1)
+    out: dict[str, float | None] = {}
+    for k in ("mfe", "mae"):
+        r = float(t.get(f"{k}_r") or 0.0)
+        out[f"{k}_price"] = round(entry + sign * r * r_unit, 2)
+        out[f"{k}_inr"] = round(r * r_unit * units, 2)
+    return out
+
+
 def build_app(engine: Engine) -> FastAPI:
     app = FastAPI(title="kotsin-nse", version="0.1.0", docs_url="/api/docs", openapi_url="/api/openapi.json")
     temp_page = daybook.TemporaryPage(engine.s.data_dir)
@@ -259,7 +278,7 @@ def build_app(engine: Engine) -> FastAPI:
     async def recent_trades(limit: int = Query(100, le=500)) -> list[dict[str, Any]]:
         # the book's name and its side of the trigger come from the registry as the rows are served:
         # rows already stored never carried them
-        return [{**t, **describe_book(str(t.get("strategy") or ""))} for t in await engine.ledger.recent(trades, limit)]
+        return [{**t, **describe_book(str(t.get("strategy") or "")), **_excursions(t)} for t in await engine.ledger.recent(trades, limit)]
 
     @api.get("/events")
     async def recent_events(limit: int = Query(100, le=500)) -> list[dict[str, Any]]:

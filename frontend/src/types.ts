@@ -148,6 +148,11 @@ export interface TradeRow {
   /** the book's name and its side of the trigger, from the registry (an older engine serves neither) */
   strategy_label?: string
   trend?: 'trend' | 'counter-trend' | ''
+  /** MFE / MAE as the option's price at that moment and the rupees open then, before charges (null: no R unit) */
+  mfe_price?: number | null
+  mae_price?: number | null
+  mfe_inr?: number | null
+  mae_inr?: number | null
   symbol: string
   underlying: string
   qty: number

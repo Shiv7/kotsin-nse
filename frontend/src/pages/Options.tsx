@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Badge, Card, ErrorLine, Table } from '../components/Ui'
-import { cls, fmt } from '../lib/api'
+import { cls, contractName, fmt } from '../lib/api'
 import { usePoll } from '../lib/usePoll'
 import type { UniverseRow } from '../types'
 
@@ -141,7 +141,7 @@ export function Options() {
               >
                 {p.ok ? (
                   <div className="space-y-1">
-                    <div className="text-sm font-semibold text-slate-100">{p.name}</div>
+                    <div className="text-sm font-semibold text-slate-100">{contractName(p.name)}</div>
                     <div className="text-xs text-slate-400">
                       strike {fmt.n(p.strike)} · premium {fmt.n(p.premium)}
                       {p.spread_pct != null && ` · spread ${p.spread_pct}%`}
