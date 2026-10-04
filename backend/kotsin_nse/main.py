@@ -275,12 +275,13 @@ def run_committee_cli(settings: Settings, args: argparse.Namespace) -> None:
     if args.action == "forensics":
         strategy = args.strategy.upper() or None
         if args.source == "ledger":
+            from .committee.service import REAL_TRADES
             from .ledger.db import Ledger, trades
 
             async def _rows() -> list[dict]:
                 ledger = Ledger(settings.db_url)
                 try:
-                    return await ledger.recent(trades, 5000)
+                    return await ledger.recent(trades, 5000, order_col="closed_ts", where=REAL_TRADES)
                 finally:
                     await ledger.close()
 

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Collection
 from typing import Any
 
 import sqlalchemy as sa
@@ -441,10 +442,12 @@ class Ledger:
         rows = await self.recent(signals, 1, where=signals.c.signal_id == signal_id)
         return rows[0] if rows else None
 
-    async def trade_for_signal(self, signal_id: str) -> dict[str, Any] | None:
-        """The closed trade a signal produced, if any. Columns exist for what is queried in bulk;
-        the signal id lives in the JSON, and a personal ledger is small enough to scan."""
-        for row in await self.recent(trades, 2000):
+    async def trade_for_signal(self, signal_id: str, *, exclude: Collection[str] = ()) -> dict[str, Any] | None:
+        """The latest closed trade a signal produced, if any, among books not in ``exclude``. Columns exist
+        for what is queried in bulk; the signal id lives in the JSON, and a personal ledger is small enough
+        to scan — newest first by close (a trade's id is random: ordering by it read an arbitrary 2000)."""
+        where = trades.c.strategy.notin_(list(exclude)) if exclude else None
+        for row in await self.recent(trades, 2000, order_col="closed_ts", where=where):
             if row.get("signal_id") == signal_id:
                 return row
         return None
