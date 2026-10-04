@@ -51,9 +51,38 @@ class StrategyKey(StrEnum):
     #: CT-Y's fade plan and exits (operator, 2026-10-03: "fade when the market is clearly against" as
     #: a shadow, named FUDKII-CT-M). Its own wallet; on the Shadow page, off the trading totals.
     FUDKII_CT_M = "FUDKII_CT_M"
+    #: STOP-RULE MIRRORS (operator, 2026-10-04: "each startegy ... have all 3 [stop rules] ... and then we
+    #: compare which ... works best with which startegy"): every book's fill copied into two shadows — the
+    #: same contract, size, price, instant and plan — that differ from it in the stop alone. ``_SE``: Model
+    #: E, the stock's stop with a fixed 60 s confirmation; ``_SA``: the stock's stop confirmed by magnitude
+    #: × time (risk/exits.py ``_equity_stop``). They keep running on their own rules when the operator
+    #: closes the real trade ("yes they should keep running as per their rules"). Their own wallets; on the
+    #: Shadow page and on each card's stop-rule strip, never in the day's totals.
+    FUDKII_SE = "FUDKII_SE"
+    FUDKII_SA = "FUDKII_SA"
+    FUDKII_RT_X_SE = "FUDKII_RT_X_SE"
+    FUDKII_RT_X_SA = "FUDKII_RT_X_SA"
+    FUDKII_RT_N_SE = "FUDKII_RT_N_SE"
+    FUDKII_RT_N_SA = "FUDKII_RT_N_SA"
+    FUDKII_RT_Y_SE = "FUDKII_RT_Y_SE"
+    FUDKII_RT_Y_SA = "FUDKII_RT_Y_SA"
+    FUDKII_CT_X_SE = "FUDKII_CT_X_SE"
+    FUDKII_CT_X_SA = "FUDKII_CT_X_SA"
+    FUDKII_CT_Y_SE = "FUDKII_CT_Y_SE"
+    FUDKII_CT_Y_SA = "FUDKII_CT_Y_SA"
+    FUDKII_RT_MCX_SE = "FUDKII_RT_MCX_SE"
+    FUDKII_RT_MCX_SA = "FUDKII_RT_MCX_SA"
+    FUDKII_RT_Y_F_SE = "FUDKII_RT_Y_F_SE"
+    FUDKII_RT_Y_F_SA = "FUDKII_RT_Y_F_SA"
+    FUDKII_RT_Y_W1_SE = "FUDKII_RT_Y_W1_SE"
+    FUDKII_RT_Y_W1_SA = "FUDKII_RT_Y_W1_SA"
+    FUDKII_CT_M_SE = "FUDKII_CT_M_SE"
+    FUDKII_CT_M_SA = "FUDKII_CT_M_SA"
 
     @property
     def display_name(self) -> str:
+        if (m := STOP_MIRRORS.get(self)) is not None:
+            return f"{m[0].display_name} · {STOP_RULE_LABELS[m[1]]} (shadow)"
         return {
             StrategyKey.FUDKII: "FUDKII",
             StrategyKey.FUKAA: "FUKAA",
@@ -73,9 +102,29 @@ class StrategyKey(StrEnum):
         return f"strategy-wallet-{self.value}"
 
 
-#: Opening capital per book. Anything not listed takes ``paper_initial_inr``.
+#: The stop rules every book is measured under: "current" is the book's own stop as it trades today,
+#: "E" and "A" its two mirrors' (``STOP_MIRRORS``).
+STOP_RULE_LABELS: dict[str, str] = {"current": "current stop", "E": "stop E", "A": "stop adaptive"}
+
+#: mirror → (the book whose fills it copies, its stop rule)
+STOP_MIRRORS: dict[StrategyKey, tuple[StrategyKey, str]] = {
+    k: (StrategyKey(k.value[:-3]), "E" if k.value.endswith("_SE") else "A")
+    for k in StrategyKey
+    if k.value.endswith(("_SE", "_SA"))
+}
+
+
+def stop_mirrors_of(book: str) -> dict[str, StrategyKey]:
+    """``{rule: mirror}`` for a book — its two stop-rule mirrors — or {} for a book with none."""
+    return {rule: k for k, (src, rule) in STOP_MIRRORS.items() if src.value == book}
+
+
+#: Opening capital per book. Anything not listed takes ``paper_initial_inr``. A stop-rule mirror
+#: takes its source's, so the purses compared stand on the same footing.
 INITIAL_INR: dict[StrategyKey, float] = {
     StrategyKey.FUDKII_RT_MCX: 3_000_000.0,
+    StrategyKey.FUDKII_RT_MCX_SE: 3_000_000.0,
+    StrategyKey.FUDKII_RT_MCX_SA: 3_000_000.0,
 }
 
 ALL_KEYS: tuple[StrategyKey, ...] = tuple(StrategyKey)
@@ -87,9 +136,9 @@ SHADOW_OF: dict[StrategyKey, StrategyKey] = {
 }
 
 #: Every book shown on the Shadow page instead of the trading tabs, and left out of the day's
-#: totals: the mirrors above, and the graded-F shadow, which places entries of its own on triggers
-#: no trading book takes.
-SHADOW_BOOKS: frozenset[StrategyKey] = frozenset({*SHADOW_OF, StrategyKey.FUDKII_RT_Y_F, StrategyKey.FUDKII_CT_M})
+#: totals: the mirrors above, the graded-F shadow, which places entries of its own on triggers
+#: no trading book takes, CT-M, and every stop-rule mirror.
+SHADOW_BOOKS: frozenset[StrategyKey] = frozenset({*SHADOW_OF, StrategyKey.FUDKII_RT_Y_F, StrategyKey.FUDKII_CT_M, *STOP_MIRRORS})
 
 #: The books that fade the trigger — they buy the opposite option to the one the SuperTrend flip asks
 #: for (strategy/counter.py, CT-Y's gap fade, CT-M's market-against fade). Every other book trades the
@@ -105,4 +154,5 @@ def describe_book(strategy: str) -> dict[str, str]:
         key = StrategyKey(strategy)
     except ValueError:
         return {"strategy_label": strategy, "trend": ""}
-    return {"strategy_label": key.display_name, "trend": "counter-trend" if key in COUNTER_TREND else "trend"}
+    side = STOP_MIRRORS[key][0] if key in STOP_MIRRORS else key  # a stop-rule mirror trades its source's side
+    return {"strategy_label": key.display_name, "trend": "counter-trend" if side in COUNTER_TREND else "trend"}

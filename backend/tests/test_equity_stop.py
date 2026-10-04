@@ -1,19 +1,17 @@
 """The equity stop mode (operator, 2026-10-04): the STOCK stop is the thesis trigger, the option only the
 instrument sold. One strategic stop path in ``ExitEngine.evaluate`` / ``evaluate_stale``; the option-side
 stop rules (hard floor, sustained option stop, plain touch, the stock stop as the option's confirmation) are
-inert; the rising line, targets, trail and backstops are unchanged. Switched per engine by
-``data/engine.json`` ``"stop_mode"``; the default is the option mode every book ran with."""
+inert; the rising line, targets, trail and backstops are unchanged. The default is the option mode every
+book trades with; the stop-rule mirrors run the equity mode (test_stop_mirrors.py)."""
 
 from __future__ import annotations
 
-import json
 from dataclasses import replace
 
 import pytest
 
-from kotsin_nse.config import Settings
 from kotsin_nse.domain import Direction, ExitReason, Position, PosSide
-from kotsin_nse.engine import Engine, _position_from_json, _position_json, read_stop_mode
+from kotsin_nse.engine import _position_from_json, _position_json
 from kotsin_nse.risk.exits import ExitEngine, MarketView, replay_gap
 from kotsin_nse.risk.limits import RT_X_LIMITS, RT_Y_LIMITS, RiskLimits
 from tests.test_limit_orders import OPT, UND
@@ -135,27 +133,8 @@ def test_the_option_mode_is_untouched_and_the_feed_gap_replay_is_the_option_mode
     assert replay_gap(_pos(), [(1000.0, 8.0), (1060.0, 8.0)], EQ) is None
 
 
-def test_the_mode_is_read_per_engine_from_engine_json_and_the_state_survives_a_restart(tmp_path):
-    assert read_stop_mode(tmp_path) == "option"
-    (tmp_path / "engine.json").write_text(json.dumps({"name": "phase 35", "stop_mode": "equity"}))
-    assert read_stop_mode(tmp_path) == "equity"
-    (tmp_path / "engine.json").write_text(json.dumps({"stop_mode": "nonsense"}))
-    assert read_stop_mode(tmp_path) == "option"
+def test_the_confirmation_state_survives_a_restart():
     pos = _pos()
     pos.breach_since, pos.stop_area = 1234.0, 0.42
     back = _position_from_json(_position_json(pos))
     assert back.breach_since == 1234.0 and back.stop_area == pytest.approx(0.42)
-
-
-@pytest.mark.asyncio
-async def test_every_books_exit_engine_takes_the_engines_mode(tmp_path):
-    (tmp_path / "engine.json").write_text(json.dumps({"stop_mode": "equity"}))
-    s = Settings(_env_file=None, data_dir=tmp_path, db_url=f"sqlite+aiosqlite:///{tmp_path}/t.db", engine_enabled=False)
-    e = Engine(s)
-    assert e.stop_mode == "equity" and e.limits.stop_mode == "equity" and e.exits_rt.limits.stop_mode == "equity"
-    assert all(x.limits.stop_mode == "equity" for x in e._exits_by_strategy.values())
-    assert e.limits_for("FUDKII_RT_Y").max_premium_loss_pct == 25.0, "everything else of the book's limits is as it was"
-    s2 = Settings(_env_file=None, data_dir=tmp_path / "b", db_url=f"sqlite+aiosqlite:///{tmp_path}/t2.db", engine_enabled=False)
-    (tmp_path / "b").mkdir()
-    e2 = Engine(s2)
-    assert e2.stop_mode == "option" and all(x.limits.stop_mode == "option" for x in e2._exits_by_strategy.values())

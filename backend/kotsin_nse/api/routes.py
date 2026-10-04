@@ -1011,6 +1011,7 @@ def build_app(engine: Engine) -> FastAPI:
             fukaa=shadow.fukaa_shadow_summary(signals=s_sigs, positions=s_pos, trades=s_trades, events=s_events),
             labels=shadow.label_summary(since_rows),
             volume=shadow.volume_summary(since_rows),
+            stop_rules=shadow.stop_rules_summary(positions=s_pos, trades=s_trades),
         )
 
     def _charges_status() -> dict[str, Any]:

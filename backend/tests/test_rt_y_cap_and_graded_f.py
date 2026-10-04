@@ -21,6 +21,7 @@ from kotsin_nse.instrument.select import Selection
 from kotsin_nse.strategy.base import published
 from kotsin_nse.strategy.fudkii import Fudkii
 from kotsin_nse.strategy.keys import SHADOW_BOOKS, StrategyKey
+from tests._books import held
 
 from .test_strategies import FakeCtx, _breakout_series
 from .test_wide_stop_shadow import _rt_y_trigger
@@ -78,7 +79,7 @@ async def test_an_unpublished_trigger_the_gates_pass_is_traded_by_the_shadow_alo
         trig = _unpublished(replace(sig, stop=1440.0))  # graded F: no wall ahead, the stop 4 % away
         assert not published(trig) and trig.signal_id == sig.signal_id
         await e._handle_unpublished(trig, None)
-        books = sorted(p.strategy for p in e.positions.values())
+        books = sorted(p.strategy for p in held(e))
         assert books == ["FUDKII_RT_Y_F"], "no trading book, no mirror: the graded-F shadow alone"
         f = next(iter(e.positions.values()))
         assert f.option_sl == pytest.approx(f.entry * 0.75), "RT-Y's 25 % cap"
