@@ -501,28 +501,31 @@ class Engine:
         #: through delta: "the parents' targets come from that parent's own logic and strategy and
         #: not borrowed or adopted from its variants or twins"
         # 4 lots under ₹75,000, stepping further OTM when they cost more (operator, 2026-09-27)
-        self.limits = RiskLimits(max_lots=4, fixed_lots_under_inr=FIXED_LOTS_UNDER_INR)
+        #: the strategic stop every book judges by (risk/limits.py ``stop_mode``): "option" unless this engine's
+        #: data/engine.json says "equity" — per engine, so the two paper engines can run the A/B
+        self.stop_mode = read_stop_mode(settings.data_dir)
+        self.limits = _with_stop_mode(RiskLimits(max_lots=4, fixed_lots_under_inr=FIXED_LOTS_UNDER_INR), self.stop_mode)
         self.exits = ExitEngine(self.limits)
         # FUDKII_RT_X trades FUDKII's entries under a different exit policy, so it gets its own
         # engine rather than a flag inside the shared one — the two must never be able to drift
         # into each other, and a second RiskLimits makes that structural.
-        self.exits_rt = ExitEngine(RT_X_LIMITS)
+        self.exits_rt = ExitEngine(_with_stop_mode(RT_X_LIMITS, self.stop_mode))
         # Three RT exit policies twinned off the same FUDKII fills (docs/PIVOTS.md §6): X is the
         # touch/sustain ladder with a single 3 % line, N the immediate-arming 2 % dwell book that
         # ran on 2026-09-23, Y the third vertical. MCX rides X's policy in its own purse.
         self._exits_by_strategy = {
             StrategyKey.FUDKII_RT_X.value: self.exits_rt,
             # its own limits: the NSE books' fixed 4 lots under ₹75,000 is not for MCX
-            StrategyKey.FUDKII_RT_MCX.value: ExitEngine(RT_MCX_LIMITS),
-            StrategyKey.FUDKII_RT_N.value: ExitEngine(RT_N_LIMITS),
-            StrategyKey.FUDKII_RT_Y.value: ExitEngine(RT_Y_LIMITS),
-            StrategyKey.FUDKII_CT_X.value: ExitEngine(CT_X_LIMITS),
-            StrategyKey.FUDKII_CT_Y.value: ExitEngine(CT_Y_LIMITS),
+            StrategyKey.FUDKII_RT_MCX.value: ExitEngine(_with_stop_mode(RT_MCX_LIMITS, self.stop_mode)),
+            StrategyKey.FUDKII_RT_N.value: ExitEngine(_with_stop_mode(RT_N_LIMITS, self.stop_mode)),
+            StrategyKey.FUDKII_RT_Y.value: ExitEngine(_with_stop_mode(RT_Y_LIMITS, self.stop_mode)),
+            StrategyKey.FUDKII_CT_X.value: ExitEngine(_with_stop_mode(CT_X_LIMITS, self.stop_mode)),
+            StrategyKey.FUDKII_CT_Y.value: ExitEngine(_with_stop_mode(CT_Y_LIMITS, self.stop_mode)),
             # the wide-stop shadow: RT-Y's policy with the equity stop 1 % further out
-            StrategyKey.FUDKII_RT_Y_W1.value: ExitEngine(RT_Y_W1_LIMITS),
+            StrategyKey.FUDKII_RT_Y_W1.value: ExitEngine(_with_stop_mode(RT_Y_W1_LIMITS, self.stop_mode)),
             # the graded-F shadow: RT-Y's policy, 25 % cap included, on the triggers RT-Y never sees
-            StrategyKey.FUDKII_RT_Y_F.value: ExitEngine(RT_Y_F_LIMITS),
-            StrategyKey.FUDKII_CT_M.value: ExitEngine(CT_M_LIMITS),
+            StrategyKey.FUDKII_RT_Y_F.value: ExitEngine(_with_stop_mode(RT_Y_F_LIMITS, self.stop_mode)),
+            StrategyKey.FUDKII_CT_M.value: ExitEngine(_with_stop_mode(CT_M_LIMITS, self.stop_mode)),
         }
         #: Each twin is checked against its own pool — 30 slots, its own lot cap — rather than
         #: skipping the check entirely, which is what it did when first written.
@@ -6841,6 +6844,20 @@ def exit_client_order_id(pos: Position, decision: Any, attempt: int = 0, *, cros
     return f"{base}|X" if cross else base
 
 
+def read_stop_mode(data_dir: Path) -> str:
+    """``"stop_mode"`` from ``<data_dir>/engine.json`` — "equity" or "option" (the default, and anything else).
+    A file, not a ``KN_*`` key: the two paper engines share one ``.env`` and the A/B needs them to differ."""
+    try:
+        mode = str(json.loads((data_dir / "engine.json").read_text()).get("stop_mode") or "option")
+    except (OSError, ValueError, AttributeError):
+        return "option"
+    return "equity" if mode == "equity" else "option"
+
+
+def _with_stop_mode(limits: RiskLimits, mode: str) -> RiskLimits:
+    return replace(limits, stop_mode=mode) if mode != limits.stop_mode else limits
+
+
 def _position_json(p: Position) -> dict[str, Any]:
     return {
         "id": p.id,
@@ -6887,6 +6904,7 @@ def _position_json(p: Position) -> dict[str, Any]:
         "peak_mid": p.peak_mid,
         "trail_dwell": p.trail_dwell,
         "breach_since": p.breach_since,
+        "stop_area": p.stop_area,
         "equity_atr": p.equity_atr,
         "realised_gross": p.realised_gross,
         "entry_charges": p.entry_charges,
@@ -6949,6 +6967,7 @@ def _position_from_json(d: dict[str, Any]) -> Position:
         peak_mid=float(d.get("peak_mid") or 0.0),
         trail_dwell=int(d.get("trail_dwell") or 0),
         breach_since=d.get("breach_since"),
+        stop_area=float(d.get("stop_area") or 0.0),
         equity_atr=float(d.get("equity_atr") or 0.0),
         realised_gross=float(d.get("realised_gross") or 0.0),
         entry_charges=float(d.get("entry_charges") or 0.0),

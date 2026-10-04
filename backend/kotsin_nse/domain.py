@@ -243,8 +243,11 @@ class Position:
     exit_reason: str | None = None
     pnl: float | None = None
     #: FUDKII-RT exit state. ``breach_since`` is the start of a *continuous* option-side
-    #: breach — cleared on recovery, paused (not cleared) when the quote is missing.
+    #: breach — cleared on recovery, paused (not cleared) when the quote is missing. Under the
+    #: equity stop mode it is the start of the continuous STOCK breach being confirmed, and
+    #: ``stop_area`` the integral of (% through) over it (risk/exits.py ``_equity_stop``).
     breach_since: float | None = None
+    stop_area: float = 0.0
     #: the underlying's ATR30 at the fill — what the stop floor (``min_equity_stop_atr``) is measured in
     equity_atr: float = 0.0
     #: highest option MID seen since the watermark armed, and how many consecutive reads have

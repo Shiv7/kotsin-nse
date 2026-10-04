@@ -130,6 +130,31 @@ class RiskLimits:
     #: Re-derive the option-side stop from live delta this often. None keeps the entry projection
     #: (the base book) — a level computed off a delta that stopped being true at entry.
     reproject_stop_s: float | None = None
+    #: -- the strategic stop (operator, 2026-10-04) ------------------------------------------------------
+    #: "option": the stop is judged on the OPTION — the delta-projected option stop, the 75 s sustain, the
+    #: 9 % hard floor, the stock stop as its confirmation — the rules every book ran with to 4 Oct.
+    #: "equity": the STOCK stop is the thesis trigger and the option only the instrument sold
+    #: (risk/exits.py ``_equity_stop``): a decisive breach sells at once, a marginal one is confirmed by
+    #: magnitude × time, and the premium cap is the catastrophe backstop. The option-side stop rules are
+    #: inert; the rising line (rung ratchet, give-back), targets, trail and backstops are untouched. Tape
+    #: study 29 Sep – 1 Oct (73 trades): option stops fired with the stock a median 13 % of the way to its
+    #: own stop; 23 of 33 stock breaches were back inside within 5 min. Set per engine in data/engine.json.
+    stop_mode: str = "option"
+    #: through the stock stop by this % of price: decisive, sold at once
+    eq_stop_margin_pct: float = 0.10
+    #: the stock moved this % against the trade over ``eq_stop_fast_window_s``: decisive, sold at once
+    eq_stop_fast_pct: float = 0.35
+    eq_stop_fast_window_s: float = 60.0
+    #: the longest a marginal breach is confirmed before it sells ...
+    eq_stop_confirm_s: float = 60.0
+    #: ... or sooner, once the integral of (% through) over the continuous breach reaches this (%·s): a
+    #: 0.05 % breach confirms in 20 s, a 0.02 % one in 50 s, a 0.10 % one at once (the margin). Only
+    #: persistence separated the breaches that reversed from the ones that did not (nothing knowable at
+    #: the breach instant did), so the wait is magnitude × time, never a clock alone.
+    eq_stop_area_pct_s: float = 1.0
+    #: the option bid (the last trade without one) this % under the premium paid sells whatever the stock
+    #: says — the catastrophe backstop (None = off)
+    eq_stop_premium_cap_pct: float | None = 25.0
     #: Lots that leave when the ratchet arms.
     arm_tranche_lots: int = 1
     #: -- the knobs that tell the three RT books apart (docs/PIVOTS.md §6) --
