@@ -26,6 +26,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .keys import STOP_MIRRORS, STOP_RULE_LABELS
+
 SRC = "streamingcandle/src/main/resources/application.properties"
 
 
@@ -515,6 +517,41 @@ BOOKS: tuple[Book, ...] = (
     ),
 )
 
+def _stop_mirror_books() -> tuple[Book, ...]:
+    """One entry per stop-rule mirror (strategy/keys.py ``STOP_MIRRORS``): what it copies, how it stops."""
+    out = []
+    for k, (src, rule) in STOP_MIRRORS.items():
+        if rule == "E":
+            how = ("a decisive breach (0.10 % of price through, or the stock 0.35 % against the trade in 60 s, or the first "
+                   "print after entry already through) sells at once; a marginal one once it has stayed through for 60 s; "
+                   "a read back inside starts the wait again")
+        else:
+            how = ("a decisive breach sells at once; a marginal one once the integral of (% through) over the continuous "
+                   "breach reaches 1.0 %·s — 0.05 % through confirms in 20 s, 0.02 % in 50 s — and at 60 s at the latest; "
+                   "a read back inside starts it again")
+        out.append(Book(
+            key=k.value,
+            label=k.display_name,
+            tf="30m entry, 1s exit",
+            summary=(
+                f"{src.display_name}'s own fills — the same contract, size, price and instant — with one rule changed, "
+                f"the stop: the stock's own stop is the trigger and the option only the instrument sold; {how}. The "
+                f"option bid 25 % under the premium paid sells whatever the stock says. Targets, rungs, the give-back "
+                f"line and the close are {src.display_name}'s own."
+            ),
+            status="live",
+            params={"stop": STOP_RULE_LABELS[rule], "copies": src.value, "premium cap": "25 % under the premium paid"},
+            have=("30m/1m bars on the session grid", "the underlying's live price"),
+            source="kotsin_nse/engine.py (_open_shadow_twins); kotsin_nse/risk/exits.py (_equity_stop); kotsin_nse/risk/limits.py stop_rule_limits",
+            note=(
+                "Operator, 2026-10-04: every strategy under all three stop rules, compared strategy by strategy. Paper; "
+                "it keeps running on its own rules when the operator closes the real trade; never in the day's totals."
+            ),
+        ))
+    return tuple(out)
+
+
+BOOKS = BOOKS + _stop_mirror_books()
 BY_KEY: dict[str, Book] = {b.key: b for b in BOOKS}
 LIVE_KEYS: tuple[str, ...] = tuple(b.key for b in BOOKS if b.status == "live")
 #: Books this engine computes and publishes, but does not trade.

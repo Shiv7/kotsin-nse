@@ -19,6 +19,7 @@ from kotsin_nse.strategy.counter import (
     flipped_signal,
 )
 from kotsin_nse.strategy.keys import StrategyKey
+from tests._books import held
 
 
 def _pt(price, label, w=None):
@@ -225,7 +226,7 @@ async def _fade_books(settings, *, halt_ct_x: bool = False):
 async def test_a_ct_x_fade_is_taken_by_both_fade_books_on_their_own_orders_and_never_by_the_in_trend_books(settings):
     e = await _fade_books(settings)
     try:
-        assert sorted(p.strategy for p in e.positions.values()) == ["FUDKII_CT_X", "FUDKII_CT_Y"]
+        assert sorted(p.strategy for p in held(e)) == ["FUDKII_CT_X", "FUDKII_CT_Y"]
         orders = {o["strategy"] for o in await e.ledger.rows_between("orders", 0, time.time() + 60) if o["purpose"] == "ENTRY"}
         assert orders == {"FUDKII_CT_X", "FUDKII_CT_Y"}, "each fade book its own order"
         assert e.wallets["FUDKII_RT_X"].available == e.wallets["FUDKII_RT_X"].balance
@@ -239,7 +240,7 @@ async def test_a_halted_ct_x_does_not_stop_ct_y_from_taking_the_fade(settings):
     — CT-Y took CT-X's fade only as a copy of CT-X's fill, so CT-X halted meant CT-Y idle."""
     e = await _fade_books(settings, halt_ct_x=True)
     try:
-        assert [p.strategy for p in e.positions.values()] == ["FUDKII_CT_Y"]
+        assert [p.strategy for p in held(e)] == ["FUDKII_CT_Y"]
         rows = await e.ledger.rows_between("signals", 0, time.time() + 60)
         assert rows[0]["strategy"] == "FUDKII_CT_X" and rows[0]["decision"] == "WALLET_HALTED", "CT-X's own decision, on its own row"
     finally:

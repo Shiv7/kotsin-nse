@@ -187,6 +187,7 @@ from .risk.limits import (
     RT_Y_LIMITS,
     RT_Y_W1_LIMITS,
     RiskLimits,
+    stop_rule_limits,
 )
 from .risk.sizing import size_position
 from .risk.wallet import Wallet
@@ -202,7 +203,16 @@ from .strategy.counter import (
 )
 from .strategy.fudkii import Fudkii, FudkiiConfig
 from .strategy.fukaa import Fukaa, FukaaConfig, select
-from .strategy.keys import ALL_KEYS, INITIAL_INR, SHADOW_BOOKS, SHADOW_OF, StrategyKey
+from .strategy.keys import (
+    ALL_KEYS,
+    INITIAL_INR,
+    SHADOW_BOOKS,
+    SHADOW_OF,
+    STOP_MIRRORS,
+    STOP_RULE_LABELS,
+    StrategyKey,
+    stop_mirrors_of,
+)
 from .strategy.regime_gates import rt_gate_reasons, trigger_verdicts, volume_labels
 from .venue.fivepaisa.auth import Authenticator
 from .venue.fivepaisa.hub import HubServer, read_hub_config
@@ -221,6 +231,7 @@ NO_PREMIUM_FLOOR = frozenset({
     StrategyKey.FUDKII, StrategyKey.FUDKII_RT_X, StrategyKey.FUDKII_RT_N, StrategyKey.FUDKII_RT_Y,
     StrategyKey.FUDKII_CT_X, StrategyKey.FUDKII_CT_Y, StrategyKey.FUDKII_RT_Y_W1, StrategyKey.FUDKII_RT_Y_F,
     StrategyKey.FUDKII_CT_M,
+    *(m for m, (src, _r) in STOP_MIRRORS.items() if src.value != StrategyKey.FUDKII_RT_MCX.value),
 })
 MIN_STOP_TICKS = 8
 #: How long an entry may wait for the chosen strike's own previous-session ladder. Bounded
@@ -273,6 +284,8 @@ BOOK_LABELS = {
     "FUDKII_RT_Y_W1": "RT-Y wide (shadow)", "FUDKII_RT_Y_F": "RT-Y graded F (shadow)",
     "FUDKII_CT_M": "CT-M market-against fade (shadow)",
 }
+for _m, (_src, _rule) in STOP_MIRRORS.items():
+    BOOK_LABELS[_m.value] = f"{BOOK_LABELS[_src.value].replace(' (shadow)', '')} · {STOP_RULE_LABELS[_rule]} (shadow)"
 
 
 def _humanise_reason(reason: str) -> str:
@@ -298,6 +311,9 @@ ORDER_CODES = {
     "FUDKII_CT_X": "FII-CTX", "FUDKII_CT_Y": "FII-CTY", "FUDKII_RT_MCX": "FII-RTM", "FUDKII_RT_Y_W1": "FII-RYW", "FUDKII_RT_Y_F": "FII-RYF", "FUDKII_CT_M": "FII-CTM",
     "FUKAA": "FKA",
 }
+# a stop-rule mirror's code: its source's with FIE- / FIA- (stop E / adaptive) for FII- — unique, the same length
+for _m, (_src, _rule) in STOP_MIRRORS.items():
+    ORDER_CODES[_m.value] = ("FIE" if _rule == "E" else "FIA") + ORDER_CODES[_src.value][3:]
 _ORDER_REF_RE = re.compile(r"^([A-Z]{3}(?:-[A-Z]{1,3})?)-(\d{6})-\d{6}-(\d{3,})(?:-|$)")
 #: what an exit order is, in its id
 EXIT_CODES = {
@@ -336,6 +352,8 @@ LAST_ENTRY_HM: dict[str, str] = {StrategyKey.FUDKII_RT_Y_F.value: "15:22"}
 #: held to the close, every in-trend book worse) — and the graded-F shadow, whose entries run to 15:22,
 #: flattens from 15:24, out by 15:25.
 FORCE_FLAT_HM: dict[str, str] = {StrategyKey.FUDKII_RT_Y_F.value: "15:24"}
+# a stop-rule mirror flattens when its source does
+FORCE_FLAT_HM.update({m.value: FORCE_FLAT_HM[src.value] for m, (src, _r) in STOP_MIRRORS.items() if src.value in FORCE_FLAT_HM})
 #: The 15:15 plan (operator, 2026-10-03: "if at 15:15 we are waiting for SL which is very near, we should
 #: exit asap, in case the SL is away, then we wait if the target is close by ... by 15:15 you will know if
 #: we need to exit at 15:20"): at this minute every open NSE position's distance to its stop line and to
@@ -501,32 +519,33 @@ class Engine:
         #: through delta: "the parents' targets come from that parent's own logic and strategy and
         #: not borrowed or adopted from its variants or twins"
         # 4 lots under ₹75,000, stepping further OTM when they cost more (operator, 2026-09-27)
-        #: the strategic stop every book judges by (risk/limits.py ``stop_mode``): "option" unless this engine's
-        #: data/engine.json says "equity" — per engine, so the two paper engines can run the A/B
-        self.stop_mode = read_stop_mode(settings.data_dir)
-        self.limits = _with_stop_mode(RiskLimits(max_lots=4, fixed_lots_under_inr=FIXED_LOTS_UNDER_INR), self.stop_mode)
+        self.limits = RiskLimits(max_lots=4, fixed_lots_under_inr=FIXED_LOTS_UNDER_INR)
         self.exits = ExitEngine(self.limits)
         # FUDKII_RT_X trades FUDKII's entries under a different exit policy, so it gets its own
         # engine rather than a flag inside the shared one — the two must never be able to drift
         # into each other, and a second RiskLimits makes that structural.
-        self.exits_rt = ExitEngine(_with_stop_mode(RT_X_LIMITS, self.stop_mode))
+        self.exits_rt = ExitEngine(RT_X_LIMITS)
         # Three RT exit policies twinned off the same FUDKII fills (docs/PIVOTS.md §6): X is the
         # touch/sustain ladder with a single 3 % line, N the immediate-arming 2 % dwell book that
         # ran on 2026-09-23, Y the third vertical. MCX rides X's policy in its own purse.
         self._exits_by_strategy = {
             StrategyKey.FUDKII_RT_X.value: self.exits_rt,
             # its own limits: the NSE books' fixed 4 lots under ₹75,000 is not for MCX
-            StrategyKey.FUDKII_RT_MCX.value: ExitEngine(_with_stop_mode(RT_MCX_LIMITS, self.stop_mode)),
-            StrategyKey.FUDKII_RT_N.value: ExitEngine(_with_stop_mode(RT_N_LIMITS, self.stop_mode)),
-            StrategyKey.FUDKII_RT_Y.value: ExitEngine(_with_stop_mode(RT_Y_LIMITS, self.stop_mode)),
-            StrategyKey.FUDKII_CT_X.value: ExitEngine(_with_stop_mode(CT_X_LIMITS, self.stop_mode)),
-            StrategyKey.FUDKII_CT_Y.value: ExitEngine(_with_stop_mode(CT_Y_LIMITS, self.stop_mode)),
+            StrategyKey.FUDKII_RT_MCX.value: ExitEngine(RT_MCX_LIMITS),
+            StrategyKey.FUDKII_RT_N.value: ExitEngine(RT_N_LIMITS),
+            StrategyKey.FUDKII_RT_Y.value: ExitEngine(RT_Y_LIMITS),
+            StrategyKey.FUDKII_CT_X.value: ExitEngine(CT_X_LIMITS),
+            StrategyKey.FUDKII_CT_Y.value: ExitEngine(CT_Y_LIMITS),
             # the wide-stop shadow: RT-Y's policy with the equity stop 1 % further out
-            StrategyKey.FUDKII_RT_Y_W1.value: ExitEngine(_with_stop_mode(RT_Y_W1_LIMITS, self.stop_mode)),
+            StrategyKey.FUDKII_RT_Y_W1.value: ExitEngine(RT_Y_W1_LIMITS),
             # the graded-F shadow: RT-Y's policy, 25 % cap included, on the triggers RT-Y never sees
-            StrategyKey.FUDKII_RT_Y_F.value: ExitEngine(_with_stop_mode(RT_Y_F_LIMITS, self.stop_mode)),
-            StrategyKey.FUDKII_CT_M.value: ExitEngine(_with_stop_mode(CT_M_LIMITS, self.stop_mode)),
+            StrategyKey.FUDKII_RT_Y_F.value: ExitEngine(RT_Y_F_LIMITS),
+            StrategyKey.FUDKII_CT_M.value: ExitEngine(CT_M_LIMITS),
         }
+        # every book's two stop-rule mirrors (strategy/keys.py STOP_MIRRORS): its own limits, the stop changed
+        for mirror, (source, rule) in STOP_MIRRORS.items():
+            base = self._exits_by_strategy[source.value].limits if source.value in self._exits_by_strategy else self.limits
+            self._exits_by_strategy[mirror.value] = ExitEngine(stop_rule_limits(base, rule))
         #: Each twin is checked against its own pool — 30 slots, its own lot cap — rather than
         #: skipping the check entirely, which is what it did when first written.
         self.exposure_rt = ExposureBook(RT_X_LIMITS)
@@ -3679,13 +3698,17 @@ class Engine:
         await self.ledger.event("regime.breadth", {"signal_id": sig.signal_id, "symbol": sig.symbol, **br})
 
     async def _open_shadow_twins(self, of: Position, inst: Instrument, ts: float, charges: float, *, planned_sl: float = 0.0) -> None:
-        """Mirror a book's fresh entry into each book that shadows it (``SHADOW_OF``): the same
-        contract, size, price, instant and ladder, one rule changed. The wide-stop shadow moves the
+        """Mirror a book's fresh entry into each book that shadows it — its two stop-rule mirrors
+        (``STOP_MIRRORS``) and the wide-stop shadow (``SHADOW_OF``): the same contract, size, price,
+        instant and ladder, one rule changed. A stop-rule mirror changes the rule that judges the stop
+        and nothing else (operator, 2026-10-04). The wide-stop shadow moves the
         equity stop ``equity_stop_buffer_pct`` further from entry and re-projects the option stop
         for it — at entry here, and every ``reproject_stop_s`` after, as RT-Y's own stop is."""
-        for shadow_key, source in SHADOW_OF.items():
-            if source.value != of.strategy:
-                continue
+        # the stop-rule mirrors (strategy/keys.py STOP_MIRRORS) copy the fill exactly — the book's own stop
+        # levels too; only the rule that judges them differs — and the wide-stop shadow widens its stop
+        twins = [(k, "stop") for k, (src, _r) in STOP_MIRRORS.items() if src.value == of.strategy]
+        twins += [(k, "wide") for k, src in SHADOW_OF.items() if src.value == of.strategy]
+        for shadow_key, kind in twins:
             engine_for = self._exits_by_strategy[shadow_key.value]
             wallet = self.wallets.get(shadow_key.value)
             cost = of.entry * of.qty * inst.multiplier
@@ -3705,16 +3728,22 @@ class Engine:
                 await self.ledger.event("rt_twin.skipped", {"book": shadow_key.value, "signal_id": of.signal_id, "symbol": of.underlying.symbol, "reason": f"exposure: {verdict.reason}"})
                 continue
             # its own order ref: its exits are its own orders, never the source's ids
-            # the wide shadow widens the PLAN's stop, as it always has — not RT-Y's floored one (1 Oct:
-            # 0.5 ATR30 is at most ~1 % of price, so the plan's stop 1 % further is still the wider; an
-            # extra dip only deepened its stop-outs, SWIGGY and MAXHEALTH) — and never sits nearer than
-            # the stop RT-Y itself holds
-            shadow = replace(of, id=new_id("pos"), strategy=shadow_key.value,
-                             equity_sl=planned_sl if planned_sl > 0 else of.equity_sl,
-                             note=f"{of.note.split(' · stop floored')[0]} · shadow of {of.id}",
-                             exec_log={"entry": dict(of.exec_log.get("entry") or {}), "exits": [],
-                                       "ref": self._order_ref(shadow_key.value, ts)})
-            self._widen_stop(shadow, engine_for.limits, not_nearer_than=of.equity_sl)
+            if kind == "stop":
+                # the fill exactly, its stop levels included: only the rule that judges them differs
+                shadow = replace(of, id=new_id("pos"), strategy=shadow_key.value, note=f"{of.note} · stop-rule mirror of {of.id}",
+                                 exec_log={"entry": dict(of.exec_log.get("entry") or {}), "exits": [],
+                                           "ref": self._order_ref(shadow_key.value, ts)})
+            else:
+                # the wide shadow widens the PLAN's stop, as it always has — not RT-Y's floored one (1 Oct:
+                # 0.5 ATR30 is at most ~1 % of price, so the plan's stop 1 % further is still the wider; an
+                # extra dip only deepened its stop-outs, SWIGGY and MAXHEALTH) — and never sits nearer than
+                # the stop RT-Y itself holds
+                shadow = replace(of, id=new_id("pos"), strategy=shadow_key.value,
+                                 equity_sl=planned_sl if planned_sl > 0 else of.equity_sl,
+                                 note=f"{of.note.split(' · stop floored')[0]} · shadow of {of.id}",
+                                 exec_log={"entry": dict(of.exec_log.get("entry") or {}), "exits": [],
+                                           "ref": self._order_ref(shadow_key.value, ts)})
+                self._widen_stop(shadow, engine_for.limits, not_nearer_than=of.equity_sl)
             self.positions[shadow.id] = shadow
             self._commit_outlay(wallet, cost, ts, shadow)
             wallet.apply_charges(charges, ts)
@@ -3722,6 +3751,9 @@ class Engine:
             await self.ledger.upsert_wallet(wallet.strategy, wallet.to_json())
             log.info("shadow.open", book=shadow_key.value, shadow=shadow.id, of=of.id, symbol=of.underlying.symbol,
                      equity_sl=shadow.equity_sl, option_sl=shadow.option_sl)
+            if kind == "wide":
+                # the wide shadow is a book in its own right: its own two stop-rule mirrors copy ITS fill
+                await self._open_shadow_twins(shadow, inst, ts, charges)
 
     def _floor_equity_stop(self, pos: Position, lim: RiskLimits, key: str) -> None:
         """A planned underlying stop nearer than ``min_equity_stop_atr`` ATR30 to the trigger's close sits
@@ -3788,6 +3820,41 @@ class Engine:
             pos.r_unit = abs(pos.entry - pos.option_sl)
 
     # -- the trigger-card page ----------------------------------------------------------------------
+
+    def _stop_rule_rows(self, book: str, ps: dict[str, Any] | None, pos_by_key: dict[tuple[str, str], dict[str, Any]],
+                        trades_by_pos: dict[str, dict[str, Any]]) -> list[dict[str, Any]] | None:
+        """A card's stop-rule strip (operator, 2026-10-04): the same trade under the book's current stop and under
+        its two mirrors' (strategy/keys.py ``STOP_MIRRORS``) — open or closed, the exit, its reason and P&L, and a
+        stop's level → trigger → bid → fill. None when the book has no mirrors or holds nothing on the trigger."""
+        mirrors = stop_mirrors_of(book)
+        if not mirrors or ps is None:
+            return None
+        rows = [("current", book, ps)]
+        rows += [(rule, m.value, pos_by_key.get((m.value, ps["signal_id"]))) for rule, m in mirrors.items()]
+        return [self._stop_rule_row(rule, key, p, trades_by_pos.get(p["id"]) if p else None) for rule, key, p in rows]
+
+    def _stop_rule_row(self, rule: str, key: str, p: dict[str, Any] | None, trade: dict[str, Any] | None) -> dict[str, Any]:
+        base = {"rule": rule, "label": STOP_RULE_LABELS[rule], "book": key}
+        if p is None:
+            return {**base, "status": "NONE"}  # not mirrored: the mirror's purse refused it, or it predates the mirrors
+        closed = p.get("status") != "OPEN"
+        exits = (p.get("exec_log") or {}).get("exits") or []
+        last = exits[-1] if exits and isinstance(exits[-1], dict) else {}
+        stop = last.get("stop") if closed else None
+        open_pnl = None
+        live = None if closed else self.positions.get(p["id"])
+        if live is not None:
+            mid = self.position_marks.get(live.id, {}).get("mid") or self.ltps.get(live.instrument.scrip_code)
+            if mid:
+                open_pnl = round((mid - live.entry) * live.qty_remaining * live.instrument.multiplier + live.realised_gross, 2)
+        return {
+            **base, "status": "EXITED" if closed else "OPEN", "entry": p.get("entry"), "qty": p.get("qty"),
+            "qtyRemaining": p.get("qty_remaining"), "targetsHit": p.get("targets_hit"),
+            "exitPrice": p.get("exit_price") if closed else None, "exitReason": p.get("exit_reason") if closed else None,
+            "closedTs": p.get("closed_ts") if closed else None, "net": float(trade["net"]) if (closed and trade) else None,
+            "openGross": open_pnl, "stop": {**stop, "fill": last.get("fillPrice")} if stop else None,
+            "operatorClosedReal": "closed by the operator" in str(p.get("note") or ""),
+        }
 
     async def book_cards(self, book: str, day: date | None = None) -> dict[str, Any]:
         """One card per FUDKII trigger of the session, read for one book: the trigger's own
@@ -4133,6 +4200,7 @@ class Engine:
                 "restingTarget": self._resting_target_card(ps),
                 "restingTargets": self._resting_targets_card(ps),
                 "verdicts": verdicts, "ctaCounter": cta_counter,
+                "stopRules": self._stop_rule_rows(book, ps, pos_by_key, trades_by_pos),
             })
         counts: dict[str, int] = {}
         for c in cards:
@@ -4497,6 +4565,12 @@ class Engine:
         self.alerts.mark_skipped(signal_id, book=book, reason="operator skip")
         log.info("operator.skip", book=book, symbol=pos.underlying.symbol, position=pos.id)
         await self._exit(pos, ExitDecision(pos.id, ExitReason.MANUAL, ref, pos.qty_remaining, "operator skip"), time.time())
+        # its stop-rule mirrors keep running on their own rules (operator, 2026-10-04: "yes they should keep
+        # running as per their rules") — they measure the stop rule, not the operator's call — and say so
+        mirrors = set(stop_mirrors_of(book).values())
+        for m in [p for p in self.positions.values() if p.status == "OPEN" and p.signal_id == pos.signal_id and StrategyKey(p.strategy) in mirrors]:
+            m.note += f" · the real {BOOK_LABELS.get(book, book)} trade was closed by the operator at ≈{ref:.2f}"
+            await self.ledger.upsert_position(_position_json(m))
         return {"book": book, "signalId": signal_id, "positionId": pos.id, "closed": pos.status != "OPEN", "ref": ref}
 
     async def reset_wallet(self, strategy: str, initial: float | None = None) -> Wallet:
@@ -6041,6 +6115,8 @@ class Engine:
             # Advisory and fire-and-forget: the review never delays or touches the trade path.
             self.committee.on_trade_closed(_trade_json(trade))
             self.positions.pop(pos.id, None)
+            if StrategyKey(pos.strategy) in STOP_MIRRORS:
+                return  # a stop-rule mirror is a measurement: no phone message for it
             self.telegram.fire_and_forget(
                 f"🔴 {pos.strategy} {pos.underlying.symbol} closed {decision.reason.value} "
                 f"net ₹{trade.net:,.0f} ({trade.r_multiple:+.2f}R)"
@@ -6842,20 +6918,6 @@ def exit_client_order_id(pos: Position, decision: Any, attempt: int = 0, *, cros
     base = f"{pos.id}|EXIT|{pos.targets_hit}|{decision.reason.value}"  # a position opened before readable ids
     base = f"{base}|r{attempt}" if attempt else base
     return f"{base}|X" if cross else base
-
-
-def read_stop_mode(data_dir: Path) -> str:
-    """``"stop_mode"`` from ``<data_dir>/engine.json`` — "equity" or "option" (the default, and anything else).
-    A file, not a ``KN_*`` key: the two paper engines share one ``.env`` and the A/B needs them to differ."""
-    try:
-        mode = str(json.loads((data_dir / "engine.json").read_text()).get("stop_mode") or "option")
-    except (OSError, ValueError, AttributeError):
-        return "option"
-    return "equity" if mode == "equity" else "option"
-
-
-def _with_stop_mode(limits: RiskLimits, mode: str) -> RiskLimits:
-    return replace(limits, stop_mode=mode) if mode != limits.stop_mode else limits
 
 
 def _position_json(p: Position) -> dict[str, Any]:

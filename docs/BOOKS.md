@@ -132,8 +132,14 @@ trigger is the read cadence and the book's grace, by design; trigger → bid is 
 the depth. None of it is the SL level: a stop is never booked AT its level (CAN2 did, and its ledger
 was optimistic by the gap).
 
-**The equity stop mode** (`stop_mode` in `risk/limits.py`, set per engine by `data/engine.json` `"stop_mode": "equity"`;
-built 4 Oct, OFF by default). The stock's stop is the thesis trigger and the option only the instrument sold: a
+**The stop-rule mirrors** (operator, 4 Oct: every strategy under all three stop rules, compared strategy by strategy).
+Each book's fill is copied into two mirror books — `<BOOK>_SE` (stop E) and `<BOOK>_SA` (stop adaptive) — with the same
+contract, size, price, instant and stop levels; only the rule that judges the stop differs. Their own purses, on the
+Shadow page's *Stop rules* tab and on a three-line strip on every card (current / stop E / adaptive: the exit, its P&L,
+and for a stop the level → trigger → bid → fill); never in the day's totals; no phone message. They keep running on
+their own rules when you close the real trade by hand, and say so. The wide-stop shadow has its own two mirrors.
+
+**The equity stop mode** (`stop_mode` in `risk/limits.py`, what the mirrors run; no book trades on it). The stock's stop is the thesis trigger and the option only the instrument sold: a
 decisive breach (0.10 % of price through, or the stock 0.35 % against the trade in 60 s, or the first print after
 entry already through) sells on that read; a marginal one is confirmed by magnitude × time — the integral of (%
 through) over the continuous breach reaching 1.0 %·s (0.05 % confirms in 20 s, 0.02 % in 50 s), 60 s at the latest;

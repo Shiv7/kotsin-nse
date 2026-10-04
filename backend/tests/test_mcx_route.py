@@ -67,7 +67,7 @@ async def test_a_commodity_trigger_is_entered_by_rt_mcx_with_the_trigger_as_its_
         c = next(x for x in (await e.book_cards("FUDKII_RT_MCX", ist_today()))["cards"] if x["symbol"] == "GOLDPETAL")
         assert c["state"] == "OPEN" and c["position"]["id"] == held[0].id
         assert [(b["book"], b["status"], b["side"]) for b in c["books"]] == [("FUDKII_RT_MCX", "OPEN", "LONG")], "only the commodity book, glowing"
-        assert not [p for p in e.positions.values() if p.strategy.startswith("FUDKII_RT_") and p.strategy != "FUDKII_RT_MCX"], "no NSE twin"
+        assert not [p for p in e.positions.values() if p.strategy.startswith("FUDKII_RT_") and not p.strategy.startswith("FUDKII_RT_MCX")], "no NSE twin"
     finally:
         await e.stop()
 

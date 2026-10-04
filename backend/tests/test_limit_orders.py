@@ -47,6 +47,7 @@ from kotsin_nse.risk.sizing import SizingResult
 from kotsin_nse.risk.wallet import Wallet
 from kotsin_nse.strategy.base import Signal
 from kotsin_nse.strategy.keys import StrategyKey
+from tests._books import held
 
 UND = Instrument("3499", "TATASTEEL", Segment.NSE_EQ, InstrumentKind.EQUITY, name="TATASTEEL", tick_size=0.01, underlying="TATASTEEL")
 OPT = Instrument("153805", "TATASTEEL", Segment.NSE_FO, InstrumentKind.OPTION, name="TATASTEEL 29 SEP 2026 CE 190.00",
@@ -150,7 +151,7 @@ async def test_every_in_trend_book_rests_and_fills_its_own_entry_with_every_time
         clock[0] += 22
         _book(e, 16.95, 17.10, clock[0])  # the ask comes down to our bid
         await e._manage_positions()
-        by = {p.strategy: p for p in e.positions.values()}
+        by = {p.strategy: p for p in held(e)}
         assert {"FUDKII", "FUDKII_RT_X", "FUDKII_RT_N", "FUDKII_RT_Y", "FUDKII_RT_Y_W1"} == set(by), "four entries and RT-Y's shadow"
         parent = by["FUDKII"]
         assert all(p.entry == 17.10 and p.signal_id == sig.signal_id for p in by.values())

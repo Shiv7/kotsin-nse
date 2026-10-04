@@ -356,5 +356,8 @@ def test_the_registry_is_an_enum_and_names_every_book_that_trades():
         StrategyKey.FUDKII_RT_Y_W1,
         StrategyKey.FUDKII_RT_Y_F,
         StrategyKey.FUDKII_CT_M,
+        # every book's two stop-rule mirrors (2026-10-04): the same fills, the stop judged on the stock
+        *(StrategyKey(f"{b}_{r}") for b in ("FUDKII", "FUDKII_RT_X", "FUDKII_RT_N", "FUDKII_RT_Y", "FUDKII_CT_X", "FUDKII_CT_Y",
+                                            "FUDKII_RT_MCX", "FUDKII_RT_Y_F", "FUDKII_RT_Y_W1", "FUDKII_CT_M") for r in ("SE", "SA")),
     )
     assert StrategyKey.FUDKII.wallet_id == "strategy-wallet-FUDKII"

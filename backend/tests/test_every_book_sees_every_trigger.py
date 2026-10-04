@@ -19,6 +19,7 @@ from kotsin_nse.engine import IN_TREND_BOOKS
 from kotsin_nse.strategy.base import Outcome, Signal, published
 from kotsin_nse.strategy.fudkii import Fudkii
 from kotsin_nse.strategy.keys import StrategyKey
+from tests._books import held
 
 from .test_rt_twin import RELIANCE, RELIANCE_OPT, _paper
 from .test_strategies import FakeCtx, _breakout_series
@@ -137,7 +138,7 @@ async def test_an_unpublished_trigger_that_reaches_the_books_is_refused_by_the_p
                                                               "reason": "grade F rr=0.0 no wall ahead — no target"}})
         out = await e._handle_signal(trig, None, books=IN_TREND_BOOKS, adopt=False)
         assert out["FUDKII"]["decision"] == "NOT_PUBLISHED" and "no wall ahead" in out["FUDKII"]["reason"]
-        assert sorted(p.strategy for p in e.positions.values()) == ["FUDKII_RT_N", "FUDKII_RT_X", "FUDKII_RT_Y", "FUDKII_RT_Y_W1"]
+        assert sorted(p.strategy for p in held(e)) == ["FUDKII_RT_N", "FUDKII_RT_X", "FUDKII_RT_Y", "FUDKII_RT_Y_W1"]
         rows = [r for r in await e.ledger.rows_between("signals", 0, time.time() + 60) if r["signal_id"] == trig.signal_id]
         assert rows and rows[-1]["decision"] == "NOT_PUBLISHED", "the trigger's row carries the parent's own decision"
     finally:

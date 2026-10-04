@@ -19,6 +19,7 @@ from typing import Any
 
 from ..market.session import IST
 from ..risk.limits import RiskLimits
+from ..strategy.keys import STOP_MIRRORS, stop_mirrors_of
 from ..strategy.regime_gates import GATE_B as GATE_B_GATES
 from ..strategy.regime_gates import trigger_verdicts
 from .daybook import _CSS, _fmt, contract_label, render_ab
@@ -26,7 +27,8 @@ from .daybook import _CSS, _fmt, contract_label, render_ab
 #: the books whose status each trigger row shows, in the order the cards show them
 BOOKS = ("FUDKII", "FUDKII_RT_X", "FUDKII_RT_N", "FUDKII_RT_Y", "FUDKII_CT_X", "FUDKII_CT_Y", "FUDKII_CT_M", "FUDKII_RT_MCX")
 LABELS = {"FUDKII": "FUDKII", "FUDKII_RT_X": "RT-X", "FUDKII_RT_N": "RT-N", "FUDKII_RT_Y": "RT-Y",
-          "FUDKII_CT_X": "CT-X", "FUDKII_CT_Y": "CT-Y", "FUDKII_CT_M": "CT-M", "FUDKII_RT_MCX": "RT-MCX"}
+          "FUDKII_CT_X": "CT-X", "FUDKII_CT_Y": "CT-Y", "FUDKII_CT_M": "CT-M", "FUDKII_RT_MCX": "RT-MCX",
+          "FUDKII_RT_Y_F": "RT-Y-F", "FUDKII_RT_Y_W1": "RT-Y-W1"}
 COUNTER = ("FUDKII_CT_X", "FUDKII_CT_Y")
 
 
@@ -114,6 +116,7 @@ class ShadowData:
     fukaa: dict[str, Any] = field(default_factory=dict)
     labels: dict[str, Any] = field(default_factory=dict)
     volume: dict[str, Any] = field(default_factory=dict)
+    stop_rules: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,6 +213,62 @@ def wide_stop_summary(*, positions: list[dict], trades: list[dict]) -> dict[str,
     }
     since_cap["diff"] = since_cap["w_net"] - since_cap["y_net"]
     return {"pairs": pairs, "total": total, "since_cap": since_cap}
+
+
+# -- the stop rules: every book against its two mirrors ----------------------------------------------
+
+#: the books that have mirrors, in the order the tables list them
+STOP_RULE_BOOKS = tuple(dict.fromkeys(src.value for src, _r in STOP_MIRRORS.values()))
+_STOP_EXITS = ("SL-EQ", "SL-OP")
+
+
+def stop_rules_summary(*, positions: list[dict], trades: list[dict]) -> dict[str, Any]:
+    """Each book against its two stop-rule mirrors, trade by trade (operator, 2026-10-04: "compare which
+    [stop rule] works best with which strategy"): a mirror opens only on its book's own fill, so each
+    mirror position has exactly one source position on the same trigger. Per book and rule: the trades
+    closed under all three rules, their net, wins, stops taken, and each mirror against the current stop."""
+    net_by = {t.get("position_id"): float(t.get("net") or 0.0) for t in trades}
+    reason_by = {t.get("position_id"): t.get("exit_reason") for t in trades}
+    by_key = {(p.get("strategy"), p.get("signal_id")): p for p in positions}
+
+    def side(p: dict[str, Any] | None) -> dict[str, Any]:
+        if p is None:
+            return {"status": "NONE", "net": None, "reason": None}
+        if p.get("status") == "OPEN":
+            return {"status": "OPEN", "net": None, "reason": None}
+        return {"status": "EXITED", "net": net_by.get(p["id"]), "reason": reason_by.get(p["id"]) or p.get("exit_reason")}
+
+    trades_out: list[dict[str, Any]] = []
+    books: dict[str, dict[str, dict[str, Any]]] = {}
+    for book in STOP_RULE_BOOKS:
+        mirrors = stop_mirrors_of(book)
+        tally = {rule: {"closed": 0, "net": 0.0, "wins": 0, "stops": 0, "better": 0, "worse": 0, "same": 0, "diff": 0.0}
+                 for rule in ("current", *mirrors)}
+        for p in sorted((x for x in positions if x.get("strategy") == book), key=lambda x: float(x.get("opened_ts") or 0)):
+            sid = p.get("signal_id")
+            row = {"current": side(p), **{rule: side(by_key.get((m.value, sid))) for rule, m in mirrors.items()}}
+            if all(r["status"] == "NONE" for k, r in row.items() if k != "current"):
+                continue  # before the mirrors existed: not a comparison
+            done = all(r["status"] == "EXITED" and r["net"] is not None for r in row.values())
+            trades_out.append({"book": book, "signal_id": sid, "symbol": p.get("symbol"), "opened": p.get("opened_ts"),
+                               "contract": (p.get("instrument") or {}).get("name"), "entry": p.get("entry"), "rules": row, "closed": done})
+            if not done:
+                continue
+            cur = row["current"]["net"]
+            for rule, r in row.items():
+                t = tally[rule]
+                t["closed"] += 1
+                t["net"] += r["net"]
+                t["wins"] += r["net"] > 0
+                t["stops"] += r["reason"] in _STOP_EXITS
+                if rule != "current":
+                    d = r["net"] - cur
+                    t["diff"] += d
+                    t["better" if d > 1 else "worse" if d < -1 else "same"] += 1
+        books[book] = tally
+    total = {rule: {k: sum(books[b][rule][k] for b in books) for k in ("closed", "net", "wins", "stops", "better", "worse", "same", "diff")}
+             for rule in ("current", "E", "A")}
+    return {"books": books, "total": total, "trades": trades_out}
 
 
 # -- the graded-F shadow -------------------------------------------------------------------------
@@ -591,6 +650,49 @@ def _render_wide(d: ShadowData) -> str:
 <tbody>{body or '<tr><td colspan="13" class="dim">no RT-Y trade since the shadow began</td></tr>'}</tbody></table></div>"""
 
 
+def _render_stop_rules(d: ShadowData) -> str:
+    sr = d.stop_rules or {"books": {}, "total": {}, "trades": []}
+    labels = {"current": "Current", "E": "Stop E", "A": "Adaptive"}
+
+    def cells(t: dict[str, Any], rule: str) -> str:
+        n = t.get("closed", 0)
+        out = f'<td>{n}</td>{_net_cell(t.get("net") if n else None)}<td>{_pct(t.get("wins", 0), n)}</td><td>{t.get("stops", 0)}</td>'
+        if rule != "current":
+            out += f'{_net_cell(t.get("diff") if n else None)}<td>{t.get("better", 0)} / {t.get("worse", 0)} / {t.get("same", 0)}</td>'
+        return out
+
+    head = ('<th class="l">Book</th>' + "".join(
+        f'<th>{labels[r]} trades</th><th>{labels[r]} net</th><th>{labels[r]} win</th><th>{labels[r]} stops</th>'
+        + ("" if r == "current" else f"<th>{labels[r]} − current</th><th>{labels[r]} better / worse / same</th>")
+        for r in ("current", "E", "A")))
+    body = "".join(
+        f'<tr><td class="l">{html.escape(LABELS.get(b, b.replace("FUDKII_", "")))}</td>' + "".join(cells(t[r], r) for r in ("current", "E", "A")) + "</tr>"
+        for b, t in sr["books"].items()
+    )
+    tot = sr.get("total") or {}
+    if tot:
+        body += '<tr><td class="l"><b>all books</b></td>' + "".join(cells(tot[r], r) for r in ("current", "E", "A")) + "</tr>"
+
+    def rule_cells(r: dict[str, Any]) -> str:
+        return f'<td class="l">{html.escape(str(r["reason"] or "—"))}</td>{_net_cell(r["net"], r["status"])}'
+
+    rows = "".join(
+        f'<tr><td class="sym">{_ist(t["opened"])}</td><td class="l">{html.escape(LABELS.get(t["book"], t["book"].replace("FUDKII_", "")))}</td>'
+        f'<td class="sym l">{html.escape(str(t["symbol"] or "—"))}</td><td class="l">{html.escape(contract_label(str(t["contract"] or "—")))}</td>'
+        f'<td>{_fmt(t["entry"])}</td>' + "".join(rule_cells(t["rules"][k]) for k in ("current", "E", "A"))
+        + (_net_cell(t["rules"]["E"]["net"] - t["rules"]["current"]["net"]) + _net_cell(t["rules"]["A"]["net"] - t["rules"]["current"]["net"])
+           if t["closed"] else '<td class="dim">—</td><td class="dim">—</td>') + "</tr>"
+        for t in reversed(sr["trades"])
+    )
+    return f"""<h3>Stop rules · running total, per book</h3>
+<div class="scroll"><table><thead><tr>{head}</tr></thead><tbody>{body or '<tr><td colspan="17" class="dim">no trade closed under all three rules yet</td></tr>'}</tbody></table></div>
+<h3>Stop rules · every trade · {len(sr["trades"])}</h3>
+<div class="scroll"><table><thead><tr><th>Opened</th><th class="l">Book</th><th class="l">Symbol</th><th class="l">Contract</th><th>Entry</th>
+<th class="l">Current exit</th><th>Current net</th><th class="l">Stop E exit</th><th>Stop E net</th><th class="l">Adaptive exit</th><th>Adaptive net</th>
+<th>E − current</th><th>Adaptive − current</th></tr></thead>
+<tbody>{rows or '<tr><td colspan="13" class="dim">no mirrored trade yet — the mirrors open on the next fill of each book</td></tr>'}</tbody></table></div>"""
+
+
 def _render_graded_f(d: ShadowData) -> str:
     g = d.graded_f or {"rows": [], "total": {}}
     t = g.get("total") or {}
@@ -835,6 +937,41 @@ GATE_B = Brief(
     ),
 )
 
+STOP_RULES = Brief(
+    name="Stop rules · current vs stop E vs adaptive",
+    testing="Which stop rule each strategy should trade with: its current option stop, or the stock's own stop (two ways).",
+    for_rule=(
+        "Every book's two mirrors — the same fill (contract, size, price, instant, stop levels), the stop judged on the STOCK: "
+        "stop E sells a decisive breach (0.10 % of price through, 0.35 % against the trade in 60 s, or already through on the "
+        "first print) at once and a marginal one after 60 s through; adaptive confirms a marginal breach by magnitude × time "
+        "(the integral of % through reaching 1.0 %·s: 0.05 % in 20 s, 0.02 % in 50 s, 60 s at most). Both sell when the option "
+        "bid is 25 % under the premium paid, whatever the stock says, and sell into the bid at the trigger."
+    ),
+    against=(
+        "The book itself: its current stop — the stock's stop drawn on the option through delta, the 75 s sustain on the option "
+        "mid for the RT books, a single print for FUDKII, the 9 % hard floor, the stock through its stop."
+    ),
+    logic=(
+        "A mirror opens only when its book fills and copies that fill exactly. Everything but the stop is the book's: targets, "
+        "the rung ratchet, the give-back line, the trail, the 15:20 flatten. It keeps running on its own rule when you close the "
+        "real trade by hand. Tape study 29 Sep – 1 Oct (73 trades): the option stop fired with the stock a median 13 % of the "
+        "way to its own stop; 23 of 33 stock breaches were back inside within 5 min."
+    ),
+    pros=(
+        "Three outcomes of one trade, side by side, with nothing else different.",
+        "Replay 29 Sep – 1 Oct: stop E +₹12,107 and adaptive +₹14,702 against the current stop, mostly false stops avoided.",
+    ),
+    cons=(
+        "A slow breach costs more under the stock's stop: the option stop had often sold a minute earlier (TECHM, SRF, 30 Sep).",
+        "About 8–10 decided trades per book a week: judge pooled across books first, a book on its own only on a large gap.",
+    ),
+    decide=(
+        "Friday 9 Oct: the all-books row first — does a stock-based stop beat the current one net of the slow breaches? Then a "
+        "book splits off only where its gap is large, holds across days and has a reason in that book's own rules."
+    ),
+)
+
+
 WIDE_STOP = Brief(
     name="Wide stop · RT-Y 1% past",
     testing="Whether giving RT-Y's equity stop 1% more room keeps more winners than it adds to the losers.",
@@ -1055,6 +1192,7 @@ VOLUME = Brief(
 #: The tabs, in order. A new shadow is one more entry here.
 TABS: list[ShadowTab] = [
     ShadowTab("gate-b", "Gate B · RT-Y regime gate", GATE_B, _render_gate_b),
+    ShadowTab("stop-rules", "Stop rules · current vs E vs adaptive", STOP_RULES, _render_stop_rules),
     ShadowTab("wide-stop", "Wide stop · RT-Y 1% past", WIDE_STOP, _render_wide),
     ShadowTab("graded-f", "Graded F · RT-Y's rules", GRADED_F, _render_graded_f),
     ShadowTab("gap-fade", "Gap fade · CT-Y 09:45", GAP_FADE, _render_gap),
@@ -1117,6 +1255,7 @@ def render_shadow(d: ShadowData) -> str:
     gt = (d.gap or {}).get("total") or {}
     mt = (d.market_fade or {}).get("total") or {}
     kt = (d.fukaa or {}).get("total") or {}
+    st = ((d.stop_rules or {}).get("total") or {}).get("current") or {}
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Shadow — {html.escape(pretty)}</title>
@@ -1133,6 +1272,7 @@ def render_shadow(d: ShadowData) -> str:
     <div class="tally">
       <div class="tal"><b>{len(d.rows)}</b><span>triggers</span></div>
       <div class="tal"><b>{stood}</b><span>RT-Y gate-B skips</span></div>
+      <div class="tal"><b>{st.get("closed", 0)}</b><span>stop-rule trios</span></div>
       <div class="tal"><b>{wt.get("pairs", 0)}</b><span>wide-stop pairs</span></div>
       <div class="tal"><b>{ft.get("traded", 0)}</b><span>graded-F trades</span></div>
       <div class="tal"><b>{gt.get("fired", 0)}</b><span>gap fades</span></div>

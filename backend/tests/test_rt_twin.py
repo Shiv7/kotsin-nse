@@ -27,6 +27,7 @@ from kotsin_nse.exec.paper import BookSnapshot
 from kotsin_nse.instrument.select import Quote, Selection, estimate_delta, map_levels_to_option
 from kotsin_nse.strategy.base import Signal
 from kotsin_nse.strategy.keys import StrategyKey
+from tests._books import held
 
 RELIANCE_OPT = Instrument("45678", "RELIANCE", Segment.NSE_FO, InstrumentKind.OPTION,
                           lot_size=250, strike=1500.0, option_type=OptionType.CE, underlying="RELIANCE")
@@ -66,7 +67,7 @@ async def test_every_in_trend_book_enters_a_fudkii_trigger_on_its_own_order(sett
     try:
         before = {k: e.wallets[k].available for k in ("FUDKII", "FUDKII_RT_X", "FUDKII_RT_N", "FUDKII_RT_Y", "FUDKII_RT_Y_W1")}
         sig = await _trigger(e, RELIANCE_OPT, RELIANCE)
-        by = {p.strategy: p for p in e.positions.values()}
+        by = {p.strategy: p for p in held(e)}
         assert set(by) == {"FUDKII", "FUDKII_RT_X", "FUDKII_RT_N", "FUDKII_RT_Y", "FUDKII_RT_Y_W1"}, "every in-trend book, and RT-Y's wide-stop shadow"
         for book, p in by.items():
             assert (p.instrument, p.entry, p.signal_id) == (RELIANCE_OPT, 50.0, sig.signal_id)
@@ -88,10 +89,10 @@ async def test_a_commodity_trigger_goes_to_the_mcx_book_alone_and_fukaa_trades_o
         fut = Instrument("482", "CRUDEOIL", Segment.MCX_FO, InstrumentKind.FUTURE, lot_size=100,
                          multiplier=100, expiry="2099-12-31", underlying="CRUDEOIL")
         await _trigger(e, fut, fut, premium=5.0, entry=5.0, stop=4.9, targets=(5.3,))
-        assert [p.strategy for p in e.positions.values()] == ["FUDKII_RT_MCX"]
+        assert [p.strategy for p in held(e)] == ["FUDKII_RT_MCX"]
 
         await _trigger(e, RELIANCE_OPT, RELIANCE, strategy=StrategyKey.FUKAA, books=None)
-        assert sorted(p.strategy for p in e.positions.values()) == ["FUDKII_RT_MCX", "FUKAA"], "a FUKAA signal is FUKAA's alone"
+        assert sorted(p.strategy for p in held(e)) == ["FUDKII_RT_MCX", "FUKAA"], "a FUKAA signal is FUKAA's alone"
     finally:
         await e.stop()
 
@@ -218,7 +219,7 @@ async def test_dried_equity_volume_skips_rt_x_and_rt_y_but_not_the_control_book(
         # baseline T-2..T-7 = 10,000; the trigger bar 4,000 (0.40) and the one before 5,000 (0.50)
         e.store.seed("RELIANCE", "30m", _bars30("RELIANCE", "2885", [10_000.0] * 6 + [5_000.0, 4_000.0]))
         await _trigger(e, RELIANCE_OPT, RELIANCE)
-        assert sorted(p.strategy for p in e.positions.values()) == ["FUDKII", "FUDKII_RT_N"], "the parent and the control book take it"
+        assert sorted(p.strategy for p in held(e)) == ["FUDKII", "FUDKII_RT_N"], "the parent and the control book take it"
         sk = await _skips(e)
         assert set(sk) == {"FUDKII_RT_X", "FUDKII_RT_Y"} and all(x["gate"] == "dried_volume" and "equity 0.40/0.50" in x["reason"] for x in sk.values())
         assert e.wallets["FUDKII_RT_X"].available == e.wallets["FUDKII_RT_X"].balance
@@ -258,7 +259,7 @@ async def test_a_dry_front_future_skips_even_when_the_equity_bar_is_live(setting
         e.rest.candles = candles  # type: ignore[method-assign]
         await _trigger(e, RELIANCE_OPT, RELIANCE)
         assert asked == [("68781", "30m"), ("68781", "1d")], "one context fetch per trigger for both gated books"
-        assert sorted(p.strategy for p in e.positions.values()) == ["FUDKII", "FUDKII_RT_N"]
+        assert sorted(p.strategy for p in held(e)) == ["FUDKII", "FUDKII_RT_N"]
 
         # the broker not answering is "unknown", never "dried": every book enters
         async def broken(inst, tf, start, end):
@@ -268,7 +269,7 @@ async def test_a_dry_front_future_skips_even_when_the_equity_bar_is_live(setting
         e._fut_cache.clear()  # the context is fetched once per trigger bar; a new bar asks again
         e.positions.clear()
         await _trigger(e, RELIANCE_OPT, RELIANCE, shift=1800)
-        assert sorted(p.strategy for p in e.positions.values()) == ["FUDKII", "FUDKII_RT_N", "FUDKII_RT_X", "FUDKII_RT_Y", "FUDKII_RT_Y_W1"]
+        assert sorted(p.strategy for p in held(e)) == ["FUDKII", "FUDKII_RT_N", "FUDKII_RT_X", "FUDKII_RT_Y", "FUDKII_RT_Y_W1"]
     finally:
         await e.stop()
 

@@ -15,7 +15,16 @@ type Plan = { ok: boolean; reason?: string; contract?: string; strike?: number; 
 type BookRow = { book: string; label: string; status: 'OPEN' | 'EXITED' | 'NONE'; side: 'CE' | 'PE' | 'LONG' | 'SHORT' | null; openedTs: number | null; closedTs: number | null; exitReason: string | null; pnl: number | null }
 type Verdict = { action: string; state?: string; gate?: string | null; why: string[] | string; side?: string; stop?: number | null; targets?: number[]; rr?: number | null; grade?: string | null; breadth?: number | null }
 type TargetEv = { rung: number; limit: number; qty: number; placedTs: number; ts: number; outcome: string }
+/** One row of a card's stop-rule strip: the same trade under one stop rule (the book's current, or a mirror's). */
+type StopRuleRow = {
+  rule: 'current' | 'E' | 'A'; label: string; book: string; status: 'OPEN' | 'EXITED' | 'NONE'
+  entry?: number; qty?: number; qtyRemaining?: number; targetsHit?: number; exitPrice?: number | null; exitReason?: string | null
+  closedTs?: number | null; net?: number | null; openGross?: number | null; operatorClosedReal?: boolean
+  stop?: { level: number; triggerPrice: number; triggerOn: string; bidAtTrigger: number | null; executable: number | null; fill: number | null } | null
+}
 type Card = {
+  // the same trade under the book's current stop and its two mirrors' (operator, 2026-10-04): null = none held
+  stopRules?: StopRuleRow[] | null
   verdicts?: { rtY: Verdict | null; ctY: Verdict | null; ctM?: Verdict | null }
   pending?: (ExecA & { restingS?: number; contract?: string; forTwins?: boolean; parentWhy?: string }) | null
   execLog?: { entry?: ExecA; exits?: (ExecA & { reason?: string; qty?: number })[]; targets?: TargetEv[] } | null
@@ -758,6 +767,46 @@ function TriggerCard({ book, c, open, onToggle, refresh, readOnly = false }: { b
   )
 }
 
+const RULE_TONE: Record<StopRuleRow['rule'], string> = { current: 'text-slate-200', E: 'text-sky-200', A: 'text-violet-200' }
+
+/** The same trade under three stop rules, one line each: what it did, what it made, and — for a stop — the level,
+ *  the read that breached it, the bid then and the fill. The mirrors keep their own rules after a manual close. */
+function StopRules({ rows }: { rows: StopRuleRow[] }) {
+  return (
+    <Section icon={IC.shield} title="stop rules · the same trade, three stops">
+      <div className="divide-y divide-slate-800/80 text-[13.5px]">
+        {rows.map((r) => {
+          const pnl = r.status === 'EXITED' ? r.net : r.openGross
+          return (
+            <div key={r.rule} className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 py-1.5">
+              <span className={`w-36 shrink-0 font-semibold ${RULE_TONE[r.rule]}`}>{r.label}</span>
+              {r.status === 'NONE' ? (
+                <span className="text-slate-500">not mirrored (its purse refused it, or the trade predates the mirrors)</span>
+              ) : (
+                <>
+                  <span className="text-slate-300">
+                    {r.status === 'OPEN' ? `open · ${r.qtyRemaining ?? '—'} of ${r.qty ?? '—'} left` : `${r.exitReason ?? 'closed'} ${f(r.exitPrice)} at ${r.closedTs ? ist(r.closedTs) : '—'}`}
+                    {r.targetsHit ? ` · ${r.targetsHit} rung(s) paid` : ''}
+                  </span>
+                  <span className={`tabular-nums font-semibold ${(pnl ?? 0) >= 0 ? 'text-emerald-300' : 'text-rose-300'}`}>
+                    {inr(pnl)}{r.status === 'OPEN' ? ' open (gross)' : ' net'}
+                  </span>
+                  {r.stop ? (
+                    <span className="w-full pl-36 text-[12.5px] text-slate-500 max-sm:pl-0">
+                      stop {f(r.stop.level)} → {r.stop.triggerOn === 'underlying' ? 'stock' : r.stop.triggerOn} {f(r.stop.triggerPrice)} → bid {f(r.stop.bidAtTrigger)} → fill {f(r.stop.fill)}
+                    </span>
+                  ) : null}
+                  {r.operatorClosedReal ? <span className="w-full pl-36 text-[12.5px] text-amber-300/80 max-sm:pl-0">you closed the real trade; this one keeps its own rule</span> : null}
+                </>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </Section>
+  )
+}
+
 function Section({ icon, title, children }: { icon: string; title: string; children: React.ReactNode }) {
   return (
     <div className="flex flex-col gap-2.5">
@@ -847,6 +896,7 @@ function Expanded({ book, c }: { book: string; c: Card }) {
               <div className="text-[14px] text-slate-300">{stateOf(c.state).label} — {c.skip ? c.skip.reason : c.parentReason ?? c.route?.summary ?? ''}{c.plan && !c.plan.ok ? <div className="mt-1 text-slate-500">preview: {c.plan.reason}</div> : null}</div>
             )}
           </Section>
+          {c.stopRules && c.stopRules.length > 0 && <StopRules rows={c.stopRules} />}
           {(c.pending || c.execLog || c.restingTarget || (c.restingTargets ?? []).length > 0) && (
             <Section icon={IC.ticket} title="order trail · limit orders">
               <div className="text-[13.5px] leading-relaxed">

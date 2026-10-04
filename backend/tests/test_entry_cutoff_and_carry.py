@@ -18,6 +18,7 @@ from kotsin_nse.config import Segment
 from kotsin_nse.domain import Direction, Instrument, InstrumentKind
 from kotsin_nse.engine import IN_TREND_BOOKS, Engine
 from kotsin_nse.market.session import IST, from_ist, past_force_flat, session_open_ts
+from tests._books import held
 
 from .conftest import REAL_PAST_LAST_ENTRY
 from .test_rt_y_cap_and_graded_f import _unpublished
@@ -83,12 +84,12 @@ async def test_past_1515_the_books_refuse_and_the_graded_f_shadow_still_enters_u
 
         f = replace(_unpublished(replace(sig, stop=1440.0)), ts=sig.ts + 1800)  # another trigger, graded F
         await e._handle_unpublished(f, None)
-        assert [p.strategy for p in e.positions.values()] == ["FUDKII_RT_Y_F"], "the graded-F shadow buys until 15:22"
+        assert [p.strategy for p in held(e)] == ["FUDKII_RT_Y_F"], "the graded-F shadow buys until 15:22"
 
         clock[0] = _at("15:23:00")
         g = replace(f, ts=f.ts + 1800, symbol="RELIANCE")
         await e._handle_unpublished(g, None)
-        assert len(e.positions) == 1, "nothing from 15:23"
+        assert len(held(e)) == 1, "nothing from 15:23"
         ev = [r for r in await e.ledger.rows_between("events", 0, time.time() + 60) if r.get("kind") == "rt_twin.skipped"]
         assert any(r["book"] == "FUDKII_RT_Y_F" and r["gate"] == "entry_cutoff" for r in ev)
     finally:
@@ -154,7 +155,7 @@ async def test_a_carried_trigger_enters_the_in_trend_books_on_its_first_print_at
     try:
         trig = _close_trigger(e, sig)  # close 1500, stop 1490, T1 1530
         open_ts = await _queue_and_open(e, trig, 1505.0)
-        books = sorted(p.strategy for p in e.positions.values())
+        books = sorted(p.strategy for p in held(e))
         assert books == ["FUDKII", "FUDKII_RT_N", "FUDKII_RT_X", "FUDKII_RT_Y", "FUDKII_RT_Y_W1"], "routed as it would have been at the close"
         carried = e._signals_today[next(iter(e.positions.values())).signal_id]
         assert carried.ts == int(open_ts) - 1800 and carried.entry == 1505.0, "the 08:45 slot (its card reads 09:15), entered at the open"
@@ -163,7 +164,7 @@ async def test_a_carried_trigger_enters_the_in_trend_books_on_its_first_print_at
         assert len(done) == 1 and done[0]["where"] == "in favour"
         e._carry_day = None  # a restart during the open
         await e._carry_tick(open_ts + 10)
-        assert len(e.positions) == 5 and not e._carry_pending, "never entered twice"
+        assert len(held(e)) == 5 and not e._carry_pending, "never entered twice"
     finally:
         await e.stop()
 
@@ -210,7 +211,7 @@ async def test_an_unpublished_carried_trigger_goes_to_the_graded_f_shadow_alone(
     try:
         trig = _unpublished(replace(_close_trigger(e, sig), stop=1440.0))
         await _queue_and_open(e, trig, 1505.0)
-        assert [p.strategy for p in e.positions.values()] == ["FUDKII_RT_Y_F"]
+        assert [p.strategy for p in held(e)] == ["FUDKII_RT_Y_F"]
         carried_id = next(iter(e.positions.values())).signal_id
         rows = [r for r in await e.ledger.rows_between("signals", 0, time.time() + AHEAD) if r["signal_id"] == carried_id]
         assert rows and rows[-1]["decision"] == "NOT_PUBLISHED" and rows[-1]["decision_reason"].startswith("carried")

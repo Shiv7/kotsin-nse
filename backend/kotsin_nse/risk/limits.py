@@ -8,6 +8,7 @@ neither code nor document named an authority.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, replace
 
 
@@ -312,6 +313,17 @@ RT_Y_LIMITS = RiskLimits(
 #: switched on: the operator has not decided (2026-10-01). Turning it on is RT_Y_LIMITS'
 #: ``min_equity_stop_atr=RT_Y_STOP_FLOOR_ATR``; RT-Y-F, CT-Y and the wide shadow stay off either way.
 RT_Y_STOP_FLOOR_ATR = 0.5
+
+
+def stop_rule_limits(base: RiskLimits, rule: str) -> RiskLimits:
+    """A book's limits under a stop-rule mirror's rule (strategy/keys.py ``STOP_MIRRORS``): "E" is the
+    stock's stop with a fixed 60 s confirmation (the persistence integral never decides); "A" the stock's
+    stop confirmed by magnitude × time. Everything else is the book's own."""
+    if rule == "E":
+        return replace(base, stop_mode="equity", eq_stop_area_pct_s=math.inf)
+    if rule == "A":
+        return replace(base, stop_mode="equity")
+    raise ValueError(f"unknown stop rule {rule!r}")
 
 #: The commodity book: RT-X's policy with the sizing it always had — up to 4 lots within the risk
 #: and position budgets. The NSE books' fixed 4 lots under ₹75,000 is not for MCX (operator,

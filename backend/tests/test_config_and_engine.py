@@ -20,7 +20,7 @@ from kotsin_nse.instrument.select import (
     select_option,
 )
 from kotsin_nse.strategy.base import Signal
-from kotsin_nse.strategy.keys import StrategyKey
+from kotsin_nse.strategy.keys import STOP_MIRRORS, StrategyKey
 
 from .conftest import ist_ts
 
@@ -149,7 +149,9 @@ async def test_engine_boots_without_credentials_and_says_why(settings):
     try:
         assert e.mode() is Mode.SHADOW
         assert any("credentials" in n for n in e.boot_notes)
-        assert set(e.wallets) == {"FUDKII", "FUKAA", "FUDKII_RT_X", "FUDKII_RT_MCX", "FUDKII_RT_N", "FUDKII_RT_Y", "FUDKII_CT_X", "FUDKII_CT_Y", "FUDKII_RT_Y_W1", "FUDKII_RT_Y_F", "FUDKII_CT_M"}
+        assert set(e.wallets) == {"FUDKII", "FUKAA", "FUDKII_RT_X", "FUDKII_RT_MCX", "FUDKII_RT_N", "FUDKII_RT_Y", "FUDKII_CT_X", "FUDKII_CT_Y",
+                                 "FUDKII_RT_Y_W1", "FUDKII_RT_Y_F", "FUDKII_CT_M", *(k.value for k in STOP_MIRRORS)}
+        assert e.wallets["FUDKII_RT_MCX_SA"].balance == 3_000_000.0, "a mirror's purse is its source's"
         assert e.wallets["FUDKII"].balance == settings.paper_initial_inr
     finally:
         await e.stop()
@@ -299,6 +301,17 @@ def test_strategy_key_is_the_only_registry():
     assert [k.value for k in StrategyKey] == [
         "FUDKII", "FUKAA", "FUDKII_RT_X", "FUDKII_RT_MCX", "FUDKII_RT_N", "FUDKII_RT_Y", "FUDKII_CT_X", "FUDKII_CT_Y",
         "FUDKII_RT_Y_W1", "FUDKII_RT_Y_F", "FUDKII_CT_M",
+        # every book's two stop-rule mirrors (2026-10-04): stop E, stop adaptive
+        "FUDKII_SE", "FUDKII_SA",
+        "FUDKII_RT_X_SE", "FUDKII_RT_X_SA",
+        "FUDKII_RT_N_SE", "FUDKII_RT_N_SA",
+        "FUDKII_RT_Y_SE", "FUDKII_RT_Y_SA",
+        "FUDKII_CT_X_SE", "FUDKII_CT_X_SA",
+        "FUDKII_CT_Y_SE", "FUDKII_CT_Y_SA",
+        "FUDKII_RT_MCX_SE", "FUDKII_RT_MCX_SA",
+        "FUDKII_RT_Y_F_SE", "FUDKII_RT_Y_F_SA",
+        "FUDKII_RT_Y_W1_SE", "FUDKII_RT_Y_W1_SA",
+        "FUDKII_CT_M_SE", "FUDKII_CT_M_SA",
     ]
     assert Signal(
         strategy=StrategyKey.FUDKII, symbol="RELIANCE", direction=Direction.BULLISH,

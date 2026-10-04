@@ -39,6 +39,7 @@ from kotsin_nse.risk.limits import CT_X_LIMITS, CT_Y_LIMITS, RT_N_LIMITS, RT_X_L
 from kotsin_nse.strategy.base import Signal
 from kotsin_nse.strategy.keys import StrategyKey
 from kotsin_nse.strategy.regime_gates import rt_gate_reasons, trigger_verdicts
+from tests._books import held
 
 UND = Instrument("3499", "TATASTEEL", Segment.NSE_EQ, InstrumentKind.EQUITY, name="TATASTEEL", tick_size=0.01, underlying="TATASTEEL")
 OPT = Instrument("153805", "TATASTEEL", Segment.NSE_FO, InstrumentKind.OPTION, lot_size=2750, tick_size=0.01,
@@ -228,7 +229,7 @@ async def test_ct_y_does_not_also_take_ct_xs_fade_of_a_trigger_it_gap_faded(sett
                            stop=188.0, targets=(184.0,), source_signal_id=trig.signal_id)
         pe = Instrument("153806", "TATASTEEL", Segment.NSE_FO, InstrumentKind.OPTION, lot_size=2750, strike=185.0, option_type=OptionType.PE, underlying="TATASTEEL")
         await _drive(e, ct_x_fade, pe, FADE_BOOKS, premium=1.2)
-        assert [p.strategy for p in e.positions.values()] == ["FUDKII_CT_X"], "CT-X takes its fade; CT-Y already holds the gap fade's view"
+        assert [p.strategy for p in held(e)] == ["FUDKII_CT_X"], "CT-X takes its fade; CT-Y already holds the gap fade's view"
         ev = [x for x in await e.ledger.rows_between("events", 0, time.time() + 5) if x.get("kind") == "rt_twin.skipped"]
         assert ev[-1]["gate"] == "gap_fade"
     finally:
