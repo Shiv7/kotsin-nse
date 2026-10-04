@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { contractName, postJson } from '../lib/api'
 import { usePoll } from '../lib/usePoll'
+import type { StopRuleRow } from '../types'
 
 // One card per FUDKII trigger, read for one book. Every trigger is scored the same way whether the
 // book traded it or not, so a skip reads as "skipped, because" — never as "missed". Two cards per
@@ -15,13 +16,6 @@ type Plan = { ok: boolean; reason?: string; contract?: string; strike?: number; 
 type BookRow = { book: string; label: string; status: 'OPEN' | 'EXITED' | 'NONE'; side: 'CE' | 'PE' | 'LONG' | 'SHORT' | null; openedTs: number | null; closedTs: number | null; exitReason: string | null; pnl: number | null }
 type Verdict = { action: string; state?: string; gate?: string | null; why: string[] | string; side?: string; stop?: number | null; targets?: number[]; rr?: number | null; grade?: string | null; breadth?: number | null }
 type TargetEv = { rung: number; limit: number; qty: number; placedTs: number; ts: number; outcome: string }
-/** One row of a card's stop-rule strip: the same trade under one stop rule (the book's current, or a mirror's). */
-type StopRuleRow = {
-  rule: 'current' | 'E' | 'A'; label: string; book: string; status: 'OPEN' | 'EXITED' | 'NONE'
-  entry?: number; qty?: number; qtyRemaining?: number; targetsHit?: number; exitPrice?: number | null; exitReason?: string | null
-  closedTs?: number | null; net?: number | null; openGross?: number | null; operatorClosedReal?: boolean
-  stop?: { level: number; triggerPrice: number; triggerOn: string; bidAtTrigger: number | null; executable: number | null; fill: number | null } | null
-}
 type Card = {
   // the same trade under the book's current stop and its two mirrors' (operator, 2026-10-04): null = none held
   stopRules?: StopRuleRow[] | null

@@ -1,18 +1,21 @@
+import { useState } from 'react'
+import { RuleBadge, StopRuleGridTable } from '../components/StopRuleGrid'
 import { Badge, Card, ErrorLine, GradeBadge, Stat, StrategyBadge, Table } from '../components/Ui'
-import { contractName, fmt, ist, pnlColor } from '../lib/api'
+import { cls, contractName, fmt, ist, pnlColor } from '../lib/api'
 import { usePoll } from '../lib/usePoll'
-import type { Pnl, TradeRow } from '../types'
+import type { Pnl, StopRuleGrid, TradeRow } from '../types'
 
 /**
  * Gross, charges and net are shown separately and never merged. On the previous book 81% of the
  * round-trip cost was flat brokerage; a single "P&L" column hides exactly the thing that decided
  * whether the strategy was viable.
  */
-const LEDGER_HEAD = ['Closed (IST)', 'Strategy', 'Trend', 'Underlying', 'Instrument', 'Qty', 'Entry', 'Exit', 'Gross', 'Charges', 'Net', 'R', 'MFE', 'MAE', 'Exit reason', 'Grade', 'Held']
+const LEDGER_HEAD = ['Closed (IST)', 'Strategy', 'Stop rule', 'Trend', 'Underlying', 'Instrument', 'Qty', 'Entry', 'Exit', 'Gross', 'Charges', 'Net', 'R', 'MFE', 'MAE', 'Exit reason', 'Grade', 'Held']
 
 /** What the R columns mean, on hover. All three are in R: 1R is the premium risked per unit at entry,
  *  entry − the first option stop. R is the result after charges; MFE and MAE are price moves alone. */
 const LEDGER_TIPS: Record<string, string> = {
+  'Stop rule': 'current stop: the book as it trades. stop E / stop adaptive: a stop-rule mirror — the same fill, judged by the stock\'s stop (E: 60 s through; adaptive: % through × seconds, 60 s at most). Mirrors never place an order and are not in the day\'s money.',
   Trend: 'trend: trades the trigger its own way (the SuperTrend flip + Bollinger break). counter-trend: fades it with the opposite option (CT-X, CT-Y, CT-M).',
   R: 'Net P&L after charges ÷ the money risked at entry (entry − first option stop, × quantity).',
   MFE: 'Maximum favourable excursion: the best the position could have been SOLD for while held — the bid, the last trade when there was none, and every fill — in R: (price − entry) ÷ (entry − first stop), with that price and the rupees open then. Before charges. Rows marked "last" (closed before 4 Oct) used the last trade alone.',
@@ -51,13 +54,36 @@ function StopTrail({ s }: { s: NonNullable<TradeRow['stop']> }) {
   )
 }
 
+/** Which books the ledger and its totals show. A stop-rule mirror re-trades its book's fills, so the
+ *  books that trade are the default: summing the mirrors in would count each trade three times. */
+const BOOK_SETS: [string, string][] = [
+  ['trading', 'Trading books'],
+  ['mirrors', 'Stop-rule mirrors'],
+  ['shadows', 'Other shadows'],
+  ['all', 'All'],
+]
+
 export function Trades() {
-  const { data: trades, error } = usePoll<TradeRow[]>('/api/trades?limit=200', 8000)
-  const { data: pnl } = usePoll<Pnl>('/api/pnl', 8000)
+  const [books, setBooks] = useState('trading')
+  const { data: trades, error } = usePoll<TradeRow[]>(`/api/trades?limit=200&books=${books}`, 8000)
+  const { data: pnl } = usePoll<Pnl>(`/api/pnl?books=${books}`, 8000)
+  const { data: grid } = usePoll<StopRuleGrid>('/api/stop-rules?since=start', 15000)
 
   return (
     <div className="space-y-4 p-4">
       <ErrorLine error={error} />
+      <div className="flex flex-wrap items-center gap-1.5">
+        {BOOK_SETS.map(([k, label]) => (
+          <button
+            key={k}
+            onClick={() => setBooks(k)}
+            className={cls('rounded px-2.5 py-1 text-xs', books === k ? 'bg-slate-700 text-white' : 'bg-slate-900 text-slate-400 hover:text-white')}
+          >
+            {label}
+          </button>
+        ))}
+        <span className="ml-2 text-[11px] text-slate-500">the totals and the ledger below follow this choice</span>
+      </div>
       <div className="grid grid-cols-2 gap-3 md:grid-cols-6">
         <Stat label="Trades" value={pnl?.trades ?? 0} />
         <Stat label="Gross" value={fmt.signedInr(pnl?.gross)} tone={pnlColor(pnl?.gross)} />
@@ -71,6 +97,10 @@ export function Trades() {
         />
         <Stat label="Avg R" value={pnl?.avg_r != null ? fmt.r(pnl.avg_r) : 'DM'} sub={pnl?.win_rate != null ? `${pnl.win_rate}% win` : undefined} />
       </div>
+
+      <Card title="Strategy × stop rule · since the mirrors began" right="the same trades under the current stop, stop E and the adaptive stop">
+        <StopRuleGridTable data={grid} />
+      </Card>
 
       {pnl?.by_exit_reason && (
         <Card title="By exit reason" right="which rule is doing the work">
@@ -94,6 +124,7 @@ export function Trades() {
               <td className="px-2 py-1.5">
                 <StrategyBadge k={t.strategy} label={t.strategy_label} />
               </td>
+              <td className="px-2 py-1.5"><RuleBadge rule={t.stop_rule} /></td>
               <td className="px-2 py-1.5">{t.trend ? <Badge tone={t.trend === 'counter-trend' ? 'amber' : 'slate'}>{t.trend}</Badge> : '—'}</td>
               <td className="px-2 py-1.5 font-medium">{t.underlying}</td>
               <td className="px-2 py-1.5 text-slate-400">{contractName(t.symbol)}</td>

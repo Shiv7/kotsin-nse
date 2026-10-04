@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import re
 import time
@@ -3616,7 +3617,23 @@ class Engine:
             "closedTs": p.get("closed_ts") if closed else None, "net": float(trade["net"]) if (closed and trade) else None,
             "openGross": open_pnl, "stop": {**stop, "fill": last.get("fillPrice")} if stop else None,
             "operatorClosedReal": "closed by the operator" in str(p.get("note") or ""),
+            "live": self._mirror_stop_state(live) if (live is not None and rule != "current") else None,
         }
+
+    def _mirror_stop_state(self, pos: Position) -> dict[str, Any]:
+        """Where an open stop-rule mirror's stop stands now: the stock's stop, the premium cap on the option
+        bid, the option stop once the trail has lifted it, and — while the stock is through its stop — how
+        long it has been and how much of the confirmation (%·s; none for stop E, which waits 60 s) is spent."""
+        lim = self._exits_by_strategy[pos.strategy].limits
+        tick = pos.instrument.tick_size or 0.05
+        cap = round(round(pos.entry * (1 - lim.eq_stop_premium_cap_pct / 100) / tick) * tick, 2)
+        trailed = pos.option_sl > pos.initial_option_sl > 0
+        through = None
+        if pos.breach_since is not None:
+            need = lim.eq_stop_area_pct_s if math.isfinite(lim.eq_stop_area_pct_s) else None
+            through = {"seconds": round(time.time() - pos.breach_since), "area": round(pos.stop_area, 3), "areaNeeded": need,
+                       "maxSeconds": lim.eq_stop_confirm_s}
+        return {"equitySl": pos.equity_sl, "premiumCap": cap, "trailStop": pos.option_sl if trailed else None, "through": through}
 
     async def book_cards(self, book: str, day: date | None = None) -> dict[str, Any]:
         """One card per FUDKII trigger of the session, read for one book: the trigger's own

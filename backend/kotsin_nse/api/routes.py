@@ -38,7 +38,16 @@ from ..hotstocks.service import HotStocksService
 from ..ledger.db import events, rejections, signals, trades
 from ..market.session import IST, TF_SECONDS, ist_day, ist_hm, ist_today, to_ist
 from ..strategy.catalog import BOOKS, LIVE_KEYS
-from ..strategy.keys import ALL_KEYS, SHADOW_BOOKS, StrategyKey, describe_book
+from ..strategy.keys import (
+    ALL_KEYS,
+    SHADOW_BOOKS,
+    STOP_MIRRORS,
+    STOP_RULE_LABELS,
+    StrategyKey,
+    describe_book,
+    stop_mirrors_of,
+    stop_rule_of,
+)
 from . import daybook, export, peer, shadow
 from .ws import Hub, handle, pump
 
@@ -91,6 +100,25 @@ class ProposeRequest(BaseModel):
     expected: str = ""
     rationale: str = ""
     segment: str = "NSE_EQ"
+
+
+#: The trades page's book sets: the books that trade, the stop-rule mirrors, the other shadows, or every book.
+BOOK_SETS = "^(trading|mirrors|shadows|all)$"
+
+
+def _books_where(books: str) -> Any:
+    keys = {
+        "trading": [k for k in ALL_KEYS if k not in SHADOW_BOOKS],
+        "mirrors": list(STOP_MIRRORS),
+        "shadows": [k for k in SHADOW_BOOKS if k not in STOP_MIRRORS],
+    }.get(books)
+    return None if keys is None else trades.c.strategy.in_([k.value for k in keys])
+
+
+def _rule_fields(strategy: str) -> dict[str, str]:
+    """A ledger row's stop rule and the book whose trade it is (a mirror's source; any other book itself)."""
+    source, rule = stop_rule_of(strategy)
+    return {"stop_rule": rule, "stop_rule_label": STOP_RULE_LABELS[rule], "source_book": source}
 
 
 def _excursions(t: dict[str, Any]) -> dict[str, Any]:
@@ -215,22 +243,71 @@ def build_app(engine: Engine) -> FastAPI:
         shadows = {k.value for k in SHADOW_BOOKS}
         trading = [w for k, w in engine.wallets.items() if k not in shadows]
         capital = sum(w.balance for w in trading)
+        # a stop-rule mirror is not a position of its own on this page: it sits under the real trade it
+        # copies, or — the real trade closed, the mirror still on its own rule — in a list apart
+        mirrors = {k.value for k in STOP_MIRRORS}
+        real = [p for p in open_positions if p.strategy not in mirrors]
+        held = {(p.strategy, p.signal_id) for p in real}
+        alone = [p for p in open_positions if p.strategy in mirrors and (stop_rule_of(p.strategy)[0], p.signal_id) not in held]
+        rows, closed = await _mirror_rows(engine, real, alone)
         return {
             "mode": engine.mode().value,
             "armed_until": engine._armed_until,
             "halted": engine.halted()[0],
             "halt_reason": engine.halted()[1],
-            "wallets": [engine.wallets[k.value].to_json() for k in ALL_KEYS],
+            "wallets": [engine.wallets[k.value].to_json() for k in ALL_KEYS if k not in STOP_MIRRORS],
             "capital": round(capital, 2),
             "day_pnl": round(sum(w.day_pnl for w in trading), 2),
             "shadow_day_pnl": round(sum(w.day_pnl for k, w in engine.wallets.items() if k in shadows), 2),
             "positions": [
-                _position_view(engine, p) for p in sorted(open_positions, key=lambda x: -x.opened_ts)
+                {**_position_view(engine, p), "stopRules": rows.get(p.id)} for p in sorted(real, key=lambda x: -x.opened_ts)
             ],
+            "mirrors_alone": [
+                {**_position_view(engine, p), "rule": stop_rule_of(p.strategy)[1], "source": stop_rule_of(p.strategy)[0],
+                 "sourceLabel": StrategyKey(stop_rule_of(p.strategy)[0]).display_name, "stopRule": rows.get(p.id, [None])[0],
+                 "realExit": closed.get((stop_rule_of(p.strategy)[0], p.signal_id))}
+                for p in sorted(alone, key=lambda x: -x.opened_ts)
+            ],
+            "mirrors_open": sum(1 for p in open_positions if p.strategy in mirrors),
             "exposure": engine.exposure.snapshot([p for p in open_positions if p.strategy not in shadows], capital),
             "universe": len(engine.underlyings),
             "boot_notes": engine.boot_notes,
         }
+
+    @api.get("/stop-rules")
+    async def stop_rules(since: str = Query("today", pattern="^(today|start)$")) -> dict[str, Any]:
+        """Every book against its two stop-rule mirrors (operator, 2026-10-04: "do i also see the bifurcation in
+        overview? per combination"): per book and rule the trades closed under all three rules — net, wins,
+        stops, each mirror against the current stop — and those still open, with their open P&L now. ``today``:
+        the trades opened this session; ``start``: every trade since the mirrors began."""
+        now = time.time()
+        if since == "today":
+            d = ist_today()
+            start: float | None = datetime(d.year, d.month, d.day, tzinfo=IST).timestamp()
+        else:
+            start = await engine.ledger.first_opened([k.value for k in STOP_MIRRORS])
+        if start is None:
+            return {"since": None, "scope": since, "rules": STOP_RULE_LABELS, "books": [], "total": None}
+        pos_rows, trade_rows = await asyncio.gather(
+            engine.ledger.rows_between("positions", start, now + 86_400), engine.ledger.rows_between("trades", start, now + 86_400)
+        )
+        s = shadow.stop_rules_summary(positions=pos_rows, trades=trade_rows)
+        live: dict[tuple[str, str], float] = {}
+        for p in engine.positions.values():
+            if p.status != "OPEN" or p.opened_ts < start:
+                continue
+            ltp = engine.ltps.get(p.instrument.scrip_code)
+            if ltp:
+                k = stop_rule_of(p.strategy)
+                live[k] = live.get(k, 0.0) + p.unrealized(ltp) + p.realised_gross
+        books = [
+            {"book": b, "label": StrategyKey(b).display_name, "shadow": StrategyKey(b) in SHADOW_BOOKS,
+             "cells": {rule: {**c, "openGross": round(live[(b, rule)], 2) if (b, rule) in live else None} for rule, c in tally.items()}}
+            for b, tally in s["books"].items()
+        ]
+        trading_live = {rule: sum(v for (b, r), v in live.items() if r == rule and StrategyKey(b) not in SHADOW_BOOKS) for rule in STOP_RULE_LABELS}
+        total = {rule: {**c, "openGross": round(trading_live[rule], 2)} for rule, c in s["total_trading"].items()}
+        return {"since": start, "scope": since, "rules": STOP_RULE_LABELS, "books": books, "total": total}
 
     @api.get("/positions")
     async def positions() -> list[dict[str, Any]]:
@@ -258,20 +335,24 @@ def build_app(engine: Engine) -> FastAPI:
         return await engine.ledger.recent(rejections, limit, where=where)
 
     @api.get("/trades")
-    async def recent_trades(limit: int = Query(100, le=500)) -> list[dict[str, Any]]:
-        # the book's name and its side of the trigger come from the registry as the rows are served:
-        # rows already stored never carried them
-        return [{**t, **describe_book(str(t.get("strategy") or "")), **_excursions(t)} for t in await engine.ledger.recent(trades, limit)]
+    async def recent_trades(limit: int = Query(100, le=500), books: str = Query("all", pattern=BOOK_SETS)) -> list[dict[str, Any]]:
+        # the book's name, its side of the trigger and its stop rule come from the registry as the rows are
+        # served: rows already stored never carried them
+        return [
+            {**t, **describe_book(str(t.get("strategy") or "")), **_rule_fields(str(t.get("strategy") or "")), **_excursions(t)}
+            for t in await engine.ledger.recent(trades, limit, where=_books_where(books))
+        ]
 
     @api.get("/events")
     async def recent_events(limit: int = Query(100, le=500)) -> list[dict[str, Any]]:
         return await engine.ledger.recent(events, limit)
 
     @api.get("/pnl")
-    async def pnl() -> dict[str, Any]:
+    async def pnl(books: str = Query("all", pattern=BOOK_SETS)) -> dict[str, Any]:
         """Net, gross and charges, split. Keeping them apart is the only way the cost structure
-        stays visible — on the old book 81% of the round trip was flat brokerage."""
-        rows = await engine.ledger.recent(trades, 1000)
+        stays visible — on the old book 81% of the round trip was flat brokerage. ``books`` picks the
+        set summed: a stop-rule mirror re-trades its book's fills, so adding it in counts a trade thrice."""
+        rows = await engine.ledger.recent(trades, 1000, where=_books_where(books))
         if not rows:
             return {"trades": 0}
         gross = sum(r["gross"] for r in rows)
@@ -1208,6 +1289,39 @@ def _bar_view(b: UnifiedBar) -> dict[str, Any]:
     d = b.to_json()
     d["ist"] = to_ist(b.ts).strftime("%Y-%m-%d %H:%M")
     return d
+
+
+async def _mirror_rows(
+    engine: Engine, real: list[Any], alone: list[Any]
+) -> tuple[dict[str, list[dict[str, Any]]], dict[tuple[str, str], dict[str, Any]]]:
+    """The Overview's stop-rule rows. Under each real open position, its two mirrors as the card strip shows
+    them — open with where their stop stands now, or closed with the exit — keyed by the real position's id.
+    For a mirror still open on its own rule after the real trade closed: its row, keyed by its own id, and
+    the real trade's exit, keyed by (book, signal)."""
+    if not real and not alone:
+        return {}, {}
+    oldest, now = min(p.opened_ts for p in (*real, *alone)), time.time()
+    pos_rows, trade_rows = await asyncio.gather(
+        engine.ledger.rows_between("positions", oldest, now + 86_400), engine.ledger.rows_between("trades", oldest, now + 86_400)
+    )
+    by_key = {(r.get("strategy"), r.get("signal_id")): r for r in pos_rows}
+    by_key.update({(p.strategy, p.signal_id): _position_json(p) for p in engine.positions.values() if p.status == "OPEN"})
+    trade_of = {t.get("position_id"): t for t in trade_rows}
+
+    def row(rule: str, key: str, p: dict[str, Any] | None) -> dict[str, Any]:
+        return engine._stop_rule_row(rule, key, p, trade_of.get(p["id"]) if p else None)
+
+    out = {p.id: [row(rule, m.value, by_key.get((m.value, p.signal_id))) for rule, m in stop_mirrors_of(p.strategy).items()] for p in real}
+    real_exit: dict[tuple[str, str], dict[str, Any]] = {}
+    for m in alone:
+        src, rule = stop_rule_of(m.strategy)
+        out[m.id] = [row(rule, m.strategy, _position_json(m))]
+        rp = by_key.get((src, m.signal_id))
+        if rp is not None and rp.get("status") != "OPEN":
+            t = trade_of.get(rp["id"])
+            real_exit[(src, m.signal_id)] = {"exitReason": rp.get("exit_reason"), "exitPrice": rp.get("exit_price"), "closedTs": rp.get("closed_ts"),
+                                             "net": float(t["net"]) if t else None, "byOperator": "closed by the operator" in str(m.note)}
+    return {k: v for k, v in out.items() if v}, real_exit
 
 
 def _position_view(engine: Engine, p: Any) -> dict[str, Any]:

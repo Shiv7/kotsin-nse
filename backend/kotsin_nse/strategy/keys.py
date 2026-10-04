@@ -119,6 +119,16 @@ def stop_mirrors_of(book: str) -> dict[str, StrategyKey]:
     return {rule: k for k, (src, rule) in STOP_MIRRORS.items() if src.value == book}
 
 
+def stop_rule_of(book: str) -> tuple[str, str]:
+    """``(the book whose trade it is, the stop rule it runs)``: a mirror's source and its rule, any other
+    book itself under its ``"current"`` stop."""
+    try:
+        m = STOP_MIRRORS.get(StrategyKey(book))
+    except ValueError:
+        m = None
+    return (m[0].value, m[1]) if m else (book, "current")
+
+
 #: Opening capital per book. Anything not listed takes ``paper_initial_inr``. A stop-rule mirror
 #: takes its source's, so the purses compared stand on the same footing.
 INITIAL_INR: dict[StrategyKey, float] = {

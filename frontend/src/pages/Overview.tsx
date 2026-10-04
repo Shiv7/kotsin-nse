@@ -1,10 +1,13 @@
+import { Fragment } from 'react'
+import { MirrorSubRow, RULE_TONE, StopRuleGridTable } from '../components/StopRuleGrid'
 import { Card, ErrorLine, GradeBadge, Notes, Stat, StrategyBadge, Table } from '../components/Ui'
-import { contractName, fmt, pnlColor } from '../lib/api'
+import { contractName, fmt, ist, pnlColor } from '../lib/api'
 import { usePoll } from '../lib/usePoll'
-import type { Overview as OverviewData } from '../types'
+import type { Overview as OverviewData, StopRuleGrid } from '../types'
 
 export function Overview() {
   const { data, error } = usePoll<OverviewData>('/api/overview', 3000)
+  const { data: grid } = usePoll<StopRuleGrid>('/api/stop-rules?since=today', 10000)
   if (!data) return <div className="p-4 text-sm text-slate-500">{error ?? 'loading…'}</div>
 
   return (
@@ -15,7 +18,7 @@ export function Overview() {
       <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
         <Stat label="Capital" value={fmt.inr(data.capital)} sub={`${data.universe} symbols tracked`} />
         <Stat label="Day P&L" value={fmt.signedInr(data.day_pnl)} tone={pnlColor(data.day_pnl)} />
-        <Stat label="Open" value={data.positions.length} sub="positions" />
+        <Stat label="Open" value={data.positions.length} sub={data.mirrors_open ? `positions · ${data.mirrors_open} stop-rule mirrors beside them` : 'positions'} />
         <Stat
           label="Gross exposure"
           value={fmt.inr(data.exposure.gross)}
@@ -29,8 +32,12 @@ export function Overview() {
         />
       </div>
 
+      <Card title="Strategy × stop rule · today" right="the same trades under the current stop, stop E and the adaptive stop">
+        <StopRuleGridTable data={grid} />
+      </Card>
+
       <div className="grid gap-4 lg:grid-cols-2">
-        <Card title="Wallets" right="one per book, as the old stack had">
+        <Card title="Wallets" right="one per book; the stop-rule mirrors' purses are in the grid above">
           <Table head={['Book', 'Balance', 'Deployed', 'Day P&L', 'Trades', 'Win %', 'Charges', 'State']}>
             {data.wallets.map((w) => (
               <tr key={w.strategy} className="border-b border-slate-900">
@@ -66,13 +73,14 @@ export function Overview() {
         </Card>
       </div>
 
-      <Card title="Open positions" right="levels are on the underlying; the trade is the option">
+      <Card title="Open positions" right="levels are on the underlying; the trade is the option · under each, the same trade under stop E and the adaptive stop">
         <Table
           head={['Book', 'Underlying', 'Instrument', 'Qty', 'Entry', 'LTP', 'Unreal', 'R', 'Opt SL', 'Eq SL', 'T hit', 'Grade', 'Opened']}
           empty="flat"
         >
           {data.positions.map((p) => (
-            <tr key={p.id} className="border-b border-slate-900">
+            <Fragment key={p.id}>
+            <tr className="border-b border-slate-900">
               <td className="px-2 py-1.5">
                 <StrategyBadge k={p.strategy} />
               </td>
@@ -101,9 +109,50 @@ export function Overview() {
               </td>
               <td className="px-2 py-1.5 text-slate-500">{p.opened_ist}</td>
             </tr>
+            {(p.stopRules ?? []).map((r) => (
+              <MirrorSubRow key={r.rule} r={r} rungs={p.option_targets.length} />
+            ))}
+            </Fragment>
           ))}
         </Table>
       </Card>
+
+      {(data.mirrors_alone?.length ?? 0) > 0 && (
+        <Card title="Stop-rule mirrors still running" right="the real trade is closed; each mirror keeps its own rule until it exits">
+          <Table head={['Strategy', 'Stop rule', 'Underlying', 'Instrument', 'Qty', 'Entry', 'LTP', 'Unreal', 'Stop now', 'The real trade']}>
+            {data.mirrors_alone!.map((m) => {
+              const t = m.stopRule?.live?.through
+              return (
+                <tr key={m.id} className="border-b border-slate-900">
+                  <td className="px-2 py-1.5"><StrategyBadge k={m.source} label={m.sourceLabel} /></td>
+                  <td className={`px-2 py-1.5 ${RULE_TONE[m.rule]}`}>{m.rule === 'E' ? 'stop E' : 'stop adaptive'}</td>
+                  <td className="px-2 py-1.5 font-medium">{m.symbol}</td>
+                  <td className="px-2 py-1.5 text-slate-400">{contractName(m.instrument.name) || m.instrument.scrip_code}</td>
+                  <td className="px-2 py-1.5">{m.qty_remaining}{m.qty_remaining !== m.qty && <span className="text-slate-600">/{m.qty}</span>}</td>
+                  <td className="px-2 py-1.5">{fmt.n(m.entry)}</td>
+                  <td className="px-2 py-1.5">{fmt.n(m.ltp)}</td>
+                  <td className={`px-2 py-1.5 ${pnlColor(m.unrealized)}`}>{fmt.signedInr(m.unrealized)}</td>
+                  <td className="px-2 py-1.5 text-slate-400">
+                    stock {fmt.n(m.equity_sl)} · {m.stopRule?.live?.trailStop != null ? `trail ${fmt.n(m.stopRule.live.trailStop)}` : `cap ${fmt.n(m.stopRule?.live?.premiumCap)}`}
+                    {t && <div className="text-[10px] text-amber-300">through {t.seconds}s{t.areaNeeded != null ? ` · ${t.area.toFixed(2)} of ${t.areaNeeded} %·s` : ` of ${t.maxSeconds}s`}</div>}
+                  </td>
+                  <td className="px-2 py-1.5 text-slate-400">
+                    {m.realExit ? (
+                      <>
+                        {m.realExit.byOperator ? 'you closed it' : m.realExit.exitReason} {fmt.n(m.realExit.exitPrice)}
+                        {m.realExit.closedTs ? ` at ${ist(m.realExit.closedTs)}` : ''}
+                        <span className={`ml-1 ${pnlColor(m.realExit.net)}`}>{fmt.signedInr(m.realExit.net)}</span>
+                      </>
+                    ) : (
+                      'closed'
+                    )}
+                  </td>
+                </tr>
+              )
+            })}
+          </Table>
+        </Card>
+      )}
     </div>
   )
 }
