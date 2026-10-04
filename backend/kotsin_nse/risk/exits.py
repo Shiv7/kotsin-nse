@@ -340,6 +340,7 @@ class ExitEngine:
         r = pos.r_now(mark)
         pos.mfe_r = max(pos.mfe_r, r)
         pos.mae_r = min(pos.mae_r, r)
+        pos.max_dd_r = max(pos.max_dd_r, max(pos.mfe_r, 0.0) - r)
         pos.mark_basis = "bid"
         pos.peak_r = max(pos.peak_r, pos.r_now(ltp))
 
@@ -871,6 +872,7 @@ def apply_exit(
         r = pos.r_now(fill_price)
         pos.mae_r = min(pos.mae_r, r)
         pos.mfe_r = max(pos.mfe_r, r)
+        pos.max_dd_r = max(pos.max_dd_r, max(pos.mfe_r, 0.0) - r)
     if decision.reason is ExitReason.TARGET:
         pos.targets_hit += 1
     if pos.qty_remaining <= 0:

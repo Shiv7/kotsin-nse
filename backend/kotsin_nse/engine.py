@@ -3871,7 +3871,8 @@ class Engine:
             need = lim.eq_stop_area_pct_s if math.isfinite(lim.eq_stop_area_pct_s) else None
             through = {"seconds": round(time.time() - pos.breach_since), "area": round(pos.stop_area, 3), "areaNeeded": need,
                        "maxSeconds": lim.eq_stop_confirm_s}
-        return {"equitySl": pos.equity_sl, "premiumCap": cap, "trailStop": pos.option_sl if trailed else None, "through": through}
+        return {"equitySl": pos.equity_sl, "premiumCap": cap, "trailStop": pos.option_sl if trailed else None, "through": through,
+                "maxDdR": round(pos.max_dd_r, 3), "maxDdInr": pos.max_dd_inr()}
 
     async def book_cards(self, book: str, day: date | None = None) -> dict[str, Any]:
         """One card per FUDKII trigger of the session, read for one book: the trigger's own
@@ -6963,6 +6964,7 @@ def _position_json(p: Position) -> dict[str, Any]:
         "mfe_r": p.mfe_r,
         "mae_r": p.mae_r,
         "mark_basis": p.mark_basis,
+        "max_dd_r": p.max_dd_r,
         "charges": p.charges,
         "targets_hit": p.targets_hit,
         "status": p.status,
@@ -7028,6 +7030,8 @@ def _position_from_json(d: dict[str, Any]) -> Position:
         mfe_r=float(d.get("mfe_r", 0)),
         mae_r=float(d.get("mae_r", 0)),
         mark_basis=str(d.get("mark_basis") or ""),
+        # a position saved before the drawdown was kept: its MAE is the deepest fall it is known to have had
+        max_dd_r=float(d.get("max_dd_r", max(0.0, -float(d.get("mae_r", 0))))),
         charges=float(d.get("charges", 0)),
         targets_hit=int(d.get("targets_hit", 0)),
         qty_remaining=int(d.get("qty_remaining", d["qty"])),

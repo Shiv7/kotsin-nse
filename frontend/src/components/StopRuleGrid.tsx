@@ -104,7 +104,18 @@ export function StopRuleGridTable({ data }: { data: Grid | null }) {
   )
 }
 
-/** An open position's mirror, as a sub-row of the Overview's open positions (13 columns). */
+/** The max drawdown cell: ₹ on top, R beneath. */
+export function MaxDd({ inr, r, small }: { inr: number | null | undefined; r: number | null | undefined; small?: boolean }) {
+  if (inr == null || r == null) return <span className="text-slate-600">—</span>
+  return (
+    <span className={cls('whitespace-nowrap', small && 'text-[11px]')}>
+      <span className={r > 0 ? 'text-rose-400' : 'text-slate-400'}>{r > 0 ? fmt.signedInr(inr) : '₹0'}</span>
+      <span className="ml-1 text-[10px] text-slate-500">{r > 0 ? `−${r.toFixed(2)}R` : ''}</span>
+    </span>
+  )
+}
+
+/** An open position's mirror, as a sub-row of the Overview's open positions (14 columns). */
 export function MirrorSubRow({ r, rungs }: { r: StopRuleRow; rungs: number }) {
   const pnl = r.status === 'EXITED' ? r.net : r.openGross
   const t = r.live?.through
@@ -142,6 +153,7 @@ export function MirrorSubRow({ r, rungs }: { r: StopRuleRow; rungs: number }) {
         {r.status === 'EXITED' && <span className="ml-1 text-[9px] text-slate-500">net</span>}
       </td>
       <td className="px-2 py-1" />
+      <td className="px-2 py-1">{r.live ? <MaxDd inr={r.live.maxDdInr} r={r.live.maxDdR} small /> : ''}</td>
       <td className="px-2 py-1 text-rose-400/60" title="a mirror stops on the stock; the option bid sells it only through the 25 % premium cap, or once the trail has lifted the option stop">
         {r.live ? (r.live.trailStop != null ? `trail ${fmt.n(r.live.trailStop)}` : `cap ${fmt.n(r.live.premiumCap)}`) : ''}
       </td>

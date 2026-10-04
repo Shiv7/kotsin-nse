@@ -233,6 +233,10 @@ class Position:
     mfe_r: float = 0.0
     mae_r: float = 0.0
     mark_basis: str = ""
+    #: the deepest fall since the trade opened, in R, on the same marks: the most the position has dropped
+    #: from its best point so far — the entry counting as the first — to a later low (operator, 2026-10-04:
+    #: "max drawdown since the time it has been trading ... in each active trade row")
+    max_dd_r: float = 0.0
     charges: float = 0.0
     targets_hit: int = 0
     qty_remaining: int = 0
@@ -305,6 +309,11 @@ class Position:
 
     def r_now(self, ltp: float) -> float:
         return (ltp - self.entry) * self.dir_sign / self.r_unit if self.r_unit > 0 else 0.0
+
+    def max_dd_inr(self) -> float | None:
+        """The max drawdown in rupees (a loss, so negative) on the full size, as MFE / MAE are shown; None
+        without an R unit."""
+        return round(-self.max_dd_r * self.r_unit * self.qty * self.instrument.multiplier, 2) if self.r_unit > 0 else None
 
 
 @dataclass(slots=True)

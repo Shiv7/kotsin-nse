@@ -43,6 +43,9 @@ export interface PositionView {
   underlying_ltp: number | null
   unrealized: number | null
   r_now: number | null
+  /** the deepest fall since it opened, from its best point (entry first) to a later low, on the bid: R, and ₹ on the full size */
+  max_dd_r: number
+  max_dd_inr: number | null
   note: string
 }
 
@@ -72,6 +75,8 @@ export interface StopRuleRow {
     premiumCap: number
     trailStop: number | null
     through: { seconds: number; area: number; areaNeeded: number | null; maxSeconds: number } | null
+    maxDdR: number
+    maxDdInr: number | null
   } | null
 }
 
