@@ -25,7 +25,7 @@ export function Stat({ label, value, sub, tone }: { label: string; value: ReactN
   )
 }
 
-export function Table({ head, children, empty }: { head: string[]; children: ReactNode; empty?: string }) {
+export function Table({ head, children, empty, tips }: { head: string[]; children: ReactNode; empty?: string; tips?: Record<string, string> }) {
   const rows = Array.isArray(children) ? children.flat() : children
   const isEmpty = Array.isArray(rows) ? rows.length === 0 : !rows
   return (
@@ -34,7 +34,7 @@ export function Table({ head, children, empty }: { head: string[]; children: Rea
         <thead>
           <tr className="border-b border-slate-800 text-slate-500">
             {head.map((h) => (
-              <th key={h} className="whitespace-nowrap px-2 py-1.5 font-medium">
+              <th key={h} title={tips?.[h]} className={cls('whitespace-nowrap px-2 py-1.5 font-medium', tips?.[h] && 'cursor-help underline decoration-dotted')}>
                 {h}
               </th>
             ))}
@@ -73,8 +73,8 @@ export function GradeBadge({ grade }: { grade: string }) {
   return <Badge tone={tone}>{grade || '—'}</Badge>
 }
 
-export function StrategyBadge({ k }: { k: string }) {
-  return <Badge tone={k === 'FUKAA' ? 'violet' : 'blue'}>{k}</Badge>
+export function StrategyBadge({ k, label }: { k: string; label?: string }) {
+  return <Badge tone={k === 'FUKAA' ? 'violet' : 'blue'}>{label || k}</Badge>
 }
 
 export function ErrorLine({ error }: { error: string | null }) {

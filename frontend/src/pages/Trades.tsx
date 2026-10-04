@@ -1,4 +1,4 @@
-import { Card, ErrorLine, GradeBadge, Stat, StrategyBadge, Table } from '../components/Ui'
+import { Badge, Card, ErrorLine, GradeBadge, Stat, StrategyBadge, Table } from '../components/Ui'
 import { fmt, ist, pnlColor } from '../lib/api'
 import { usePoll } from '../lib/usePoll'
 import type { Pnl, TradeRow } from '../types'
@@ -8,6 +8,17 @@ import type { Pnl, TradeRow } from '../types'
  * round-trip cost was flat brokerage; a single "P&L" column hides exactly the thing that decided
  * whether the strategy was viable.
  */
+const LEDGER_HEAD = ['Closed (IST)', 'Strategy', 'Trend', 'Underlying', 'Instrument', 'Qty', 'Entry', 'Exit', 'Gross', 'Charges', 'Net', 'R', 'MFE', 'MAE', 'Exit reason', 'Grade', 'Held']
+
+/** What the R columns mean, on hover. All three are in R: 1R is the premium risked per unit at entry,
+ *  entry − the first option stop. R is the result after charges; MFE and MAE are price moves alone. */
+const LEDGER_TIPS: Record<string, string> = {
+  Trend: 'trend: trades the trigger its own way (the SuperTrend flip + Bollinger break). counter-trend: fades it with the opposite option (CT-X, CT-Y, CT-M).',
+  R: 'Net P&L after charges ÷ the money risked at entry (entry − first option stop, × quantity).',
+  MFE: 'Maximum favourable excursion: the best the option got while held, in R — (highest price − entry) ÷ (entry − first stop). Price only, before charges.',
+  MAE: 'Maximum adverse excursion: the worst the option got while held, in R — (lowest price − entry) ÷ (entry − first stop); −1.00R is the first stop. Price only, before charges.',
+}
+
 export function Trades() {
   const { data: trades, error } = usePoll<TradeRow[]>('/api/trades?limit=200', 8000)
   const { data: pnl } = usePoll<Pnl>('/api/pnl', 8000)
@@ -43,17 +54,15 @@ export function Trades() {
         </Card>
       )}
 
-      <Card title="Trade ledger">
-        <Table
-          head={['Closed (IST)', 'Book', 'Underlying', 'Instrument', 'Qty', 'Entry', 'Exit', 'Gross', 'Charges', 'Net', 'R', 'MFE', 'MAE', 'Exit', 'Grade', 'Held']}
-          empty="no closed trades yet"
-        >
+      <Card title="Trade ledger" right="MFE / MAE: the best / worst the option got while held, in R — hover a column name">
+        <Table head={LEDGER_HEAD} tips={LEDGER_TIPS} empty="no closed trades yet">
           {(trades ?? []).map((t) => (
             <tr key={t.id} className="border-b border-slate-900">
               <td className="px-2 py-1.5 text-slate-500">{ist(t.closed_ts)}</td>
               <td className="px-2 py-1.5">
-                <StrategyBadge k={t.strategy} />
+                <StrategyBadge k={t.strategy} label={t.strategy_label} />
               </td>
+              <td className="px-2 py-1.5">{t.trend ? <Badge tone={t.trend === 'counter-trend' ? 'amber' : 'slate'}>{t.trend}</Badge> : '—'}</td>
               <td className="px-2 py-1.5 font-medium">{t.underlying}</td>
               <td className="px-2 py-1.5 text-slate-400">{t.symbol}</td>
               <td className="px-2 py-1.5">{t.qty}</td>

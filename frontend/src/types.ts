@@ -145,6 +145,9 @@ export interface RejectionRow {
 export interface TradeRow {
   id: string
   strategy: string
+  /** the book's name and its side of the trigger, from the registry (an older engine serves neither) */
+  strategy_label?: string
+  trend?: 'trend' | 'counter-trend' | ''
   symbol: string
   underlying: string
   qty: number
