@@ -122,7 +122,8 @@ export function Trades() {
             <tr key={t.id} className="border-b border-slate-900">
               <td className="px-2 py-1.5 text-slate-500">{ist(t.closed_ts)}</td>
               <td className="px-2 py-1.5">
-                <StrategyBadge k={t.strategy} label={t.strategy_label} />
+                {/* a mirror is named by the book whose trade it is: its rule is the next column */}
+                <StrategyBadge k={t.strategy} label={t.stop_rule && t.stop_rule !== 'current' ? t.source_label : t.strategy_label} />
               </td>
               <td className="px-2 py-1.5"><RuleBadge rule={t.stop_rule} /></td>
               <td className="px-2 py-1.5">{t.trend ? <Badge tone={t.trend === 'counter-trend' ? 'amber' : 'slate'}>{t.trend}</Badge> : '—'}</td>

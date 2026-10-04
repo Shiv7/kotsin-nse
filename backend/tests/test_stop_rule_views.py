@@ -17,7 +17,9 @@ import pytest
 
 from kotsin_nse.api.routes import build_app
 from kotsin_nse.api.shadow import stop_rules_summary
+from kotsin_nse.committee.service import REAL_TRADES
 from kotsin_nse.engine import IN_TREND_BOOKS
+from kotsin_nse.ledger.db import trades
 from kotsin_nse.market.session import IST, ist_today
 from kotsin_nse.strategy.keys import STOP_MIRRORS, StrategyKey, stop_rule_of
 from tests.test_limit_orders import UND, _book, _engine, _sig
@@ -167,3 +169,51 @@ def test_the_grid_counts_open_and_waiting_trades_and_totals_the_trading_books_ap
     assert (y["current"]["waiting"], y["E"]["open"], y["A"]["waiting"]) == (1, 1, 1), "s2: closed under two rules, open under E"
     assert sr["total"]["current"]["net"] == 300.0 and sr["total_trading"]["current"]["net"] == -100.0, "the wide-stop shadow is not a strategy's"
     assert {k.value for k in STOP_MIRRORS} >= {"FUDKII_RT_Y_W1_SE", "FUDKII_RT_Y_W1_SA"}
+
+
+@pytest.mark.asyncio
+async def test_the_ledger_is_newest_first_by_close_and_the_committee_never_counts_a_mirror(settings, clock):
+    """A trade's id is random (uuid4): ordering by it served an arbitrary 200 on the Trades page, and an
+    arbitrary 1000 to its totals once the ledger is that long. The committee reads real trades only."""
+    e = await _engine(settings, clock)
+    try:
+        books = ("FUDKII", "FUDKII_SE", "FUDKII_RT_X", "FUDKII_SA", "FUDKII_RT_Y")
+        for i, book in enumerate(books):  # ids in the reverse order of their closes
+            await e.ledger.insert_trade({"id": f"trd-{9 - i}", "position_id": f"pos-{i}", "strategy": book, "symbol": "X", "underlying": "X",
+                                         "closed_ts": clock[0] + i, "gross": 0.0, "net": 0.0, "charges": 0.0, "r_multiple": 0.0,
+                                         "exit_reason": "EOD", "signal_id": "s1"})
+        async with _client(e) as c:
+            rows = (await c.get("/api/trades", params={"books": "all", "limit": 3})).json()
+        assert [r["strategy"] for r in rows] == ["FUDKII_RT_Y", "FUDKII_SA", "FUDKII_RT_X"], "the latest three closes"
+        real = await e.ledger.recent(trades, 50, order_col="closed_ts", where=REAL_TRADES)
+        assert [r["strategy"] for r in real] == ["FUDKII_RT_Y", "FUDKII_RT_X", "FUDKII"]
+        t = await e.ledger.trade_for_signal("s1", exclude=("FUDKII_SE", "FUDKII_SA"))
+        assert t is not None and t["strategy"] == "FUDKII_RT_Y"
+    finally:
+        await e.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_mirrors_close_sends_nothing_to_the_review_committee(settings, clock):
+    e = await _engine(settings, clock)
+    try:
+        sent: list[str] = []
+        e.committee.on_trade_closed = lambda t: sent.append(t["strategy"])  # type: ignore[method-assign]
+        _book(e, 16.95, 17.25, clock[0])
+        await e._handle_signal(_sig(clock), None, books=(StrategyKey.FUDKII_RT_Y,))
+        clock[0] += 22
+        _book(e, 16.95, 17.10, clock[0])
+        e.ltps[UND.scrip_code] = 186.0
+        await e._manage_positions()
+        clock[0] += 1
+        _book(e, 16.95, 17.10, clock[0])
+        await e._manage_positions()
+        clock[0] += 1
+        _book(e, 16.95, 17.10, clock[0])
+        e.ltps[UND.scrip_code] = 182.0  # decisively through every stop: RT-Y, its mirrors, the wide shadow's
+        await e._manage_positions()
+        closed = await e.ledger.recent(trades, 50)
+        assert {r["strategy"] for r in closed} >= {"FUDKII_RT_Y", "FUDKII_RT_Y_SE", "FUDKII_RT_Y_SA"}
+        assert not any(s.endswith(("_SE", "_SA")) for s in sent) and "FUDKII_RT_Y" in sent
+    finally:
+        await e.stop()

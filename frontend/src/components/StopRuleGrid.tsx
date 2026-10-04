@@ -12,7 +12,11 @@ export const RULE_TONE: Record<StopRule, string> = { current: 'text-slate-200', 
 
 export function RuleBadge({ rule }: { rule: StopRule | undefined }) {
   if (!rule) return <span className="text-slate-600">—</span>
-  return <Badge tone={rule === 'E' ? 'blue' : rule === 'A' ? 'violet' : 'slate'}>{RULE_LABEL[rule]}</Badge>
+  return (
+    <span className="whitespace-nowrap">
+      <Badge tone={rule === 'E' ? 'blue' : rule === 'A' ? 'violet' : 'slate'}>{RULE_LABEL[rule]}</Badge>
+    </span>
+  )
 }
 
 function Cell({ c, rule, best }: { c: StopRuleCell | undefined; rule: StopRule; best: boolean }) {

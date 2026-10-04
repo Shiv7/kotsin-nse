@@ -22,6 +22,7 @@ from ..ledger.db import trades
 from ..market.session import ist_hm, session_phase
 from ..research.backtest import BacktestParams
 from ..research.history import HistoryStore
+from ..strategy.keys import STOP_MIRRORS
 from .evidence import BarRow, Case, case_pack, render_case
 from .experiments import apply_changes, changes_key, run_experiment
 from .forensics import TradeRec, blind_view, forensics, from_backtest, from_ledger, render
@@ -32,6 +33,12 @@ from .schemas import ParamChange
 
 if TYPE_CHECKING:
     from ..engine import Engine
+
+
+#: The stop-rule mirrors re-trade their books' fills under another stop: a measurement, not a trade the
+#: committee should count again or review (strategy/keys.py ``STOP_MIRRORS``).
+MIRROR_BOOKS = tuple(k.value for k in STOP_MIRRORS)
+REAL_TRADES = trades.c.strategy.notin_(MIRROR_BOOKS)
 
 log = structlog.get_logger("committee")
 
@@ -123,7 +130,7 @@ class CommitteeService:
         self, source: str, strategy: str | None = None
     ) -> tuple[list[TradeRec], dict[str, Any]]:
         if source == "ledger":
-            rows = await self.engine.ledger.recent(trades, 5000)
+            rows = await self.engine.ledger.recent(trades, 5000, order_col="closed_ts", where=REAL_TRADES)
             recs = [from_ledger(r) for r in rows]
             meta: dict[str, Any] = {"source": "ledger", "segment": None}
         elif source.startswith("backtest:"):
@@ -214,7 +221,7 @@ class CommitteeService:
         row = await self.engine.ledger.signal(signal_id)
         if row is None:
             raise KeyError(f"unknown signal {signal_id!r}")
-        trade = await self.engine.ledger.trade_for_signal(signal_id)
+        trade = await self.engine.ledger.trade_for_signal(signal_id, exclude=MIRROR_BOOKS)
         symbol, ts = str(row["symbol"]), int(row["ts"])
         inst = self.engine.underlyings.get(symbol)
         segment = inst.segment if inst else Segment.NSE_EQ
@@ -510,7 +517,7 @@ class CommitteeService:
 
     async def autopilot_source(self) -> str:
         """The ledger once it can carry a verdict; the newest backtest run until then."""
-        rows = await self.engine.ledger.recent(trades, 5000)
+        rows = await self.engine.ledger.recent(trades, 5000, order_col="closed_ts", where=REAL_TRADES)
         if len(rows) >= 30:
             return "ledger"
         root = self.s.data_dir / "backtests"

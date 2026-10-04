@@ -217,6 +217,7 @@ export interface TradeRow {
   stop_rule?: StopRule
   stop_rule_label?: string
   source_book?: string
+  source_label?: string
   /** MFE / MAE as the option's price at that moment and the rupees open then, before charges (null: no R unit) */
   mfe_price?: number | null
   mae_price?: number | null

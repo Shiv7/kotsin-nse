@@ -6129,11 +6129,11 @@ class Engine:
         if pos.status == "CLOSED":
             trade = _trade_from(pos, now)
             await self.ledger.insert_trade(_trade_json(trade))
-            # Advisory and fire-and-forget: the review never delays or touches the trade path.
-            self.committee.on_trade_closed(_trade_json(trade))
             self.positions.pop(pos.id, None)
             if StrategyKey(pos.strategy) in STOP_MIRRORS:
-                return  # a stop-rule mirror is a measurement: no phone message for it
+                return  # a stop-rule mirror is a measurement: no review of its signal (the book's own trade has one), no phone message
+            # Advisory and fire-and-forget: the review never delays or touches the trade path.
+            self.committee.on_trade_closed(_trade_json(trade))
             self.telegram.fire_and_forget(
                 f"🔴 {pos.strategy} {pos.underlying.symbol} closed {decision.reason.value} "
                 f"net ₹{trade.net:,.0f} ({trade.r_multiple:+.2f}R)"

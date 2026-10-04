@@ -118,7 +118,8 @@ def _books_where(books: str) -> Any:
 def _rule_fields(strategy: str) -> dict[str, str]:
     """A ledger row's stop rule and the book whose trade it is (a mirror's source; any other book itself)."""
     source, rule = stop_rule_of(strategy)
-    return {"stop_rule": rule, "stop_rule_label": STOP_RULE_LABELS[rule], "source_book": source}
+    return {"stop_rule": rule, "stop_rule_label": STOP_RULE_LABELS[rule], "source_book": source,
+            "source_label": describe_book(source)["strategy_label"]}
 
 
 def _excursions(t: dict[str, Any]) -> dict[str, Any]:
@@ -359,7 +360,7 @@ def build_app(engine: Engine) -> FastAPI:
         # served: rows already stored never carried them
         return [
             {**t, **describe_book(str(t.get("strategy") or "")), **_rule_fields(str(t.get("strategy") or "")), **_excursions(t)}
-            for t in await engine.ledger.recent(trades, limit, where=_books_where(books))
+            for t in await engine.ledger.recent(trades, limit, order_col="closed_ts", where=_books_where(books))
         ]
 
     @api.get("/events")
@@ -371,7 +372,7 @@ def build_app(engine: Engine) -> FastAPI:
         """Net, gross and charges, split. Keeping them apart is the only way the cost structure
         stays visible — on the old book 81% of the round trip was flat brokerage. ``books`` picks the
         set summed: a stop-rule mirror re-trades its book's fills, so adding it in counts a trade thrice."""
-        rows = await engine.ledger.recent(trades, 1000, where=_books_where(books))
+        rows = await engine.ledger.recent(trades, 1000, order_col="closed_ts", where=_books_where(books))
         if not rows:
             return {"trades": 0}
         gross = sum(r["gross"] for r in rows)
