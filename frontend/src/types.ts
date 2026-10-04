@@ -46,6 +46,68 @@ export interface PositionView {
   note: string
 }
 
+export type StopRule = 'current' | 'E' | 'A'
+
+/** One trade under one stop rule — the book's current stop or a stop-rule mirror's (operator, 2026-10-04). */
+export interface StopRuleRow {
+  rule: StopRule
+  label: string
+  book: string
+  status: 'OPEN' | 'EXITED' | 'NONE'
+  entry?: number
+  qty?: number
+  qtyRemaining?: number
+  targetsHit?: number
+  exitPrice?: number | null
+  exitReason?: string | null
+  closedTs?: number | null
+  net?: number | null
+  openGross?: number | null
+  operatorClosedReal?: boolean
+  stop?: { level: number; triggerPrice: number; triggerOn: string; bidAtTrigger: number | null; executable: number | null; fill: number | null } | null
+  /** an open mirror's stop now: the stock's stop, the premium cap on the bid, the trail once lifted, and the
+   *  confirmation spent while the stock is through (areaNeeded null: stop E, which waits maxSeconds) */
+  live?: {
+    equitySl: number
+    premiumCap: number
+    trailStop: number | null
+    through: { seconds: number; area: number; areaNeeded: number | null; maxSeconds: number } | null
+  } | null
+}
+
+/** A stop-rule mirror still open on its own rule after the real trade closed. */
+export interface MirrorAlone extends PositionView {
+  rule: StopRule
+  source: string
+  sourceLabel: string
+  stopRule: StopRuleRow | null
+  realExit: { exitReason: string | null; exitPrice: number | null; closedTs: number | null; net: number | null; byOperator: boolean } | null
+}
+
+/** One book × one stop rule: trades closed under all three rules (net, wins, stops, against the current
+ *  stop), and those still open or waiting on another rule. */
+export interface StopRuleCell {
+  closed: number
+  net: number
+  wins: number
+  stops: number
+  better: number
+  worse: number
+  same: number
+  diff: number
+  open: number
+  waiting: number
+  openGross: number | null
+}
+
+export interface StopRuleGrid {
+  since: number | null
+  scope: 'today' | 'start'
+  rules: Record<StopRule, string>
+  books: { book: string; label: string; shadow: boolean; cells: Partial<Record<StopRule, StopRuleCell>> }[]
+  total: Record<StopRule, StopRuleCell> | null
+}
+
 export interface Overview {
   mode: Mode
   armed_until: number | null
@@ -54,7 +116,10 @@ export interface Overview {
   wallets: Wallet[]
   capital: number
   day_pnl: number
-  positions: PositionView[]
+  /** each with its two stop-rule mirrors under it (null: a book without mirrors) */
+  positions: (PositionView & { stopRules?: StopRuleRow[] | null })[]
+  mirrors_alone?: MirrorAlone[]
+  mirrors_open?: number
   exposure: {
     gross: number
     gross_pct: number
@@ -148,6 +213,10 @@ export interface TradeRow {
   /** the book's name and its side of the trigger, from the registry (an older engine serves neither) */
   strategy_label?: string
   trend?: 'trend' | 'counter-trend' | ''
+  /** the stop rule it ran under and the book whose trade it is (a mirror's source; any other book itself) */
+  stop_rule?: StopRule
+  stop_rule_label?: string
+  source_book?: string
   /** MFE / MAE as the option's price at that moment and the rupees open then, before charges (null: no R unit) */
   mfe_price?: number | null
   mae_price?: number | null

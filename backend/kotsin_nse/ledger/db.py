@@ -423,6 +423,14 @@ class Ledger:
             rows = (await conn.execute(stmt)).mappings().all()
         return {r["strategy"]: dict(r) for r in rows}
 
+    async def first_opened(self, strategies: list[str]) -> float | None:
+        """When the earliest position of any of ``strategies`` opened — None if they never held one."""
+        async with self.engine.begin() as conn:
+            ts = (await conn.execute(
+                sa.select(sa.func.min(positions.c.opened_ts)).where(positions.c.strategy.in_(strategies))
+            )).scalar()
+        return float(ts) if ts is not None else None
+
     async def last_signal(self, strategy: str) -> dict[str, Any] | None:
         # a trigger the strategy did not publish (NOT_PUBLISHED, 2026-09-28) is not its last signal
         where = sa.and_(signals.c.strategy == strategy, signals.c.decision != "NOT_PUBLISHED")

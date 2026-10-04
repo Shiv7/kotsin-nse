@@ -19,7 +19,7 @@ from typing import Any
 
 from ..market.session import IST
 from ..risk.limits import RiskLimits
-from ..strategy.keys import STOP_MIRRORS, stop_mirrors_of
+from ..strategy.keys import SHADOW_BOOKS, STOP_MIRRORS, StrategyKey, stop_mirrors_of
 from ..strategy.regime_gates import GATE_B as GATE_B_GATES
 from ..strategy.regime_gates import trigger_verdicts
 from .daybook import _CSS, _fmt, contract_label, render_ab
@@ -226,7 +226,10 @@ def stop_rules_summary(*, positions: list[dict], trades: list[dict]) -> dict[str
     """Each book against its two stop-rule mirrors, trade by trade (operator, 2026-10-04: "compare which
     [stop rule] works best with which strategy"): a mirror opens only on its book's own fill, so each
     mirror position has exactly one source position on the same trigger. Per book and rule: the trades
-    closed under all three rules, their net, wins, stops taken, and each mirror against the current stop."""
+    closed under all three rules, their net, wins, stops taken, and each mirror against the current stop;
+    beside them the trades still OPEN under that rule and those WAITING (closed under it, open under
+    another — counted once closed under all three). ``total`` sums every book, ``total_trading`` the
+    trading books alone (a shadow book's trades are not the strategy's)."""
     net_by = {t.get("position_id"): float(t.get("net") or 0.0) for t in trades}
     reason_by = {t.get("position_id"): t.get("exit_reason") for t in trades}
     by_key = {(p.get("strategy"), p.get("signal_id")): p for p in positions}
@@ -242,7 +245,8 @@ def stop_rules_summary(*, positions: list[dict], trades: list[dict]) -> dict[str
     books: dict[str, dict[str, dict[str, Any]]] = {}
     for book in STOP_RULE_BOOKS:
         mirrors = stop_mirrors_of(book)
-        tally = {rule: {"closed": 0, "net": 0.0, "wins": 0, "stops": 0, "better": 0, "worse": 0, "same": 0, "diff": 0.0}
+        tally = {rule: {"closed": 0, "net": 0.0, "wins": 0, "stops": 0, "better": 0, "worse": 0, "same": 0, "diff": 0.0,
+                        "open": 0, "waiting": 0}
                  for rule in ("current", *mirrors)}
         for p in sorted((x for x in positions if x.get("strategy") == book), key=lambda x: float(x.get("opened_ts") or 0)):
             sid = p.get("signal_id")
@@ -253,6 +257,9 @@ def stop_rules_summary(*, positions: list[dict], trades: list[dict]) -> dict[str
             trades_out.append({"book": book, "signal_id": sid, "symbol": p.get("symbol"), "opened": p.get("opened_ts"),
                                "contract": (p.get("instrument") or {}).get("name"), "entry": p.get("entry"), "rules": row, "closed": done})
             if not done:
+                for rule, r in row.items():
+                    if r["status"] != "NONE":
+                        tally[rule]["open" if r["status"] == "OPEN" else "waiting"] += 1
                 continue
             cur = row["current"]["net"]
             for rule, r in row.items():
@@ -266,9 +273,13 @@ def stop_rules_summary(*, positions: list[dict], trades: list[dict]) -> dict[str
                     t["diff"] += d
                     t["better" if d > 1 else "worse" if d < -1 else "same"] += 1
         books[book] = tally
-    total = {rule: {k: sum(books[b][rule][k] for b in books) for k in ("closed", "net", "wins", "stops", "better", "worse", "same", "diff")}
-             for rule in ("current", "E", "A")}
-    return {"books": books, "total": total, "trades": trades_out}
+    fields = ("closed", "net", "wins", "stops", "better", "worse", "same", "diff", "open", "waiting")
+
+    def tot(among: list[str]) -> dict[str, dict[str, float]]:
+        return {rule: {k: sum(books[b][rule][k] for b in among) for k in fields} for rule in ("current", "E", "A")}
+
+    trading = [b for b in books if StrategyKey(b) not in SHADOW_BOOKS]
+    return {"books": books, "total": tot(list(books)), "total_trading": tot(trading), "trades": trades_out}
 
 
 # -- the graded-F shadow -------------------------------------------------------------------------
