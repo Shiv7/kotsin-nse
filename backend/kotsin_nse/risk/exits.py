@@ -49,6 +49,8 @@ class MarketView:
     #: False when the quote is missing or stale. Distinct from "not breached": an absent quote is a
     #: third state, and treating it as recovery would reset a sustain clock that should pause.
     quote_ok: bool = True
+    #: the best bid — what the position could be SOLD for now; MFE / MAE are marked on it. None: no bid.
+    option_bid: float | None = None
 
 
 class ExitEngine:
@@ -84,7 +86,7 @@ class ExitEngine:
         lim = self.limits
         ltp = view.option_ltp
         if ltp > 0:
-            self._track(pos, ltp)
+            self._track(pos, ltp, view.option_bid if view.quote_ok else None)
 
         mid = view.option_mid if view.option_mid and view.option_mid > 0 else ltp
         self._reproject_stop(pos, view)
@@ -101,6 +103,7 @@ class ExitEngine:
                     pos.qty_remaining,
                     f"hard floor {floor:.2f} ({lim.hard_floor_below_stop_pct:.0f}% through the "
                     f"{pos.option_sl:.2f} stop) — a collapse is not a wick",
+                    level=round(floor, 2), trigger_price=mid, trigger_on="option mid",
                 )
 
         # 1. stops --------------------------------------------------------------------------------
@@ -115,6 +118,7 @@ class ExitEngine:
                 ltp,
                 pos.qty_remaining,
                 f"underlying confirmed the breach at {view.underlying_ltp:.2f} — no grace",
+                level=pos.equity_sl, trigger_price=view.underlying_ltp or 0.0, trigger_on="underlying",
             )
         if lim.sustain_s is not None and mid > 0 and pos.option_sl > 0:
             # The sustained decision is the answer under this policy, so it returns here rather
@@ -136,6 +140,7 @@ class ExitEngine:
                 ltp,
                 pos.qty_remaining,
                 f"option {ltp:.2f} ≤ stop {pos.option_sl:.2f} (peak {pos.peak_r:.2f}R)",
+                level=pos.option_sl, trigger_price=ltp, trigger_on="option last",
             )
         if view.underlying_ltp is not None and pos.equity_sl > 0:
             breached = (
@@ -150,6 +155,7 @@ class ExitEngine:
                     ltp,
                     pos.qty_remaining,
                     f"underlying {view.underlying_ltp:.2f} breached {pos.equity_sl:.2f}",
+                    level=pos.equity_sl, trigger_price=view.underlying_ltp, trigger_on="underlying",
                 )
 
         # 2. hard floor ---------------------------------------------------------------------------
@@ -166,6 +172,7 @@ class ExitEngine:
                     ltp,
                     pos.qty_remaining,
                     f"hard floor: gave back {lim.hard_floor_pct:.0f}% of a {pos.peak_r:.2f}R peak",
+                    level=round(floor_price, 2), trigger_price=ltp, trigger_on="option last",
                 )
 
         # 3. targets ------------------------------------------------------------------------------
@@ -233,16 +240,23 @@ class ExitEngine:
             return ExitDecision(
                 pos.id, ExitReason.SL_EQ, ltp, pos.qty_remaining,
                 f"underlying {view.underlying_ltp:.2f} breached {pos.equity_sl:.2f} (option quote stale)",
+                level=pos.equity_sl, trigger_price=view.underlying_ltp or 0.0, trigger_on="underlying",
             )
         return self._backstops(pos, view, ltp)
 
     # -- state -----------------------------------------------------------------------------------
 
-    def _track(self, pos: Position, ltp: float) -> None:
-        r = pos.r_now(ltp)
+    def _track(self, pos: Position, ltp: float, bid: float | None = None) -> None:
+        """MFE / MAE on what the position could be SOLD for: the bid when there is one, else the last trade.
+        A stop sells into the bid, so marking the last trade left 47 of 120 exits below their own MAE
+        (operator, 2026-10-04; median 2.75 % of the premium). ``peak_r`` stays on the last trade: the
+        legacy hard floor and the trail read it, and an exit rule may not move with a reporting fix."""
+        mark = bid if bid and bid > 0 else ltp
+        r = pos.r_now(mark)
         pos.mfe_r = max(pos.mfe_r, r)
         pos.mae_r = min(pos.mae_r, r)
-        pos.peak_r = max(pos.peak_r, r)
+        pos.mark_basis = "bid"
+        pos.peak_r = max(pos.peak_r, pos.r_now(ltp))
 
     def _ladder_qty(self, pos: Position, share: float) -> int:
         if share <= 0:
@@ -315,6 +329,7 @@ class ExitEngine:
             pos.qty_remaining,
             f"option mid held below {pos.option_sl:.2f} for {held_s:.0f}s "
             f"(≥ {lim.sustain_s:.0f}s) with the underlying unconfirmed",
+            level=pos.option_sl, trigger_price=mid, trigger_on="option mid",
         )
 
     def _reproject_stop(self, pos: Position, view: MarketView) -> None:
@@ -438,6 +453,7 @@ class ExitEngine:
         return ExitDecision(
             pos.id, ExitReason.TRAIL if by_band else ExitReason.SL_OP, view.option_ltp, pos.qty_remaining,
             f"hard SL {line:.2f}: {what} traded through at {mid:.2f} [{mode}]; {pos.targets_hit} lot(s) already out",
+            level=round(line, 2), trigger_price=mid, trigger_on="option mid",
         )
 
     def _last_rung(self, pos: Position, targets: tuple[float, ...]) -> bool:
@@ -740,6 +756,7 @@ class ExitEngine:
             pos.qty_remaining,
             f"gave back {give * 100:.1f}% of a {pos.peak_mid:.2f} peak "
             f"({pos.trail_dwell} consecutive reads below {level:.2f})",
+            level=round(level, 2), trigger_price=mid, trigger_on="option mid",
         )
 
 
@@ -763,6 +780,12 @@ def apply_exit(
     pos.realised_gross += gross
     pos.qty_remaining -= qty
     pos.charges += charges
+    # the fill is a price the position WAS sold at: the excursions include it, so a stop's fill is never
+    # below the MAE nor a target's above the MFE (a stale-quote exit is often the only read of that moment)
+    if fill_price > 0 and pos.r_unit > 0:
+        r = pos.r_now(fill_price)
+        pos.mae_r = min(pos.mae_r, r)
+        pos.mfe_r = max(pos.mfe_r, r)
     if decision.reason is ExitReason.TARGET:
         pos.targets_hit += 1
     if pos.qty_remaining <= 0:

@@ -52,14 +52,19 @@ def _deep(e, bids: list[tuple[float, int]], asks: list[tuple[float, int]], now: 
 
 
 def test_which_stops_are_urgent():
-    pol = LimitPolicy()
+    # 2026-10-04: EVERY stop sells at its trigger. The finer 3 Oct rules below are what the switch falls back to.
+    for reason in (ExitReason.SL_EQ, ExitReason.SL_OP):
+        assert urgent_stop(reason, 10.0, 11.0, None, LimitPolicy()) == "a stop sells at its trigger"
+    for reason in (ExitReason.TRAIL, ExitReason.TARGET, ExitReason.EOD, ExitReason.HALT):
+        assert urgent_stop(reason, 10.0, 10.05, -9.0, LimitPolicy()) is None, f"{reason} keeps its walk"
+    pol = LimitPolicy(exit_stops_at_bid=False)
     assert urgent_stop(ExitReason.SL_EQ, 10.0, 11.0, None, pol) == "the stock has broken its stop"
     assert "falling fast (-2.5% in 30 s)" in urgent_stop(ExitReason.SL_OP, 10.0, 11.0, -2.5, pol)
     assert urgent_stop(ExitReason.SL_OP, 10.0, 10.10, None, pol) == "a tight book (10 / 10.1)", "two ticks wide"
     assert urgent_stop(ExitReason.SL_OP, 10.0, 11.0, -1.0, pol) is None, "calm and wide: rest at the mid and walk"
     for reason in (ExitReason.TRAIL, ExitReason.TARGET, ExitReason.EOD, ExitReason.HALT):
         assert urgent_stop(reason, 10.0, 10.05, -9.0, pol) is None, f"{reason} keeps its walk"
-    assert urgent_stop(ExitReason.SL_EQ, 10.0, 11.0, None, LimitPolicy(exit_urgent_stops=False)) is None, "switched off"
+    assert urgent_stop(ExitReason.SL_EQ, 10.0, 11.0, None, LimitPolicy(exit_stops_at_bid=False, exit_urgent_stops=False)) is None, "switched off"
 
 
 # -- the engine ------------------------------------------------------------------------------------
@@ -77,7 +82,7 @@ async def test_a_stock_stop_sells_through_the_bid_at_once_for_every_lot_and_logs
         assert e._exit_resting(pos.id) is None, "nothing rests at the mid"
         assert pos.status == "CLOSED"
         x = pos.exec_log["exits"][-1]
-        assert x["outcome"] == "sold into the bid at once — the stock has broken its stop" and x["waitS"] == 0
+        assert x["outcome"] == "sold into the bid at once — a stop sells at its trigger" and x["waitS"] == 0
         assert "sold into the bid at once" in x["why"] and x["bookAtPlace"] == {"bid": 10.0, "ask": 11.0}
         assert x["depthAtPlace"]["bids"][:2] == [[10.0, 1000], [9.95, 1000]] and x["depthAtCross"]["asks"] == [[11.0, 5000]]
         assert 9.9 < pos.exit_price < 10.0, "2,750 lots walk past the 1,000 at the top bid"
@@ -87,7 +92,9 @@ async def test_a_stock_stop_sells_through_the_bid_at_once_for_every_lot_and_logs
 
 @pytest.mark.asyncio
 async def test_an_option_stop_falling_fast_sells_at_once_and_a_calm_one_still_walks(settings, clock):
-    e = await _engine(settings, clock)
+    """The 3 Oct rule, behind the switch (2026-10-04: with it on, every stop sells at its trigger —
+    test_mae_and_stop_execution.py)."""
+    e = await _engine(settings.model_copy(update={"paper_limit_exit_stops_at_bid": False}), clock)
     try:
         fast, calm = _pos(clock, pid="fast"), _pos(clock, pid="calm")
         for p in (fast, calm):

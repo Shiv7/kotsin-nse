@@ -42,10 +42,13 @@ async def test_rows_stored_before_the_labels_existed_are_served_with_them(tmp_pa
 def test_mfe_and_mae_in_money_are_the_option_price_and_the_rupees_open_then():
     # KEI 29 SEP CE 4700, FUDKII, 2026-09-23 09:45: entry 37.70, first stop 31.47, 875 units
     kei = {"entry": 37.7, "r_unit": 6.23, "side": "LONG", "qty": 875, "multiplier": 1, "mfe_r": 0.209, "mae_r": -0.064}
-    assert _excursions(kei) == {"mfe_price": 39.0, "mae_price": 37.3, "mfe_inr": pytest.approx(1139.31), "mae_inr": pytest.approx(-348.88)}
+    assert _excursions(kei) == {"mark_basis": "last", "mfe_price": 39.0, "mae_price": 37.3, "mfe_inr": pytest.approx(1139.31),
+                                "mae_inr": pytest.approx(-348.88)}
     short = {**kei, "side": "SHORT"}
     assert _excursions(short)["mfe_price"] == 36.4, "a short's best price is below its entry"
-    assert set(_excursions({"entry": 10.0, "mfe_r": 0.5}).values()) == {None}, "no R unit stored: no figure"
+    none = _excursions({"entry": 10.0, "mfe_r": 0.5})
+    assert none.pop("mark_basis") == "last" and set(none.values()) == {None}, "no R unit stored: no figure"
+    assert _excursions({**kei, "mark_basis": "bid"})["mark_basis"] == "bid", "a trade marked on the bid says so"
 
 
 def test_a_strike_keeps_only_the_decimals_it_needs():

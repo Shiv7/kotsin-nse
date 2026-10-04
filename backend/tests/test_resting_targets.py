@@ -168,11 +168,13 @@ async def test_a_touch_and_fall_keeps_lot_ones_profit_and_the_stop_cancels_the_n
         assert gross_t1 == pytest.approx((18.5 - 17.0) * LOT)
         await _tick(e, clock, 1, 16.80, 16.95)  # ... and the fall: through breakeven
         assert e._target_resting(pos.id) is None, "the T2 sell is off the book before the stop's SELL goes in"
-        ex = e._exit_resting(pos.id)
-        assert ex is not None and ex.intent.qty == 3 * LOT and ex.ctx[1].reason is ExitReason.SL_OP
+        # 2026-10-04: the stop sells into the bid at its trigger — nothing rests, nothing waits for a deadline
+        assert e._exit_resting(pos.id) is None and pos.status == "CLOSED"
+        x = pos.exec_log["exits"][-1]
+        assert x["reason"] == "SL-OP" and x["qty"] == 3 * LOT and "at its trigger" in x["outcome"]
+        assert x["stop"]["level"] == 17.0 and x["stop"]["triggerOn"] == "option mid" and x["stop"]["bidAtTrigger"] == 16.8
+        assert x["fillPrice"] == 16.8 and pos.exit_price == 16.8
         assert pos.exec_log["targets"][-1]["outcome"].startswith("cancelled — SL-OP")
-        await _tick(e, clock, 16, 16.80, 16.95)  # crossed at the deadline
-        assert pos.status == "CLOSED"
         orders = await _rows(e, "orders")
         assert len(_sells(orders)) == 2, "T1 and the stop — never a second SELL for the same lots"
         assert [o for o in orders if o.get("status") == "CANCELLED" and "|TGT|" in o.get("client_order_id", "")]

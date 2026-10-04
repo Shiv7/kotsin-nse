@@ -93,18 +93,20 @@ class ProposeRequest(BaseModel):
     segment: str = "NSE_EQ"
 
 
-def _excursions(t: dict[str, Any]) -> dict[str, float | None]:
+def _excursions(t: dict[str, Any]) -> dict[str, Any]:
     """MFE and MAE in money as well as R (operator, 2026-10-04: "add the actual values of MFE and MAE in the
     table"): the option's price at the best and worst moment, and the rupees open then, before charges.
     Worked back from the stored R and R unit — the position kept no price — so a figure is within half a
     thousandth of an R unit of the price seen (a paisa or less on most contracts). A row without an R unit
-    has neither."""
+    has neither. ``mark_basis`` says what the marks were taken on (see ``Position.mark_basis``)."""
     r_unit, entry = float(t.get("r_unit") or 0.0), float(t.get("entry") or 0.0)
+    # "bid": marked on what the position could be sold for and folded with every fill (2026-10-04 on);
+    # "last": a trade closed before that — the last trade alone, which a stop's fill can sit below
+    out: dict[str, float | None] = {"mark_basis": "bid" if t.get("mark_basis") == "bid" else "last"}  # type: ignore[dict-item]
     if r_unit <= 0 or entry <= 0:
-        return {"mfe_price": None, "mae_price": None, "mfe_inr": None, "mae_inr": None}
+        return {**out, "mfe_price": None, "mae_price": None, "mfe_inr": None, "mae_inr": None}
     sign = -1.0 if t.get("side") == "SHORT" else 1.0
     units = float(t.get("qty") or 0) * float(t.get("multiplier") or 1)
-    out: dict[str, float | None] = {}
     for k in ("mfe", "mae"):
         r = float(t.get(f"{k}_r") or 0.0)
         out[f"{k}_price"] = round(entry + sign * r * r_unit, 2)
