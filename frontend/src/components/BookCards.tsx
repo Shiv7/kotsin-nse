@@ -791,6 +791,12 @@ function StopRules({ rows }: { rows: StopRuleRow[] }) {
                       stop {f(r.stop.level)} → {r.stop.triggerOn === 'underlying' ? 'stock' : r.stop.triggerOn} {f(r.stop.triggerPrice)} → bid {f(r.stop.bidAtTrigger)} → fill {f(r.stop.fill)}
                     </span>
                   ) : null}
+                  {r.live?.through ? (
+                    <span className="w-full pl-36 text-[12.5px] text-amber-300 max-sm:pl-0">
+                      stock through its stop {f(r.live.equitySl)} for {r.live.through.seconds}s
+                      {r.live.through.areaNeeded != null ? ` · ${r.live.through.area.toFixed(2)} of ${r.live.through.areaNeeded} %·s` : ` of ${r.live.through.maxSeconds}s`}
+                    </span>
+                  ) : null}
                   {r.operatorClosedReal ? <span className="w-full pl-36 text-[12.5px] text-amber-300/80 max-sm:pl-0">you closed the real trade; this one keeps its own rule</span> : null}
                 </>
               )}
