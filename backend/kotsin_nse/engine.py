@@ -84,7 +84,7 @@ from .domain import (
 )
 from .exec.gateway import LIVE_MODES, Decision, Gateway, LiveCaps, LiveContext, Mode
 from .exec.live import LiveExecutor
-from .exec.paper import BookSnapshot, PaperMatcher, book_from_quote
+from .exec.paper import BookSnapshot, PaperMatcher, book_from_quote, walk_book
 from .exec.reconcile import Reconciler
 from .exec.resting import (
     LimitPolicy,
@@ -583,6 +583,7 @@ class Engine:
             exit_cross_urgent_s=settings.paper_limit_exit_cross_urgent_s,
             exit_cross_other_s=settings.paper_limit_exit_cross_other_s,
             rest_targets=settings.paper_limit_rest_targets,
+            exit_stops_at_bid=settings.paper_limit_exit_stops_at_bid,
             exit_urgent_stops=settings.paper_limit_exit_urgent_stops,
             exit_fast_fall_pct=settings.paper_limit_exit_fast_fall_pct,
             exit_fast_window_s=settings.paper_limit_exit_fast_window_s,
@@ -5434,6 +5435,7 @@ class Engine:
                 option_mid=mid,
                 spread_pct=spread,
                 quote_ok=bool(q and (now - q.ts) <= self.s.position_quote_max_age_s),
+                option_bid=(q.bid if q and q.bid > 0 else None),
                 option_ltp=ltp,
                 underlying_ltp=self.ltps.get(pos.underlying.scrip_code),
                 now=now,
@@ -5571,10 +5573,11 @@ class Engine:
         attempt = self._exit_attempts.get(pos.id, 0)
         code = pos.instrument.scrip_code
         bid, ask, _, _ = self._touch(code, now)
+        stop = self._stop_record(pos, decision, now)
         run = self._option_fall(code, now, (bid + ask) / 2 if bid and ask else None)
         urgent = urgent_stop(decision.reason, bid, ask, run, self.limit_policy, pos.instrument.tick_size or 0.05)
         if urgent and bid:
-            await self._exit_at_once(pos, decision, now, attempt, (bid, ask), run, urgent)
+            await self._exit_at_once(pos, decision, now, attempt, (bid, ask), run, urgent, stop)
             return
         deadline = self.limit_policy.exit_deadline(decision.reason)
         limit = exit_limit(bid, ask, 0.0, deadline, pos.instrument.tick_size or 0.05)
@@ -5593,16 +5596,34 @@ class Engine:
             return
         r = Resting(intent=intent, kind="exit", limit=limit, placed_ts=now, deadline_s=deadline, signal_ts=now,
                     ref=decision.ref_price, why=f"{decision.reason.value}: the mid, walked to the bid, crossed after {deadline:g} s",
-                    book_at_place=(bid, ask), last_check=now, ctx=(pos, decision, attempt), depth_at_place=self._depth(code, now))
+                    book_at_place=(bid, ask), last_check=now, ctx=(pos, decision, attempt), depth_at_place=self._depth(code, now), stop=stop)
         r.order = res.order
         self._resting[intent.client_order_id] = r
         log.info("limit.placed", kind="exit", strategy=pos.strategy, symbol=pos.underlying.symbol, limit=limit, bid=bid, ask=ask,
                  reason=decision.reason.value, deadline_s=deadline)
         await self._advance_one(r, now, first=True)
 
+    def _stop_record(self, pos: Position, decision: Any, now: float) -> dict[str, Any] | None:
+        """A stop's prices kept apart (operator, 2026-10-04): the LEVEL that fired, the READ that breached it
+        (``triggerOn`` says which price that was), what the position could be sold for at that instant — the
+        BID, and the bid side WALKED for every lot (``executable``) — and, once booked, the FILL (the order's
+        ``fillPrice`` beside it). None for an exit with no level (a target, the close)."""
+        if not decision.level or decision.level <= 0:
+            return None
+        code = pos.instrument.scrip_code
+        bid, ask, _, _ = self._touch(code, now)
+        executable = bid
+        b = self.books.get(code)
+        if b is not None and b.bids and b.age_ms(now) <= self.matcher.age_limit_ms(now):
+            w = walk_book(b.bids, decision.qty, touch=b.bids[0][0], ceiling_pct=self.matcher.ceiling_pct, buy=False)
+            if w.filled:
+                executable = round(w.avg_price, 2)
+        return {"level": round(decision.level, 2), "triggerPrice": round(decision.trigger_price, 2), "triggerOn": decision.trigger_on,
+                "triggerTs": now, "bidAtTrigger": bid, "askAtTrigger": ask, "executable": executable}
+
     async def _exit_at_once(self, pos: Position, decision: Any, now: float, attempt: int, book: tuple[float, float | None],
-                            run: float | None, why: str) -> None:
-        """An urgent stop: sold into the bid now, through the depth for every lot — no rest at the mid."""
+                            run: float | None, why: str, stop: dict[str, Any] | None = None) -> None:
+        """A stop: sold into the bid now, through the depth for every lot — no rest at the mid."""
         bid, ask = book
         code = pos.instrument.scrip_code
         intent = OrderIntent(
@@ -5612,7 +5633,7 @@ class Engine:
         )
         r = Resting(intent=intent, kind="exit", limit=bid, placed_ts=now, deadline_s=0.0, signal_ts=now, ref=decision.ref_price,
                     why=f"{decision.reason.value}: sold into the bid at once — {why}", book_at_place=(bid, ask), last_check=now,
-                    ctx=(pos, decision, attempt), depth_at_place=self._depth(code, now))
+                    ctx=(pos, decision, attempt), depth_at_place=self._depth(code, now), stop=stop)
         r.momentum.append({"atS": 0.0, "runPct": round(run, 2) if run is not None else None, "note": why})
         log.info("exit.urgent", strategy=pos.strategy, symbol=pos.underlying.symbol, reason=decision.reason.value, bid=bid, ask=ask,
                  run_pct=round(run, 2) if run is not None else None, why=why)
@@ -5666,8 +5687,9 @@ class Engine:
             ref_price=decision.ref_price,
         )
         placed = time.time()
+        stop = self._stop_record(pos, decision, now)
         result = await self._submit(intent, verdict_ok=True, verdict_reason="")
-        audit = self._market_audit("exit", now, placed, result, pos.instrument.scrip_code)
+        audit = {**self._market_audit("exit", now, placed, result, pos.instrument.scrip_code), **({"stop": stop} if stop else {})}
         await self.ledger.insert_order(_order_json(result.order, audit), result.decision.value)
         if result.decision is Decision.SHADOW_OK:
             # SHADOW places nothing, so a position carried in from a PAPER run can never close.
@@ -6455,6 +6477,7 @@ def _position_json(p: Position) -> dict[str, Any]:
         "peak_r": p.peak_r,
         "mfe_r": p.mfe_r,
         "mae_r": p.mae_r,
+        "mark_basis": p.mark_basis,
         "charges": p.charges,
         "targets_hit": p.targets_hit,
         "status": p.status,
@@ -6518,6 +6541,7 @@ def _position_from_json(d: dict[str, Any]) -> Position:
         peak_r=float(d.get("peak_r", 0)),
         mfe_r=float(d.get("mfe_r", 0)),
         mae_r=float(d.get("mae_r", 0)),
+        mark_basis=str(d.get("mark_basis") or ""),
         charges=float(d.get("charges", 0)),
         targets_hit=int(d.get("targets_hit", 0)),
         qty_remaining=int(d.get("qty_remaining", d["qty"])),
@@ -6581,7 +6605,19 @@ def _trade_from(p: Position, now: float) -> Trade:
         equity_targets=tuple(p.equity_targets),
         r_unit=p.r_unit,
         multiplier=p.instrument.multiplier,
+        mark_basis=p.mark_basis,
+        stop=_last_stop(p),
     )
+
+
+def _last_stop(p: Position) -> dict[str, Any]:
+    """The closing exit's stop record with its fill beside it, or {} when the trade did not end on a level."""
+    exits = p.exec_log.get("exits") or []
+    last = exits[-1] if exits else {}
+    stop = last.get("stop") if isinstance(last, dict) else None
+    if not stop:
+        return {}
+    return {**stop, "fill": last.get("fillPrice"), "filledTs": last.get("filledTs"), "reason": last.get("reason")}
 
 
 def _trade_json(t: Trade) -> dict[str, Any]:
@@ -6614,4 +6650,6 @@ def _trade_json(t: Trade) -> dict[str, Any]:
         "equity_targets": list(t.equity_targets),
         "r_unit": t.r_unit,
         "multiplier": t.multiplier,
+        "mark_basis": t.mark_basis,
+        "stop": t.stop,
     }

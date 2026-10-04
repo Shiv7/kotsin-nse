@@ -226,8 +226,13 @@ class Position:
     #: |entry - initial option stop|; the denominator of every R figure
     r_unit: float = 0.0
     peak_r: float = 0.0
+    #: the best and worst the position could have been SOLD for while held, in R: the bid when the option
+    #: has one, the last trade when it does not, and every exit fill — so a stop's fill is never below the
+    #: MAE (operator, 2026-10-04: 47 of 120 exits had filled below it). ``mark_basis`` says which rule
+    #: marked them: "bid" (this rule) or "" (positions closed before it: the last trade alone).
     mfe_r: float = 0.0
     mae_r: float = 0.0
+    mark_basis: str = ""
     charges: float = 0.0
     targets_hit: int = 0
     qty_remaining: int = 0
@@ -330,12 +335,23 @@ class Trade:
     r_unit: float = 0.0
     multiplier: int = 1
     evidence: dict[str, float] = field(default_factory=dict)
+    #: how MFE / MAE were marked: "bid" (the price it could be sold at) or "" (the last trade alone)
+    mark_basis: str = ""
+    #: the last exit's stop record (``Engine._stop_record``): the level that fired, the read that breached
+    #: it, the bid and the depth-walk price at that instant, the fill — four prices, never one
+    stop: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
 class ExitDecision:
     position_id: str
     reason: ExitReason
+    #: the last traded price of the option when the rule fired — a reference for the trail, never a fill
     ref_price: float
     qty: int  # partial exits carry less than qty_remaining
     note: str = ""
+    #: a stop's trigger, kept apart from the fill: the level that fired, the read that breached it and
+    #: what that read was ("option mid" / "option last" / "underlying"). 0 / "" for exits with no level.
+    level: float = 0.0
+    trigger_price: float = 0.0
+    trigger_on: str = ""

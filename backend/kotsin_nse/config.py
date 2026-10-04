@@ -334,6 +334,10 @@ class Settings(BaseSettings):
     #: stock through its stop, the option's mid down ``..._fast_fall_pct`` % in ``..._fast_window_s``, or a
     #: book ``..._tight_ticks`` wide or less. False = every stop rests at the mid and walks, as before
     paper_limit_exit_urgent_stops: bool = True
+    #: every stop sells into the bid at its trigger (operator, 2026-10-04; exec/resting.py
+    #: ``LimitPolicy.exit_stops_at_bid``): the stop record keeps the level, the read that breached it, the
+    #: bid then and the fill apart. False = the 3 Oct rule alone: only an urgent stop sells at once
+    paper_limit_exit_stops_at_bid: bool = True
     paper_limit_exit_fast_fall_pct: float = 2.0
     paper_limit_exit_fast_window_s: float = 30.0
     paper_limit_exit_tight_ticks: int = 2

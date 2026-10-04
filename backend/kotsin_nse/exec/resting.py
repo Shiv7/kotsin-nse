@@ -97,6 +97,15 @@ class LimitPolicy:
     exit_cross_other_s: float = 45.0
     #: rest the next target sell in advance for the books whose target is a touch
     rest_targets: bool = True
+    #: a stop sells into the bid the moment its rule fires, every stop (``urgent_stop``; operator,
+    #: 2026-10-04: the simulated stop must not cross its level and then fill at a later, worse price for
+    #: want of a stop order). The engine's stop is a software stop — a 1 s read of the level, then an
+    #: order — so what it can execute at the trigger is the bid, walked through the depth for the lots:
+    #: that is the fill. Resting a limit at the mid first was a bet on the spread taken at the moment
+    #: the thesis had failed: on the 43 stops that rested 26 Sep – 3 Oct it lost ₹30,712 against
+    #: selling at the bid at the trigger (won on 15, lost on 24; DMART −₹7,692 / −₹5,458 / −₹5,458 in
+    #: one 15 s rest). False = only the urgent stops below sell at once; a calm stop rests and walks.
+    exit_stops_at_bid: bool = True
     #: a stop that is urgent sells into the bid at once instead of walking from the mid (``urgent_stop``)
     exit_urgent_stops: bool = True
     #: ... urgent when the option's mid fell this many % or more over ``exit_fast_window_s``
@@ -121,6 +130,7 @@ class LimitPolicy:
             "exitRepriceS": self.exit_reprice_s, "exitCrossStopS": self.exit_cross_stop_s,
             "exitCrossUrgentS": self.exit_cross_urgent_s, "exitCrossOtherS": self.exit_cross_other_s,
             "restTargets": self.rest_targets,
+            "exitStopsAtBid": self.exit_stops_at_bid,
             "exitUrgentStops": self.exit_urgent_stops, "exitFastFallPct": self.exit_fast_fall_pct,
             "exitFastWindowS": self.exit_fast_window_s, "exitTightTicks": self.exit_tight_ticks,
         }
@@ -180,7 +190,11 @@ def urgent_stop(reason: ExitReason, bid: float | None, ask: float | None, run_pc
                 tick: float = 0.05) -> str | None:
     """Why a stop sells into the bid at once rather than resting at the mid, or None (rest and walk).
     ``run_pct`` is the option's mid now against ``exit_fast_window_s`` ago, % (None = not known)."""
-    if not policy.exit_urgent_stops or reason not in STOP_REASONS:
+    if reason not in STOP_REASONS:
+        return None
+    if policy.exit_stops_at_bid:
+        return "a stop sells at its trigger"
+    if not policy.exit_urgent_stops:
         return None
     if reason is ExitReason.SL_EQ:
         return "the stock has broken its stop"
@@ -246,6 +260,8 @@ class Resting:
     momentum: list[dict[str, Any]] = field(default_factory=list)
     #: the five levels a side, price and quantity, when the order was placed (None = no depth book)
     depth_at_place: dict[str, Any] | None = None
+    #: a stop's trigger record (``Engine._stop_record``): level, breaching read, bid and walk price then
+    stop: dict[str, Any] | None = None
 
     def audit(self, **more: Any) -> dict[str, Any]:
         bid, ask = self.book_at_place
@@ -254,5 +270,6 @@ class Resting:
             "why": self.why, "bookAtPlace": {"bid": bid, "ask": ask}, "deadlineS": self.deadline_s,
             "reprices": [[round(t, 3), p] for t, p in self.reprices],
             **({"momentum": list(self.momentum)} if self.momentum else {}),
-            **({"depthAtPlace": self.depth_at_place} if self.depth_at_place else {}), **more,
+            **({"depthAtPlace": self.depth_at_place} if self.depth_at_place else {}),
+            **({"stop": self.stop} if self.stop else {}), **more,
         }

@@ -114,14 +114,30 @@ How an exit sells (PAPER with limit orders on; LIVE sells at once):
 | Exit | Order |
 |---|---|
 | target | a SELL resting at the rung from the moment the contract is held — the next rung only, placed the instant the one below fills; fills on a touch |
-| **urgent stop** — the stock through its stop (SL-EQ), the option's mid down 2 % or more in 30 s, or a book 2 ticks wide or less | **sold into the bid at once, through the depth for every lot** (operator, 3 Oct: "if the momentum is very high, then stoploss if not executed quickly and waited will attract high losses"; live 30 Sep – 1 Oct, 43 stops: +₹23,224 after the depth, +₹5,370 without DMART's collapse; the candle-built replay −₹5,209) |
-| calm option stop on a wide book | the mid, walked to the bid, sold at the bid after 15 s |
+| **every stop** (SL-OP, SL-EQ, the hard floor) | **sold into the bid at its trigger, through the depth for every lot** (operator, 4 Oct: the simulated stop must not cross its level and then fill at a later, worse price for want of a stop order). The engine's stop is a software stop — a 1 s read of the level, then an order — so the price it can execute at the trigger is the bid, walked for the lots; that is the fill. Resting a limit at the mid first was a bet on the spread taken at the moment the thesis had failed: on the 43 stops that rested 26 Sep – 3 Oct it lost ₹30,712 against selling at the bid at the trigger (won on 15, lost on 24; DMART −₹7,692 / −₹5,458 / −₹5,458 in one 15 s rest). `KN_PAPER_LIMIT_EXIT_STOPS_AT_BID=false` falls back to the 3 Oct rule: only an urgent stop — the stock through its stop, the mid down 2 % in 30 s, a book 2 ticks wide — sells at once; a calm one rests at the mid and is sold at the bid after 15 s |
 | trail (the give-back line) | the mid, walked to the bid, 45 s — the walk beat the bid on 13 of 18 |
 | 15:20 flatten | the mid, walked to the bid, 10 s |
 
 Every order's trail keeps the book at placing and at the fill (or cross, or cancel) — the best bid and
 ask, and five levels a side, price and quantity (`depthAtPlace`, `depthAtFill`, `depthAtCross`,
 `depthAtCancel`).
+
+**A stop's four prices, kept apart** (`stop` on the exit order, the position's `exec_log` and the trade;
+the Trades page shows them under the exit reason): the **level** that fired (the option stop, the rising
+line, the hard floor, or the stock stop — `triggerOn` says which price breached it); the **trigger**
+read — the mid, the last trade or the stock, at the 1 s read that saw it through, and after a book's
+grace (RT books: 75 s of sustained breach, the 1-minute close; the base book: one print); the **bid** at
+that instant and the bid side **walked** for the lots (`executable`); and the **fill**. The gap level →
+trigger is the read cadence and the book's grace, by design; trigger → bid is the spread; bid → fill is
+the depth. None of it is the SL level: a stop is never booked AT its level (CAN2 did, and its ledger
+was optimistic by the gap).
+
+**MFE / MAE** are marked on what the position could be SOLD for — the bid when the option has one, the
+last trade when it does not — and every exit fill is folded in, so a trade's exit is never below its
+MAE nor above its MFE. A stale quote marks nothing (no new price was seen); the fill that ends a
+stale-quote exit is still folded in. Trades closed before 4 Oct carry the last trade alone
+(`mark_basis` "last" on the page): 47 of 120 had filled below that MAE, median 2.75 % of the premium.
+`peak_r`, the trail's watermark, still reads the last trade — a reporting fix moves no exit rule.
 
 **15:15 plan (recorded, not acted on).** At 15:15 each open NSE position's distance to its stop line
 and its next target is written to the ledger as an `eod.plan` event with what the operator's rule

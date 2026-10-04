@@ -153,6 +153,10 @@ export interface TradeRow {
   mae_price?: number | null
   mfe_inr?: number | null
   mae_inr?: number | null
+  /** "bid": marked on the price the position could be sold for, every fill included; "last": an older trade, the last trade alone */
+  mark_basis?: 'bid' | 'last'
+  /** a stop's prices, apart: the level that fired, the read that breached it, the bid and the depth-walk price then, the fill */
+  stop?: { level: number; triggerPrice: number; triggerOn: string; bidAtTrigger: number | null; askAtTrigger: number | null; executable: number | null; fill: number | null } | null
   symbol: string
   underlying: string
   qty: number

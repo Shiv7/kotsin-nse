@@ -310,9 +310,10 @@ async def test_no_book_enters_a_trigger_whose_stop_the_underlying_is_already_thr
 
 @pytest.mark.asyncio
 async def test_an_exit_rests_at_the_mid_walks_to_the_bid_and_crosses_at_its_deadline(settings, clock):
-    """A calm option stop on a wide book (an urgent stop sells into the bid at once:
-    test_urgent_stops_depth_eod_plan.py)."""
-    e = await _engine(settings, clock)
+    """The rest-and-walk exit, on a calm option stop with the 2026-10-04 stops-at-the-trigger switch OFF
+    (on, the default, every stop sells into the bid at once: test_mae_and_stop_execution.py; the trail
+    and the close still rest and walk either way)."""
+    e = await _engine(settings.model_copy(update={"paper_limit_exit_stops_at_bid": False}), clock)
     try:
         pos = Position(id="p1", strategy="FUDKII_RT_X", instrument=OPT, underlying=UND, side=PosSide.LONG, qty=2750, entry=17.0,
                        opened_ts=clock[0] - 600, signal_id="s1", direction=Direction.BULLISH, equity_entry=187.0, equity_sl=185.0,
@@ -342,7 +343,9 @@ async def test_an_exit_rests_at_the_mid_walks_to_the_bid_and_crosses_at_its_dead
 
 @pytest.mark.asyncio
 async def test_a_resting_target_exit_is_replaced_by_a_stop(settings, clock):
-    e = await _engine(settings, clock)
+    """With the stops-at-the-trigger switch off, so the stop rests too and the replacement itself is what
+    shows (on, the stop takes the target off and sells at once: test_mae_and_stop_execution.py)."""
+    e = await _engine(settings.model_copy(update={"paper_limit_exit_stops_at_bid": False}), clock)
     try:
         pos = Position(id="p2", strategy="FUDKII_RT_X", instrument=OPT, underlying=UND, side=PosSide.LONG, qty=5500, entry=17.0,
                        opened_ts=clock[0] - 600, signal_id="s2", direction=Direction.BULLISH, option_sl=15.0)

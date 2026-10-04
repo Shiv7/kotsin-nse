@@ -15,21 +15,39 @@ const LEDGER_HEAD = ['Closed (IST)', 'Strategy', 'Trend', 'Underlying', 'Instrum
 const LEDGER_TIPS: Record<string, string> = {
   Trend: 'trend: trades the trigger its own way (the SuperTrend flip + Bollinger break). counter-trend: fades it with the opposite option (CT-X, CT-Y, CT-M).',
   R: 'Net P&L after charges ÷ the money risked at entry (entry − first option stop, × quantity).',
-  MFE: 'Maximum favourable excursion: the best the option got while held, in R — (highest price − entry) ÷ (entry − first stop) — with that price and the rupees open at that moment. Before charges.',
-  MAE: 'Maximum adverse excursion: the worst the option got while held, in R — (lowest price − entry) ÷ (entry − first stop); −1.00R is the first stop — with that price and the rupees open at that moment. Before charges. It is the worst LAST TRADE seen: a stop sells at the bid, so the exit often fills below it.',
+  MFE: 'Maximum favourable excursion: the best the position could have been SOLD for while held — the bid, the last trade when there was none, and every fill — in R: (price − entry) ÷ (entry − first stop), with that price and the rupees open then. Before charges. Rows marked "last" (closed before 4 Oct) used the last trade alone.',
+  MAE: 'Maximum adverse excursion: the worst the position could have been SOLD for while held — the bid, the last trade when there was none, and every fill — in R; −1.00R is the first stop. The exit is never below it. Rows marked "last" (closed before 4 Oct) used the last trade alone, which a stop\'s fill can sit below.',
+  'Exit reason': 'For a stop: the LEVEL that fired → the read that breached it (TRIG) → the BID at that instant → the FILL. The gap level→trig is the 1 s read (and a book\'s grace); trig→bid is the spread; bid→fill is the depth walked for the lots.',
 }
 
 /** An excursion: R on top, the option's price then and the rupees open then beneath. */
-function Excursion({ r, price, inr, tone }: { r: number | null | undefined; price?: number | null; inr?: number | null; tone: string }) {
+function Excursion({ r, price, inr, tone, basis }: { r: number | null | undefined; price?: number | null; inr?: number | null; tone: string; basis?: string }) {
   return (
     <td className="px-2 py-1.5">
-      <div className={tone}>{fmt.r(r)}</div>
+      <div className={tone}>
+        {fmt.r(r)}
+        {basis === 'last' && (
+          <span className="ml-1 text-[9px] text-slate-600" title="marked on the last trade alone (closed before 4 Oct); a stop's fill can sit below it">
+            last
+          </span>
+        )}
+      </div>
       {price != null && (
         <div className="whitespace-nowrap text-[10px] text-slate-500">
           {fmt.n(price)} · {fmt.signedInr(inr)}
         </div>
       )}
     </td>
+  )
+}
+
+/** A stop's prices, apart: level → trigger read → bid → fill. */
+function StopTrail({ s }: { s: NonNullable<TradeRow['stop']> }) {
+  return (
+    <div className="whitespace-nowrap text-[10px] text-slate-500" title={`level ${fmt.n(s.level)} (${s.triggerOn}) · trig ${fmt.n(s.triggerPrice)} · bid ${fmt.n(s.bidAtTrigger)} · walk ${fmt.n(s.executable)} · fill ${fmt.n(s.fill)}`}>
+      SL {fmt.n(s.level)} → trig {fmt.n(s.triggerPrice)}
+      {s.triggerOn === 'underlying' ? ' (stock)' : ''} → bid {fmt.n(s.bidAtTrigger)} → fill {fmt.n(s.fill)}
+    </div>
   )
 }
 
@@ -68,7 +86,7 @@ export function Trades() {
         </Card>
       )}
 
-      <Card title="Trade ledger" right="MFE / MAE: the best / worst the option got while held — in R, then its price and the rupees open — hover a column name">
+      <Card title="Trade ledger" right="MFE / MAE: the best / worst the position could have been sold for while held — in R, then that price and the rupees open — hover a column name">
         <Table head={LEDGER_HEAD} tips={LEDGER_TIPS} empty="no closed trades yet">
           {(trades ?? []).map((t) => (
             <tr key={t.id} className="border-b border-slate-900">
@@ -86,9 +104,12 @@ export function Trades() {
               <td className="px-2 py-1.5 text-amber-400/80">{fmt.inr(t.charges)}</td>
               <td className={`px-2 py-1.5 font-medium ${pnlColor(t.net)}`}>{fmt.signedInr(t.net)}</td>
               <td className={`px-2 py-1.5 ${pnlColor(t.r_multiple)}`}>{fmt.r(t.r_multiple)}</td>
-              <Excursion r={t.mfe_r} price={t.mfe_price} inr={t.mfe_inr} tone="text-emerald-500/70" />
-              <Excursion r={t.mae_r} price={t.mae_price} inr={t.mae_inr} tone="text-rose-500/70" />
-              <td className="px-2 py-1.5 text-slate-400">{t.exit_reason}</td>
+              <Excursion r={t.mfe_r} price={t.mfe_price} inr={t.mfe_inr} tone="text-emerald-500/70" basis={t.mark_basis} />
+              <Excursion r={t.mae_r} price={t.mae_price} inr={t.mae_inr} tone="text-rose-500/70" basis={t.mark_basis} />
+              <td className="px-2 py-1.5 text-slate-400">
+                {t.exit_reason}
+                {t.stop && t.stop.level > 0 && <StopTrail s={t.stop} />}
+              </td>
               <td className="px-2 py-1.5">
                 <GradeBadge grade={t.grade} />
               </td>
