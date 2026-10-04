@@ -15,6 +15,7 @@ from kotsin_nse.engine import Engine
 from kotsin_nse.exec.gateway import Mode
 from kotsin_nse.exec.paper import BookSnapshot
 from kotsin_nse.instrument.select import Quote
+from tests._books import held
 
 from .test_entry_cutoff_and_carry import _close_trigger, _next_session
 from .test_limit_orders import OPT as L_OPT
@@ -191,6 +192,6 @@ async def test_a_carried_trigger_waits_for_a_print_traded_this_session(settings)
             import asyncio
 
             await asyncio.gather(*list(e._decision_tasks), return_exceptions=True)
-        assert len(e.positions) == 5 and not e._carry_pending
+        assert len(held(e)) == 5 and not e._carry_pending
     finally:
         await e.stop()
