@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { postJson } from '../lib/api'
+import { contractName, postJson } from '../lib/api'
 import { usePoll } from '../lib/usePoll'
 
 // One card per FUDKII trigger, read for one book. Every trigger is scored the same way whether the
@@ -196,7 +196,7 @@ function Levels({ c }: { c: Card }) {
   const optEntry = p ? p.entry : plan?.ok ? plan.premium : null
   const optSl = p ? (c.live ? Math.max(c.live.line, c.live.optionSl) : p.option_sl) : plan?.ok ? plan.optionSl : null
   const optLadder = p ? (c.live?.ladder?.length ? c.live.ladder : p.option_targets) : plan?.ok ? (plan.ladder ?? []) : []
-  const optHead = p ? `${p.instrument.name} · ${p.qty / p.instrument.lot_size} lots (${p.qty})` : plan?.ok ? `${plan.contract} · ${plan.lots} lots (${plan.qty})` : plan ? `no contract — ${plan.reason}` : 'no contract'
+  const optHead = p ? `${contractName(p.instrument.name)} · ${p.qty / p.instrument.lot_size} lots (${p.qty})` : plan?.ok ? `${contractName(plan.contract)} · ${plan.lots} lots (${plan.qty})` : plan ? `no contract — ${plan.reason}` : 'no contract'
   const n = Math.max(c.targets?.length ?? 0, fut?.ahead.length ?? 0, optLadder.length, 1)
   const rows: { key: string; tone: Tone; icon: string; eq: React.ReactNode; fu: React.ReactNode; op: React.ReactNode }[] = []
   const cell = (price: number | null | undefined, sub?: string | null, ref?: number) => (
@@ -262,7 +262,7 @@ function Timeline({ c }: { c: Card }) {
   const rows: { ts: number; what: string; detail: string; tone: Tone }[] = [{ ts: c.ts + 1800, what: 'fired', detail: `${c.reason} · grade ${c.grade ?? '—'} rr ${f(c.rr)}`, tone: 'sky' }]
   if (c.route) rows.push({ ts: c.route.ts ?? c.ts + 1800, what: `route ${c.route.route}`, detail: c.route.reason, tone: c.route.route === 'COUNTER' ? 'orange' : 'slate' })
   if (c.skip) rows.push({ ts: c.skip.ts, what: 'skipped', detail: c.skip.reason, tone: 'rose' })
-  if (c.position) rows.push({ ts: c.position.opened_ts, what: 'filled', detail: `${c.position.qty} × @ ${f(c.position.entry)} · ${c.position.instrument.name}`, tone: 'amber' })
+  if (c.position) rows.push({ ts: c.position.opened_ts, what: 'filled', detail: `${c.position.qty} × @ ${f(c.position.entry)} · ${contractName(c.position.instrument.name)}`, tone: 'amber' })
   for (const o of c.exits) rows.push({ ts: o.ts, what: 'exit', detail: `${o.filled ?? o.qty} @ ${f(o.avg_price)} — ${o.reason}`, tone: 'emerald' })
   for (const e of c.operator) rows.push({ ts: e.ts, what: e.kind.replace('operator.', 'operator '), detail: 'override, audited', tone: 'amber' })
   if (c.trade) rows.push({ ts: c.position?.closed_ts ?? c.ts, what: 'closed', detail: `${c.trade.exit_reason} · net ${inr(c.trade.net)} · MFE ${f(c.trade.mfe_r)}R MAE ${f(c.trade.mae_r)}R`, tone: c.trade.net >= 0 ? 'emerald' : 'rose' })
@@ -319,10 +319,10 @@ function Cta({ book, c, onDone }: { book: string; c: Card; onDone: () => void })
   }
   const act = (kind: 'take' | 'skip') =>
     post(book, kind, kind === 'take'
-      ? `Enter ${BOOK_LABEL[book] ?? book} on ${c.symbol} now — ${c.plan?.lots} lots (${c.plan?.qty}) of ${c.plan?.contract} × ₹${f(c.plan?.premium)} ≈ ${inr0(c.plan?.outlay)}?`
+      ? `Enter ${BOOK_LABEL[book] ?? book} on ${c.symbol} now — ${c.plan?.lots} lots (${c.plan?.qty}) of ${contractName(c.plan?.contract)} × ₹${f(c.plan?.premium)} ≈ ${inr0(c.plan?.outlay)}?`
       : `Close ${BOOK_LABEL[book] ?? book}'s ${c.symbol} position now, at the market?`, kind)
   const takeCounter = () => cc && post(cc.book, 'take',
-    `Enter ${cc.label} on ${c.symbol} COUNTER-TREND now — ${cc.lots} lots (${cc.qty}) of ${cc.contract} × ₹${f(cc.premium)} ≈ ${inr0(cc.outlay)}?`, 'counter')
+    `Enter ${cc.label} on ${c.symbol} COUNTER-TREND now — ${cc.lots} lots (${cc.qty}) of ${contractName(cc.contract)} × ₹${f(cc.premium)} ≈ ${inr0(cc.outlay)}?`, 'counter')
   const mid = c.live?.mid ?? null
   const left = c.live?.qtyRemaining ?? c.position?.qty_remaining ?? 0
   const lot = c.position?.instrument.lot_size || 1
@@ -332,9 +332,9 @@ function Cta({ book, c, onDone }: { book: string; c: Card; onDone: () => void })
       {cc && (
         <div className="basis-full flex flex-wrap items-center gap-2.5">
           {cc.enabled ? (
-            <button disabled={busy !== null} onClick={takeCounter} className="inline-flex items-center gap-2 rounded-xl bg-orange-400 px-5 py-2.5 text-[14.5px] font-bold text-slate-950 shadow-[0_6px_20px_-8px_rgba(251,146,60,0.8)] hover:bg-orange-300 disabled:opacity-40"><I d={IC.check} />TAKE COUNTER-TREND · {cc.label}: {cc.contract}{sizeText(cc)}</button>
+            <button disabled={busy !== null} onClick={takeCounter} className="inline-flex items-center gap-2 rounded-xl bg-orange-400 px-5 py-2.5 text-[14.5px] font-bold text-slate-950 shadow-[0_6px_20px_-8px_rgba(251,146,60,0.8)] hover:bg-orange-300 disabled:opacity-40"><I d={IC.check} />TAKE COUNTER-TREND · {cc.label}: {contractName(cc.contract)}{sizeText(cc)}</button>
           ) : (
-            <button disabled aria-disabled className={grey}><I d={IC.check} />{cc.action === 'taken' ? 'TAKEN' : cc.action === 'held' ? 'HELD' : 'TAKE'} COUNTER-TREND · {cc.label}: {cc.contract ?? `${c.symbol} — no contract`}{sizeText(cc)}</button>
+            <button disabled aria-disabled className={grey}><I d={IC.check} />{cc.action === 'taken' ? 'TAKEN' : cc.action === 'held' ? 'HELD' : 'TAKE'} COUNTER-TREND · {cc.label}: {contractName(cc.contract) ?? `${c.symbol} — no contract`}{sizeText(cc)}</button>
           )}
           {cc.reason && <span className={`text-[13.5px] ${cc.enabled ? 'text-orange-200/80' : 'text-slate-400'}`}>{cc.enabled ? '' : cc.action === 'take' ? 'Why disabled: ' : ''}{cc.reason}</span>}
         </div>
@@ -343,10 +343,10 @@ function Cta({ book, c, onDone }: { book: string; c: Card; onDone: () => void })
         <button disabled={busy !== null} onClick={() => act('skip')} className="inline-flex items-center gap-2 rounded-xl bg-rose-500 px-5 py-2.5 text-[14.5px] font-bold text-slate-950 shadow-[0_6px_20px_-8px_rgba(251,113,133,0.8)] hover:bg-rose-400 disabled:opacity-40"><I d={IC.x} />SKIP · close {Math.floor(left / lot)} lots ({left.toLocaleString('en-IN')}) at market{mid ? ` ≈ ₹${mid.toFixed(2)} = ${inr0(mid * left * (c.position?.instrument.multiplier || 1))}` : ''}</button>
       ) : (
         canTake ? (
-          <button disabled={busy !== null} onClick={() => act('take')} className="inline-flex items-center gap-2 rounded-xl bg-emerald-400 px-5 py-2.5 text-[14.5px] font-bold text-slate-950 shadow-[0_6px_20px_-8px_rgba(52,211,153,0.8)] hover:bg-emerald-300 disabled:opacity-40"><I d={IC.check} />TAKE {c.plan?.contract}{sizeText(c.cta?.lots ? c.cta : { lots: c.plan?.lots, qty: c.plan?.qty, premium: c.plan?.premium, outlay: c.plan?.outlay })}</button>
+          <button disabled={busy !== null} onClick={() => act('take')} className="inline-flex items-center gap-2 rounded-xl bg-emerald-400 px-5 py-2.5 text-[14.5px] font-bold text-slate-950 shadow-[0_6px_20px_-8px_rgba(52,211,153,0.8)] hover:bg-emerald-300 disabled:opacity-40"><I d={IC.check} />TAKE {contractName(c.plan?.contract)}{sizeText(c.cta?.lots ? c.cta : { lots: c.plan?.lots, qty: c.plan?.qty, premium: c.plan?.premium, outlay: c.plan?.outlay })}</button>
         ) : (
           // Not takeable: still name the contract and what it would cost, greyed out, with the reason underneath.
-          <button disabled aria-disabled className={grey}><I d={IC.check} />{c.cta?.action === 'taken' || c.state === 'TRADED' ? 'TAKEN' : 'TAKE'} {c.cta?.contract ?? c.plan?.contract ?? `${c.symbol} ${c.cta?.type ?? c.side ?? ''} — no listed contract`}{sizeText(c.cta)}</button>
+          <button disabled aria-disabled className={grey}><I d={IC.check} />{c.cta?.action === 'taken' || c.state === 'TRADED' ? 'TAKEN' : 'TAKE'} {contractName(c.cta?.contract ?? c.plan?.contract) ?? `${c.symbol} ${c.cta?.type ?? c.side ?? ''} — no listed contract`}{sizeText(c.cta)}</button>
         )
       )}
       {canTake && <span className="text-[13.5px] text-slate-400">ask {f(c.plan?.ask)} · spread {f(c.plan?.spreadPct, 1)}% · δ {f(c.plan?.delta)}</span>}
@@ -671,7 +671,7 @@ function TriggerCard({ book, c, open, onToggle, refresh, readOnly = false }: { b
   // NSE's last bar is 15:15–15:30 (the close), decided at 15:30 — not 15:45; MCX bars (futures, LONG/SHORT) run to 23:30
   const barEnd = ist(c.ts, false) === '15:15' && (buys === 'CE' || buys === 'PE') ? c.ts + 900 : c.ts + 1800
   const sideText = fading ? `${bull ? 'Bullish' : 'Bearish'} trigger · fade buys ${buys}` : `${bull ? 'Bullish' : 'Bearish'} · buy ${buys}`
-  const contract = c.position?.instrument.name ?? c.plan?.contract ?? c.cta?.contract ?? `${c.symbol} ${c.side ?? (bull ? 'CE' : 'PE')} — no listed contract`
+  const contract = contractName(c.position?.instrument.name ?? c.plan?.contract ?? c.cta?.contract) ?? `${c.symbol} ${c.side ?? (bull ? 'CE' : 'PE')} — no listed contract`
   const lots = c.position ? `${c.position.qty / c.position.instrument.lot_size} lots (${c.position.qty.toLocaleString('en-IN')})` : c.plan?.ok ? `${c.plan.lots} lots (${(c.plan.qty ?? 0).toLocaleString('en-IN')}) · ${inr0(c.plan.outlay)}` : null
   // the one sentence this card exists to say: what THIS book did, and why
   const why: { text: React.ReactNode; tone: Tone } = (() => {
@@ -851,7 +851,7 @@ function Expanded({ book, c }: { book: string; c: Card }) {
             <Section icon={IC.ticket} title="order trail · limit orders">
               <div className="text-[13.5px] leading-relaxed">
                 {(c.restingTargets && c.restingTargets.length > 0 ? c.restingTargets : c.restingTarget ? [c.restingTarget] : []).map((t) => <div key={`r${t.rung}`} className="text-emerald-300">RESTING · T{t.rung} sell {f(t.limit)} × {t.qty} ({t.lots} lot{t.lots === 1 ? '' : 's'}) since {ist(t.placedTs)} — fills on a touch</div>)}
-                {c.pending && <div className="text-amber-300">PENDING · {c.pending.contract} · limit {f(c.pending.limit)} resting {f(c.pending.restingS, 0)} s · {trail(c.pending)} · {c.pending.why}</div>}
+                {c.pending && <div className="text-amber-300">PENDING · {contractName(c.pending.contract)} · limit {f(c.pending.limit)} resting {f(c.pending.restingS, 0)} s · {trail(c.pending)} · {c.pending.why}</div>}
                 {c.execLog?.entry && <div className="text-slate-300"><b className="text-slate-200">Entry:</b> {trail(c.execLog.entry)}</div>}
                 {(c.execLog?.exits ?? []).map((x, i) => <div key={i} className="text-slate-300"><b className="text-slate-200">Exit {x.reason ?? ''}{x.qty ? ` ×${x.qty}` : ''}:</b> {trail(x)}</div>)}
                 {(c.execLog?.targets ?? []).filter((t) => t.outcome !== 'placed' && !t.outcome.startsWith('kept')).map((t, i) => <div key={`t${i}`} className="text-slate-400"><b className="text-slate-300">T{t.rung} resting sell {f(t.limit)} ×{t.qty}:</b> placed {ist(t.placedTs)} · {t.outcome} {ist(t.ts)}</div>)}

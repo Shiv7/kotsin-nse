@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 import time
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -376,6 +377,16 @@ def _fmt(v: Any, dp: int = 2) -> str:
     return html.escape(str(v))
 
 
+_STRIKE_DECIMALS = re.compile(r"\b(CE|PE) (\d+)\.(\d*?)0*$")
+
+
+def contract_label(name: str) -> str:
+    """A contract as a person reads it (operator, 2026-10-04): the strike keeps only the decimals it needs —
+    "KEI 29 SEP 2026 CE 4700.00" → "... CE 4700", "GAIL 27 OCT 2026 PE 167.50" → "... PE 167.5". Display
+    only; the engine's names are the scrip master's. The dashboard's ``contractName`` is the same rule."""
+    return _STRIKE_DECIMALS.sub(lambda m: f"{m[1]} {m[2]}" + (f".{m[3]}" if m[3] else ""), name)
+
+
 def _bucket(decision: str) -> str:
     return {"PAPER_FILLED": "filled", "WALLET_HALTED": "blocked"}.get(decision, "refused")
 
@@ -421,7 +432,7 @@ def render(rows: list[dict[str, Any]], ticket: Ticket, ab: dict[str, Any] | None
             f'<tr><td class="sym">{ist(r["fired_ts"])}</td><td class="sym l">{html.escape(r["symbol"] or "")}</td>'
             f'<td>{"long" if r["dir"] == "BULLISH" else "short"}</td><td>{html.escape(r["grade"] or "—")}</td>'
             f'<td><span class="chip {b}">{_LABEL.get(r["decision"], r["decision"])}</span></td>'
-            f'<td class="l">{html.escape(r["contract"] or "—")}</td>'
+            f'<td class="l">{html.escape(contract_label(r["contract"] or "—"))}</td>'
             f'<td class="dim">{ist(r["ts"])}</td>'
             f'<td>{_fmt(r["entry"])}</td><td>{_fmt(r["atr"])}</td><td>{_fmt(r["atr_pct"])}%</td>'
             f'<td>{_fmt(r["rr"])}</td><td>{_fmt(r["fortress"], 1)}</td><td>{_fmt(r["room_atr"])}</td>'
@@ -459,7 +470,7 @@ def render(rows: list[dict[str, Any]], ticket: Ticket, ab: dict[str, Any] | None
         fbody.append(
             f'<tr><td class="sym">{ist(f["opened_ts"])}</td><td class="sym l">{html.escape(r["symbol"])}</td>'
             f'<td class="l">{html.escape(f["book"].replace("FUDKII_", "").replace("FUDKII", "PARENT"))}{" (shadow)" if f["book"] in shadows else ""}</td>'
-            f'<td class="l">{html.escape(f["contract"])}</td><td>{f["lots"]}</td><td>{f["qty"]:,}</td>'
+            f'<td class="l">{html.escape(contract_label(f["contract"]))}</td><td>{f["lots"]}</td><td>{f["qty"]:,}</td>'
             f'<td>{_fmt(f["premium"])}</td><td>{_fmt(f["opt_stop"])}</td><td>{_fmt(f["opt_stop_now"])}</td>'
             f'<td>{" · ".join(_fmt(t) for t in f["opt_targets"]) or "—"}</td>'
             f'<td class="dim">{html.escape(f["status"] or "")}</td><td>{_fmt(f["exit_price"])}</td>'

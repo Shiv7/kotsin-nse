@@ -104,7 +104,7 @@ def test_the_page_renders_every_number_it_was_given():
 
     t = Ticket(day="2026-09-24", created_ts=time.time(), expires_ts=time.time() + 3600)
     out = render(rows, t)
-    for token in ("AUBANK", "1,002.15", "979.55", "2.31", "11.15", "1d.S3", "PE 980.00",
+    for token in ("AUBANK", "1,002.15", "979.55", "2.31", "11.15", "1d.S3", "PE 980</td>",
                   "6.55", "SL-OP", "-15,748", "24 September 2026", "deletes itself"):
         assert token in out, f"{token} missing from the page"
     assert out.startswith("<!doctype html>") and out.count("<table") == 3
@@ -165,7 +165,7 @@ def test_open_interest_and_the_contract_reach_the_page():
     assert rows[0]["contract"] == "AUBANK 29 SEP 2026 PE 980.00"
     from kotsin_nse.api.daybook import Ticket
     out = render(rows, Ticket(day="2026-09-24", created_ts=time.time(), expires_ts=time.time() + 60))
-    for token in ("17,837,000", "1.40", "PE 980.00", "OI chg%", "Fut T1", "Eq T4", "OTM contract"):
+    for token in ("17,837,000", "1.40", "PE 980</td>", "OI chg%", "Fut T1", "Eq T4", "OTM contract"):
         assert token in out, f"{token} missing"
 
 
