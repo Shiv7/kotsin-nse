@@ -21,6 +21,7 @@ Ordering matters and is deliberate:
 from __future__ import annotations
 
 import math
+from collections import deque
 from dataclasses import dataclass, replace
 
 from ..domain import Direction, ExitDecision, ExitReason, OptionType, Position
@@ -79,6 +80,8 @@ class ExitEngine:
         self.limits = limits
         #: per position: (minute bucket, last option print in it) — the option's own 1m close
         self._minute: dict[str, tuple[int, float]] = {}
+        #: per position: the stock's prints over the last ``eq_stop_fast_window_s`` — the equity stop's velocity
+        self._und_hist: dict[str, deque[tuple[float, float]]] = {}
 
     def evaluate(self, pos: Position, view: MarketView) -> ExitDecision | None:
         if pos.status != "OPEN" or pos.qty_remaining <= 0:
@@ -93,7 +96,7 @@ class ExitEngine:
         self._mark(pos, view, mid)
 
         # 0. hard floor below the stop — path-independent, so a feed gap cannot hide it -----------
-        if lim.sustain_s is not None and view.quote_ok and mid > 0 and pos.option_sl > 0:
+        if lim.stop_mode == "option" and lim.sustain_s is not None and view.quote_ok and mid > 0 and pos.option_sl > 0:
             floor = pos.option_sl * (1 - lim.hard_floor_below_stop_pct / 100)
             if mid <= floor:
                 return ExitDecision(
@@ -111,7 +114,12 @@ class ExitEngine:
         # confirmed, the option-side breach is not noise and gets no grace.
         if lim.own_ladder and (hard := self._own_hard_stop(pos, view, mid)) is not None:
             return hard
-        if lim.sustain_s is not None and self._equity_breached(pos, view):
+        if lim.stop_mode == "equity":
+            # the ONE strategic stop under the equity mode: the stock, confirmed by magnitude × time, and the
+            # premium cap. The option-side rules below are the "option" mode's and do not run.
+            if (stop := self._equity_stop(pos, view)) is not None:
+                return stop
+        if lim.stop_mode == "option" and lim.sustain_s is not None and self._equity_breached(pos, view):
             return ExitDecision(
                 pos.id,
                 ExitReason.SL_EQ,
@@ -120,7 +128,7 @@ class ExitEngine:
                 f"underlying confirmed the breach at {view.underlying_ltp:.2f} — no grace",
                 level=pos.equity_sl, trigger_price=view.underlying_ltp or 0.0, trigger_on="underlying",
             )
-        if lim.sustain_s is not None and mid > 0 and pos.option_sl > 0:
+        if lim.stop_mode == "option" and lim.sustain_s is not None and mid > 0 and pos.option_sl > 0:
             # The sustained decision is the answer under this policy, so it returns here rather
             # than falling through to the plain-touch rule below — which would otherwise reach its
             # own return first and report the touch, not the sustain.
@@ -131,7 +139,10 @@ class ExitEngine:
                 # backstops: returning None here used to skip the halt, the daily-loss exit and
                 # the 15:20 force-flat for as long as the option sat under its stop.
                 return self._backstops(pos, view, ltp)
-        if ltp > 0 and pos.option_sl > 0 and ltp <= pos.option_sl:
+        # the plain touch of the option stop — and, under the equity mode, only once ``_trail`` has raised the
+        # level above the thesis stop: then it is the base book's trail (breakeven after T1, the 40 % give-back),
+        # not the stop, and it keeps working
+        if ltp > 0 and pos.option_sl > 0 and ltp <= pos.option_sl and (lim.stop_mode == "option" or pos.option_sl > pos.initial_option_sl):
             if lim.sustain_s is not None:
                 return self._backstops(pos, view, ltp)  # no exit on a bare touch; backstops still apply
             return ExitDecision(
@@ -142,7 +153,7 @@ class ExitEngine:
                 f"option {ltp:.2f} ≤ stop {pos.option_sl:.2f} (peak {pos.peak_r:.2f}R)",
                 level=pos.option_sl, trigger_price=ltp, trigger_on="option last",
             )
-        if view.underlying_ltp is not None and pos.equity_sl > 0:
+        if lim.stop_mode == "option" and view.underlying_ltp is not None and pos.equity_sl > 0:
             breached = (
                 view.underlying_ltp <= pos.equity_sl
                 if pos.direction is Direction.BULLISH
@@ -236,6 +247,9 @@ class ExitEngine:
         if pos.status != "OPEN" or pos.qty_remaining <= 0:
             return None
         ltp = view.option_ltp
+        if self.limits.stop_mode == "equity":
+            # the same strategic path as ``evaluate``: the stock decides; the cap needs a fresh option quote
+            return self._equity_stop(pos, view) or self._backstops(pos, view, ltp)
         if self._equity_breached(pos, view):
             return ExitDecision(
                 pos.id, ExitReason.SL_EQ, ltp, pos.qty_remaining,
@@ -243,6 +257,77 @@ class ExitEngine:
                 level=pos.equity_sl, trigger_price=view.underlying_ltp or 0.0, trigger_on="underlying",
             )
         return self._backstops(pos, view, ltp)
+
+    # -- the equity stop (``stop_mode == "equity"``) ----------------------------------------------------
+
+    def _equity_stop(self, pos: Position, view: MarketView) -> ExitDecision | None:
+        """The strategic stop judged on the STOCK, the option only sold (operator, 2026-10-04).
+
+        WATCH → the stock through its stop → CONFIRM → SELL, with the wait set by the breach itself:
+
+        * decisive — through by ``eq_stop_margin_pct`` of price, or the stock moved ``eq_stop_fast_pct``
+          against the trade over ``eq_stop_fast_window_s``, or the first print after entry is already
+          through (a gap) — sells on this read;
+        * marginal — a clock starts and the integral of (% through) accrues each read: the trade sells
+          when it reaches ``eq_stop_area_pct_s`` (a bigger breach confirms sooner) or at
+          ``eq_stop_confirm_s`` at the latest; a read back inside the stop clears both (touch and
+          reverse — 23 of 33 breaches on the 29 Sep – 1 Oct tape were back inside within 5 min);
+        * the premium cap — the option bid (the last trade without one) ``eq_stop_premium_cap_pct``
+          under the premium paid — sells whatever the stock says, on a fresh quote.
+
+        No quote of the option delays or triggers the stop; a stale one only suspends the cap. The
+        decision names the level, the read that breached it and what that read was, kept apart from
+        the fill the engine records."""
+        lim = self.limits
+        ltp = view.option_ltp
+        if view.quote_ok and lim.eq_stop_premium_cap_pct is not None and pos.entry > 0:
+            px = view.option_bid if view.option_bid and view.option_bid > 0 else ltp
+            cap = pos.entry * (1 - lim.eq_stop_premium_cap_pct / 100)
+            if px and px <= cap:
+                return ExitDecision(
+                    pos.id, ExitReason.SL_OP, ltp, pos.qty_remaining,
+                    f"premium cap: option {px:.2f} ≤ {cap:.2f} ({lim.eq_stop_premium_cap_pct:g} % under the premium paid)",
+                    level=round(cap, 2), trigger_price=px, trigger_on="option bid",
+                )
+        und = view.underlying_ltp
+        if und is None or und <= 0 or pos.equity_sl <= 0:
+            return None
+        hist = self._und_hist.setdefault(pos.id, deque())
+        first = not hist
+        hist.append((view.now, und))
+        while hist and view.now - hist[0][0] > lim.eq_stop_fast_window_s:
+            hist.popleft()
+        sign = 1 if pos.direction is Direction.BULLISH else -1
+        through = sign * (pos.equity_sl - und) / und * 100  # > 0: through the stop, % of price
+        if through < 0:
+            pos.breach_since, pos.stop_area = None, 0.0
+            return None
+        back = hist[0][1]
+        fell = sign * (back - und) / back * 100 if back > 0 else 0.0
+        why = None
+        if first:
+            why = "the first stock print after entry is already through"
+        elif through >= lim.eq_stop_margin_pct:
+            why = f"decisive, {through:.2f} % through"
+        elif fell >= lim.eq_stop_fast_pct:
+            why = f"fast, the stock moved {fell:.2f} % against the trade in {lim.eq_stop_fast_window_s:.0f} s"
+        elif pos.breach_since is None:
+            pos.breach_since, pos.stop_area = view.now, through
+            return None
+        else:
+            pos.stop_area += through
+            held = view.now - pos.breach_since
+            if pos.stop_area >= lim.eq_stop_area_pct_s:
+                why = f"persistent, {pos.stop_area:.2f} %·s through in {held:.0f} s"
+            elif held >= lim.eq_stop_confirm_s:
+                why = f"still through after {held:.0f} s"
+        if why is None:
+            return None
+        return ExitDecision(
+            pos.id, ExitReason.SL_EQ, ltp, pos.qty_remaining,
+            f"stock {und:.2f} through its stop {pos.equity_sl:.2f} — {why}",
+            level=pos.equity_sl, trigger_price=und, trigger_on="underlying",
+        )
 
     # -- state -----------------------------------------------------------------------------------
 
@@ -792,8 +877,8 @@ def replay_gap(
     leaves the scrip master, so this only works while the option is still listed. The hard floor
     covers both, being path-independent.
     """
-    if limits.sustain_s is None or not candles:
-        return None
+    if limits.sustain_s is None or limits.stop_mode == "equity" or not candles:
+        return None  # the option sustain is the option mode's; under the equity mode the stock decides
     for ts, close in sorted(candles):
         if close <= 0 or pos.option_sl <= 0:
             continue

@@ -132,6 +132,21 @@ trigger is the read cadence and the book's grace, by design; trigger → bid is 
 the depth. None of it is the SL level: a stop is never booked AT its level (CAN2 did, and its ledger
 was optimistic by the gap).
 
+**The equity stop mode** (`stop_mode` in `risk/limits.py`, set per engine by `data/engine.json` `"stop_mode": "equity"`;
+built 4 Oct, OFF by default). The stock's stop is the thesis trigger and the option only the instrument sold: a
+decisive breach (0.10 % of price through, or the stock 0.35 % against the trade in 60 s, or the first print after
+entry already through) sells on that read; a marginal one is confirmed by magnitude × time — the integral of (%
+through) over the continuous breach reaching 1.0 %·s (0.05 % confirms in 20 s, 0.02 % in 50 s), 60 s at the latest;
+a read back inside clears it; the option bid 25 % under the premium paid sells whatever the stock says (a fresh
+quote only). The option-side stop rules — the delta-projected option stop, the 75 s sustain, the 9 % hard floor,
+the stock stop as the option's confirmation — do not run; the rung ratchet, the give-back line, targets, the base
+book's trail, the time stop and the flatten are unchanged. One decision point, `ExitEngine.evaluate` →
+`_equity_stop`, shared by every book. Tape replay 29 Sep – 1 Oct, 73 trades: +₹14,702 against the option mode
+replayed on the same tape (FUDKII +13.1k, RT-N +13.5k, RT-X +3.2k; RT-Y −4.0k, RT-Y-F −5.6k, RT-Y-W1 −5.5k), the
+gain in touch-and-reverse exits avoided, the cost in slow breaches where the option stop had sold a minute earlier.
+Nothing knowable at the instant of a breach separated the ones that reversed from the ones that persisted; only
+time outside did, which is why the wait is magnitude × time and not a clock alone.
+
 **MFE / MAE** are marked on what the position could be SOLD for — the bid when the option has one, the
 last trade when it does not — and every exit fill is folded in, so a trade's exit is never below its
 MAE nor above its MFE. A stale quote marks nothing (no new price was seen); the fill that ends a
