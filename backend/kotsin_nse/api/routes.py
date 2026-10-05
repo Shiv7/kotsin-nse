@@ -755,6 +755,12 @@ def build_app(engine: Engine) -> FastAPI:
             ],
         }
 
+    @api.get("/volume/relative")
+    async def volume_relative(ts: int | None = None) -> dict[str, Any]:
+        """Every NSE stock's volume at a closed 30m bar (the last by default): against its own usual half hour
+        and against the NIFTY50 at the same bar, highest first (``Engine.volume_table``)."""
+        return engine.volume_table(ts)
+
     @api.get("/indicators/{symbol}")
     async def indicators(symbol: str, tf: str = "30m", n: int = Query(300, le=1000)) -> dict[str, Any]:
         """Bollinger and SuperTrend per bar — computed by the SAME functions, with the SAME live

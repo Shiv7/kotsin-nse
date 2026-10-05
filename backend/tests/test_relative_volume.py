@@ -80,3 +80,24 @@ def test_a_trigger_reads_twice_relative_and_gets_its_tier(engine, monkeypatch):
     # no NIFTY50 reading yet: the stock's own time-of-day ratio still shows, without a tier
     monkeypatch.setattr(engine, "n50_relative_volume", lambda t: (None, None))
     assert engine.relative_volume("ADANIGREEN", _ts(5, 13, 15), 5.40) == {"slotVol": 1.26}
+
+
+def test_every_stock_is_read_at_each_closed_bar_highest_first_and_kept_once_the_nifty50_stands(engine, monkeypatch):
+    from kotsin_nse.bars.unified import BarSource, UnifiedBar
+
+    t = _ts(5, 13, 15)
+    for sym in ("ADANIGREEN", "UNITDSPR"):
+        engine.underlyings[sym] = Instrument(sym, sym, Segment.NSE_EQ, InstrumentKind.EQUITY, underlying=sym)
+        engine.store.seed(sym, "30m", [UnifiedBar(symbol=sym, scrip_code=sym, tf="30m", ts=t, open=1, high=1, low=1, close=1,
+                                                   volume=1000, source=BarSource.REST, complete=True)])
+    monkeypatch.setattr(engine, "_volume_reading", lambda m, ts, bars=None: VolumeReading(2.0, 1.0, 1000.0))
+    rel = {"ADANIGREEN": 3.13, "UNITDSPR": 3.21}
+    monkeypatch.setattr(engine, "relative_volume", lambda m, ts, s: {"relVol": rel.get(m), "relVolTier": rel_volume_tier(rel.get(m))})
+    monkeypatch.setattr(engine, "n50_relative_volume", lambda ts: (1.43, 1.5))
+    out = engine.volume_table()
+    assert out["ts"] == t and [r["symbol"] for r in out["rows"]] == ["UNITDSPR", "ADANIGREEN"]
+    assert out["rows"][0]["relVolTier"] == "high" and t in engine._vol_table, "kept for the bar"
+    engine._vol_table.clear()
+    monkeypatch.setattr(engine, "n50_relative_volume", lambda ts: (None, None))
+    engine.volume_table(t)
+    assert t not in engine._vol_table, "the NIFTY50 has not read yet: asked again on the next call"
