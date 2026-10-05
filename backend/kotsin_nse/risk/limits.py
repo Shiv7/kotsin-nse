@@ -211,6 +211,11 @@ class RiskLimits:
     #: its own way — the opposite OTM, stop 1 ATR30 past the close. The replay's fade made +3.72 %
     #: / +5.87 % in the two halves (40 trades, before costs). None = off.
     gap_fade_datr: float | None = None
+    #: The fade's stock stop (``Engine.fade_plan``): False = 1 ATR30 past the close; True = the NEARER of that and 0.1
+    #: ATR30 past the first classic level (raw: 1d / 1wk / 1mo pivot, TC, BC, R1-R4, S1-S4) at least 0.25 ATR30 past
+    #: the close (operator, 2026-10-06: "SL based on pivot clusters or ATR based on what is nearer"). Route study on
+    #: CT-Y's published gap fades: 1-28 Sep +₹39,515 -> +₹50,219 on 18, 29 Sep - 5 Oct −₹15,551 -> −₹11,742 on 8.
+    fade_stop_nearer_level: bool = False
     #: The gap fade's own RR is a label; set this to make it a floor. None = never blocks.
     gap_fade_min_rr: float | None = None
     #: A shadow twin's equity stop, moved this many percent further from entry than the book it
@@ -351,6 +356,7 @@ CT_Y_LIMITS = replace(
     gap_fade_datr=0.3,  # CT-Y fades the 09:45 gap-with triggers RT-Y stands aside from (2026-09-26)
     gap_switch_rel_vol=None,
     gap_fade_max_rel_vol=3.0,  # ... but not one on >= 3x the NIFTY50's volume: RT-Y follows that (2026-10-06)
+    fade_stop_nearer_level=True,  # the nearer of 1 ATR30 and just past the next classic level (2026-10-06)
     max_premium_loss_pct=None,  # RT-Y's 25 % cap is RT-Y's (2026-09-28), not the fade's
     min_equity_stop_atr=None,   # so is its stop floor (2026-10-01): a fade's stop is its own plan's
 )
@@ -378,4 +384,5 @@ RT_Y_F_LIMITS = replace(RT_Y_LIMITS, min_equity_stop_atr=None,  # RT-Y's floor i
 #: 24 Aug - 1 Oct the rule lost: 73 fades, −₹80,934 (−₹76,238 to 11 Sep, −₹4,696 after) — though following the same
 #: triggers lost −₹2,17,547. Unproven, hence a shadow.
 CT_M_MARKET_AGAINST_MAX = 0.45
-CT_M_LIMITS = replace(CT_Y_LIMITS, gap_fade_datr=None)  # its own fade route, not CT-Y's 09:45 gap rule
+CT_M_LIMITS = replace(CT_Y_LIMITS, gap_fade_datr=None,  # its own fade route, not CT-Y's 09:45 gap rule
+                      fade_stop_nearer_level=False)  # and its 1-ATR30 stop as measured (2026-10-06)

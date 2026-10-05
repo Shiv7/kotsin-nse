@@ -254,14 +254,16 @@ BOOKS: tuple[Book, ...] = (
         tf="30m entry, 1s exit",
         summary=(
             "Two fades under RT-Y's exits: (a) its own 09:45 gap fade — a first-bar trigger that gapped 0.3 daily ATR or more "
-            "its own way, faded with the stock stop 1 ATR30 past the close and the fade side's walls as targets; (b) CT-X's "
+            "its own way, faded with the stock stop at the nearer of 1 ATR30 and 0.1 ATR30 past the next classic level and the "
+            "fade side's walls as targets; (b) CT-X's "
             "counter-trend fade, decided for itself, except on a trigger it already gap-faded."
         ),
         status="live",
         params={
             "gap_fade_datr": "0.3 daily ATR, the trigger's own way, 09:45 bar only",
             "gap_fade_max_rel_vol": "3.0 — no gap fade on >= 3x the NIFTY50's volume: the gap switch, RT-Y follows it (2026-10-06)",
-            "fade plan": "Engine.fade_plan — the same plan FUDKII-CT-M uses",
+            "fade plan": "Engine.fade_plan — the same plan FUDKII-CT-M uses, CT-M's stop always 1 ATR30",
+            "fade_stop_nearer_level": "true — the stop is the nearer of 1 ATR30 and 0.1 ATR30 past the first classic level >= 0.25 ATR30 past the close (2026-10-06)",
             "counter_wall_min": "5.2 (route b, CT-X's)",
             "exits": "RT-Y policy incl. the +5 % T1 floor; no 25 % premium cap",
             "size": "4 lots under ₹75,000",

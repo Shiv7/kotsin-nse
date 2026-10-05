@@ -110,7 +110,8 @@ def trigger_verdicts(
     if gap_ev is not None and not gap_ev.get("blocked"):
         ct_y = {"action": "GAP FADE", "side": gap_ev.get("side") or fade_side, "stop": gap_ev.get("stop"), "targets": gap_ev.get("targets") or [],
                 "rr": gap_ev.get("rr"), "grade": gap_ev.get("grade"),
-                "why": f"09:45 gap {float(gap_ev.get('gapDatr') or 0):.2f} daily ATR with the trigger — CT-Y fades it, stop 1 ATR30 past the close"}
+                "why": f"09:45 gap {float(gap_ev.get('gapDatr') or 0):.2f} daily ATR with the trigger — CT-Y fades it, "
+                       f"stop {gap_ev.get('stopNote') or '1 ATR30 past the close'}"}
     elif gap_fade is not None:
         ct_y = {"action": "GAP FADE", "side": fade_side, "stop": gap_fade.get("stop"), "targets": gap_fade.get("targets") or [],
                 "rr": gap_fade.get("rr"), "grade": gap_fade.get("grade"), "why": str(gap_fade.get("reason") or "")}
