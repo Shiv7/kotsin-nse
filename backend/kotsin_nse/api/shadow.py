@@ -28,7 +28,7 @@ from .daybook import _CSS, _fmt, contract_label, render_ab
 BOOKS = ("FUDKII", "FUDKII_RT_X", "FUDKII_RT_N", "FUDKII_RT_Y", "FUDKII_CT_X", "FUDKII_CT_Y", "FUDKII_CT_M", "FUDKII_RT_MCX")
 LABELS = {"FUDKII": "FUDKII", "FUDKII_RT_X": "RT-X", "FUDKII_RT_N": "RT-N", "FUDKII_RT_Y": "RT-Y",
           "FUDKII_CT_X": "CT-X", "FUDKII_CT_Y": "CT-Y", "FUDKII_CT_M": "CT-M", "FUDKII_RT_MCX": "RT-MCX",
-          "FUDKII_RT_Y_F": "RT-Y-F", "FUDKII_RT_Y_W1": "RT-Y-W1"}
+          "FUDKII_RT_Y_F": "RT-Y-F", "FUDKII_RT_Y_W1": "RT-Y-W1", "FUDKII_CT_Y_F": "CT-Y-F"}
 COUNTER = ("FUDKII_CT_X", "FUDKII_CT_Y")
 
 
@@ -285,15 +285,21 @@ def stop_rules_summary(*, positions: list[dict], trades: list[dict]) -> dict[str
 # -- the graded-F shadow -------------------------------------------------------------------------
 
 GRADED_F_BOOK = "FUDKII_RT_Y_F"
+#: the graded-F fade shadow (2026-10-06): CT-Y's 09:45 gap fade on graded-F triggers, light volume only
+GRADED_F_FADE_BOOK = "FUDKII_CT_Y_F"
 
 
 def graded_f_summary(*, signals: list[dict], positions: list[dict], trades: list[dict], events: list[dict]) -> dict[str, Any]:
     """Every trigger FUDKII graded F and did not publish (NOT_PUBLISHED), and what the graded-F
     shadow did with it under RT-Y's rules: traded (its net once closed) or stood aside (the gate
-    and why). An MCX trigger is not offered to it and is not a row."""
+    and why) — beside what RT-Y did with it through the gap switch and the CT-Y-F shadow's fade
+    (2026-10-06). An MCX trigger is not offered to it and is not a row."""
     latest: dict[str, dict] = {}
     for sg in signals:
         latest[sg["signal_id"]] = sg
+    own_by = {(sg["strategy"], sg["source_signal_id"]): sg for sg in latest.values() if sg.get("source_signal_id")}
+    by_key = {(p["strategy"], p["signal_id"]): p for p in positions}
+    net_by = _net_by_position(trades)
     pos_by = {p["signal_id"]: p for p in positions if p.get("strategy") == GRADED_F_BOOK}
     trade_by: dict[str, float] = {}
     for t in trades:
@@ -318,12 +324,16 @@ def graded_f_summary(*, signals: list[dict], positions: list[dict], trades: list
             "exit_reason": (p or {}).get("exit_reason") if closed else None,
             "net": trade_by.get(p["id"]) if (closed and p is not None) else None,
             "skip": (sk or {}).get("reason") if p is None else None, "gate": (sk or {}).get("gate") if p is None else None,
+            "rt_y": _book_on(by_key, net_by, "FUDKII_RT_Y", sid),
+            "ct_y_f": _book_on(by_key, net_by, GRADED_F_FADE_BOOK, (own_by.get((GRADED_F_FADE_BOOK, sid)) or {}).get("signal_id")),
         })
     done = [r for r in rows if r["net"] is not None]
     total = {
         "triggers": len(rows), "traded": sum(1 for r in rows if r["status"] != "NONE"), "closed": len(done),
         "net": sum(r["net"] for r in done), "win": sum(1 for r in done if r["net"] > 0),
         "worst": min((r["net"] for r in done), default=None), "best": max((r["net"] for r in done), default=None),
+        "rt_y_net": sum(r["rt_y"]["net"] or 0.0 for r in rows), "rt_y_traded": sum(1 for r in rows if r["rt_y"]["status"] != "NONE"),
+        "ct_y_f_net": sum(r["ct_y_f"]["net"] or 0.0 for r in rows), "ct_y_f_traded": sum(1 for r in rows if r["ct_y_f"]["status"] != "NONE"),
     }
     return {"rows": rows, "total": total}
 
@@ -712,21 +722,26 @@ def _render_graded_f(d: ShadowData) -> str:
         f'<td class="{"pos" if r["direction"] == "BULLISH" else "neg"}">{"BULL" if r["direction"] == "BULLISH" else "BEAR"}</td>'
         f'<td class="l">{html.escape(str(r["why_f"] or "—"))}</td><td class="l">{" · ".join(_fmt(x) for x in r["targets"]) or "—"}</td>'
         f'<td class="l">{html.escape(contract_label(str(r["contract"] or "—")))}</td><td>{_fmt(r["entry"])}</td>'
-        f'<td class="l">{html.escape(str(r["exit_reason"] or r["skip"] or "—"))}</td>{_net_cell(r["net"], r["status"])}</tr>'
+        f'<td class="l">{html.escape(str(r["exit_reason"] or r["skip"] or "—"))}</td>{_net_cell(r["net"], r["status"])}'
+        f'{_net_cell((r.get("rt_y") or {}).get("net"), (r.get("rt_y") or {}).get("status"))}'
+        f'{_net_cell((r.get("ct_y_f") or {}).get("net"), (r.get("ct_y_f") or {}).get("status"))}</tr>'
         for r in g["rows"]
     )
     n = t.get("closed", 0)
     tot = (
         f'<tr><td class="l"><b>since {d.ab["since"]}</b></td><td>{t.get("triggers", 0)}</td><td>{t.get("traded", 0)}</td><td>{n}</td>'
-        f'{_net_cell(t.get("net") if n else None)}<td>{_pct(t.get("win", 0), n)}</td>{_net_cell(t.get("best"))}{_net_cell(t.get("worst"))}</tr>'
+        f'{_net_cell(t.get("net") if n else None)}<td>{_pct(t.get("win", 0), n)}</td>{_net_cell(t.get("best"))}{_net_cell(t.get("worst"))}'
+        f'<td>{t.get("rt_y_traded", 0)}</td>{_net_cell(t.get("rt_y_net") if t.get("rt_y_traded") else None)}'
+        f'<td>{t.get("ct_y_f_traded", 0)}</td>{_net_cell(t.get("ct_y_f_net") if t.get("ct_y_f_traded") else None)}</tr>'
     )
     return f"""<h3>Graded F · running total</h3>
 <div class="scroll"><table><thead><tr><th class="l">Period</th><th>Graded-F triggers</th><th>Traded</th><th>Closed</th><th>Net</th>
-<th>Win</th><th>Best</th><th>Worst</th></tr></thead><tbody>{tot}</tbody></table></div>
+<th>Win</th><th>Best</th><th>Worst</th><th>RT-Y (gap switch)</th><th>RT-Y net</th><th>CT-Y-F fades</th><th>CT-Y-F net</th></tr></thead><tbody>{tot}</tbody></table></div>
 <h3>Graded F · every trigger · {len(g["rows"])}</h3>
 <div class="scroll"><table><thead><tr><th>Fired</th><th class="l">Symbol</th><th>Dir</th><th class="l">Why FUDKII graded it F</th>
-<th class="l">Targets (raw pivots when no wall)</th><th class="l">Contract</th><th>Entry</th><th class="l">Exit / why it stood aside</th><th>Net</th></tr></thead>
-<tbody>{body or '<tr><td colspan="9" class="dim">no graded-F trigger since the shadow began</td></tr>'}</tbody></table></div>"""
+<th class="l">Targets (raw pivots when no wall)</th><th class="l">Contract</th><th>Entry</th><th class="l">Exit / why it stood aside</th><th>Net (RT-Y-F)</th>
+<th>RT-Y (gap switch)</th><th>CT-Y-F fade</th></tr></thead>
+<tbody>{body or '<tr><td colspan="11" class="dim">no graded-F trigger since the shadow began</td></tr>'}</tbody></table></div>"""
 
 
 def _render_gap(d: ShadowData) -> str:
@@ -1017,7 +1032,7 @@ WIDE_STOP = Brief(
 )
 
 GRADED_F = Brief(
-    name="Graded F · RT-Y's rules",
+    name="Graded F · RT-Y-F, RT-Y, CT-Y-F",
     testing="Whether the triggers FUDKII grades F and does not publish make money under RT-Y's own rules.",
     for_rule=(
         "The shadow book RT-Y · graded F: every NSE trigger FUDKII does not publish (a SuperTrend flip with the close "
@@ -1026,7 +1041,9 @@ GRADED_F = Brief(
         "just ahead, the 09:45 gap, dried volume) and traded under RT-Y's exits with its 25% premium cap. Where no pivot "
         "cluster makes a target, the raw pivots ahead, nearest first, are the ladder."
     ),
-    against="Standing aside, which is what every trading book does on these triggers today.",
+    against=("Standing aside. Since 6 Oct every RT and CT book is offered these triggers and decides for itself: RT-Y takes "
+             "one only through the gap switch (a 09:45 gap on >= 3x the NIFTY50's volume), RT-X and the CT books discard them, "
+             "and the CT-Y-F shadow fades the 09:45 gaps on under 1.5x — both shown beside this shadow here."),
     logic=(
         "Its own entries and its own purse: RT-Y never sees these triggers, so nothing is mirrored. Its gates run first, "
         "from what the engine already holds; only a trigger they pass goes on to the strike choice, the 4 lots under "
@@ -1205,7 +1222,7 @@ TABS: list[ShadowTab] = [
     ShadowTab("gate-b", "Gate B · RT-Y regime gate", GATE_B, _render_gate_b),
     ShadowTab("stop-rules", "Stop rules · current vs E vs adaptive", STOP_RULES, _render_stop_rules),
     ShadowTab("wide-stop", "Wide stop · RT-Y 1% past", WIDE_STOP, _render_wide),
-    ShadowTab("graded-f", "Graded F · RT-Y's rules", GRADED_F, _render_graded_f),
+    ShadowTab("graded-f", "Graded F · RT-Y-F, RT-Y, CT-Y-F", GRADED_F, _render_graded_f),
     ShadowTab("gap-fade", "Gap fade · CT-Y 09:45", GAP_FADE, _render_gap),
     ShadowTab("market-fade", "Market fade · CT-M ≤45%", MARKET_FADE, _render_market_fade),
     ShadowTab("fukaa", "FUKAA · shadow", FUKAA_SHADOW, _render_fukaa),

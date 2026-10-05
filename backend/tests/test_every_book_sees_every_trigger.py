@@ -171,7 +171,9 @@ async def test_concurrent_readers_share_one_futures_fetch(settings):
 
 
 @pytest.mark.asyncio
-async def test_an_unpublished_trigger_is_carded_only_for_the_books_that_see_it(settings):
+async def test_an_unpublished_trigger_is_carded_for_every_nse_book(settings):
+    """Every RT and CT book is offered a trigger FUDKII did not publish (2026-10-06) and cards it; before any book has
+    decided, each card says it was not published. RT-MCX takes only published triggers."""
     e = await _paper(settings)
     try:
         e.underlyings["TCS"] = Instrument("11536", "TCS", Segment.NSE_EQ, InstrumentKind.EQUITY, underlying="TCS")
@@ -186,11 +188,11 @@ async def test_an_unpublished_trigger_is_carded_only_for_the_books_that_see_it(s
                                                                                           "reason": "grade F rr=0.0 no wall ahead — no target"}})
         await e.ledger.insert_signal(trig.to_json(), "NOT_PUBLISHED", "FUDKII's own confluence_grade: grade F")
 
-        seen = {b: [c["symbol"] for c in (await e.book_cards(b, ist_today()))["cards"]] for b in
-                ("FUDKII", "FUDKII_RT_X", "FUDKII_RT_Y", "FUDKII_CT_X", "FUDKII_CT_Y")}
-        assert seen["FUDKII"] == ["TCS"], "the parent's own card, with its own reason"
-        assert seen["FUDKII_RT_X"] == seen["FUDKII_RT_Y"] == seen["FUDKII_CT_X"] == seen["FUDKII_CT_Y"] == [], "no trading book is offered it"
-        card = (await e.book_cards("FUDKII", ist_today()))["cards"][0]
+        books = ("FUDKII", "FUDKII_RT_X", "FUDKII_RT_N", "FUDKII_RT_Y", "FUDKII_CT_X", "FUDKII_CT_Y", "FUDKII_CT_M")
+        seen = {b: (await e.book_cards(b, ist_today()))["cards"] for b in (*books, "FUDKII_RT_MCX")}
+        assert all([c["symbol"] for c in seen[b]] == ["TCS"] for b in books) and seen["FUDKII_RT_MCX"] == []
+        assert all(seen[b][0]["state"] == "NOT_PUBLISHED" for b in books), "offered, not decided yet"
+        card = seen["FUDKII"][0]
         assert card["state"] == "NOT_PUBLISHED"
         assert card["cta"]["enabled"] is False and card["cta"]["reason"].startswith("not published — FUDKII's own confluence_grade"), \
             "no TAKE the parent would refuse (review, 2026-09-28)"
@@ -226,7 +228,8 @@ async def test_the_graded_f_shadows_tab_cards_the_unpublished_triggers_alone_wit
         assert card["state"] == "SKIPPED" and card["skip"]["gate"] == "breadth", "what the SHADOW did, with its own reason"
         assert card["cta"]["enabled"] is False and card["cta"]["reason"].startswith("paper shadow"), "no operator TAKE"
         assert out["wallet"]["strategy"] == "FUDKII_RT_Y_F" and out["wallet"]["initial"] == e.wallets["FUDKII_RT_Y_F"].initial
-        assert [c["symbol"] for c in (await e.book_cards("FUDKII_RT_Y", ist_today()))["cards"]] == ["INFY"], "RT-Y's tab is unchanged"
+        assert [c["symbol"] for c in (await e.book_cards("FUDKII_RT_Y", ist_today()))["cards"]] == ["TCS", "INFY"], \
+            "RT-Y's tab: both — it is offered the graded-F trigger too (2026-10-06)"
     finally:
         await e.stop()
 

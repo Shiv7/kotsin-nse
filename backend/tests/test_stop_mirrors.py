@@ -33,7 +33,7 @@ def clock(monkeypatch):
 
 
 SOURCES = ("FUDKII", "FUDKII_RT_X", "FUDKII_RT_N", "FUDKII_RT_Y", "FUDKII_CT_X", "FUDKII_CT_Y", "FUDKII_RT_MCX",
-           "FUDKII_RT_Y_F", "FUDKII_RT_Y_W1", "FUDKII_CT_M")
+           "FUDKII_RT_Y_F", "FUDKII_RT_Y_W1", "FUDKII_CT_M", "FUDKII_CT_Y_F")
 
 
 def test_every_book_has_two_mirrors_with_their_own_codes_labels_and_purses():

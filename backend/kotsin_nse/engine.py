@@ -182,6 +182,7 @@ from .risk.limits import (
     CT_M_LIMITS,
     CT_M_MARKET_AGAINST_MAX,
     CT_X_LIMITS,
+    CT_Y_F_LIMITS,
     CT_Y_LIMITS,
     FIXED_LOTS_UNDER_INR,
     RT_MCX_LIMITS,
@@ -220,6 +221,8 @@ from .strategy.keys import (
 from .strategy.regime_gates import (
     GAP_SWITCH_GAP_DATR,
     gap_fade_volume_block,
+    gap_switch,
+    graded_f_verdicts,
     rt_gate_reasons,
     trigger_verdicts,
     volume_labels,
@@ -240,7 +243,7 @@ SELECTION_POLICY = SelectionPolicy()
 NO_PREMIUM_FLOOR = frozenset({
     StrategyKey.FUDKII, StrategyKey.FUDKII_RT_X, StrategyKey.FUDKII_RT_N, StrategyKey.FUDKII_RT_Y,
     StrategyKey.FUDKII_CT_X, StrategyKey.FUDKII_CT_Y, StrategyKey.FUDKII_RT_Y_W1, StrategyKey.FUDKII_RT_Y_F,
-    StrategyKey.FUDKII_CT_M,
+    StrategyKey.FUDKII_CT_M, StrategyKey.FUDKII_CT_Y_F,
     *(m for m, (src, _r) in STOP_MIRRORS.items() if src.value != StrategyKey.FUDKII_RT_MCX.value),
 })
 MIN_STOP_TICKS = 8
@@ -292,7 +295,7 @@ BOOK_LABELS = {
     "FUDKII": "FUDKII", "FUDKII_RT_X": "RT-X", "FUDKII_RT_N": "RT-N", "FUDKII_RT_Y": "RT-Y",
     "FUDKII_CT_X": "CT-X", "FUDKII_CT_Y": "CT-Y", "FUDKII_RT_MCX": "RT-MCX",
     "FUDKII_RT_Y_W1": "RT-Y wide (shadow)", "FUDKII_RT_Y_F": "RT-Y graded F (shadow)",
-    "FUDKII_CT_M": "CT-M market-against fade (shadow)",
+    "FUDKII_CT_M": "CT-M market-against fade (shadow)", "FUDKII_CT_Y_F": "CT-Y graded F (shadow)",
 }
 for _m, (_src, _rule) in STOP_MIRRORS.items():
     BOOK_LABELS[_m.value] = f"{BOOK_LABELS[_src.value].replace(' (shadow)', '')} · {STOP_RULE_LABELS[_rule]} (shadow)"
@@ -319,6 +322,7 @@ _RESTING_DECISIONS = frozenset({"RESTING", "PARENT_HALTED_TWINS_RESTING", "PAREN
 ORDER_CODES = {
     "FUDKII": "FII-P", "FUDKII_RT_X": "FII-RTX", "FUDKII_RT_N": "FII-RTN", "FUDKII_RT_Y": "FII-RTY",
     "FUDKII_CT_X": "FII-CTX", "FUDKII_CT_Y": "FII-CTY", "FUDKII_RT_MCX": "FII-RTM", "FUDKII_RT_Y_W1": "FII-RYW", "FUDKII_RT_Y_F": "FII-RYF", "FUDKII_CT_M": "FII-CTM",
+    "FUDKII_CT_Y_F": "FII-CYF",
     "FUKAA": "FKA",
 }
 # a stop-rule mirror's code: its source's with FIE- / FIA- (stop E / adaptive) for FII- — unique, the same length
@@ -395,9 +399,25 @@ COUNTER_OF = {
     StrategyKey.FUDKII: StrategyKey.FUDKII_CT_X, StrategyKey.FUDKII_RT_X: StrategyKey.FUDKII_CT_X,
     StrategyKey.FUDKII_RT_N: StrategyKey.FUDKII_CT_X, StrategyKey.FUDKII_RT_Y: StrategyKey.FUDKII_CT_Y,
 }
-#: the books offered a trigger FUDKII grades F and does not publish (operator, 2026-09-28): the
-#: graded-F shadow alone, until each book's own grade rule is proven (phase19)
-UNPUBLISHED_BOOKS = (StrategyKey.FUDKII_RT_Y_F,)
+#: The books offered a trigger FUDKII grades F and does not publish, each with its own rule for one (operator,
+#: 2026-10-06: "lets have all fudkii triggers (including F grade ones) to simultaneously be published to fudkii-rt and
+#: fudki-ct variants and twins, then if they want to discard it, it can ... let fudkii-rt-n be as is fudkii"). In trend:
+#: the graded-F shadow on RT-Y's rules as before (2026-09-28); RT-Y itself only through the gap switch; RT-X discards
+#: one. Route study, 6 Oct (option model): RT-Y's rules on graded-F triggers 1-28 Sep −₹68,675 on 67 and 29 Sep - 5 Oct
+#: −₹44,387 on 18; every graded-F trigger in trend −₹3,93,282 / −₹1,85,141. FUDKII and RT-N do not see them.
+UNPUBLISHED_BOOKS = (StrategyKey.FUDKII_RT_Y_F, StrategyKey.FUDKII_RT_Y, StrategyKey.FUDKII_RT_X)
+#: ... and the fade side: the CT-Y-F shadow gap-fades one on light volume (CT_Y_F_LIMITS); CT-Y, CT-X and CT-M fade only
+#: published triggers and say so on their cards
+UNPUBLISHED_FADE_BOOKS = (StrategyKey.FUDKII_CT_Y_F, StrategyKey.FUDKII_CT_Y, StrategyKey.FUDKII_CT_X, StrategyKey.FUDKII_CT_M)
+#: what each book that does not trade a graded-F trigger says on its card
+GRADED_F_RULES = {
+    StrategyKey.FUDKII_RT_X: "graded F — RT-X trades only what FUDKII publishes",
+    StrategyKey.FUDKII_RT_Y: "graded F — RT-Y takes one only through the gap switch: a 09:45 gap ≥ 0.3 daily ATR its own way "
+                             "on ≥ 3x the NIFTY50's volume",
+    StrategyKey.FUDKII_CT_Y: "graded F — CT-Y fades only what FUDKII publishes; its light-volume gap fade is the CT-Y-F shadow's",
+    StrategyKey.FUDKII_CT_X: "graded F — CT-X fades only what FUDKII publishes",
+    StrategyKey.FUDKII_CT_M: "graded F — CT-M fades only what FUDKII publishes",
+}
 
 
 @dataclass(slots=True)
@@ -559,6 +579,8 @@ class Engine:
             # the graded-F shadow: RT-Y's policy, 25 % cap included, on the triggers RT-Y never sees
             StrategyKey.FUDKII_RT_Y_F.value: ExitEngine(RT_Y_F_LIMITS),
             StrategyKey.FUDKII_CT_M.value: ExitEngine(CT_M_LIMITS),
+            # the graded-F fade shadow: CT-Y's gap fade and exits, on light volume only
+            StrategyKey.FUDKII_CT_Y_F.value: ExitEngine(CT_Y_F_LIMITS),
         }
         # every book's two stop-rule mirrors (strategy/keys.py STOP_MIRRORS): its own limits, the stop changed
         for mirror, (source, rule) in STOP_MIRRORS.items():
@@ -770,6 +792,8 @@ class Engine:
         self._breadth_at: dict[str, dict[str, Any]] = {}
         #: triggers CT-Y faded on the 09:45 gap rule — their CT-X fade is not mirrored into CT-Y
         self._gap_faded: set[str] = set()
+        #: the graded-F triggers the CT-Y-F shadow gap-faded
+        self._gap_faded_f: set[str] = set()
         #: positions with an exit order in flight: a second exit for the same position (the
         #: operator's SKIP racing the exit loop) must not send a second order
         self._exits_in_flight: set[str] = set()
@@ -2390,9 +2414,10 @@ class Engine:
         # it is generated, whether FUDKII publishes it as its own signal or not, and every path runs
         # side by side, not in series (operator, 2026-09-28: "push them in parallel not in series").
         # A published trigger reaches the in-trend books and the fade route (CT-X, CT-Y's gap fade)
-        # as before; one FUDKII grades F and does not publish reaches the graded-F shadow alone
-        # (UNPUBLISHED_BOOKS) until each book's own grade rule is proven (phase19). FUKAA runs beside
-        # them. Each path is guarded: one path's error never costs another its entry.
+        # as before; one FUDKII grades F and does not publish reaches every RT and CT book, each
+        # with its own rule for one (UNPUBLISHED_BOOKS, UNPUBLISHED_FADE_BOOKS; 2026-10-06) — FUDKII
+        # and RT-N take neither. FUKAA runs beside them. Each path is guarded: one path's error never
+        # costs another its entry.
         triggers = [*base_out.signals, *base_out.triggers]
         for sig in base_out.triggers:
             # its own row first: the parent's decision on its trigger, found by the cards and the
@@ -2413,8 +2438,9 @@ class Engine:
             elif published(sig):  # the in-trend books keep the parent's grade
                 jobs.append(self._guarded("signal.failed", sig, self._handle_signal(sig, bar, books=IN_TREND_BOOKS, adopt=True)))
                 jobs.append(self._guarded("counter.failed", sig, self._handle_counter(sig, bar)))
-            else:
+            else:  # every RT and CT book is offered it and decides for itself (2026-10-06)
                 jobs.append(self._guarded("signal.failed", sig, self._handle_unpublished(sig, bar)))
+                jobs.append(self._guarded("counter.failed", sig, self._handle_counter_unpublished(sig, bar)))
         for sig in admitted:
             if self.fukaa.cfg.shadow and sig.strategy is StrategyKey.FUKAA:
                 jobs.append(self._guarded("signal.failed", sig, self._fukaa_shadow(sig)))
@@ -2462,14 +2488,14 @@ class Engine:
                 "oiChangePct": oi, "oiQuadrant": quad,
                 "oiAgrees": None if quad is None else quad == ("long build-up" if bull else "short build-up")}
 
-    async def _handle_unpublished(self, sig: Signal, bar: UnifiedBar) -> None:
-        """A trigger FUDKII does not publish, offered to ``UNPUBLISHED_BOOKS`` (the graded-F shadow).
-        Each such book's own gates run FIRST, from what the engine already holds — the breadth, the
-        pivots, the gap, the volume reading — and only a trigger a book would take goes on to the
-        strike choice: at a 09:45 bar some twenty of these arrive with the one or two published
-        triggers, and a strike choice each would subscribe and quote twenty chains for entries the
-        gates then refuse. The book's decision is the same either way; the gates run again inside
-        ``_enter_book_once`` on the same readings."""
+    async def _handle_unpublished(self, sig: Signal, bar: UnifiedBar | None) -> None:
+        """A trigger FUDKII does not publish, offered to ``UNPUBLISHED_BOOKS``, each deciding for itself (2026-10-06):
+        the graded-F shadow on RT-Y's rules, RT-Y only through the gap switch, RT-X never — a book that does not trade
+        it says why on its card (``GRADED_F_RULES``). Each book's own gates run FIRST, from what the engine already
+        holds — the breadth, the pivots, the gap, the volume reading — and only a trigger a book would take goes on to
+        the strike choice: at a 09:45 bar some twenty of these arrive with the one or two published triggers, and a
+        strike choice each would subscribe and quote twenty chains for entries the gates then refuse. The book's
+        decision is the same either way; the gates run again inside ``_enter_book_once`` on the same readings."""
         underlying = self.underlyings.get(sig.symbol)
         if underlying is None:
             return
@@ -2479,6 +2505,10 @@ class Engine:
         takers = []
         for key in books:
             lim = self.limits_for(key.value)
+            if key is StrategyKey.FUDKII_RT_X or (
+                    key is StrategyKey.FUDKII_RT_Y and gap_switch(self._trigger_ctx(sig.signal_id, sig.direction), lim) is None):
+                await self._book_skip(key.value, sig, GRADED_F_RULES[key], gate="graded_f")
+                continue
             late = self._past_last_entry(key.value, underlying)
             if late:  # before any broker read: nothing past the book's last entry minute is bought
                 await self._book_skip(key.value, sig, late, gate="entry_cutoff")
@@ -2508,6 +2538,21 @@ class Engine:
             await self._book_skip(key.value, sig, why, gate=gate, **extra)
         if takers:
             await self._handle_signal(sig, bar, books=tuple(takers), adopt=False)
+
+    async def _handle_counter_unpublished(self, sig: Signal, bar: UnifiedBar | None) -> None:
+        """The fade side of a trigger FUDKII grades F (2026-10-06): the CT-Y-F shadow gap-fades it on light volume
+        (``_gap_fade`` under its own limits); CT-Y, CT-X and CT-M fade only published triggers and say so on their
+        cards. NSE stocks only — the fade books trade nothing else."""
+        if sig.strategy is not StrategyKey.FUDKII:
+            return
+        underlying = self.underlyings.get(sig.symbol)
+        if underlying is None or underlying.segment is not Segment.NSE_EQ:
+            return
+        for key in UNPUBLISHED_FADE_BOOKS:
+            if key in GRADED_F_RULES and self.book_trades(key.value, underlying.segment):
+                await self._book_skip(key.value, sig, GRADED_F_RULES[key], gate="graded_f")
+        if self.book_trades(StrategyKey.FUDKII_CT_Y_F.value, underlying.segment):
+            await self._gap_fade(sig, bar, underlying, key=StrategyKey.FUDKII_CT_Y_F)
 
     @staticmethod
     async def _guarded(event: str, sig: Signal, job: Awaitable[Any]) -> None:
@@ -4055,12 +4100,15 @@ class Engine:
         latest: dict[str, dict[str, Any]] = {}
         for sgn in signals:  # a take re-enters the same id: the last row is the decision that stands
             latest[sgn["signal_id"]] = sgn
-        # A trigger FUDKII did not publish (NOT_PUBLISHED) is carded for the parent, with its own
-        # reason, and for the graded-F shadow — the one book offered it — which is carded on those
-        # ALONE: it never sees a published trigger (its Alerts tab, operator 2026-09-29). No trading
-        # book is offered one (2026-09-28).
-        sees_unpublished = key in (StrategyKey.FUDKII, StrategyKey.FUDKII_RT_Y_F)
-        only_unpublished = key is StrategyKey.FUDKII_RT_Y_F
+        # A trigger FUDKII did not publish (NOT_PUBLISHED) is carded for every NSE book (2026-10-06): the parent and
+        # RT-N with its own reason, each RT and CT book with what it did with it — its own rule for one
+        # (UNPUBLISHED_BOOKS, UNPUBLISHED_FADE_BOOKS) — and the two graded-F shadows on those ALONE: they never see a
+        # published trigger (their Alerts tabs, operator 2026-09-29). RT-MCX takes only published triggers.
+        graded_f_shadows = (StrategyKey.FUDKII_RT_Y_F, StrategyKey.FUDKII_CT_Y_F)
+        sees_unpublished = key is not StrategyKey.FUDKII_RT_MCX
+        only_unpublished = key in graded_f_shadows
+        #: the fade books whose fade is their own signal on the trigger (not CT-X's route)
+        own_fade_books = (StrategyKey.FUDKII_CT_M, StrategyKey.FUDKII_CT_Y_F)
         parents = sorted(
             (
                 sgn
@@ -4136,6 +4184,7 @@ class Engine:
         for sgn in parents:
             sid = sgn["signal_id"]
             evs = ev_by_sig.get(sid, [])
+            unpublished = sgn.get("decision") == "NOT_PUBLISHED"
             route = next((e for e in reversed(evs) if e.get("kind") == "counter.route"), None)
             fade_x = by_source.get(sid)  # CT-X's fade (mirrored into CT-Y unless CT-Y gap-faded)
             gap_fade = own_by_source.get((StrategyKey.FUDKII_CT_Y.value, sid))
@@ -4175,8 +4224,12 @@ class Engine:
                 state = "PENDING"
             elif carried_here and skip is None:
                 state = "CARRIED"
-            elif skip is not None and not owns_row:
+            elif unpublished and key in (StrategyKey.FUDKII, StrategyKey.FUDKII_RT_N):
+                state = "NOT_PUBLISHED"  # RT-N is as FUDKII: it trades what FUDKII publishes (2026-10-06)
+            elif skip is not None and (not owns_row or unpublished):
                 state = "SKIPPED"
+            elif unpublished and own is None:
+                state = "NOT_PUBLISHED"  # offered, not decided yet (or never: a restart between the trigger and the books)
             elif key is StrategyKey.FUDKII:
                 state = sgn.get("decision") or "UNKNOWN"
             elif key is StrategyKey.FUDKII_CT_Y and gap_fade is not None:
@@ -4214,7 +4267,7 @@ class Engine:
             # zones and plan; everything else shows the trigger. (NAM-INDIA, 2026-09-25: the CT-Y
             # card showed the bullish trigger's CE, stop and targets although CT-Y's trade is a PE.)
             vs = fade if (key.value in counter_books and fade is not None) else (
-                own if (key is StrategyKey.FUDKII_CT_M and own is not None) else sgn)
+                own if (key in own_fade_books and own is not None) else sgn)
             ctx = vs.get("context") or {}
             conf = ctx.get("confluence") or {}
             pros, cons = [], []
@@ -4266,7 +4319,6 @@ class Engine:
             fade_book = key.value in counter_books
             # A fade book with no fade has nothing to preview: falling back to the PARENT's signal
             # showed CT-Y a bullish trigger's CE (NAM-INDIA, 2026-09-25 14:45) as if CT-Y would buy it.
-            unpublished = sgn.get("decision") == "NOT_PUBLISHED"
             if (ps is None and und is not None and (state not in ("IN_TREND", "NO_ROUTE") or key is StrategyKey.FUDKII)
                     and not (fade_book and entry_sig is None) and not unpublished):
                 plan_sig = entry_sig if entry_sig is not None else sgn
@@ -4307,18 +4359,20 @@ class Engine:
             elif inst_json.get("kind") == "FUTURE":
                 side = "LONG" if (ps or {}).get("direction") == "BULLISH" else "SHORT"
             else:
-                side = ("PE" if trig_bull else "CE") if fade_book else ("CE" if trig_bull else "PE")
+                side = ("PE" if trig_bull else "CE") if (fade_book or key in own_fade_books) else ("CE" if trig_bull else "PE")
             if und is not None and und.segment is Segment.MCX_FO and not inst_json:
                 side = ("SHORT" if trig_bull else "LONG") if fade_book else ("LONG" if trig_bull else "SHORT")
             rt_card = alert_cards.get(entry_sig["signal_id"]) if (fade_book and entry_sig is not None) else (None if fade_book else alert_cards.get(sid))
             no_plan = next((e for e in reversed(evs) if e.get("kind") == "counter.no_plan"), None)
             cta = self._card_cta(book, key, state, ps, plan, route, skip, und, sgn, vs, fade_book, entry_sig is None, no_plan)
-            if unpublished:
-                # FUDKII's own grade kept it from publishing the trigger: no TAKE — the parent would
-                # refuse it — and the card says why (review, 2026-09-28). The graded-F shadow's own tab:
-                # a paper shadow decides these itself, so no operator TAKE there either
-                why_not = ("paper shadow — it takes or skips these triggers itself; no operator TAKE"
-                           if key is StrategyKey.FUDKII_RT_Y_F else f"not published — {sgn.get('decision_reason') or 'graded F'}")
+            if unpublished and (ps is None or key in graded_f_shadows):
+                # FUDKII's own grade kept it from publishing the trigger: no TAKE — each book offered it has decided
+                # for itself, and the card says what and why (review, 2026-09-28; 2026-10-06). The graded-F shadows'
+                # own tabs: a paper shadow decides these itself, so no operator TAKE there either. A book that took one
+                # (RT-Y through the gap switch) keeps its live button
+                why_not = ("paper shadow — it takes or skips these triggers itself; no operator TAKE" if key in graded_f_shadows
+                           else str(skip.get("reason") or "") if skip is not None
+                           else f"not published — {sgn.get('decision_reason') or 'graded F'}")
                 cta = {**cta, "action": "take", "enabled": False, "reason": why_not}
             if state == "CARRIED" or (carry_q is not None and key is StrategyKey.FUDKII):
                 cta = {**cta, "action": "take", "enabled": False, "reason": "after the close — carried to the next session's 09:15 open"}
@@ -4335,12 +4389,10 @@ class Engine:
                     seg_books.insert(0, StrategyKey.FUDKII.value)
             else:
                 seg_books = list(nse_books)
-                if unpublished:  # the one book offered a trigger FUDKII did not publish
-                    seg_books.append(StrategyKey.FUDKII_RT_Y_F.value)
+                if unpublished:  # and the two shadows that trade only what FUDKII did not publish
+                    seg_books += [StrategyKey.FUDKII_RT_Y_F.value, StrategyKey.FUDKII_CT_Y_F.value]
             books_row = [book_row(b, position_on(b, sid, fade_x)) for b in seg_books]
-            # RT-Y and CT-Y are never offered a trigger FUDKII did not publish: no chip for what they would
-            # have done — the graded-F shadow's own dot in the row says what it did (review, 2026-09-29)
-            verdicts = {"rtY": None, "ctY": None, "ctM": None} if unpublished else self._card_verdicts(sgn, evs, fade_x, gap_fade, pos_by_key)
+            verdicts = self._card_verdicts(sgn, evs, fade_x, gap_fade, pos_by_key, unpublished=unpublished)
             if cta.get("type") not in ("CE", "PE"):
                 cta["type"] = side  # a future reads LONG / SHORT
             # every button says what it buys: lots, the price of one, and the money it needs
@@ -4482,12 +4534,16 @@ class Engine:
 
     def _card_verdicts(
         self, sgn: dict[str, Any], evs: list[dict[str, Any]], fade_x: dict[str, Any] | None,
-        gap_fade: dict[str, Any] | None, pos_by_key: dict[tuple[str, str], dict[str, Any]],
+        gap_fade: dict[str, Any] | None, pos_by_key: dict[tuple[str, str], dict[str, Any]], *, unpublished: bool = False,
     ) -> dict[str, Any]:
         """What RT-Y, CT-Y and CT-M do with this trigger — a label on EVERY book's card (operator,
-        2026-09-26: "mention on all respective strategies as label"); see ``trigger_verdicts``."""
+        2026-09-26: "mention on all respective strategies as label"); see ``trigger_verdicts``, and
+        ``graded_f_verdicts`` for a trigger FUDKII did not publish (2026-10-06)."""
         if self._segment_of(sgn["symbol"]) is Segment.MCX_FO:
             return {"rtY": None, "ctY": None, "ctM": None}
+        if unpublished:
+            return graded_f_verdicts(sgn, evs, rt_y_held=(StrategyKey.FUDKII_RT_Y.value, sgn["signal_id"]) in pos_by_key,
+                                     lim_y=self._exits_by_strategy[StrategyKey.FUDKII_RT_Y.value].limits)
         return trigger_verdicts(
             sgn, evs, fade_x=fade_x, gap_fade=gap_fade,
             rt_y_held=(StrategyKey.FUDKII_RT_Y.value, sgn["signal_id"]) in pos_by_key,
@@ -4604,6 +4660,7 @@ class Engine:
             "FUDKII_CT_X": "CT-X: the fade under RT-X's exits",
             "FUDKII_CT_Y": "CT-Y: the fade under RT-Y's exits",
             "FUDKII_CT_M": "CT-M (shadow): CT-Y's fade on a trigger the market is clearly against (≤ 45 % agree)",
+            "FUDKII_CT_Y_F": "CT-Y graded F (shadow): CT-Y's 09:45 gap fade and exits on graded-F triggers under 1.5x the NIFTY50's volume",
             "FUDKII_RT_MCX": "RT-MCX: RT-X's exits on commodities",
         }.get(key.value, key.value)
         return {"policy": policy, "rows": rows}
@@ -4986,39 +5043,51 @@ class Engine:
         log.info("market_fade", symbol=sig.symbol, side=plan["side"], breadth=share, stop=plan["stop"], t1=plan["targets"][0])
         await self._handle_signal(fade, bar, adopt=False)
 
-    async def _gap_fade(self, sig: Signal, bar: UnifiedBar | None, underlying: Instrument) -> None:
+    async def _gap_fade(self, sig: Signal, bar: UnifiedBar | None, underlying: Instrument, *,
+                        key: StrategyKey = StrategyKey.FUDKII_CT_Y) -> None:
         """CT-Y's entry on a 09:45 gap-with trigger: the plan above, through the ordinary entry
-        path under CT-Y's own key (CT-X is untouched; CT-Y does not also mirror CT-X's fade)."""
-        if sig.signal_id in self._gap_faded:
+        path under CT-Y's own key (CT-X is untouched; CT-Y does not also mirror CT-X's fade).
+        ``key`` FUDKII_CT_Y_F: the same fade of a graded-F trigger by the CT-Y-F shadow under its own
+        limits (2026-10-06), which records every trigger it does not fade on its card."""
+        shadow = key is not StrategyKey.FUDKII_CT_Y
+        done = self._gap_faded_f if shadow else self._gap_faded
+        kind = "counter.gap_fade_f" if shadow else "counter.gap_fade"
+        if sig.signal_id in done:
             return
         ctx = self._breadth_at.get(sig.signal_id)
         if ctx is None:
             ctx = self.trigger_context(sig)
-        plan = self.gap_fade_plan(sig, ctx)
+        lim = self._exits_by_strategy[key.value].limits
+        plan = self.gap_fade_plan(sig, ctx, key)
         if plan is None:
+            if shadow:
+                await self._book_skip(key.value, sig, f"not a 09:45 gap of ≥ {lim.gap_fade_datr:g} daily ATR its own way", gate="no_gap")
             return
-        lim = self._exits_by_strategy[StrategyKey.FUDKII_CT_Y.value].limits
-        event = {"signal_id": sig.signal_id, "symbol": sig.symbol, **plan}
+        event = {"signal_id": sig.signal_id, "symbol": sig.symbol, "book": key.value, **plan}
+        blocked = None
         if (heavy := gap_fade_volume_block(ctx, lim)) is not None:
-            # the gap switch: a gap on this much volume is RT-Y's, in trend (operator, 2026-10-06)
-            event.update(blocked=heavy, relVol=ctx.get("relVol"))
-            await self.ledger.event("counter.gap_fade", event)
-            log.info("gap_fade.blocked", symbol=sig.symbol, reason=heavy)
-            return
-        if lim.gap_fade_min_rr is not None and plan["rr"] < lim.gap_fade_min_rr:
-            event["blocked"] = f"RR {plan['rr']:.2f} < {lim.gap_fade_min_rr:g}"
-            await self.ledger.event("counter.gap_fade", event)
-            log.info("gap_fade.blocked", symbol=sig.symbol, rr=plan["rr"])
+            # the gap switch: a gap on this much volume is followed in trend, not faded (operator, 2026-10-06)
+            blocked = heavy
+            event["relVol"] = ctx.get("relVol")
+        elif lim.gap_fade_min_rr is not None and plan["rr"] < lim.gap_fade_min_rr:
+            blocked = f"RR {plan['rr']:.2f} < {lim.gap_fade_min_rr:g}"
+        if blocked is not None:
+            event["blocked"] = blocked
+            await self.ledger.event(kind, event)
+            log.info("gap_fade.blocked", book=key.value, symbol=sig.symbol, reason=blocked)
+            if shadow:
+                await self._book_skip(key.value, sig, blocked, gate="gap_fade_blocked")
             return
         fade = replace(
             sig,
-            strategy=StrategyKey.FUDKII_CT_Y,
+            strategy=key,
             direction=Direction(plan["direction"]),
             stop=plan["stop"],
             targets=tuple(plan["targets"]),
             grade=plan["grade"],
             rr=plan["rr"],
-            reason=f"GAP FADE of {sig.signal_id}: 09:45 gap with the trigger {plan['gapDatr']:.2f} daily ATR; stop {plan['stopNote']}",
+            reason=(f"GAP FADE{' (graded F)' if shadow else ''} of {sig.signal_id}: 09:45 gap with the trigger {plan['gapDatr']:.2f} "
+                    f"daily ATR; stop {plan['stopNote']}"),
             source_signal_id=sig.signal_id,
             evidence={**dict(sig.evidence), "gap_datr": plan["gapDatr"], "rr": plan["rr"]},
             context={
@@ -5028,10 +5097,10 @@ class Engine:
                                "target_zones": [plan["targetNote"]], "grade": plan["grade"], "rr": plan["rr"]},
             },
         )
-        self._gap_faded.add(sig.signal_id)
+        done.add(sig.signal_id)
         event["fade_signal_id"] = fade.signal_id
-        await self.ledger.event("counter.gap_fade", event)
-        log.info("gap_fade", symbol=sig.symbol, side=plan["side"], stop=plan["stop"], t1=plan["targets"][0], rr=plan["rr"])
+        await self.ledger.event(kind, event)
+        log.info("gap_fade", book=key.value, symbol=sig.symbol, side=plan["side"], stop=plan["stop"], t1=plan["targets"][0], rr=plan["rr"])
         await self._handle_signal(fade, bar, adopt=False)
 
     async def _counter_legs(self, underlying: Instrument, bar: UnifiedBar, *, low_priority: bool = False) -> list[Leg]:
