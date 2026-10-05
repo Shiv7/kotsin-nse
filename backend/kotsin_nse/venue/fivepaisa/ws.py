@@ -36,7 +36,7 @@ import websockets
 from ...config import Settings
 from ...domain import Instrument
 from .auth import Authenticator
-from .hub import LINE_LIMIT, HubLink
+from .hub import LINE_LIMIT, PRIMED_CHANNELS, HubLink
 
 log = structlog.get_logger(__name__)
 
@@ -184,20 +184,78 @@ class FivePaisaFeed:
         self.hub_lines = 0
         self.hub_lag_ms = 0.0
         self.hub_lag_max_ms = 0.0
+        # -- the pool (operator, 2026-10-05: "whichever subscribes, must put all data in a pool that everyone can
+        # have access to without waiting ... no engine will have to duplicate subscription or fetch data again
+        # and again") ------------------------------------------------------------------------------------
+        #: the last frame of every code this socket (or the hub) carries, whoever asked for it:
+        #: (channel, code) -> (row, arrived). The broker sends a code's frame once, to the one socket; the
+        #: engine that subscribed second used to discard it as not yet wanted and then wait for the code's
+        #: next change (BAJFINANCE 1010 CE, 5 Oct: phase 35 asked at 09:45:04.3, the broker's first frame
+        #: 18.00 / 17.90 / 18.05 came at 04.432, phase 34 asked at 04.56, read only its own REST price —
+        #: no bid or ask — and gave the strike up at 06.6; the next frame came at 09:45:17)
+        self._pool: dict[tuple[str, str], tuple[dict[str, Any], float]] = {}
+        self.pool_primed = 0
+        #: serving side: channel -> code -> since when a twin has held it at the broker
+        self._pinned_since: dict[str, dict[str, float]] = {"mf": {}, "md": {}, "oi": {}}
 
     # -- subscription state ----------------------------------------------------------------------
 
     async def subscribe(self, channel: str, instruments: list[Instrument]) -> None:
         fresh = [i for i in instruments if i.scrip_code not in self._desired[channel]]
         now = time.time()
+        held = self._twin_codes(channel)
+        pinned = self._pinned_since.get(channel, {})
         for i in fresh:
             self._desired[channel][i.scrip_code] = i
-            self._since.setdefault(channel, {})[i.scrip_code] = now
+            # a code a twin already holds has streamed through this socket since the twin's pin: a frame
+            # from then on is as current for this engine as for the twin
+            since = min(now, pinned.get(i.scrip_code, now)) if i.scrip_code in held else now
+            self._since.setdefault(channel, {})[i.scrip_code] = since
         self.health.subscriptions = {k: len(v) for k, v in self._desired.items()}
-        held = self._twin_codes(channel)
+        await self._prime(channel, fresh)
         fresh = [i for i in fresh if i.scrip_code not in held]  # already at the broker for the twin
         if fresh and self._ws is not None:
             await self._send_batched(channel, "s", fresh)
+
+    async def _prime(self, channel: str, instruments: list[Instrument]) -> None:
+        """Newly wanted codes' last frames from the pool, dispatched now with the time they ARRIVED and marked
+        ``pooled``: the engine reads a price and a book with their true age — never a trade, which the bars
+        and the tape already saw when it came."""
+        if channel not in PRIMED_CHANNELS:
+            return
+        for i in instruments:
+            hit = self._pool.get((channel, i.scrip_code))
+            if hit is None:
+                continue
+            row, arrived = hit
+            try:
+                await self._dispatch(row, arrived, pooled=True)
+                self.pool_primed += 1
+            except Exception as exc:  # noqa: BLE001 - a primed frame is a head start, never a reason to stop
+                self.health.parse_errors += 1
+                log.warning("feed.prime_failed", channel=channel, scrip=i.scrip_code, error=str(exc)[:120])
+
+    def pooled(self, channel: str, codes: list[str]) -> list[tuple[dict[str, Any], float, float]]:
+        """Serving side, for a twin's subscribe: the pool's last frame of each code this socket already
+        streams for someone else, with since when it has — ``(row, arrived, since)``."""
+        out: list[tuple[dict[str, Any], float, float]] = []
+        for code in codes:
+            hit = self._pool.get((channel, code))
+            if hit is None:
+                continue
+            since = self.subscribed_since(channel, code)
+            if since is None:
+                since = self._pinned_since.get(channel, {}).get(code)
+            if since is not None:
+                out.append((hit[0], hit[1], since))
+        return out
+
+    def streaming(self, channel: str, *, but_twin: str) -> set[str]:
+        """Serving side: the codes the broker streams on ``channel`` for this engine or any twin but one."""
+        return set(self._desired.get(channel, {})) | self._twin_codes(channel, but=but_twin)
+
+    def pool_stats(self) -> dict[str, int]:
+        return {"codes": len(self._pool), "primed": self.pool_primed}
 
     def is_subscribed(self, channel: str, scrip_code: str) -> bool:
         """Is ``scrip_code`` on ``channel`` in the desired set — what every (re)connect subscribes."""
@@ -232,13 +290,19 @@ class FivePaisaFeed:
             return
         mine = self._twins.setdefault(twin, {}).setdefault(channel, {})
         others = self._twin_codes(channel, but=twin) | set(self._desired[channel])
+        pinned = self._pinned_since.setdefault(channel, {})
         if op == "s":
             fresh = [i for i in instruments if i.scrip_code not in mine]
+            now = time.time()
             for i in fresh:
                 mine[i.scrip_code] = i
+                pinned.setdefault(i.scrip_code, now)
             send = [i for i in fresh if i.scrip_code not in others]
         else:
             send = [mine.pop(i.scrip_code) for i in instruments if i.scrip_code in mine]
+            for i in send:
+                if i.scrip_code not in self._twin_codes(channel):
+                    pinned.pop(i.scrip_code, None)
             send = [i for i in send if i.scrip_code not in others]
         if send and self._ws is not None:
             await self._send_batched(channel, op, send)
@@ -249,9 +313,12 @@ class FivePaisaFeed:
         self._twins.pop(twin, None)
 
     def _wants(self, row: dict[str, Any]) -> bool:
+        return self._wants_cc(row_channel_code(row))
+
+    def _wants_cc(self, cc: tuple[str, str] | None) -> bool:
         """Every engine reads only what it subscribed, as on a socket of its own: the serving side
-        skips the rows only its twin asked for, the reading side the rows only the hub's engine did."""
-        cc = row_channel_code(row)
+        skips the rows only its twin asked for, the reading side the rows only the hub's engine did.
+        Skipped is not lost: every row is in the pool first (``_handle``)."""
         if cc is None:
             return True
         channel, code = cc
@@ -393,6 +460,9 @@ class FivePaisaFeed:
                 if line.startswith(b"#"):
                     self.health.connected = line.strip() == b"#up"
                     continue
+                if line.startswith(b"="):
+                    await self._take_pooled(line[1:])
+                    continue
                 stamp, _, raw = line.partition(b" ")
                 try:
                     lag = max(0.0, (time.time() - float(stamp)) * 1000)
@@ -408,6 +478,38 @@ class FivePaisaFeed:
                 self._ws = None
             self.health.connected = False
             writer.close()
+
+    async def _take_pooled(self, line: bytes) -> None:
+        """Reading side: the hub's pool answering this engine's subscribe for a code the hub already streams
+        (``HubServer`` writes ``=<arrived> <since> <row>``) — the frame the broker will not send again. Pooled
+        here, and dispatched at once when the code is wanted, with the subscription read as live since the
+        hub's own."""
+        try:
+            stamp, since_s, raw = line.rstrip(b"\r\n").split(b" ", 2)
+            arrived, since = float(stamp), float(since_s)
+            row = json.loads(raw)
+        except (ValueError, TypeError):
+            self.health.parse_errors += 1
+            return
+        cc = row_channel_code(row) if isinstance(row, dict) else None
+        if cc is None:
+            return
+        channel, code = cc
+        wanted = code in self._desired.get(channel, {}) and channel in PRIMED_CHANNELS
+        if wanted:
+            ch_since = self._since.setdefault(channel, {})
+            ch_since[code] = min(ch_since.get(code, since), since)
+        held = self._pool.get(cc)
+        if held is not None and held[1] >= arrived:
+            return  # this engine has the frame, or a newer one came off the stream meanwhile
+        self._pool[cc] = (row, arrived)
+        if wanted:
+            try:
+                await self._dispatch(row, arrived, pooled=True)
+                self.pool_primed += 1
+            except Exception as exc:  # noqa: BLE001
+                self.health.parse_errors += 1
+                log.warning("feed.prime_failed", channel=channel, scrip=code, error=str(exc)[:120])
 
     # -- message handling ---------------------------------------------------------------------------
 
@@ -432,7 +534,12 @@ class FivePaisaFeed:
             return
         rows = payload if isinstance(payload, list) else [payload]
         for row in rows:
-            if not isinstance(row, dict) or not self._wants(row):
+            if not isinstance(row, dict):
+                continue
+            cc = row_channel_code(row)
+            if cc is not None:
+                self._pool[cc] = (row, arrived)
+            if not self._wants_cc(cc):
                 continue
             try:
                 await self._dispatch(row, arrived)
@@ -441,20 +548,28 @@ class FivePaisaFeed:
                 log.warning("feed.dispatch_failed", error=str(exc))
         self.health.note_dispatch(arrived, time.time())
 
-    async def _dispatch(self, row: dict[str, Any], arrived: float) -> None:
+    async def _dispatch(self, row: dict[str, Any], arrived: float, *, pooled: bool = False) -> None:
         if "Details" in row or "MarketDepthData" in row:
             if self.on_depth:
-                self.health.depth += 1
-                await self.on_depth(self._depth(row, arrived))
+                depth = self._depth(row, arrived)
+                if pooled:
+                    depth["pooled"] = True
+                else:
+                    self.health.depth += 1
+                await self.on_depth(depth)
             return
         if "OpenInterest" in row:
-            if self.on_oi:
+            if self.on_oi and not pooled:
                 self.health.oi += 1
                 await self.on_oi(self._oi(row, arrived))
             return
         if "LastRate" in row or "Token" in row:
-            self.health.ticks += 1
-            await self.on_tick(self._tick(row, arrived))
+            tick = self._tick(row, arrived)
+            if pooled:
+                tick["pooled"] = True
+            else:
+                self.health.ticks += 1
+            await self.on_tick(tick)
 
     @staticmethod
     def _tick(row: dict[str, Any], arrived: float | None = None) -> dict[str, Any]:
