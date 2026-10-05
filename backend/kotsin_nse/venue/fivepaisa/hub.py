@@ -18,6 +18,11 @@ Wire, newline-framed on a loopback TCP socket:
 - twin → hub: the twin's own 5paisa subscription frames, verbatim. The hub subscribes them at the
   broker on the twin's behalf (held across its reconnects), and never unsubscribes a code the other
   side still wants.
+- hub → twin, on a subscribe for codes the broker already streams here: ``=<arrived> <since> <row>``,
+  each code's last frame from the pool (the broker does not send it again) and since when it has streamed.
+
+Both sides keep that pool — the last frame of every code on the socket, whoever asked for it — and a code
+either engine subscribes is read from it at once (operator, 2026-10-05).
 
 The hub never waits on the twin: a twin whose unsent backlog passes ``MAX_CLIENT_BUFFER`` is dropped
 (it reconnects and re-subscribes) rather than slow the engine that trades."""
@@ -49,6 +54,9 @@ LINE_LIMIT = 8 << 20
 _LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 _CHANNEL = {"MarketFeedV3": "mf", "MarketDepthService": "md", "GetScripInfoForFuture": "oi"}
 _OP = {"Subscribe": "s", "Unsubscribe": "u"}
+#: the channels a newly wanted code is primed on from the pool: a price and a book. OI is a level the next
+#: frame repeats, and its reference logic reads every print as it comes (``Engine._note_oi``).
+PRIMED_CHANNELS = ("mf", "md")
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +115,7 @@ class HubServer:
         self._ids = itertools.count(1)
         self.sent = 0
         self.dropped = 0
+        self.answered = 0
         self._up = False
 
     async def start(self) -> None:
@@ -171,7 +180,10 @@ class HubServer:
                 except (ValueError, KeyError, TypeError) as exc:
                     log.warning("feed_hub.bad_request", twin=cid, error=str(exc)[:120])
                     continue
+                held = self.feed.streaming(channel, but_twin=cid) if op == "s" else set()
                 await self.feed.pin(cid, channel, op, instruments)
+                if held:
+                    self._answer_from_pool(cid, writer, channel, [i.scrip_code for i in instruments if i.scrip_code in held])
         except (ConnectionError, asyncio.IncompleteReadError, asyncio.LimitOverrunError) as exc:
             log.warning("feed_hub.twin_error", twin=cid, error=str(exc)[:120])
         finally:
@@ -180,9 +192,23 @@ class HubServer:
             await self.feed.unpin_all(cid)
             log.info("feed_hub.twin_disconnected", twin=cid)
 
+    def _answer_from_pool(self, cid: str, writer: asyncio.StreamWriter, channel: str, codes: list[str]) -> None:
+        """A twin's subscribe for codes the broker already streams here: the broker will not send their frames
+        again, so the pool's last ones go to the twin at once (operator, 2026-10-05: "whichever subscribes,
+        must put all data in a pool that everyone can have access to without waiting"), as
+        ``=<arrived> <streaming since> <row>`` — the twin reads their true age and that the subscription
+        behind them was already live."""
+        if channel not in PRIMED_CHANNELS:
+            return
+        for row, arrived, since in self.feed.pooled(channel, codes):
+            body = json.dumps(row, separators=(",", ":")).encode()
+            self._write(cid, writer, f"={arrived:.6f} {since:.6f} ".encode() + body + b"\n")
+            self.answered += 1
+
     def stats(self) -> dict[str, Any]:
         return {"role": "serve", "address": f"{self.host}:{self.port}", "twins": len(self._clients),
-                "messages_sent": self.sent, "twins_dropped": self.dropped, "pinned": self.feed.pinned_counts()}
+                "messages_sent": self.sent, "twins_dropped": self.dropped, "pinned": self.feed.pinned_counts(),
+                "pool": self.feed.pool_stats(), "answered_from_pool": self.answered}
 
 
 class HubLink:
@@ -200,4 +226,4 @@ class HubLink:
         self.w.close()
 
 
-__all__ = ["FILE", "LINE_LIMIT", "MAX_CLIENT_BUFFER", "HubConfig", "HubLink", "HubServer", "read_hub_config", "wire_instruments"]
+__all__ = ["FILE", "LINE_LIMIT", "MAX_CLIENT_BUFFER", "PRIMED_CHANNELS", "HubConfig", "HubLink", "HubServer", "read_hub_config", "wire_instruments"]

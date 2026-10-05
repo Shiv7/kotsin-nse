@@ -326,17 +326,24 @@ async def test_a_strike_with_a_fresh_price_still_gets_its_depth_before_the_order
         async def subscribe(self, ch, insts):
             subs.append((ch, tuple(i.scrip_code for i in insts)))
 
+    asked: list[int] = []
+
     class Rest:
         async def market_feed(self, insts):
-            raise AssertionError("must not be called: the quote is fresh")
+            asked.append(len(insts))  # must not happen: the quote is fresh
+            return {}
 
     e.feed, e.rest = Feed(), Rest()
     e.quotes[option.scrip_code] = Quote(ltp=7.0, bid=6.9, ask=7.0, ts=time.time())
+    # and a fresh book: a missing one is stale, and asks REST (the old raise was caught as "quotes.failed")
+    e.books[option.scrip_code] = BookSnapshot(scrip_code=option.scrip_code, bids=[(6.9, 100)], asks=[(7.0, 100)], ts=time.time())
 
     await e._ensure_quotes([option], spot=1500.0)
     assert ("md", (option.scrip_code,)) in subs, "depth is subscribed regardless of price freshness"
     assert option.scrip_code in e._depth_following
-    assert not any(ch == "mf" for ch, _ in subs), "and no REST round trip was needed"
+    # price is subscribed up front too, so the feed's pool can answer it (operator, 2026-10-05)
+    assert ("mf", (option.scrip_code,)) in subs
+    assert asked == [], "and no REST round trip was needed"
 
 
 @pytest.mark.asyncio

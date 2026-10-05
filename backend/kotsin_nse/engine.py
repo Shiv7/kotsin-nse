@@ -681,6 +681,8 @@ class Engine:
         self.snapshot_confirmed = self.snapshot_kept = self.snapshot_book_confirmed = 0
         #: snapshot rows that marked an open position's contract from the broker's last price
         self.snapshot_held_marked = 0
+        #: quotes / books taken from the feed's pool for a code just subscribed (``_take_pooled_quote``)
+        self.pool_quotes = self.pool_books = 0
         #: code -> when a snapshot's last trade contradicted the held quote: that quote is known old,
         #: and the choice waits for a newer one (``_choose_option``)
         self._quote_outdated: dict[str, float] = {}
@@ -1648,6 +1650,9 @@ class Engine:
     async def _on_tick(self, tick: dict[str, Any]) -> None:
         code = str(tick["scrip_code"])
         ltp = float(tick.get("ltp") or 0)
+        if tick.get("pooled"):
+            self._take_pooled_quote(code, ltp, tick)
+            return
         if ltp > 0:
             self.ltps[code] = ltp
             self._ltp_ts[code] = float(tick.get("recv_ts") or time.time())
@@ -1660,9 +1665,39 @@ class Engine:
         await self.aggregator.on_tick(tick)
         await self.bus.publish(Topic.TICK, tick)
 
+    def _take_pooled_quote(self, code: str, ltp: float, tick: dict[str, Any]) -> None:
+        """A code this engine just subscribed, primed from the feed's pool (``FivePaisaFeed._prime``): the
+        last frame the broker sent for it — to the other engine's subscription — with the time it ARRIVED,
+        so every age guard reads its true age. It replaces nothing newer, except the broker's REST price,
+        which has no bid or ask, when it is two-sided (BAJFINANCE 1010 CE, 2026-10-05 09:45:04: 18.00 /
+        17.90 / 18.05 at 04.432 against the REST 18.00 / 0 / 0 at 04.564 — the strike read unpriced and the
+        trigger had no option). A price, never a trade: no bar, no tape — they had it when it came."""
+        seen = float(tick.get("recv_ts") or 0.0)
+        bid, ask = float(tick.get("bid") or 0), float(tick.get("ask") or 0)
+        held = self.quotes.get(code)
+        if ltp <= 0 or seen <= 0:
+            return
+        if held is not None and held.ts >= seen and not (held.src == "snapshot" and not held.priced and bid > 0 and ask > 0):
+            return
+        if held is not None and held.ts > seen and held.ltp > 0 and abs(held.ltp - ltp) > 1e-6:
+            # the broker's REST price is a newer trade than this frame: the book stands, its price is known old
+            self._quote_outdated[code] = time.time()
+        else:
+            self.ltps[code] = ltp
+            self._ltp_ts[code] = seen
+        self.quotes[code] = Quote(ltp=ltp, bid=bid, ask=ask, ts=seen)
+        self.pool_quotes += 1
+
     async def _on_depth(self, depth: dict[str, Any]) -> None:
         code = str(depth["scrip_code"])
         ts = float(depth.get("recv_ts") or time.time())
+        if depth.get("pooled"):
+            # the pool's last book for a code just subscribed: kept at its own age, over nothing newer
+            held = self.books.get(code)
+            if held is None or held.ts < ts:
+                self.books[code] = BookSnapshot(scrip_code=code, bids=depth["bids"], asks=depth["asks"], ts=ts)
+                self.pool_books += 1
+            return
         self.books[code] = BookSnapshot(scrip_code=code, bids=depth["bids"], asks=depth["asks"], ts=ts)
         self.micro.on_depth(code, depth["bids"], depth["asks"], ts)
 
@@ -5154,6 +5189,9 @@ class Engine:
         # about to be priced against, and since depth only follows what is in use, a strike whose
         # price happens to be fresh would otherwise reach the matcher with no book at all.
         await self._follow_depth(near)
+        # Price next, BEFORE the staleness test: a strike the other engine already streams is answered from
+        # the feed's pool at once (operator, 2026-10-05), and needs no REST call or wait of its own
+        await self.feed.subscribe("mf", near)
         now_ = time.time()
         limit_ms = self.matcher.age_limit_ms(now_)
         # A quote can be fresh while its depth book has aged past the matcher's limit (the socket
@@ -5172,7 +5210,6 @@ class Engine:
             log.warning("quotes.failed", n=len(stale), error=str(exc))
             return
         self._apply_snapshot(rows, time.time())
-        await self.feed.subscribe("mf", stale)
 
     def _apply_snapshot(self, rows: dict[str, dict[str, Any]], now: float) -> None:
         """Install REST snapshot quotes: the quote, the LTP, and a one-level book wherever the real
@@ -6417,7 +6454,8 @@ class Engine:
             # broker snapshots with no bid/ask: held quotes confirmed as current / kept as they were
             "quotes": {"snapshot_confirmed": self.snapshot_confirmed, "snapshot_kept": self.snapshot_kept,
                        "snapshot_book_confirmed": self.snapshot_book_confirmed,
-                       "snapshot_held_marked": self.snapshot_held_marked},
+                       "snapshot_held_marked": self.snapshot_held_marked,
+                       "pool_quotes": self.pool_quotes, "pool_books": self.pool_books},
             "gateway": self.gateway.stats(),
             "rest": self.rest.stats(),
             "catalogue": self.catalogue_loader.catalogue.stats(),
