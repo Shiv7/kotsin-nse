@@ -4103,9 +4103,11 @@ class Engine:
                         # changes at a fill, a target placed or cancelled, or an exit
                         stop_now = max(lp.option_sl, lp.ratchet_sl)
                         exit_plan = self._exit_plan(key, p_inst, int(lp.qty_remaining), tuple(lp.option_targets), stop_now,
-                                                    float(lp.equity_sl or 0), seg, hit=lp.targets_hit, rising=lp.ratchet_sl > lp.option_sl)
+                                                    float(lp.equity_sl or 0), seg, hit=lp.targets_hit, rising=lp.ratchet_sl > lp.option_sl,
+                                                    entry=lp.entry, initial_sl=lp.initial_option_sl)
                     else:
-                        exit_plan = self._exit_plan(key, p_inst, int(ps["qty"]), tuple(ps.get("option_targets") or ()), float(ps.get("option_sl") or 0), float(ps.get("equity_sl") or 0), seg)
+                        exit_plan = self._exit_plan(key, p_inst, int(ps["qty"]), tuple(ps.get("option_targets") or ()), float(ps.get("option_sl") or 0), float(ps.get("equity_sl") or 0), seg,
+                                                    entry=float(ps.get("entry") or 0), initial_sl=float(ps.get("initial_option_sl") or 0))
             if skip is not None:
                 route_label = "SKIP"
             elif key is StrategyKey.FUDKII_CT_Y and gap_fade is not None:
@@ -4364,7 +4366,7 @@ class Engine:
         return {"action": "take", "enabled": False, **(aim or blank), "reason": reason}
 
     def _exit_plan(self, key: StrategyKey, inst: Instrument, qty: int, ladder: tuple[float, ...], option_sl: float, equity_stop: float,
-                   segment: Segment, *, hit: int = 0, rising: bool = False) -> dict[str, Any]:
+                   segment: Segment, *, hit: int = 0, rising: bool = False, entry: float = 0.0, initial_sl: float = 0.0) -> dict[str, Any]:
         """What leaves at which threshold, for this book — the card's "what happens next". For an open
         position the caller passes the LIVE stop, the lots left and the rungs already taken (``hit``),
         so the plan tracks the trade (operator, 2026-09-29: "does the SL get updated live?")."""
@@ -4392,8 +4394,14 @@ class Engine:
                 rows.append({"kind": "target", "at": f"T{i + 1} {r:.2f}", "action": f"{share:.0%}", "qty": out})
         if option_sl > 0:
             sus = f", {lim.sustain_s:.0f} s sustain" if lim.sustain_s else ""
-            what = (f"stop now {option_sl:.2f} — the rising line (breakeven, the rung below, or the peak give-back)" if rising
-                    else f"option stop {option_sl:.2f} (equity stop through δ{sus})")
+            if entry > 0 and option_sl > entry + 1e-6:
+                # a stop above the premium paid is the trail's, not the stock's stop through δ (operator, 2026-10-06: "the
+                # dashboard says equity projected stop at 19.21 ... entry was 18.4" — FUDKII's trail, locking a gain)
+                what = f"stop {option_sl:.2f} — above the {entry:.2f} paid: the trail locks +{(option_sl / entry - 1) * 100:.1f}%"
+            elif rising or (initial_sl > 0 and option_sl > initial_sl + 1e-6):
+                what = f"stop now {option_sl:.2f} — the rising line (breakeven, the rung below, or the peak give-back)"
+            else:
+                what = f"option stop {option_sl:.2f} (equity stop through δ{sus})"
             rows.append({"kind": "stop", "at": what, "action": "all", "qty": qty})
             if lim.sustain_s:
                 rows.append({"kind": "stop", "at": f"hard floor {option_sl * (1 - lim.hard_floor_below_stop_pct / 100):.2f} — {lim.hard_floor_below_stop_pct:.0f}% through the stop, no sustain", "action": "all", "qty": qty})
