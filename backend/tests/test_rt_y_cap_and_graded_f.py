@@ -103,7 +103,8 @@ async def test_an_unpublished_trigger_the_gates_refuse_never_costs_a_strike_choi
         await e._handle_unpublished(_unpublished(sig), None)
         assert asked == [] and not e.positions
         ev = [r for r in await e.ledger.rows_between("events", 0, time.time() + 60) if r.get("kind") == "rt_twin.skipped"]
-        assert [(r["book"], r["gate"]) for r in ev] == [("FUDKII_RT_Y_F", "breadth")], "recorded as the shadow's own skip"
+        assert sorted((r["book"], r["gate"]) for r in ev) == [("FUDKII_RT_X", "graded_f"), ("FUDKII_RT_Y", "graded_f"), ("FUDKII_RT_Y_F", "breadth")], \
+            "the shadow's own skip, and RT-X and RT-Y say why they stand aside (2026-10-06)"
     finally:
         await e.stop()
 
@@ -208,7 +209,8 @@ def test_the_shadow_page_lists_every_graded_f_trigger_and_what_the_shadow_did():
     got = shadow.graded_f_summary(signals=sigs, positions=pos, trades=[{"position_id": "p1", "net": 1234.0}], events=ev)
     assert [(r["symbol"], r["status"]) for r in got["rows"]] == [("TCS", "EXITED"), ("INFY", "NONE")]
     assert got["rows"][1]["skip"] == "breadth 30 %" and got["rows"][0]["net"] == 1234.0
-    assert got["total"] == {"triggers": 2, "traded": 1, "closed": 1, "net": 1234.0, "win": 1, "worst": 1234.0, "best": 1234.0}
+    assert got["total"] == {"triggers": 2, "traded": 1, "closed": 1, "net": 1234.0, "win": 1, "worst": 1234.0, "best": 1234.0,
+                            "rt_y_net": 0.0, "rt_y_traded": 0, "ct_y_f_net": 0.0, "ct_y_f_traded": 0}
 
 
 # -- the scrip masters: every distinct one kept, every day logged ---------------------------------

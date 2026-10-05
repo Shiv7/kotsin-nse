@@ -36,7 +36,7 @@ THRESHOLDS: dict[str, float] = {
     "breakeven_r": 0.25,      # a raised stop that closed within this many R of the entry: the trail at breakeven
 }
 
-COUNTER_TREND_BOOKS = ("FUDKII_CT_X", "FUDKII_CT_Y", "FUDKII_CT_M")
+COUNTER_TREND_BOOKS = ("FUDKII_CT_X", "FUDKII_CT_Y", "FUDKII_CT_M", "FUDKII_CT_Y_F")
 OPTION_STOP_EXITS = ("SL-OP",)
 #: exits a rule or a person made, not the market: a halt, the daily loss limit, the 15:20 flatten, a manual close
 RULE_EXITS = ("HALT", "DAILY_LOSS", "FORCED", "MANUAL")

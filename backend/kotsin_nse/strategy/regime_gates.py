@@ -79,14 +79,7 @@ def trigger_verdicts(
     if skip is not None:
         # what actually happened, named as it happened (audit, 2026-09-26: a missed limit, a stop
         # already breached or an empty purse all read as a gate-B SKIP)
-        gate = str(skip.get("gate") or "")
-        action, state = (
-            ("SKIP", "gate B") if gate in GATE_B else
-            ("SKIP", "dried volume") if gate == "dried_volume" else
-            ("MISSED", "missed") if gate in MISSED_GATES else
-            ("NOT TAKEN", gate.replace("_", " ") or "refused")
-        )
-        rt_y: dict[str, Any] = {"action": action, "state": state, "gate": gate, "why": [str(skip.get("reason") or "")]}
+        rt_y: dict[str, Any] = _rt_y_skip_verdict(skip)
     elif rt_y_held:
         rt_y = {"action": "TAKE", "state": "taken", "gate": None, "why": []}
     elif would:
@@ -131,6 +124,48 @@ def trigger_verdicts(
         ct_y = {"action": "NONE", "side": fade_side, "stop": None, "targets": [], "rr": (no_plan or {}).get("rr"),
                 "grade": (no_plan or {}).get("grade"), "why": why}
     return {"rtY": rt_y, "ctY": ct_y, "ctM": market_fade_verdict(evs, ctx, fade_side)}
+
+
+def _rt_y_skip_verdict(skip: dict[str, Any]) -> dict[str, Any]:
+    gate = str(skip.get("gate") or "")
+    action, state = (
+        ("SKIP", "gate B") if gate in GATE_B else
+        ("SKIP", "graded F") if gate == "graded_f" else
+        ("SKIP", "dried volume") if gate == "dried_volume" else
+        ("MISSED", "missed") if gate in MISSED_GATES else
+        ("NOT TAKEN", gate.replace("_", " ") or "refused")
+    )
+    return {"action": action, "state": state, "gate": gate, "why": [str(skip.get("reason") or "")]}
+
+
+def graded_f_verdicts(sgn: dict[str, Any], evs: list[dict[str, Any]], *, rt_y_held: bool, lim_y: RiskLimits) -> dict[str, Any]:
+    """What RT-Y, CT-Y and CT-M do with a trigger FUDKII grades F (operator, 2026-10-06: every RT and CT book is offered
+    one and decides for itself): RT-Y takes it only through the gap switch; CT-Y fades only published triggers — its
+    graded-F side is the CT-Y-F shadow's light-volume gap fade, shown in its place; CT-M fades published triggers only."""
+    ctx = next((e for e in reversed(evs) if e.get("kind") == "regime.breadth"), None)
+    skip = next((e for e in reversed(evs) if e.get("kind") == "rt_twin.skipped" and e.get("book") == "FUDKII_RT_Y"), None)
+    if rt_y_held:
+        rt_y: dict[str, Any] = {"action": "TAKE", "state": "taken", "gate": None, "why": [w for w in [gap_switch(ctx, lim_y)] if w]}
+    elif skip is not None:
+        rt_y = _rt_y_skip_verdict(skip)
+    else:
+        rt_y = {"action": "NONE", "state": "not decided", "gate": None, "why": ["no decision recorded on this graded-F trigger"]}
+    fade_side = "PE" if sgn.get("direction") == "BULLISH" else "CE"
+    blank = {"side": fade_side, "stop": None, "targets": [], "rr": None, "grade": None}
+    f_ev = next((e for e in reversed(evs) if e.get("kind") == "counter.gap_fade_f"), None)
+    f_skip = next((e for e in reversed(evs) if e.get("kind") == "rt_twin.skipped" and e.get("book") == "FUDKII_CT_Y_F"), None)
+    if f_ev is not None and not f_ev.get("blocked"):
+        ct_y = {"action": "GAP FADE via CT-Y-F", "side": f_ev.get("side") or fade_side, "stop": f_ev.get("stop"),
+                "targets": f_ev.get("targets") or [], "rr": f_ev.get("rr"), "grade": f_ev.get("grade"),
+                "why": f"graded F: the CT-Y-F shadow fades the 09:45 gap {float(f_ev.get('gapDatr') or 0):.2f} daily ATR on light volume, "
+                       f"stop {f_ev.get('stopNote') or '1 ATR30 past the close'}"}
+    else:
+        why = (f"graded F — CT-Y-F: {f_ev['blocked']}" if f_ev is not None else
+               f"graded F — CT-Y-F: {f_skip.get('reason')}" if f_skip is not None else
+               "graded F — CT-Y fades only published triggers")
+        ct_y = {**blank, "action": "NONE", "why": why}
+    ct_m = {**blank, "action": "NONE", "breadth": (ctx or {}).get("share"), "why": "graded F — CT-M fades only published triggers"}
+    return {"rtY": rt_y, "ctY": ct_y, "ctM": ct_m}
 
 
 def market_fade_verdict(evs: list[dict[str, Any]], ctx: dict[str, Any] | None, fade_side: str) -> dict[str, Any]:

@@ -21,6 +21,7 @@ Code: `engine.py` — `_handle_signal` (the trigger, once) → `_enter_book` (ev
 | **CT-X** | counter-trend fade | the fade plan of a FUDKII trigger routed COUNTER; a plan whose stop is nearer than 0.5 ATR30 to the close is graded F (every counter-trend plan) | none | own ladder, RT-X's policy | ₹10 L |
 | **CT-Y** | counter-trend fade + the 09:45 gap fade | (a) its own 09:45 gap fade of a trigger that gapped ≥ 0.3 daily ATR its own way — not one on ≥ 3× the NIFTY50's volume, which the gap switch gives RT-Y in trend (6 Oct); its stock stop the nearer of 1 ATR30 and 0.1 ATR30 past the first classic level ≥ 0.25 ATR30 past the close (operator, 6 Oct: "pivot clusters or ATR based on what is nearer"; route study: 1–28 Sep +₹39,515 → +₹50,219 on 18, 29 Sep–5 Oct −₹15,551 → −₹11,742 on 8); (b) the same fade plan as CT-X | stands aside from (b) on a trigger it already gap-faded | own ladder, RT-Y's policy (incl. the +5 % T1 floor) | ₹10 L |
 | **CT-M (shadow)** | the market-against fade (operator, 3 Oct: "fade when the market is clearly against" as a shadow, named FUDKII-CT-M) | every published NSE trigger at most 45 % of the market agrees with — breadth, the share of NSE names past today's open the trigger's way (`CT_M_MARKET_AGAINST_MAX`); a trigger above that is a skip on its card with the share | none of its own: CT-Y's fade plan (`Engine.fade_plan`) — the opposite OTM, the stock stop 1 ATR30 past the close, the walls on the fade's side (else one target 1 ATR30 away); beside CT-Y's gap fade, never instead of it | CT-Y's: RT-Y's policy incl. the +5 % T1 floor, no 25 % premium cap | ₹10 L — paper, on the Shadow page; never in the day's totals. 25 Sep–1 Oct actual replay: 3 fades, all won, +₹19,127; option model 24 Aug–1 Oct: 73 fades, −₹80,934 (−₹76,238 to 11 Sep, −₹4,696 after), against −₹2,17,547 for the same triggers in-trend. Every fade and skip: the Shadow page's *Market fade · CT-M* tab; a CT-M chip on every card |
+| **CT-Y graded F (shadow)** | CT-Y's 09:45 gap fade on the triggers FUDKII does not publish (operator, 6 Oct: "lets have all fudkii triggers (including F grade ones) to simultaneously be published to fudkii-rt and fudki-ct variants and twins") | a trigger FUDKII grades F (NOT_PUBLISHED), NSE only, on a 09:45 gap ≥ 0.3 daily ATR its own way | the trigger bar's volume under 1.5× the NIFTY50's (`CT_Y_F_MAX_REL_VOL`); every trigger it does not fade is a skip on its card with the reason | CT-Y's plan (the nearer stop) and exits | ₹10 L — paper, on the Shadow page's Graded F tab beside RT-Y-F; never in the day's totals. Route study: 1–28 Sep +₹59,238 on 29, all of it on 11 Sep (−₹9,441 on 6 without 11 and 24 Sep); 29 Sep–5 Oct +₹2,907 on 6 |
 | **RT-MCX** | the commodity book | every FUDKII trigger on MCX (FUDKII's purse never trades MCX) | none | own ladder, RT-X's policy | ₹30 L |
 | **FUKAA (shadow)** | a separate strategy derived from FUDKII's context — FUDKII's trigger admitted only when volume confirms it; in SHADOW since 2 Oct (inputs fixed) | its own signals | its own, incl. the costs-against-T1 test: 4x volume on T or T-1 (else watched one bar), composite ≥ 60 | never trades: each signal is a SHADOW row and a `fukaa.shadow` event with its inputs and alignment (market with / against, OI quadrant); the Shadow page's *FUKAA · shadow* tab | ₹10 L, untouched |
 
@@ -48,6 +49,23 @@ Code: `engine.py` — `_handle_signal` (the trigger, once) → `_enter_book` (ev
   ones until the broker answers). On 29 Sep ALUMINIUM's expiring contract traded 53 lots against 1,438 in the next
   month. NSE is not rolled here.
 
+
+## 1c. Graded-F triggers (operator, 6 Oct)
+
+"lets have all fudkii triggers (including F grade ones) to simultaneously be published to fudkii-rt and fudki-ct variants
+and twins, then if they want to discard it, it can ... let fudkii-rt-n be as is fudkii" · "dont retire the graded-F shadow".
+
+A trigger FUDKII grades F and does not publish (`NOT_PUBLISHED`) reaches every RT and CT book at once; each decides for
+itself and its card says what it did and why (`UNPUBLISHED_BOOKS`, `UNPUBLISHED_FADE_BOOKS`, `GRADED_F_RULES`):
+
+| Book | On a graded-F trigger | Why (route study, option model: 1–28 Sep / 29 Sep–5 Oct) |
+|---|---|---|
+| FUDKII, RT-N | nothing — carded `NOT_PUBLISHED` | RT-N is as FUDKII |
+| RT-Y graded F (shadow) | RT-Y's rules, as since 28 Sep | kept (operator) |
+| RT-Y | only through the **gap switch**: a 09:45 gap ≥ 0.3 daily ATR its own way on ≥ 3× the NIFTY50's volume, breadth > 50 %, not dried | RT-Y's rules on every graded-F trigger: −₹68,675 on 67 / −₹44,387 on 18 |
+| RT-X | discards it (`graded_f` skip) | every graded-F trigger in trend: −₹3,93,282 / −₹1,85,141 |
+| CT-Y graded F (shadow) | CT-Y's 09:45 gap fade under 1.5× the NIFTY50's volume | +₹59,238 on 29 (all on 11 Sep) / +₹2,907 on 6 — unproven |
+| CT-Y, CT-X, CT-M | discard it (`graded_f` skip) | graded-F gap fades at 1 ATR: −₹81,003 on 64 / −₹5,262 on 8 |
 ## 2. The funnel — decided ONCE per trigger (a reason here stops every book)
 
 1. The trigger itself — FUDKII's strategy logic and grade. A trigger FUDKII grades F (a SuperTrend flip with

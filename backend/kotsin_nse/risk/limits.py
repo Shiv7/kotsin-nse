@@ -384,5 +384,11 @@ RT_Y_F_LIMITS = replace(RT_Y_LIMITS, min_equity_stop_atr=None,  # RT-Y's floor i
 #: 24 Aug - 1 Oct the rule lost: 73 fades, −₹80,934 (−₹76,238 to 11 Sep, −₹4,696 after) — though following the same
 #: triggers lost −₹2,17,547. Unproven, hence a shadow.
 CT_M_MARKET_AGAINST_MAX = 0.45
+
+#: FUDKII-CT-Y-F (operator, 2026-10-06), a shadow: CT-Y's 09:45 gap fade — its plan, its nearer stop, its exits — on the
+#: triggers FUDKII grades F, only under 1.5x the NIFTY50's volume. Route study (option model): 1-28 Sep +₹59,238 on 29,
+#: but all of it on 11 Sep (−₹9,441 on 6 without 11 and 24 Sep); 29 Sep - 5 Oct +₹2,907 on 6. Unproven, hence a shadow.
+CT_Y_F_MAX_REL_VOL = 1.5
 CT_M_LIMITS = replace(CT_Y_LIMITS, gap_fade_datr=None,  # its own fade route, not CT-Y's 09:45 gap rule
                       fade_stop_nearer_level=False)  # and its 1-ATR30 stop as measured (2026-10-06)
+CT_Y_F_LIMITS = replace(CT_Y_LIMITS, gap_fade_max_rel_vol=CT_Y_F_MAX_REL_VOL)

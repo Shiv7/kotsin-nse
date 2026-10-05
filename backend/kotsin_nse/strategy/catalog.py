@@ -208,6 +208,7 @@ BOOKS: tuple[Book, ...] = (
             "dried_volume_skip": "no mirror when surgeT and surgeT-1 are both < 0.85x the T-2..T-7 volume baseline, on the equity or its front future",
             "max_premium_loss_pct": "25 (the option stop never more than 25 % under the premium paid; set 2026-09-28)",
             "gap_switch_rel_vol": "3.0 — a 09:45 trigger that gapped >= 0.3 daily ATR its own way on >= 3x the NIFTY50's volume is taken through the pivot and gap gates (2026-10-06)",
+            "graded F": "offered every trigger FUDKII does not publish; takes one only through the gap switch (2026-10-06)",
         },
         have=(
             "30m/1m bars on the session grid",
@@ -341,6 +342,30 @@ BOOKS: tuple[Book, ...] = (
             "Operator, 2026-10-03. 25 Sep - 1 Oct actual replay: 3 fades, all won, +₹19,127 (two more had no option "
             "prices). Option model 24 Aug - 1 Oct: 73 fades, −₹80,934 (−₹76,238 to 11 Sep, −₹4,696 after). Paper; the Shadow "
             "page's Market fade tab lists every fade and skip; its P&L is never added to the trading books'."
+        ),
+    ),
+    Book(
+        key="FUDKII_CT_Y_F",
+        label="CT-Y · graded F (shadow)",
+        tf="30m entry, 1s exit",
+        summary=(
+            "A shadow with entries of its own: CT-Y's 09:45 gap fade — its plan, its nearer stop, its exits — on the NSE "
+            "triggers FUDKII grades F and does not publish, only when the trigger bar's volume is under 1.5x the NIFTY50's. "
+            "CT-Y itself fades only published triggers. It answers whether CT-Y should fade graded-F gaps."
+        ),
+        status="live",
+        params={
+            "entries": "triggers FUDKII does not publish (NOT_PUBLISHED), NSE only: a 09:45 gap >= 0.3 daily ATR the trigger's own way",
+            "gap_fade_max_rel_vol": "1.5 (risk/limits.py CT_Y_F_MAX_REL_VOL) — a heavier gap is not faded",
+            "plan": "CT-Y's (Engine.gap_fade_plan): the nearer of 1 ATR30 and 0.1 ATR30 past the next classic level; the fade side's walls",
+            "exits": "CT-Y's: RT-Y's policy incl. the +5 % T1 floor, no 25 % premium cap",
+        },
+        have=("30m/1m bars on the session grid", "relative volume against the NIFTY50", "MTF pivot zones"),
+        source="kotsin_nse/engine.py (_handle_counter_unpublished, _gap_fade); kotsin_nse/risk/limits.py CT_Y_F_LIMITS",
+        note=(
+            "Operator, 2026-10-06. Route study (option model): 1-28 Sep +₹59,238 on 29 fades, all of it on 11 Sep (−₹9,441 on 6 "
+            "without 11 and 24 Sep); 29 Sep - 5 Oct +₹2,907 on 6. Paper; the Shadow page's Graded F tab shows it beside RT-Y-F; "
+            "its P&L is never added to the trading books'."
         ),
     ),
     Book(
