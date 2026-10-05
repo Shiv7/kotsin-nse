@@ -195,6 +195,18 @@ class RiskLimits:
     #: ... and skip a 09:45 trigger (the session's first 30m bar) whose open gapped this many
     #: daily ATRs the trade's own way (−2.0 % / −5.7 % against −0.7 % / −1.3 %). None = off.
     skip_open_gap_datr: float | None = None
+    #: The gap switch (operator, 2026-10-06: "include relative volume to decide trade in-trend/countertrend"): at a
+    #: 09:45 trigger that gapped ``regime_gates.GAP_SWITCH_GAP_DATR`` daily ATRs or more its own way, the trigger bar's
+    #: volume against the NIFTY50's (``relVol``: the bar over its own half hour's median, over the members' same
+    #: reading) decides the side. At this many times the members' or more the move is FOLLOWED: the book takes it in
+    #: trend through its pivot and gap gates (breadth and dried volume still stand). Route study, 6 Oct (option model,
+    #: published and graded-F triggers): 1-28 Sep 17 such triggers in trend +₹1,11,091, 15 won (+₹76,058 on 10 without
+    #: the two market-wide gap days, 11 and 24 Sep); 29 Sep - 5 Oct +₹6,747 on 3; the same triggers faded lost in both.
+    #: Off a gap the same volume did not hold (−₹49,723 on 17 in Sep). None = off.
+    gap_switch_rel_vol: float | None = None
+    #: The fade's side of the gap switch: no 09:45 gap fade when ``relVol`` is this many times the NIFTY50's or more.
+    #: A volume that cannot be read never blocks. None = no volume condition.
+    gap_fade_max_rel_vol: float | None = None
     #: The 09:45 gap fade (CT-Y only): fade a first-bar trigger that gapped this many daily ATRs
     #: its own way — the opposite OTM, stop 1 ATR30 past the close. The replay's fade made +3.72 %
     #: / +5.87 % in the two halves (40 trades, before costs). None = off.
@@ -301,6 +313,7 @@ RT_Y_LIMITS = RiskLimits(
     breadth_min=0.5,           # paper A/B: RT-Y gated, RT-X / RT-N not (2026-09-25)
     skip_pivot_ahead_atr=0.5,  # gate B (2026-09-26): a key pivot within 0.5 ATR30 ahead
     skip_open_gap_datr=0.3,    # gate B: a 09:45 trigger that gapped >= 0.3 daily ATR its own way
+    gap_switch_rel_vol=3.0,    # ... unless its volume is >= 3x the NIFTY50's: followed in trend (2026-10-06)
     min_equity_stop_atr=None,  # built and validated at RT_Y_STOP_FLOOR_ATR; OFF until the operator says (2026-10-01)
     # the option stop never more than 25 % under the premium paid (operator, 2026-09-28: "execute and
     # make live: RT-Y 25% premium cap on normal trades"). Replay 1–28 Sep, fresh purses: 28 trades,
@@ -336,6 +349,8 @@ CT_X_LIMITS = replace(RT_X_LIMITS, dried_volume_v=None)
 CT_Y_LIMITS = replace(
     RT_Y_LIMITS, dried_volume_v=None, breadth_min=None, skip_pivot_ahead_atr=None, skip_open_gap_datr=None,
     gap_fade_datr=0.3,  # CT-Y fades the 09:45 gap-with triggers RT-Y stands aside from (2026-09-26)
+    gap_switch_rel_vol=None,
+    gap_fade_max_rel_vol=3.0,  # ... but not one on >= 3x the NIFTY50's volume: RT-Y follows that (2026-10-06)
     max_premium_loss_pct=None,  # RT-Y's 25 % cap is RT-Y's (2026-09-28), not the fade's
     min_equity_stop_atr=None,   # so is its stop floor (2026-10-01): a fade's stop is its own plan's
 )
@@ -354,7 +369,8 @@ RT_Y_W1_LIMITS = replace(RT_Y_LIMITS, equity_stop_buffer_pct=1.0,
 #: the triggers FUDKII grades F and does not publish, which RT-Y itself never sees. Its own purse,
 #: kept off the trading tabs and shown on the Shadow page. Replay 1–28 Sep (inside RT-Y's purse):
 #: 16 trades, 11 won, −₹2,364 — DIXON −13,251, BLUESTARCO −12,782, SBICARD −7,340.
-RT_Y_F_LIMITS = replace(RT_Y_LIMITS, min_equity_stop_atr=None)  # RT-Y's floor is not the shadow's (mixed in the study)
+RT_Y_F_LIMITS = replace(RT_Y_LIMITS, min_equity_stop_atr=None,  # RT-Y's floor is not the shadow's (mixed in the study)
+                        gap_switch_rel_vol=None)  # the shadow keeps RT-Y's rules as they were (operator, 2026-10-06)
 
 #: FUDKII-CT-M (operator, 2026-10-03), a shadow: CT-Y's fade plan and exits on every published NSE trigger the
 #: market is clearly against — at most this share of the NSE names past today's open the trigger's way (RT-Y

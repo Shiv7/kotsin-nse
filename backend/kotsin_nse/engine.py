@@ -214,7 +214,13 @@ from .strategy.keys import (
     StrategyKey,
     stop_mirrors_of,
 )
-from .strategy.regime_gates import rt_gate_reasons, trigger_verdicts, volume_labels
+from .strategy.regime_gates import (
+    GAP_SWITCH_GAP_DATR,
+    gap_fade_volume_block,
+    rt_gate_reasons,
+    trigger_verdicts,
+    volume_labels,
+)
 from .venue.fivepaisa.auth import Authenticator
 from .venue.fivepaisa.hub import HubServer, read_hub_config
 from .venue.fivepaisa.rest import FivePaisaREST
@@ -350,6 +356,10 @@ FORCE_FLAT_HM.update({m.value: FORCE_FLAT_HM[src.value] for m, (src, _r) in STOP
 #: position of nine had its stop that near, none a target). ``EOD_PLAN_NEAR_PCT`` is "near", % of the mid.
 EOD_PLAN_HM = "15:15"
 EOD_PLAN_NEAR_PCT = 3.0
+#: How long a 09:45 gap trigger waits for the NIFTY50's volume reading at its bar — the members' bars close in the
+#: same few seconds — before the gap switch decides without it (a reading that cannot be taken never blocks)
+REL_VOL_WAIT_S = 3.0
+REL_VOL_POLL_S = 0.25
 #: How long after the NSE open a trigger carried from the last session's close waits for its stock's
 #: first print before it expires.
 CARRY_WINDOW_S = 300.0
@@ -1868,8 +1878,8 @@ class Engine:
         return r.ratio if r.ok else None
 
     def relative_volume(self, symbol: str, t_ts: float, surge_t: float | None) -> dict[str, Any]:
-        """A trigger's volume against the NIFTY50's at the same bar, on two scales (operator, 2026-10-05) —
-        labels, nothing gates on them:
+        """A trigger's volume against the NIFTY50's at the same bar, on two scales (operator, 2026-10-05) — labels,
+        and at a 09:45 gap ``relVol`` decides the side (the gap switch, ``regime_gates.gap_switch``, 2026-10-06):
 
         * ``relVolMkt`` — its surge over the members' median surge (both against their previous bars);
         * ``relVol`` — its time-of-day ratio over the members' median time-of-day ratio: the opening rush and
@@ -3589,11 +3599,29 @@ class Engine:
         try:
             br.update(self.trigger_context(sig))
             br.update(volume_labels(br))
+            await self._await_gap_rel_vol(sig, br)
         except Exception as exc:  # noqa: BLE001 — descriptive labels never cost a trigger its entry
             log.warning("regime.context_failed", symbol=sig.symbol, error=str(exc)[:120])
         self._breadth_at[sig.signal_id] = br
         log.info("regime.breadth", symbol=sig.symbol, direction=sig.direction.value, share=br["share"], names=br["names"])
         await self.ledger.event("regime.breadth", {"signal_id": sig.signal_id, "symbol": sig.symbol, **br})
+
+    async def _await_gap_rel_vol(self, sig: Signal, ctx: dict[str, Any]) -> None:
+        """A 09:45 gap trigger's ``relVol`` decides its side (the gap switch): when the NIFTY50's reading at its bar is
+        not in yet — the members' bars close in the same few seconds — wait up to REL_VOL_WAIT_S for it, then read the
+        trigger again. Only where it can come: the stock's own half-hour reading stands and 25 members are in the
+        universe. Without it the books decide as before."""
+        if ctx.get("relVol") is not None or not ctx.get("openBar") or (ctx.get("gapDatr") or 0.0) < GAP_SWITCH_GAP_DATR:
+            return
+        if sum(1 for m in NIFTY50 if m in self.underlyings) < 25 or self._slot_ratio(sig.symbol, sig.ts) is None:
+            return
+        end = time.monotonic() + REL_VOL_WAIT_S
+        while self.n50_relative_volume(sig.ts)[1] is None:
+            if time.monotonic() >= end:
+                log.info("gap_switch.no_rel_vol", symbol=sig.symbol, waited_s=REL_VOL_WAIT_S)
+                return
+            await asyncio.sleep(REL_VOL_POLL_S)
+        ctx.update(self.relative_volume(sig.symbol, sig.ts, ctx.get("volSurgeT")))
 
     async def _open_shadow_twins(self, of: Position, inst: Instrument, ts: float, charges: float, *, planned_sl: float = 0.0) -> None:
         """Mirror a book's fresh entry into each book that shadows it — its two stop-rule mirrors
@@ -4714,6 +4742,12 @@ class Engine:
             return
         lim = self._exits_by_strategy[StrategyKey.FUDKII_CT_Y.value].limits
         event = {"signal_id": sig.signal_id, "symbol": sig.symbol, **plan}
+        if (heavy := gap_fade_volume_block(ctx, lim)) is not None:
+            # the gap switch: a gap on this much volume is RT-Y's, in trend (operator, 2026-10-06)
+            event.update(blocked=heavy, relVol=ctx.get("relVol"))
+            await self.ledger.event("counter.gap_fade", event)
+            log.info("gap_fade.blocked", symbol=sig.symbol, reason=heavy)
+            return
         if lim.gap_fade_min_rr is not None and plan["rr"] < lim.gap_fade_min_rr:
             event["blocked"] = f"RR {plan['rr']:.2f} < {lim.gap_fade_min_rr:g}"
             await self.ledger.event("counter.gap_fade", event)

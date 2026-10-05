@@ -207,6 +207,7 @@ BOOKS: tuple[Book, ...] = (
             "post_arm_sustain": "true (the rung SL keeps its 75 s sustain)",
             "dried_volume_skip": "no mirror when surgeT and surgeT-1 are both < 0.85x the T-2..T-7 volume baseline, on the equity or its front future",
             "max_premium_loss_pct": "25 (the option stop never more than 25 % under the premium paid; set 2026-09-28)",
+            "gap_switch_rel_vol": "3.0 — a 09:45 trigger that gapped >= 0.3 daily ATR its own way on >= 3x the NIFTY50's volume is taken through the pivot and gap gates (2026-10-06)",
         },
         have=(
             "30m/1m bars on the session grid",
@@ -259,6 +260,7 @@ BOOKS: tuple[Book, ...] = (
         status="live",
         params={
             "gap_fade_datr": "0.3 daily ATR, the trigger's own way, 09:45 bar only",
+            "gap_fade_max_rel_vol": "3.0 — no gap fade on >= 3x the NIFTY50's volume: the gap switch, RT-Y follows it (2026-10-06)",
             "fade plan": "Engine.fade_plan — the same plan FUDKII-CT-M uses",
             "counter_wall_min": "5.2 (route b, CT-X's)",
             "exits": "RT-Y policy incl. the +5 % T1 floor; no 25 % premium cap",
