@@ -12,16 +12,42 @@ from typing import Any
 
 from ..risk.limits import CT_M_MARKET_AGAINST_MAX, RiskLimits
 
+#: The gap the gap switch reads (``RiskLimits.gap_switch_rel_vol``): a 09:45 trigger that gapped this many daily
+#: ATRs its own way — RT-Y's gap gate and CT-Y's gap fade threshold.
+GAP_SWITCH_GAP_DATR = 0.3
+
+
+def gap_switch(ctx: dict[str, Any] | None, lim: RiskLimits) -> str | None:
+    """Why a 09:45 gap is followed in trend by a book with the gap switch — its volume at least
+    ``gap_switch_rel_vol`` times the NIFTY50's — or None (operator, 2026-10-06)."""
+    ctx = ctx or {}
+    x, gap, rv = lim.gap_switch_rel_vol, ctx.get("gapDatr"), ctx.get("relVol")
+    if x is None or not ctx.get("openBar") or gap is None or gap < GAP_SWITCH_GAP_DATR or rv is None or rv < x:
+        return None
+    return f"gap switch: 09:45 gap {gap:.2f} daily ATR its own way on {rv:.1f}x the NIFTY50's volume (≥ {x:g}x) — followed in trend"
+
+
+def gap_fade_volume_block(ctx: dict[str, Any] | None, lim: RiskLimits) -> str | None:
+    """Why a fade book does not fade a 09:45 gap: its volume at least ``gap_fade_max_rel_vol`` times the
+    NIFTY50's. A volume that cannot be read never blocks."""
+    x, rv = lim.gap_fade_max_rel_vol, (ctx or {}).get("relVol")
+    if x is None or rv is None or rv < x:
+        return None
+    return f"volume {rv:.1f}x the NIFTY50's (≥ {x:g}x) — the gap is followed in trend, not faded"
+
 
 def rt_gate_reasons(ctx: dict[str, Any] | None, lim: RiskLimits) -> list[tuple[str, str]]:
     """Why a gated in-trend book stands aside from a trigger, read from the context logged AT the
     trigger: breadth, a key pivot just ahead, a 09:45 gap its own way (gate B, operator 2026-09-26).
-    Empty = take it. A measure that was never taken never blocks."""
+    Empty = take it. A measure that was never taken never blocks. A 09:45 gap on the volume of the
+    gap switch (``gap_switch``) stands aside for neither a pivot nor the gap."""
     ctx = ctx or {}
     out: list[tuple[str, str]] = []
     share = ctx.get("share")
     if lim.breadth_min is not None and share is not None and share <= lim.breadth_min:
         out.append(("breadth", f"breadth {share:.0%} of {ctx.get('names')} names agree ≤ {lim.breadth_min:.0%} — the market is not with the breakout"))
+    if gap_switch(ctx, lim) is not None:
+        return out
     if lim.skip_pivot_ahead_atr is not None:
         if "pivotsAheadAtr" in ctx:
             near = [f"{lab} +{round(d, 2):g} ATR" for lab, d in ctx["pivotsAheadAtr"] if d <= lim.skip_pivot_ahead_atr]
@@ -74,7 +100,9 @@ def trigger_verdicts(
             share = ctx.get("share")
             if share is not None:
                 rt_y["why"].append(f"breadth {share:.0%} agree")
-            if not ctx.get("pivotsAhead"):
+            if (switch := gap_switch(ctx, lim_y)) is not None:
+                rt_y["why"].append(switch)
+            elif not ctx.get("pivotsAhead"):
                 rt_y["why"].append("no key pivot within 0.5 ATR ahead")
     fade_side = "PE" if sgn.get("direction") == "BULLISH" else "CE"
     gap_ev = next((e for e in reversed(evs) if e.get("kind") == "counter.gap_fade"), None)
