@@ -45,7 +45,7 @@ type Card = {
   clusters: { price: number; strength: number; members: string[]; wall: boolean; side: 'ahead' | 'behind' }[]
   futLevels: { close: number; atr: number | null; surgeT: number | null; surgeT1: number | null; volume: string; behind: Level | null; ahead: Level[] } | null
   plan: Plan | null; exitPlan: { policy: string; rows: ExitRow[] } | null
-  position: { id: string; entry: number; qty: number; qty_remaining: number; opened_ts: number; closed_ts: number | null; option_sl: number; option_targets: number[]; targets_hit: number; instrument: { name: string; lot_size: number; strike: number; option_type: string; multiplier?: number }; note: string; exit_reason?: string; exit_price?: number } | null
+  position: { id: string; entry: number; qty: number; qty_remaining: number; opened_ts: number; closed_ts: number | null; option_sl: number; initial_option_sl?: number; option_targets: number[]; targets_hit: number; instrument: { name: string; lot_size: number; strike: number; option_type: string; multiplier?: number }; note: string; exit_reason?: string; exit_price?: number } | null
   trade: { net: number; gross: number; charges?: number; exit: number; exit_reason: string; mfe_r: number; mae_r: number; duration_s: number } | null
   exits: Order[]
   live: { mid: number; quoteOk: boolean | null; peak: number; line: number; optionSl: number; armedBy: string; armedTs: number | null; targetsHit: number; qtyRemaining: number; qty: number; ladder: number[]; edm: number; underlying: number | null; unrealised: number | null; realised: number } | null
@@ -142,6 +142,15 @@ const human = (s: string | null | undefined) => (s ?? '')
 const inr = (v: number | null | undefined) => (v === null || v === undefined ? '—' : `${v < 0 ? '−' : v > 0 ? '+' : ''}₹${Math.abs(v).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`)
 const inr0 = (v: number | null | undefined) => (v === null || v === undefined ? '—' : `₹${Math.abs(v).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`)
 const pct = (a: number | null | undefined, b: number) => (a === null || a === undefined || !b ? '—' : `${(((a - b) / b) * 100).toFixed(2)}%`)
+/** What the option stop is (operator, 2026-10-06: "the dashboard says equity projected stop at 19.21 … entry was 18.4"): a stop
+ *  above the premium paid is the trail locking a gain, a raised one the rising line, else the stock's stop through δ. */
+const optStopNote = (c: Card, optSl: number, optEntry: number | null | undefined) => {
+  if (optEntry && optSl > optEntry + 1e-6) return `trail — locks +${(((optSl - optEntry) / optEntry) * 100).toFixed(1)}%`
+  if (c.live && c.live.line > c.live.optionSl) return 'rising line'
+  const first = c.position?.initial_option_sl
+  if (first && optSl > first + 1e-6) return `raised from ${f(first)}`
+  return 'equity stop via δ'
+}
 const lakh = (v: number | null | undefined) => (v === null || v === undefined ? '—' : v >= 1e7 ? `${(v / 1e7).toFixed(2)} Cr` : v >= 1e5 ? `${(v / 1e5).toFixed(1)} L` : v.toLocaleString('en-IN'))
 
 // -- icons (inline stroke SVG, 16px) ---------------------------------------------------------------
@@ -211,7 +220,7 @@ function Levels({ c }: { c: Card }) {
     </div>
   )
   rows.push({ key: 'entry', tone: 'amber', icon: IC.trend, eq: cell(c.entry, 'trigger close'), fu: fut ? cell(fut.close, 'FUT trigger close') : <span className="text-slate-600">—</span>, op: optEntry ? cell(optEntry, p ? `filled ${ist(p.opened_ts)}` : `live ask · δ ${f(plan?.delta)}`) : <span className="text-slate-600">—</span> })
-  rows.push({ key: 'stop', tone: 'rose', icon: IC.shield, eq: cell(c.stop, c.confluence.stop_zone || '1 ATR fallback', c.entry), fu: fut?.behind ? cell(fut.behind.price, fut.behind.label, fut.close) : <span className="text-slate-600">—</span>, op: optSl ? cell(optSl, c.live && c.live.line > c.live.optionSl ? 'rising line' : 'equity stop via δ', optEntry ?? undefined) : <span className="text-slate-600">—</span> })
+  rows.push({ key: 'stop', tone: 'rose', icon: IC.shield, eq: cell(c.stop, c.confluence.stop_zone || '1 ATR fallback', c.entry), fu: fut?.behind ? cell(fut.behind.price, fut.behind.label, fut.close) : <span className="text-slate-600">—</span>, op: optSl ? cell(optSl, optStopNote(c, optSl, optEntry), optEntry ?? undefined) : <span className="text-slate-600">—</span> })
   for (let i = 0; i < n; i++) {
     const eqT = c.targets?.[i], fuT = fut?.ahead[i], opT = optLadder[i]
     if (eqT === undefined && fuT === undefined && opT === undefined) continue
@@ -478,7 +487,7 @@ function TradeMap({ c }: { c: Card }) {
   if (optEntry && delta) {
     // the stock move that takes the premium to a level: (level − entry premium) ÷ δ, in % of the close
     const omove = (px: number) => ((px - optEntry) / delta / c.entry) * 100
-    if (optSl) marks.push({ key: 'o-sl', inst: 'option', code: 'SL', kind: 'stop', price: optSl, move: omove(optSl), zone: 'option stop', crossed: false })
+    if (optSl) marks.push({ key: 'o-sl', inst: 'option', code: 'SL', kind: 'stop', price: optSl, move: omove(optSl), zone: optStopNote(c, optSl, optEntry), crossed: false })
     optLadder.slice(0, 4).forEach((l, i) => {
       const m = omove(l)
       marks.push({ key: `o${i}`, inst: 'option', code: `O${i + 1}`, kind: 'target', price: l, move: m, zone: i === optLadder.length - 1 ? 'the rest' : '1 lot', crossed: p ? i < rungsTaken : crossedAt(m) })
