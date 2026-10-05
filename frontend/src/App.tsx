@@ -11,6 +11,7 @@ import { Committee } from './pages/Committee'
 import { HotStocks } from './pages/HotStocks'
 import { Options } from './pages/Options'
 import { Overview } from './pages/Overview'
+import { Review } from './pages/Review'
 import { Risk } from './pages/Risk'
 import { Signals } from './pages/Signals'
 import { Strategies } from './pages/Strategies'
@@ -23,6 +24,7 @@ const PAGES = [
   ['/', 'Overview'],
   ['/signals', 'Signals'],
   ['/trades', 'Trades'],
+  ['/review', 'Trade review'],
   ['/strategies', 'Strategies'],
   ['/chart', 'Chart'],
   ['/options', 'Options'],
@@ -44,6 +46,7 @@ function Pages() {
         <Route path="/" element={<Overview />} />
         <Route path="/signals" element={<Signals />} />
         <Route path="/trades" element={<Trades />} />
+        <Route path="/review" element={<Review />} />
         <Route path="/strategies" element={<Strategies />} />
         <Route path="/chart" element={<Chart />} />
         <Route path="/options" element={<Options />} />
