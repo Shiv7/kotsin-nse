@@ -5377,7 +5377,7 @@ class Engine:
         limit_ms = self.matcher.age_limit_ms(now)
         stale: dict[str, Instrument] = {}
         for p in self.positions.values():
-            if p.status != "OPEN" or not is_open(p.underlying.segment, now):
+            if p.status != "OPEN" or not is_open(p.underlying.segment, now, self.calendar):
                 continue
             code = p.instrument.scrip_code
             q, b = self.quotes.get(code), self.books.get(code)
