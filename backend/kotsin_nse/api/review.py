@@ -21,14 +21,15 @@ IST = timezone(timedelta(hours=5, minutes=30))
 #: The thresholds every check uses, in the stock's ATR (30m, 14) unless named otherwise. Shown on the page.
 THRESHOLDS: dict[str, float] = {
     "wall_atr": 0.5,          # a level this close ahead of the entry is in the way (RT-Y-F's pivot gate uses the same)
-    "stall_atr": 0.15,        # the stock's best price within this of that level, and not this far past it: stopped there
+    "stall_atr": 0.15,        # the stock's best price got within this of that level ...
+    "clear_atr": 0.5,         # ... and never this far past it: it never got clear of the level (MAHABANK 5 Oct: 0.31 past the 1mo pivot)
     "chase_atr": 0.3,         # the stock had already moved this far the trade's way between the trigger and the fill
     "tight_stop_atr": 0.5,    # a stop nearer than this sits inside one bar's noise
     "gave_back_r": 0.5,       # the option was this far up (in R) before the loss
     "breadth_against": 0.45,  # fewer than this share of the NSE names moving the trade's way: the market was against
     "volume_low_x": 1.0,      # the trigger bar's volume under its usual level (T surge < 1×)
     "gap_atr": 0.5,           # an opening gap this large, decided on the first bar
-    "later_right_atr": 1.0,   # after the stop, the stock went this far the trade's way from the entry the same session
+    "later_right_atr": 1.0,   # after the stock broke its stop, it went this far the trade's way from the entry the same session
     "early_window_s": 900.0,  # "should we have waited": the stock's dip in the first 15 minutes after the fill
     "excess_option_pct": 3.0,  # the option fell this many % more than the stock's move explains
     "entry_slip_r": 0.25,     # paid this many R over the option's mid when the order went in
@@ -42,8 +43,8 @@ RULE_EXITS = ("HALT", "DAILY_LOSS", "FORCED", "MANUAL")
 
 #: The order the root cause is chosen in; the first rule that holds is the cause.
 ROOT_CAUSE_ORDER = (
-    "costs", "closed_by_rule", "exit_cost", "breakeven_stop", "option_stop", "tight_stop", "gave_back", "fade_failed", "pivot_rejection",
-    "chased", "entry_cost", "too_early", "market_against", "oi_against", "no_volume", "went_nowhere", "unexplained",
+    "costs", "closed_by_rule", "exit_cost", "breakeven_stop", "option_stop", "tight_stop", "gave_back", "too_early", "fade_failed",
+    "pivot_rejection", "chased", "entry_cost", "market_against", "oi_against", "no_volume", "went_nowhere", "unexplained",
 )
 ROOT_CAUSE_LABEL = {
     "costs": "Costs",
@@ -55,9 +56,9 @@ ROOT_CAUSE_LABEL = {
     "entry_cost": "Entry cost",
     "gave_back": "Gave back a winner",
     "fade_failed": "Fade failed — the wall broke",
-    "pivot_rejection": "Rejected at a level just ahead",
+    "pivot_rejection": "Never got clear of a level just ahead",
     "chased": "Chased the entry",
-    "too_early": "Right idea, too early (stop inside the noise)",
+    "too_early": "Right idea, stopped out first",
     "market_against": "Market against the trade",
     "oi_against": "OI against the trade",
     "no_volume": "No volume behind the move",
@@ -198,6 +199,19 @@ def review_trade(
     later_stop_ts = next((b["ts"] for b in after if eq_sl and ((b["l"] <= eq_sl) if bull else (b["h"] >= eq_sl))), None)
     later_t1 = bool(after and eq_targets and any((b["h"] >= eq_targets[0]) if bull else (b["l"] <= eq_targets[0]) for b in after))
     dip15 = adv(first15)
+    # after the stock broke its own stop (during the trade or after it): how far past the stop it ran, and whether it then turned
+    broke_ts = stop_hit_ts or later_stop_ts
+    from_break = [b for b in bars if broke_ts is not None and b["ts"] >= broke_ts]
+    run_against = adv(from_break)
+    turn = None  # the stock's furthest point against, the minute it was back through the entry, and its best the trade's way after
+    if from_break and ref_px is not None and run_against is not None:
+        worst_bar = max(from_break, key=lambda b: (ref_px - b["l"]) if bull else (b["h"] - ref_px))
+        later_bars = [b for b in from_break if b["ts"] >= worst_bar["ts"]]
+        back = next((b for b in later_bars[1:] if ((b["h"] >= ref_px) if bull else (b["l"] <= ref_px))), None)
+        best_bar = max(later_bars, key=lambda b: (b["h"] - ref_px) if bull else (ref_px - b["l"]))
+        right = (best_bar["h"] - ref_px) if bull else (ref_px - best_bar["l"])
+        turn = {"worstPx": worst_bar["l"] if bull else worst_bar["h"], "worstTs": worst_bar["ts"], "backTs": back["ts"] if back else None,
+                "rightAtr": in_atr(right), "rightPx": best_bar["h"] if bull else best_bar["l"], "rightTs": best_bar["ts"]}
     stop_dist = abs(eq_entry - eq_sl) if (eq_entry and eq_sl) else None
 
     # -- the levels around the entry ----------------------------------------------------------------------
@@ -205,20 +219,25 @@ def review_trade(
     for leg in (route or {}).get("legs") or []:
         if leg.get("name") == "equity":
             levels = {k: float(v) for k, v in (leg.get("levels") or {}).items() if _f(v)}
-    ahead = None
+    ahead = beyond = None
     if levels and ref_px:
-        cands = [(k, p, d * (p - ref_px)) for k, p in levels.items() if d * (p - ref_px) > 0]
+        cands = sorted(((k, p, d * (p - ref_px)) for k, p in levels.items() if d * (p - ref_px) > 0), key=lambda c: c[2])
         if cands:
-            k, p, dist = min(cands, key=lambda c: c[2])
+            k, p, dist = cands[0]
             ahead = {"label": k, "price": round(p, 2), "atr": in_atr(dist)}
+            nxt = next((c for c in cands[1:] if d * (c[1] - p) > 0), None)
+            if nxt:
+                beyond = {"label": nxt[0], "price": round(nxt[1], 2), "atr": in_atr(nxt[2])}
     elif breadth and not counter and breadth.get("pivotsAheadAtr"):
         k, a = breadth["pivotsAheadAtr"][0]
         ahead = {"label": k, "price": round(ref_px + d * a * atr, 2) if (ref_px and atr) else None, "atr": round(float(a), 3)}
     stalled = None
+    best_px = past = None
     if ahead and ahead.get("price") and best_fav is not None and atr:
         best_px = ref_px + best_fav if bull else ref_px - best_fav
-        gap_to_level = d * (ahead["price"] - best_px)  # > 0: the best price stayed short of the level
-        stalled = bool(-th["stall_atr"] * atr <= gap_to_level <= th["stall_atr"] * atr)
+        past = d * (best_px - ahead["price"])  # > 0: the best price went beyond the level
+        # it reached the level (or came within stall_atr of it) and never got clear_atr past it
+        stalled = bool(-th["stall_atr"] * atr <= past < th["clear_atr"] * atr)
 
     # -- the checks ----------------------------------------------------------------------------------------------
     checks: list[dict[str, Any]] = []
@@ -249,8 +268,9 @@ def review_trade(
     if ahead:
         near = ahead["atr"] is not None and ahead["atr"] <= th["wall_atr"]
         txt = f"nearest level the trade's way: {ahead['label']} {ahead['price']} — {fx(ahead['atr'])} ATR from the entry"
-        if stalled:
-            txt += "; the stock's best price stopped at it"
+        if stalled and past is not None:
+            txt += (f"; the stock's best {best_px:g} " + (f"got only {fx(in_atr(past))} ATR past it" if past > 0 else f"stopped {fx(in_atr(-past))} ATR short of it")
+                    + (f", short of {beyond['label']} {beyond['price']}" if beyond and d * (beyond["price"] - best_px) > 0 else ""))
         elif stalled is False and best_fav is not None:
             txt += f"; the stock's best was {fx(in_atr(best_fav))} ATR the trade's way"
         checks.append(_check("pivot", "Was a pivot / cluster in the way?", "bad" if (near and stalled) else ("warn" if near else "ok"), txt,
@@ -400,18 +420,29 @@ def review_trade(
                                     + (f"; then the stock went {fx(in_atr(later_fav))} ATR the trade's way" if (later_fav and atr and later_fav / atr >= th["later_right_atr"]) else ""))
     elif mfe_r >= th["gave_back_r"] or int(_f(pos.get("targets_hit")) or 0) >= 1:
         cause, why = "gave_back", f"it was {mfe_r:+.2f} R at best, then fell to {mae_r:+.2f} R and out on {reason}"
+    elif thesis_failed and turn and atr and (later_t1 or (turn["rightAtr"] or 0) >= th["later_right_atr"]):
+        overshoot = in_atr(run_against - stop_dist) if (run_against is not None and stop_dist) else None
+        cause = "too_early"
+        why = (("the fade was right, but early: " if counter else "")
+               + f"the stop {eq_sl:g} was {fx(in_atr(stop_dist))} ATR away; the stock ran to {turn['worstPx']:g} at {_hm(turn['worstTs'])}"
+               + (f", {fx(overshoot)} ATR past the stop," if overshoot is not None else "") + " then turned"
+               + (f": back through the entry {ref_px:g} at {_hm(turn['backTs'])}" if turn["backTs"] else "")
+               + f" and {fx(turn['rightAtr'])} ATR the trade's way ({turn['rightPx']:g}) by {_hm(turn['rightTs'])}"
+               + (f", reaching the first target {eq_targets[0]:g}" if later_t1 else "") + " the same session")
     elif counter and thesis_failed and fade:
-        cause, why = "fade_failed", f"the fade bet on the stock turning; it went through the fade's stop {eq_sl:g} instead"
-    elif "pivot" in fails:
-        cause, why = "pivot_rejection", f"the stock's best stopped at {ahead['label']} {ahead['price']}, {fx(ahead['atr'])} ATR ahead of the entry, then turned"
+        cause, why = "fade_failed", f"the fade bet on the stock turning; it went through the fade's stop {eq_sl:g} instead and did not come back"
+    elif "pivot" in fails and ahead and past is not None:
+        cause = "pivot_rejection"
+        why = (f"{ahead['label']} {ahead['price']} sat {fx(ahead['atr'])} ATR ahead of the entry; the stock's best was {best_px:g}, "
+               + (f"only {fx(in_atr(past))} ATR past it" if past > 0 else f"{fx(in_atr(-past))} ATR short of it")
+               + (f" and short of {beyond['label']} {beyond['price']}" if beyond and d * (beyond["price"] - best_px) > 0 else "")
+               + (f"; then it broke its stop {eq_sl:g}" + (f" at {_hm(broke_ts)}" if broke_ts else "") if thesis_failed else "; then it turned"))
     elif chased and thesis_failed:
         cause, why = "chased", f"the stock was already {fx(chase)} ATR the trade's way by the fill and gave it back to the stop"
-    elif costly_entry and slip_r is not None and net is not None and r_unit and qty:
+    elif (costly_entry and slip_r is not None and net is not None and r_unit and qty
+          # a cost is the cause only where the stock did not fail the trade on its own, or the cost was most of the loss
+          and (not thesis_failed or (fill_opt - mid_at_place) * qty >= 0.5 * abs(net))):
         cause, why = "entry_cost", f"the option cost {slip_r:+.2f} R over its mid at the order — ₹{(fill_opt - mid_at_place) * qty:,.0f} of the ₹{abs(net):,.0f} loss"
-    elif thesis_failed and later_fav is not None and atr and (later_t1 or later_fav / atr >= th["later_right_atr"]):
-        cause = "too_early"
-        why = (f"stopped at {eq_sl:g} ({fx(in_atr(stop_dist))} ATR away), then the stock went {fx(in_atr(later_fav))} ATR the trade's way from the entry"
-               + (f" and reached the first target {eq_targets[0]:g}" if later_t1 else "") + " the same session")
     elif "market" in fails:
         cause, why = "market_against", next(c["detail"] for c in checks if c["key"] == "market")
     elif "oi" in fails:

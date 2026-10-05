@@ -112,11 +112,44 @@ def test_a_chased_entry_and_a_market_against_the_trade():
 
 def test_stopped_then_right_is_too_early_and_costs_and_rule_closes_are_their_own():
     r = _review(_pos(), path=FLAT + [(98.9, 100.1)] * 21 + [(100.5, 102.5)] * 30)  # stopped, then +2.5 ATR and T1
-    assert r["cause"]["key"] == "too_early" and "reached the first target 102" in r["cause"]["why"]
+    assert r["cause"]["key"] == "too_early" and "reaching the first target 102" in r["cause"]["why"]
     r = _review(_pos(), path=FLAT + [(98.9, 100.1)] * 15, trade={"net": -50.0, "gross": 150.0, "charges": 200.0, "r_multiple": -0.05})
     assert r["cause"]["key"] == "costs"
     r = _review(_pos(exit_reason="DAILY_LOSS"), path=FLAT + [(99.5, 100.1)] * 15)
     assert r["cause"]["key"] == "closed_by_rule"
+
+
+def test_a_fade_through_its_stop_that_then_turned_was_right_but_early():
+    """BAJFINANCE CT-Y, 5 Oct: the gap fade's stop 993.45 (1 ATR) went at 09:53, the stock ran to 995.8 (0.31 ATR past
+    it), was back through the 985.95 entry at 10:22 and 1.88 ATR the fade's way by 11:50 — not a failed fade."""
+    fade = {"stop": 101.0, "gapDatr": 0.76}
+    pos = _pos(strategy="FUDKII_CT_Y", direction="BEARISH", equity_sl=101.0, signal_id="FUDKII_CT_Y-ABC-1791171900-B", equity_targets=[97.0])
+    path = FLAT + [(99.9, 100.9)] * 8 + [(100.5, 101.3)] * 3 + [(99.5, 100.6)] * 20 + [(98.0, 99.0)] * 30
+    r = _review(pos, path=path, fade=fade, breadth={"share": 0.56, "direction": "BULLISH", "volSurgeT": 8.6, "volSurgeT1": 10.8})
+    why = r["cause"]["why"]
+    assert r["cause"]["key"] == "too_early" and why.startswith("the fade was right, but early")
+    assert "101.3" in why and "0.30 ATR past the stop" in why and "back through the entry 100" in why and "2.00 ATR the trade's way" in why
+    r = _review(pos, path=FLAT + [(99.9, 101.2)] * 15 + [(100.6, 101.5)] * 30, fade=fade,
+                breadth={"share": 0.56, "direction": "BULLISH", "volSurgeT": 8.6, "volSurgeT1": 10.8})
+    assert r["cause"]["key"] == "fade_failed" and "did not come back" in r["cause"]["why"]
+
+
+def test_a_stock_that_never_got_clear_of_a_level_just_ahead_is_the_cause_not_its_entry_cost():
+    """MAHABANK, 5 Oct: the 1mo pivot 82.01 sat 0.08 ATR over the 81.96 entry; the best was 82.21 (0.31 ATR past it, short of
+    1d.R2 82.43); the option stop went at 10:02 and the stock broke its own stop at 10:55. The ₹1,430 paid over the mid was
+    not why it lost ₹4,837."""
+    route = {"legs": [{"name": "equity", "levels": {"1mo.PIVOT": 100.08, "1d.R2": 100.72, "1d.S1": 98.0}}]}
+    ex = {"entry": {**_pos()["exec_log"]["entry"], "fillPrice": 10.3, "bookAtPlace": {"bid": 9.95, "ask": 10.05}},
+          "exits": [{"fillPrice": 9.0, "stop": {"level": 9.1, "triggerOn": "option mid", "triggerPrice": 9.05, "bidAtTrigger": 9.0}}]}
+    pos = _pos(exit_reason="SL-OP", entry=10.3, exit_price=9.0, closed_ts=T0 + 30 + 900, exec_log=ex)
+    path = FLAT + [(99.9, 100.39)] * 15 + [(99.6, 100.2)] * 10 + [(98.8, 99.4)] * 10
+    r = _review(pos, path=path, route=route, trade={"net": -1300.0, "gross": -1300.0, "charges": 0.0, "r_multiple": -1.3})
+    assert r["cause"]["key"] == "pivot_rejection", r["cause"]
+    why = r["cause"]["why"]
+    assert "1mo.PIVOT 100.08" in why and "0.31 ATR past it" in why and "short of 1d.R2 100.72" in why and "broke its stop 99" in why
+    pivot = next(c for c in r["checks"] if c["key"] == "pivot")
+    assert pivot["status"] == "bad" and pivot["stalled"] is True
+    assert any("over" in x or "paid" in x for x in r["cause"]["contributing"]), "the entry cost is a contributing factor"
 
 
 def test_a_failed_fade_names_its_wall_and_a_clean_loss_says_the_record_has_no_cause():
