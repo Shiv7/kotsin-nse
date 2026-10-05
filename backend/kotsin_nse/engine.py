@@ -22,6 +22,7 @@ import json
 import math
 import os
 import re
+import statistics
 import time
 from bisect import bisect_right
 from collections import deque
@@ -64,7 +65,15 @@ from .bars.pivots import (
 from .bars.store import BarStore
 from .bars.unified import BarSource, UnifiedBar
 from .bars.verify import BarReconciler
-from .bars.volume_read import MarketVolume, VolBar, VolumeReading, market_volume, read_volume
+from .bars.volume_read import (
+    MarketVolume,
+    VolBar,
+    VolumeReading,
+    market_volume,
+    read_volume,
+    rel_volume_tier,
+    slot_reading,
+)
 from .bus import Bus, Topic
 from .committee.service import CommitteeService
 from .config import Segment, Settings
@@ -768,6 +777,8 @@ class Engine:
         self._front_code: dict[tuple[str, date], str | None] = {}
         self._n50_oi: tuple[int, dict[str, float]] = (-1, {})
         self._n50_vol: dict[int, tuple[float | None, int]] = {}
+        #: bar ts -> the NIFTY50 members' median surge and median time-of-day ratio (``n50_relative_volume``)
+        self._n50_rel: dict[int, tuple[float | None, float | None]] = {}
         self._stale_positions: set[str] = set()
         self._shadow_exits: set[str] = set()
         self._mode = Mode.SHADOW
@@ -1827,6 +1838,55 @@ class Engine:
             if len(self._n50_vol) > 64:
                 self._n50_vol.pop(next(iter(self._n50_vol)))
         return self._n50_vol[key]
+
+    def n50_relative_volume(self, t_ts: float) -> tuple[float | None, float | None]:
+        """The NIFTY50 members' MEDIAN readings at the bar starting ``t_ts``: their surge (T against its own
+        T-2…T-7) and their time-of-day ratio (T against the same half hour's median, ``slot_reading``).
+        A stock is read against these (operator, 2026-10-05: "relative vol surge ... from all nifty50
+        companies"); the median, because one name's opening rush moves a mean (5 Oct 09:45: mean 2.07x,
+        median 1.43x). Cached once 25 members read; asked again until then."""
+        key = int(t_ts)
+        hit = self._n50_rel.get(key)
+        if hit is not None:
+            return hit
+        members = [m for m in NIFTY50 if m in self.underlyings]
+        surges = [r.surge_t for m in members if (r := self._volume_reading(m, t_ts)).ok and r.surge_t is not None]
+        slots = [x for m in members if (x := self._slot_ratio(m, t_ts)) is not None]
+        out = (statistics.median(surges) if len(surges) >= 25 else None, statistics.median(slots) if len(slots) >= 25 else None)
+        if len(surges) >= 25 and len(slots) >= 25:
+            self._n50_rel[key] = out
+            while len(self._n50_rel) > 64:
+                self._n50_rel.pop(next(iter(self._n50_rel)))
+        return out
+
+    def _slot_ratio(self, symbol: str, t_ts: float) -> float | None:
+        bars = self.store.bars(symbol, DECISION_TF, 400)
+        r = slot_reading([VolBar(int(b.ts), float(b.volume), str(b.extra.get("volume_doubt") or "")) for b in bars], int(t_ts))
+        return r.ratio if r.ok else None
+
+    def relative_volume(self, symbol: str, t_ts: float, surge_t: float | None) -> dict[str, Any]:
+        """A trigger's volume against the NIFTY50's at the same bar, on two scales (operator, 2026-10-05) —
+        labels, nothing gates on them:
+
+        * ``relVolMkt`` — its surge over the members' median surge (both against their previous bars);
+        * ``relVol`` — its time-of-day ratio over the members' median time-of-day ratio: the opening rush and
+          the lunch lull cancel twice, once against the stock's own usual and once against the market's day
+          (5 Oct: ADANIGREEN 13:15 surge 5.4x, 5.6x the NIFTY50's — but 1.26x its usual half hour, the
+          NIFTY50 1.22x, so 1.03x: a normal bar); ``relVolTier`` is the operator's tier for it."""
+        n50_t, n50_slot = self.n50_relative_volume(t_ts)
+        out: dict[str, Any] = {}
+        if n50_t and surge_t is not None:
+            out["n50SurgeT"] = round(n50_t, 3)
+            out["relVolMkt"] = round(surge_t / n50_t, 3)
+        slot = self._slot_ratio(symbol, t_ts)
+        if slot is not None:
+            out["slotVol"] = round(slot, 3)
+            if n50_slot:
+                rel = slot / n50_slot
+                out["n50SlotVol"] = round(n50_slot, 3)
+                out["relVol"] = round(rel, 3)
+                out["relVolTier"] = rel_volume_tier(rel)
+        return out
 
     def book_for(self, scrip_code: str) -> BookSnapshot | None:
         return self.books.get(scrip_code)
@@ -3431,6 +3491,8 @@ class Engine:
                 out["volSurgeT"], out["volSurgeT1"] = round(vr.surge_t, 3), round(vr.surge_t1, 3)  # type: ignore[arg-type]
             else:
                 out["volDoubt"] = vr.doubt
+            if und is not None and und.segment is Segment.NSE_EQ:
+                out.update(self.relative_volume(sig.symbol, sig.ts, vr.surge_t if vr.ok else None))
         dailies = list(self.store.bars(sig.symbol, "1d", 40))
         prev = previous_session(dailies, today)
         first = next((b for b in self.store.bars(sig.symbol, DECISION_TF, 20) if b.ts >= start), None)

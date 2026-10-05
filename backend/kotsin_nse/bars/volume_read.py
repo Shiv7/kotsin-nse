@@ -142,3 +142,64 @@ def market_volume(ts: int, readings: Sequence[VolumeReading]) -> MarketVolume:
     elif mv.median_t is not None and not lo <= mv.median_t <= hi:
         mv.alarm = f"market median T {mv.median_t:.3f}x (outside {lo:g}–{hi:g}x)"
     return mv
+
+
+# -- relative volume (operator, 2026-10-05) ----------------------------------------------------------
+#: the operator's tentative tiers for a stock's volume against the NIFTY50's at the same bar (5 Oct:
+#: "above 1 ... ok, 3x high, 5x very high, 7x strong — can be recalibrated")
+REL_VOL_TIERS: tuple[tuple[float, str], ...] = ((7.0, "strong"), (5.0, "very high"), (3.0, "high"), (1.0, "normal"))
+
+
+@dataclass(frozen=True, slots=True)
+class SlotReading:
+    """A bar's volume against the SAME time slot on earlier sessions — the reading that does not
+    mistake the intraday U-shape for a market drying up or surging."""
+
+    ratio: float | None = None
+    median: float | None = None
+    sessions: int = 0
+    slot: str = ""
+    doubt: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return not self.doubt and self.ratio is not None
+
+    def to_json(self) -> dict[str, object]:
+        return {"ratio": None if self.ratio is None else round(self.ratio, 3), "median": self.median,
+                "sessions": self.sessions, "slot": self.slot, "doubt": self.doubt}
+
+
+#: sessions of the same slot the median is taken over, and the fewest it may stand on
+SLOT_SESSIONS = 20
+SLOT_MIN_SESSIONS = 5
+
+
+def slot_reading(bars: Sequence[VolBar], t_ts: int, *, sessions: int = SLOT_SESSIONS,
+                 min_sessions: int = SLOT_MIN_SESSIONS) -> SlotReading:
+    """The bar starting ``t_ts`` against the median of the same IST HH:MM slot over up to ``sessions``
+    earlier sessions. The T-2…T-7 reading compares a bar with the six before it, so it reads the
+    normal U-shape as signal: 0 % of 09:15 bars read "dried" against 60-68 % of late-morning ones and
+    1 % at 14:45; divided by its own slot's median, 25 % / 35 % / 27 % (review, 2026-10-03). Reported,
+    gating nothing — whether a book gates on it is the operator's call."""
+    slot = to_ist(t_ts).strftime("%H:%M")
+    by_ts = {b.ts: b for b in bars}
+    t = by_ts.get(int(t_ts))
+    if t is None:
+        return SlotReading(slot=slot, doubt="no bar at that time")
+    if t.doubt or t.volume <= 0:
+        return SlotReading(slot=slot, doubt=t.doubt or "zero volume")
+    same = sorted((b for b in bars if b.ts < t_ts and to_ist(b.ts).strftime("%H:%M") == slot
+                   and b.volume > 0 and not b.doubt), key=lambda b: b.ts)[-sessions:]
+    if len(same) < min_sessions:
+        return SlotReading(slot=slot, sessions=len(same), doubt=f"only {len(same)} earlier sessions at {slot}")
+    med = statistics.median(b.volume for b in same)
+    return SlotReading(ratio=t.volume / med if med > 0 else None, median=med, sessions=len(same), slot=slot,
+                       doubt="" if med > 0 else "median volume is zero")
+
+
+def rel_volume_tier(x: float | None) -> str | None:
+    """The operator's tier for a stock's relative volume (``REL_VOL_TIERS``); under 1x is below the market."""
+    if x is None:
+        return None
+    return next((name for floor, name in REL_VOL_TIERS if x >= floor), "below market")
