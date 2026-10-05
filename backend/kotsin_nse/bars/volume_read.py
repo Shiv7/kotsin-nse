@@ -200,3 +200,15 @@ def slot_reading(bars: Sequence[VolBar], t_ts: int, *, sessions: int = SLOT_SESS
     return SlotReading(ratio=t.volume / med if med > 0 else None, median=med, sessions=len(same), slot=slot,
                        doubt="" if med > 0 else "median volume is zero")
 
+
+# -- relative volume (operator, 2026-10-05) ----------------------------------------------------------
+#: the operator's tentative tiers for a stock's volume against the NIFTY50's at the same bar (5 Oct:
+#: "above 1 ... ok, 3x high, 5x very high, 7x strong — can be recalibrated")
+REL_VOL_TIERS: tuple[tuple[float, str], ...] = ((7.0, "strong"), (5.0, "very high"), (3.0, "high"), (1.0, "normal"))
+
+
+def rel_volume_tier(x: float | None) -> str | None:
+    """The operator's tier for a stock's relative volume (``REL_VOL_TIERS``); under 1x is below the market."""
+    if x is None:
+        return None
+    return next((name for floor, name in REL_VOL_TIERS if x >= floor), "below market")

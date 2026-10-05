@@ -27,7 +27,7 @@ type Card = {
   // every rung's SELL resting, lowest first (since 3 Oct the whole ladder rests from the fill)
   restingTargets?: { rung: number; limit: number; qty: number; lots: number; placedTs: number }[]
   side?: 'CE' | 'PE' | 'LONG' | 'SHORT'
-  breadth?: { share: number | null; names: number; efficiency?: number; volBand?: string | null; gapDatr?: number; pivotsAhead?: string[]; openBar?: boolean } | null
+  breadth?: { share: number | null; names: number; efficiency?: number; volBand?: string | null; gapDatr?: number; pivotsAhead?: string[]; openBar?: boolean; relVol?: number; relVolTier?: string; relVolMkt?: number; slotVol?: number; n50SlotVol?: number } | null
   books?: BookRow[]
   cta?: { action: 'take' | 'skip' | 'taken'; enabled: boolean; contract: string | null; type?: string | null; bid?: number | null; ask?: number | null; spreadPct?: number | null; reason: string | null } & Size
   // a trigger the route sends COUNTER-TREND, on an in-trend book's card: the counter-trend book's buy
@@ -830,7 +830,7 @@ function Expanded({ book, c }: { book: string; c: Card }) {
             <div className="text-[14px] leading-relaxed">
               <div><b className="text-emerald-300">For:</b> <span className="text-slate-200">{c.pros.length ? c.pros.join(' · ') : '—'}</span></div>
               <div className="mt-1.5"><b className="text-rose-300">Against:</b> <span className="text-slate-200">{c.cons.length ? c.cons.join(' · ') : '—'}</span></div>
-              {c.breadth && <div className="mt-1.5 text-slate-400"><b className="text-slate-300">Context:</b> trend efficiency {c.breadth.efficiency != null ? f(c.breadth.efficiency) : '—'} · own volatility {c.breadth.volBand ?? '—'} · gap {c.breadth.gapDatr != null ? `${f(c.breadth.gapDatr)} daily ATR` : '—'}{c.breadth.openBar ? ' · first bar (09:45)' : ''}</div>}
+              {c.breadth && <div className="mt-1.5 text-slate-400"><b className="text-slate-300">Context:</b> trend efficiency {c.breadth.efficiency != null ? f(c.breadth.efficiency) : '—'} · own volatility {c.breadth.volBand ?? '—'} · gap {c.breadth.gapDatr != null ? `${f(c.breadth.gapDatr)} daily ATR` : '—'}{c.breadth.openBar ? ' · first bar (09:45)' : ''}{c.breadth.relVol != null ? ` · volume ${f(c.breadth.relVol)}× the NIFTY50's (${c.breadth.relVolTier}; ${f(c.breadth.slotVol)}× its usual half hour, NIFTY50 ${f(c.breadth.n50SlotVol)}×)` : ''}</div>}
               {c.route && <div className="mt-1.5 text-slate-400">{c.route.reason}</div>}
             </div>
           </Section>
