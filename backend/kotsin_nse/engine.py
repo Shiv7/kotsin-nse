@@ -63,6 +63,7 @@ from .bars.store import BarStore
 from .bars.unified import BarSource, UnifiedBar
 from .bars.verify import BarReconciler
 from .bars.volume_read import (
+    REL_VOL_TIERS,
     MarketVolume,
     VolBar,
     VolumeReading,
@@ -848,6 +849,8 @@ class Engine:
         self._n50_vol: dict[int, tuple[float | None, int]] = {}
         #: bar ts -> the NIFTY50 members' median surge and median time-of-day ratio (``n50_relative_volume``)
         self._n50_rel: dict[int, tuple[float | None, float | None]] = {}
+        #: bar ts -> every NSE stock's relative volume at that bar (``volume_table``)
+        self._vol_table: dict[int, dict[str, Any]] = {}
         self._stale_positions: set[str] = set()
         self._shadow_exits: set[str] = set()
         self._mode = Mode.SHADOW
@@ -2118,6 +2121,41 @@ class Engine:
                 out["n50SlotVol"] = round(n50_slot, 3)
                 out["relVol"] = round(rel, 3)
                 out["relVolTier"] = rel_volume_tier(rel)
+        return out
+
+    def volume_table(self, t_ts: float | None = None) -> dict[str, Any]:
+        """Every NSE stock's volume at one closed 30m bar (the last one by default) on both relative scales
+        (``relative_volume``), ranked (operator, 2026-10-05: "do this for all scrips and recalibrate with every
+        passed candle"). Each new bar is a new reading — the slot medians and the six-bar baselines move with
+        every closed candle — and a bar's table is kept once it stands on 25 NIFTY50 members."""
+        if t_ts is None:
+            last = max((int(b.ts) for sym, u in self.underlyings.items()
+                        if u.segment is Segment.NSE_EQ and u.kind is InstrumentKind.EQUITY
+                        for b in self.store.bars(sym, DECISION_TF, 1)), default=None)
+            if last is None:
+                return {"ts": None, "rows": []}
+            t_ts = last
+        key = int(t_ts)
+        hit = self._vol_table.get(key)
+        if hit is not None:
+            return hit
+        rows = []
+        for sym, und in self.underlyings.items():
+            if und.segment is not Segment.NSE_EQ or und.kind is not InstrumentKind.EQUITY:
+                continue
+            bars = self.store.bars(sym, DECISION_TF, 40)
+            if not bars or not any(int(b.ts) == key for b in bars):
+                continue
+            vr = self._volume_reading(sym, key, bars)
+            rel = self.relative_volume(sym, key, vr.surge_t if vr.ok else None)
+            rows.append({"symbol": sym, "surgeT": None if not vr.ok else round(vr.surge_t, 3), **rel})  # type: ignore[arg-type]
+        rows.sort(key=lambda r: -(r.get("relVol") or 0.0))
+        n50_t, n50_slot = self.n50_relative_volume(key)
+        out = {"ts": key, "n50SurgeT": n50_t, "n50SlotVol": n50_slot, "tiers": [t for _, t in REL_VOL_TIERS], "rows": rows}
+        if n50_t and n50_slot:
+            self._vol_table[key] = out
+            while len(self._vol_table) > 30:
+                self._vol_table.pop(next(iter(self._vol_table)))
         return out
 
     def book_for(self, scrip_code: str) -> BookSnapshot | None:
