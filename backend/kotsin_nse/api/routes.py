@@ -48,7 +48,7 @@ from ..strategy.keys import (
     stop_mirrors_of,
     stop_rule_of,
 )
-from . import daybook, export, peer, shadow
+from . import daybook, export, peer, review, shadow
 from .ws import Hub, handle, pump
 
 
@@ -293,6 +293,32 @@ def build_app(engine: Engine) -> FastAPI:
             "universe": len(engine.underlyings),
             "boot_notes": engine.boot_notes,
         }
+
+    @api.get("/review")
+    async def trade_review(day: str | None = None) -> dict[str, Any]:
+        """Every trade of a session, each from its trigger to its exit and what the stock did after, with the checks
+        and the root cause of a loss (api/review.py; operator, 2026-10-05: "be accurate in identifying the root cause
+        of the loss for each trade")."""
+        try:
+            d = date.fromisoformat(day) if day else ist_today()
+        except ValueError as exc:
+            raise HTTPException(400, f"day must be YYYY-MM-DD, not {day!r}") from exc
+        start = datetime(d.year, d.month, d.day, tzinfo=IST).timestamp()
+        end = start + 86_400
+        positions_, trades_, signals_, events_ = await asyncio.gather(
+            engine.ledger.rows_between("positions", start, end),
+            engine.ledger.rows_between("trades", start, end + 3 * 86_400),  # an MCX trade carried overnight closes later
+            engine.ledger.rows_between("signals", start - 3_600, end),
+            engine.ledger.rows_between("events", start - 3_600, end),
+        )
+        bars = {sym: _minute_bars(engine, sym, d) for sym in {str(p.get("symbol") or "") for p in positions_} if sym}
+        out = review.review_day(
+            positions=positions_, trades=trades_, signals=signals_, events=events_, bars_by_symbol=bars,
+            session_end=min(time.time(), end) if d == ist_today() else end,
+            labels={k.value: k.display_name for k in StrategyKey},
+            mirror_books={k.value: (src.value, rule) for k, (src, rule) in STOP_MIRRORS.items()},
+        )
+        return {"day": d.isoformat(), **out}
 
     @api.get("/stop-rules")
     async def stop_rules(since: str = Query("today", pattern="^(today|start)$")) -> dict[str, Any]:
@@ -1342,6 +1368,27 @@ async def _mirror_rows(
             real_exit[(src, m.signal_id)] = {"exitReason": rp.get("exit_reason"), "exitPrice": rp.get("exit_price"), "closedTs": rp.get("closed_ts"),
                                              "net": float(t["net"]) if t else None, "byOperator": "closed by the operator" in str(m.note)}
     return {k: v for k, v in out.items() if v}, real_exit
+
+
+def _minute_bars(engine: Engine, symbol: str, day: date) -> list[dict[str, Any]]:
+    """The underlying's one-minute bars for ``day``: today's from the engine's store (each corrected to the broker's
+    candle as its minute closes), an earlier day's from the archive (as built from the feed)."""
+    start = datetime(day.year, day.month, day.day, tzinfo=IST).timestamp()
+    if day == ist_today():
+        rows = [b.to_json() for b in engine.store.bars(symbol, "1m") if b.ts >= start]
+        if rows:
+            return rows
+    try:
+        import pandas as pd
+
+        files = sorted((engine.s.data_dir / "archive" / "bars").glob(f"{day.isoformat()}*.parquet"))
+        if not files:
+            return []
+        frame = pd.concat([pd.read_parquet(f, columns=["symbol", "ts", "o", "h", "l", "c", "v"]) for f in files])
+        frame = frame[frame["symbol"] == symbol].drop_duplicates("ts", keep="last").sort_values("ts")
+        return [{"ts": float(r.ts), "o": float(r.o), "h": float(r.h), "l": float(r.l), "c": float(r.c), "v": float(r.v)} for r in frame.itertuples()]
+    except Exception:  # noqa: BLE001 - a review without its chart still answers
+        return []
 
 
 def _position_view(engine: Engine, p: Any) -> dict[str, Any]:
