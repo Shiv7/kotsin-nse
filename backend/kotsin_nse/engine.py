@@ -371,6 +371,10 @@ FORCE_FLAT_HM.update({m.value: FORCE_FLAT_HM[src.value] for m, (src, _r) in STOP
 #: position of nine had its stop that near, none a target). ``EOD_PLAN_NEAR_PCT`` is "near", % of the mid.
 EOD_PLAN_HM = "15:15"
 EOD_PLAN_NEAR_PCT = 3.0
+#: The fade's nearer stop (``RiskLimits.fade_stop_nearer_level``): the first classic level at least FADE_LEVEL_MIN_ATR
+#: ATR30 past the close the trigger's way, and the stop FADE_LEVEL_BUFFER_ATR beyond it — when that is nearer than 1 ATR30
+FADE_LEVEL_MIN_ATR = 0.25
+FADE_LEVEL_BUFFER_ATR = 0.1
 #: How long a 09:45 gap trigger waits for the NIFTY50's volume reading at its bar — the members' bars close in the
 #: same few seconds — before the gap switch decides without it (a reading that cannot be taken never blocks)
 REL_VOL_WAIT_S = 3.0
@@ -4869,29 +4873,35 @@ class Engine:
         # the fade reaches both fade books at once; CT-X's row is the fade's, CT-Y decides for itself
         await self._handle_signal(fade, bar, books=FADE_BOOKS)
 
-    def gap_fade_plan(self, sig: Signal, ctx: dict[str, Any] | None) -> dict[str, Any] | None:
-        """The 09:45 gap fade's plan, or None when the trigger is not one (operator, 2026-09-26).
+    def gap_fade_plan(self, sig: Signal, ctx: dict[str, Any] | None, key: StrategyKey = StrategyKey.FUDKII_CT_Y) -> dict[str, Any] | None:
+        """The 09:45 gap fade's plan for ``key`` (CT-Y's own limits by default), or None when the trigger is not one
+        (operator, 2026-09-26).
 
         Eligible: a FUDKII trigger on the session's first 30m bar whose open gapped at least
         ``gap_fade_datr`` daily ATRs its OWN way — the first-bar trap RT-Y now stands aside from.
         The fade: the opposite direction from the trigger's close, the equity stop 1 ATR30 past the
         close (the replay's stop: +3.72 % / +5.87 % a trade in the two halves of Sep 1–25, 40
-        trades, before costs), the walls on the fade's side as its targets — or, with none, one
-        target 1 ATR30 away. Its RR is its own (T1 against the 1-ATR stop) and its grade a label."""
-        lim = self._exits_by_strategy[StrategyKey.FUDKII_CT_Y.value].limits
+        trades, before costs) or nearer, at the next classic level (``fade_stop_nearer_level``), the
+        walls on the fade's side as its targets — or, with none, one target 1 ATR30 away. Its RR is
+        its own (T1 against 1 ATR30) and its grade a label."""
+        lim = self._exits_by_strategy[key.value].limits
         ctx = ctx or {}
         gap = ctx.get("gapDatr")
         if lim.gap_fade_datr is None or not ctx.get("openBar") or gap is None or gap < lim.gap_fade_datr:
             return None
-        plan = self.fade_plan(sig, ctx)
+        plan = self.fade_plan(sig, ctx, nearer_level=lim.fade_stop_nearer_level)
         if plan is not None:
             plan["gapDatr"] = gap
         return plan
 
-    def fade_plan(self, sig: Signal, ctx: dict[str, Any] | None) -> dict[str, Any] | None:
+    def fade_plan(self, sig: Signal, ctx: dict[str, Any] | None, *, nearer_level: bool = False) -> dict[str, Any] | None:
         """The fade of a trigger, as CT-Y's gap fade plans it: the opposite direction from the trigger's
         close, the equity stop 1 ATR30 past the close, the walls on the fade's side as its targets —
-        or, with none, one target 1 ATR30 away. None off NSE cash or without an ATR30."""
+        or, with none, one target 1 ATR30 away. None off NSE cash or without an ATR30.
+
+        ``nearer_level`` (operator, 2026-10-06: "SL based on pivot clusters or ATR based on what is nearer"): the stop is
+        the nearer of 1 ATR30 and FADE_LEVEL_BUFFER_ATR past the first classic level at least FADE_LEVEL_MIN_ATR past the
+        close the trigger's way — a level right at the close is the one the trigger just reached, too near to hold a stop."""
         ctx = ctx or {}
         und = self.underlyings.get(sig.symbol)
         if und is None or und.segment is not Segment.NSE_EQ:
@@ -4905,6 +4915,17 @@ class Engine:
         sign = 1 if fade_bull else -1
         close = float(sig.entry)
         stop = rnd(close - sign * atr30)
+        stop_note = "1 ATR30 past the close"
+        if nearer_level:
+            way = -sign  # the trigger's own way: where the fade loses
+            past = sorted((p for p in self._pivot_points(sig.symbol) if way * (p.price - close) >= FADE_LEVEL_MIN_ATR * atr30),
+                          key=lambda p: way * (p.price - close))
+            if past:
+                level = past[0]
+                at = rnd(level.price + way * FADE_LEVEL_BUFFER_ATR * atr30)
+                if way * (at - close) < way * (stop - close):
+                    names = ",".join(p.label for p in past if abs(p.price - level.price) < 1e-6)
+                    stop, stop_note = at, f"{FADE_LEVEL_BUFFER_ATR:g} ATR30 past {names} {level.price:.2f} — nearer than 1 ATR30"
         pol = self.fudkii.cfg.fade_grade_policy  # a counter-trend plan: the fade's grading
         # the confluence engine's own walls on the fade's side; its stop is not used — the fade's
         # stop is the replay's 1 ATR — so the noise filter that would skip the targets is off
@@ -4917,6 +4938,7 @@ class Engine:
             "direction": (Direction.BULLISH if fade_bull else Direction.BEARISH).value, "side": "CE" if fade_bull else "PE",
             "entry": close, "stop": stop, "targets": targets, "rr": round(rr, 2), "grade": grade,
             "atr30": round(atr30, 4), "targetNote": "walls on the fade's side" if conf.targets else "no wall on the fade's side — 1 ATR30",
+            "stopNote": stop_note,
         }
 
     async def _market_fade(self, sig: Signal, bar: UnifiedBar | None, underlying: Instrument) -> None:
@@ -4936,7 +4958,7 @@ class Engine:
             await self._book_skip(key.value, sig, f"market not against the trigger: {share:.0%} of {ctx.get('names')} names agree "
                                   f"> {CT_M_MARKET_AGAINST_MAX:.0%}", gate="market_with", breadth=share)
             return
-        plan = self.fade_plan(sig, ctx)
+        plan = self.fade_plan(sig, ctx, nearer_level=self.limits_for(key.value).fade_stop_nearer_level)
         if plan is None:
             await self._book_skip(key.value, sig, "no fade plan (no ATR30)", gate="no_plan", breadth=share)
             return
@@ -4996,13 +5018,13 @@ class Engine:
             targets=tuple(plan["targets"]),
             grade=plan["grade"],
             rr=plan["rr"],
-            reason=f"GAP FADE of {sig.signal_id}: 09:45 gap with the trigger {plan['gapDatr']:.2f} daily ATR; stop 1 ATR past the close",
+            reason=f"GAP FADE of {sig.signal_id}: 09:45 gap with the trigger {plan['gapDatr']:.2f} daily ATR; stop {plan['stopNote']}",
             source_signal_id=sig.signal_id,
             evidence={**dict(sig.evidence), "gap_datr": plan["gapDatr"], "rr": plan["rr"]},
             context={
                 **dict(sig.context),
                 "gap_fade": plan,
-                "confluence": {"stop": plan["stop"], "stop_zone": "1 ATR30 past the close", "targets": plan["targets"],
+                "confluence": {"stop": plan["stop"], "stop_zone": plan["stopNote"], "targets": plan["targets"],
                                "target_zones": [plan["targetNote"]], "grade": plan["grade"], "rr": plan["rr"]},
             },
         )
