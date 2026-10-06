@@ -12,7 +12,8 @@ type Route = { route: string; reason: string; summary?: string; wall?: { strengt
 type Order = { ts: number; avg_price: number | null; filled: number | null; qty: number; reason: string; purpose: string }
 type Level = { label: string; price: number }
 type ExitRow = { kind: 'target' | 'stop' | 'trail' | 'time'; at: string; action: string; qty: number | null }
-type Plan = { ok: boolean; reason?: string; contract?: string; strike?: number; type?: string; premium?: number; bid?: number | null; ask?: number | null; spreadPct?: number | null; delta?: number; lots?: number; qty?: number; outlay?: number; lotSize?: number; optionSl?: number; ladder?: number[]; edm?: number; ladderNote?: string; exitPlan?: { policy: string; rows: ExitRow[] } | null }
+type Exec = { side: 'buy' | 'sell'; touch: number; walk: number | null; filled: number | null }
+type Plan = { entryAt?: Exec | null; ok: boolean; reason?: string; contract?: string; strike?: number; type?: string; premium?: number; bid?: number | null; ask?: number | null; spreadPct?: number | null; delta?: number; lots?: number; qty?: number; outlay?: number; lotSize?: number; optionSl?: number; ladder?: number[]; edm?: number; ladderNote?: string; exitPlan?: { policy: string; rows: ExitRow[] } | null }
 type BookRow = { book: string; label: string; status: 'OPEN' | 'EXITED' | 'NONE'; side: 'CE' | 'PE' | 'LONG' | 'SHORT' | null; openedTs: number | null; closedTs: number | null; exitReason: string | null; pnl: number | null }
 type Verdict = { action: string; state?: string; gate?: string | null; why: string[] | string; side?: string; stop?: number | null; targets?: number[]; rr?: number | null; grade?: string | null; breadth?: number | null }
 type TargetEv = { rung: number; limit: number; qty: number; placedTs: number; ts: number; outcome: string }
@@ -39,7 +40,7 @@ type Card = {
   cta?: { action: 'take' | 'skip' | 'taken'; enabled: boolean; contract: string | null; type?: string | null; bid?: number | null; ask?: number | null; spreadPct?: number | null; reason: string | null } & Size
   // a trigger the route sends COUNTER-TREND, on an in-trend book's card: the counter-trend book's buy
   // is the live button (operator, 2026-09-29) — RT-Y's tab → CT-Y, the others → CT-X
-  ctaCounter?: ({ book: string; label: string; action: 'take' | 'taken' | 'held'; enabled: boolean; contract: string | null; type?: string | null; reason: string | null } & Size) | null
+  ctaCounter?: ({ book: string; label: string; action: 'take' | 'taken' | 'held'; enabled: boolean; contract: string | null; type?: string | null; reason: string | null; entryAt?: Exec | null } & Size) | null
   signalId: string; symbol: string; direction: 'BULLISH' | 'BEARISH'; triggerDirection?: 'BULLISH' | 'BEARISH'; ts: number; grade: string | null; rr: number | null; reason: string
   entry: number; stop: number; targets: number[] | null; stopPct: number
   confluence: { stop_zone?: string; target_zones?: string[]; fortress?: number; room_ratio?: number; note?: string }
@@ -55,7 +56,7 @@ type Card = {
   position: { id: string; entry: number; qty: number; qty_remaining: number; opened_ts: number; closed_ts: number | null; option_sl: number; initial_option_sl?: number; option_targets: number[]; targets_hit: number; instrument: { name: string; lot_size: number; strike: number; option_type: string; multiplier?: number }; note: string; exit_reason?: string; exit_price?: number } | null
   trade: { net: number; gross: number; charges?: number; exit: number; exit_reason: string; mfe_r: number; mae_r: number; duration_s: number } | null
   exits: Order[]
-  live: { mid: number; quoteOk: boolean | null; peak: number; line: number; optionSl: number; armedBy: string; armedTs: number | null; targetsHit: number; qtyRemaining: number; qty: number; ladder: number[]; edm: number; underlying: number | null; unrealised: number | null; realised: number } | null
+  live: { exitAt?: Exec | null; mid: number; quoteOk: boolean | null; peak: number; line: number; optionSl: number; armedBy: string; armedTs: number | null; targetsHit: number; qtyRemaining: number; qty: number; ladder: number[]; edm: number; underlying: number | null; unrealised: number | null; realised: number } | null
   rtCard: { confidence?: { score: number }; odds?: { pT1: number | null; note?: string }; wallAhead?: { price: number; strength: number; members: string[] } | null; wallBehind?: { price: number; strength: number; members: string[] } | null; stop?: { equityStop: number; optionStop: number; delta: number } } | null
   pros: string[]; cons: string[]
 }
@@ -64,6 +65,23 @@ type Align = { with: number; against: number; flat: number; names: number }
 type Size = { lots?: number | null; qty?: number | null; premium?: number | null; outlay?: number | null }
 const sizeText = (s?: Size | null) =>
   s?.lots && s?.qty && s?.premium ? ` · ${s.lots} lots (${s.qty.toLocaleString('en-IN')}) × ₹${s.premium.toFixed(2)} = ${inr0(s.outlay ?? s.premium * s.qty)}` : ''
+/** A button's price that can actually trade (operator, 2026-10-06: the SKIP button's "≈ ₹5.97" was the mid — "we need
+ *  to write the price that we can buy at"): the side's depth walked for the whole quantity on a fresh book, else its
+ *  touch — the ask to buy, the bid to sell — with which one it is. Null when the book has no price on that side. */
+const execPx = (e: Exec | null | undefined, qty: number) => {
+  if (!e) return null
+  const px = e.walk ?? e.touch
+  const side = e.side === 'buy' ? 'ask' : 'bid'
+  const note = e.walk == null ? `at the ${side}`
+    : e.filled != null && e.filled < qty ? `${side} ${e.touch.toFixed(2)}; the book shows ${e.filled.toLocaleString('en-IN')} of ${qty.toLocaleString('en-IN')}`
+    : e.walk === e.touch ? `at the ${side}, all ${qty.toLocaleString('en-IN')} there` : `${side} ${e.touch.toFixed(2)}, walked for all ${qty.toLocaleString('en-IN')}`
+  return { px, note }
+}
+/** A buy button's size at the price it can buy at: lots, quantity, ₹ each and the money. */
+const execSizeText = (lots: number | null | undefined, qty: number | null | undefined, e: Exec | null | undefined, mult = 1) => {
+  const x = qty ? execPx(e, qty) : null
+  return x && lots && qty ? ` · ${lots} lots (${qty.toLocaleString('en-IN')}) × ₹${x.px.toFixed(2)} = ${inr0(x.px * qty * mult)} (${x.note})` : null
+}
 type Resp = { book: string; day: string; wallet: { balance: number; day_start_balance: number; initial: number; trades: number } | null; counts: Record<string, number>; cards: Card[]; nowTs: number }
 
 export const BOOK_TABS: [string, string][] = [
@@ -341,23 +359,25 @@ function Cta({ book, c, onDone }: { book: string; c: Card; onDone: () => void })
   }
   const act = (kind: 'take' | 'skip') =>
     post(book, kind, kind === 'take'
-      ? `Enter ${BOOK_LABEL[book] ?? book} on ${c.symbol} now — ${c.plan?.lots} lots (${c.plan?.qty}) of ${contractName(c.plan?.contract)} × ₹${f(c.plan?.premium)} ≈ ${inr0(c.plan?.outlay)}?`
+      ? `Enter ${BOOK_LABEL[book] ?? book} on ${c.symbol} now — ${contractName(c.plan?.contract)}${execSizeText(c.plan?.lots, c.plan?.qty, c.plan?.entryAt) ?? ` · ${c.plan?.lots} lots (${c.plan?.qty}) × ₹${f(c.plan?.premium)} mid ≈ ${inr0(c.plan?.outlay)}`}?`
       : `Close ${BOOK_LABEL[book] ?? book}'s ${c.symbol} position now, at the market?`, kind)
   const takeCounter = () => cc && post(cc.book, 'take',
-    `Enter ${cc.label} on ${c.symbol} COUNTER-TREND now — ${cc.lots} lots (${cc.qty}) of ${contractName(cc.contract)} × ₹${f(cc.premium)} ≈ ${inr0(cc.outlay)}?`, 'counter')
+    `Enter ${cc.label} on ${c.symbol} COUNTER-TREND now — ${contractName(cc.contract)}${execSizeText(cc.lots, cc.qty, cc.entryAt) ?? ` · ${cc.lots} lots (${cc.qty}) × ₹${f(cc.premium)} mid ≈ ${inr0(cc.outlay)}`}?`, 'counter')
   const mid = c.live?.mid ?? null
   const left = c.live?.qtyRemaining ?? c.position?.qty_remaining ?? 0
   const lot = c.position?.instrument.lot_size || 1
   // the premium paid beside the close-now value: the button's ≈ is the mid now, not the fill (KOTAKBANK 6 Oct read
   // "≈ ₹5.97 = ₹47,800" on a 7.30 buy — the operator asked why)
   const paid = c.position?.entry ?? null
+  const mult = c.position?.instrument.multiplier || 1
+  const sell = execPx(c.live?.exitAt, left)
   const grey = 'inline-flex cursor-not-allowed items-center gap-2 rounded-xl border border-slate-700 bg-slate-800 px-5 py-2.5 text-[14.5px] font-bold text-slate-500'
   return (
     <div className="flex flex-wrap items-center gap-2.5">
       {cc && (
         <div className="basis-full flex flex-wrap items-center gap-2.5">
           {cc.enabled ? (
-            <button disabled={busy !== null} onClick={takeCounter} className="inline-flex items-center gap-2 rounded-xl bg-orange-400 px-5 py-2.5 text-[14.5px] font-bold text-slate-950 shadow-[0_6px_20px_-8px_rgba(251,146,60,0.8)] hover:bg-orange-300 disabled:opacity-40"><I d={IC.check} />TAKE COUNTER-TREND · {cc.label}: {contractName(cc.contract)}{sizeText(cc)}</button>
+            <button disabled={busy !== null} onClick={takeCounter} className="inline-flex items-center gap-2 rounded-xl bg-orange-400 px-5 py-2.5 text-[14.5px] font-bold text-slate-950 shadow-[0_6px_20px_-8px_rgba(251,146,60,0.8)] hover:bg-orange-300 disabled:opacity-40"><I d={IC.check} />TAKE COUNTER-TREND · {cc.label}: {contractName(cc.contract)}{execSizeText(cc.lots, cc.qty, cc.entryAt) ?? sizeText(cc)}</button>
           ) : (
             <button disabled aria-disabled className={grey}><I d={IC.check} />{cc.action === 'taken' ? 'TAKEN' : cc.action === 'held' ? 'HELD' : 'TAKE'} COUNTER-TREND · {cc.label}: {contractName(cc.contract) ?? `${c.symbol} — no contract`}{sizeText(cc)}</button>
           )}
@@ -365,13 +385,13 @@ function Cta({ book, c, onDone }: { book: string; c: Card; onDone: () => void })
         </div>
       )}
       {held ? (
-        <button disabled={busy !== null} onClick={() => act('skip')} className="inline-flex items-center gap-2 rounded-xl bg-rose-500 px-5 py-2.5 text-[14.5px] font-bold text-slate-950 shadow-[0_6px_20px_-8px_rgba(251,113,133,0.8)] hover:bg-rose-400 disabled:opacity-40"><I d={IC.x} />SKIP · close {Math.floor(left / lot)} lots ({left.toLocaleString('en-IN')}) at market{mid ? ` ≈ ₹${mid.toFixed(2)} = ${inr0(mid * left * (c.position?.instrument.multiplier || 1))}` : ''}{paid ? ` · paid ₹${paid.toFixed(2)} = ${inr0(paid * left * (c.position?.instrument.multiplier || 1))}` : ''}</button>
+        <button disabled={busy !== null} onClick={() => act('skip')} className="inline-flex items-center gap-2 rounded-xl bg-rose-500 px-5 py-2.5 text-[14.5px] font-bold text-slate-950 shadow-[0_6px_20px_-8px_rgba(251,113,133,0.8)] hover:bg-rose-400 disabled:opacity-40"><I d={IC.x} />SKIP · close {Math.floor(left / lot)} lots ({left.toLocaleString('en-IN')}) at market{sell ? ` ≈ ₹${sell.px.toFixed(2)} = ${inr0(sell.px * left * mult)} (${sell.note})` : mid ? ` ≈ ₹${mid.toFixed(2)} mid = ${inr0(mid * left * mult)} (no bid to quote)` : ''}{paid ? ` · paid ₹${paid.toFixed(2)} = ${inr0(paid * left * mult)}` : ''}</button>
       ) : (
         canTake ? (
-          <button disabled={busy !== null} onClick={() => act('take')} className="inline-flex items-center gap-2 rounded-xl bg-emerald-400 px-5 py-2.5 text-[14.5px] font-bold text-slate-950 shadow-[0_6px_20px_-8px_rgba(52,211,153,0.8)] hover:bg-emerald-300 disabled:opacity-40"><I d={IC.check} />TAKE {contractName(c.plan?.contract)}{sizeText(c.cta?.lots ? c.cta : { lots: c.plan?.lots, qty: c.plan?.qty, premium: c.plan?.premium, outlay: c.plan?.outlay })}</button>
+          <button disabled={busy !== null} onClick={() => act('take')} className="inline-flex items-center gap-2 rounded-xl bg-emerald-400 px-5 py-2.5 text-[14.5px] font-bold text-slate-950 shadow-[0_6px_20px_-8px_rgba(52,211,153,0.8)] hover:bg-emerald-300 disabled:opacity-40"><I d={IC.check} />TAKE {contractName(c.plan?.contract)}{execSizeText(c.plan?.lots, c.plan?.qty, c.plan?.entryAt) ?? sizeText(c.cta?.lots ? c.cta : { lots: c.plan?.lots, qty: c.plan?.qty, premium: c.plan?.premium, outlay: c.plan?.outlay })}</button>
         ) : (
           // Not takeable: still name the contract and what it would cost, greyed out, with the reason underneath.
-          <button disabled aria-disabled className={grey}><I d={IC.check} />{c.cta?.action === 'taken' || c.state === 'TRADED' ? 'TAKEN' : 'TAKE'} {contractName(c.cta?.contract ?? c.plan?.contract) ?? `${c.symbol} ${c.cta?.type ?? c.side ?? ''} — no listed contract`}{sizeText(c.cta)}</button>
+          <button disabled aria-disabled className={grey}><I d={IC.check} />{c.cta?.action === 'taken' || c.state === 'TRADED' ? 'TAKEN' : 'TAKE'} {contractName(c.cta?.contract ?? c.plan?.contract) ?? `${c.symbol} ${c.cta?.type ?? c.side ?? ''} — no listed contract`}{(c.cta?.action !== 'taken' && c.state !== 'TRADED' ? execSizeText(c.plan?.lots, c.plan?.qty, c.plan?.entryAt) : null) ?? sizeText(c.cta)}</button>
         )
       )}
       {canTake && <span className="text-[13.5px] text-slate-400">ask {f(c.plan?.ask)} · spread {f(c.plan?.spreadPct, 1)}% · δ {f(c.plan?.delta)}</span>}
