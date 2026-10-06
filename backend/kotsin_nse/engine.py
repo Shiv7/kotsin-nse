@@ -3044,20 +3044,22 @@ class Engine:
     def _executable(self, scrip_code: str, qty: int, *, buy: bool, now: float | None = None) -> dict[str, Any] | None:
         """What ``qty`` would trade at now, for a button (operator, 2026-10-06: the SKIP button's "≈ ₹5.97" was the mid —
         "we need to write the price that we can buy at"): the touch on the side that trades — the ask to buy, the bid
-        to sell — and, on a fresh depth book, that side WALKED for every unit with the paper matcher's own ceiling
-        (``walk``, ``filled``: how much of ``qty`` the book holds). None without a price on that side."""
+        to sell — and, on a fresh depth book, that side WALKED for the whole order with the paper matcher's own ceiling
+        (``walk``, ``filled``: how much of ``qty`` the book holds; ``touchQty``: what sits at the touch). The book counts
+        units, not lots (every level of KOTAKBANK 440 CE's book is a multiple of its 2,000 lot): 6 Oct 11:24 its 5.40
+        bid held one lot and the next 47 sat at 5.35, so a 4-lot sell averaged 5.36. None without a price on that side."""
         now = now or time.time()
         bid, ask, _, _ = self._touch(scrip_code, now)
         touch = ask if buy else bid
         if not touch:
             return None
-        out: dict[str, Any] = {"side": "buy" if buy else "sell", "touch": touch, "walk": None, "filled": None}
+        out: dict[str, Any] = {"side": "buy" if buy else "sell", "touch": touch, "walk": None, "filled": None, "touchQty": None}
         b = self.books.get(scrip_code)
         levels = (b.asks if buy else b.bids) if b is not None else None
         if b is not None and levels and qty > 0 and b.age_ms(now) <= self.matcher.age_limit_ms(now):
             w = walk_book(levels, qty, touch=levels[0][0], ceiling_pct=self.matcher.ceiling_pct, buy=buy)
             if w.filled:
-                out["walk"], out["filled"] = round(w.avg_price, 2), w.filled
+                out["walk"], out["filled"], out["touchQty"] = round(w.avg_price, 2), w.filled, levels[0][1]
         return out
 
     def _note_mid(self, scrip_code: str, now: float, mid: float) -> None:
