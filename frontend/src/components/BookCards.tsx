@@ -941,7 +941,7 @@ const RULE_TONE: Record<StopRuleRow['rule'], string> = { current: 'text-slate-20
  *  6 Oct: the cap sold both mirrors at 10:00:04 while the stock was 2.9 % above its stop; the current stop, the
  *  same 5.47 on the option mid held 75 s, sold at 11:24). */
 const isCap = (r: StopRuleRow) => r.rule !== 'current' && r.stop?.triggerOn === 'option bid'
-const stopName = (r: StopRuleRow) => (r.stop?.triggerOn === 'underlying' ? 'stock stop' : isCap(r) ? 'premium cap' : 'option stop')
+const stopName = (r: StopRuleRow) => (r.stop?.triggerOn === 'underlying' ? 'stock stop' : isCap(r) ? 'premium cap' : r.exitReason === 'TRAIL' ? 'trail line' : 'option stop')
 const stopNote = (r: StopRuleRow) =>
   isCap(r) && r.entry && r.stop ? ` (${Math.round((1 - r.stop.level / r.entry) * 100)} % under the ₹${f(r.entry)} paid)` : ''
 
