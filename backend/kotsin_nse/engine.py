@@ -820,6 +820,11 @@ class Engine:
         self._n50_rel: dict[int, tuple[float | None, float | None]] = {}
         #: bar ts -> every NSE stock's relative volume at that bar (``volume_table``)
         self._vol_table: dict[int, dict[str, Any]] = {}
+        #: India VIX through the day, the last print of each minute (ts, value): the card's open and at-trigger readings
+        #: (``vix_at``, ``vix_open``); emptied at the day roll
+        self._vix_path: list[tuple[float, float]] = []
+        #: (bar ts, direction) -> the NIFTY 50 members' alignment at that closed bar (``n50_alignment``)
+        self._n50_align: dict[tuple[int, str], dict[str, int] | None] = {}
         self._stale_positions: set[str] = set()
         self._shadow_exits: set[str] = set()
         self._mode = Mode.SHADOW
@@ -1708,6 +1713,8 @@ class Engine:
         if ltp > 0:
             self.ltps[code] = ltp
             self._ltp_ts[code] = float(tick.get("recv_ts") or time.time())
+            if code == INDIA_VIX_SCRIP:
+                self._note_vix(self._ltp_ts[code], ltp)
             self.quotes[code] = Quote(
                 ltp=ltp,
                 bid=float(tick.get("bid") or 0),
@@ -2025,6 +2032,71 @@ class Engine:
     def india_vix(self) -> float | None:
         """Last India VIX print. None when it is not subscribed or has not ticked."""
         return self.ltps.get(INDIA_VIX_SCRIP)
+
+    def _note_vix(self, ts: float, value: float) -> None:
+        """Keep the day's India VIX path at one sample a minute: the minute's last print and its time."""
+        if self._vix_path and int(ts // 60) == int(self._vix_path[-1][0] // 60):
+            self._vix_path[-1] = (ts, value)
+        else:
+            self._vix_path.append((ts, value))
+
+    def vix_at(self, t: float) -> float | None:
+        """India VIX as it stood at ``t`` — the last print at or before it, to the minute — from today's path. None
+        when the engine was not up yet (the path starts at its first print)."""
+        out = None
+        for ts, v in self._vix_path:
+            if ts > t:
+                break
+            out = v
+        return out
+
+    def vix_open(self) -> float | None:
+        """India VIX at today's open: the last print of its first minute from 09:15 (the first print can be a glitch —
+        6 Oct 09:15:02 read 14.19 between 14.78 and 14.63), and only when the engine was up for it."""
+        start = session_open_ts(Segment.NSE_EQ, ist_today())
+        first = next(((ts, v) for ts, v in self._vix_path if ts >= start), None)
+        return first[1] if first is not None and first[0] <= start + 120 else None
+
+    def n50_alignment(self, direction: Direction, at_ts: int | None = None) -> dict[str, int] | None:
+        """The NIFTY 50 member stocks against a trigger's direction (operator, 2026-10-06: "trigger direction
+        allignment with nifty50 constituents and countre-trend allignment as well"): ``with`` beyond their own day
+        open the trigger's way, ``against`` on the other side — the counter-trend side — and ``flat`` on it. Now (each
+        name's live price, else its latest 30m close), or at the close of the 30m bar starting ``at_ts`` (kept once
+        that bar has closed). The day open is the open of its first 30m bar today, as in ``market_breadth``. None
+        under 25 members read."""
+        key = (int(at_ts), direction.value) if at_ts is not None else None
+        if key is not None and key in self._n50_align:
+            return self._n50_align[key]
+        start = session_open_ts(Segment.NSE_EQ, ist_today())
+        bull = direction is Direction.BULLISH
+        out = {"with": 0, "against": 0, "flat": 0, "names": 0}
+        for m in NIFTY50:
+            und = self.underlyings.get(m)
+            if und is None:
+                continue
+            today = [b for b in self.store.bars(m, DECISION_TF, 16) if b.ts >= start]
+            if at_ts is None:
+                forming = self.store.forming(m, DECISION_TF)
+                if forming is not None and forming.ts >= start and (not today or forming.ts > today[-1].ts):
+                    today.append(forming)
+                if not today:
+                    continue
+                px = self.ltps.get(und.scrip_code) or today[-1].close
+            else:
+                bar = next((b for b in today if int(b.ts) == int(at_ts)), None)
+                if bar is None:
+                    continue
+                px = bar.close
+            day_open = today[0].open
+            side = "flat" if px == day_open else "with" if (px > day_open) == bull else "against"
+            out[side] += 1
+            out["names"] += 1
+        res = out if out["names"] >= 25 else None
+        if key is not None and res is not None and time.time() >= int(key[0]) + TF_SECONDS[DECISION_TF]:
+            self._n50_align[key] = res
+            while len(self._n50_align) > 128:
+                self._n50_align.pop(next(iter(self._n50_align)))
+        return res
 
     def regime_snapshot(self) -> dict[str, Any]:
         """The volatility regime in force — the ``k`` every NSE zone is clustered at, and the VIX
@@ -3648,6 +3720,8 @@ class Engine:
         try:
             br.update(self.trigger_context(sig))
             br.update(volume_labels(br))
+            if (vix := self.india_vix()) is not None:
+                br["vix"] = vix  # India VIX as the trigger closed — the card's live strip sets it beside now
             await self._await_gap_rel_vol(sig, br)
         except Exception as exc:  # noqa: BLE001 — descriptive labels never cost a trigger its entry
             log.warning("regime.context_failed", symbol=sig.symbol, error=str(exc)[:120])
@@ -3832,6 +3906,36 @@ class Engine:
             "live": self._mirror_stop_state(live) if (live is not None and rule != "current") else None,
         }
 
+    def _card_market(self, sgn: dict[str, Any], ps: dict[str, Any] | None, plan: dict[str, Any] | None, und: Instrument | None,
+                     breadth: dict[str, Any] | None, memo: dict[Any, Any]) -> dict[str, Any] | None:
+        """A card's live strip (operator, 2026-10-06: "factor in india vix at the time of trigger and its allignment
+        (trigger direction allignment with nifty50 constituents and countre-trend allignment as well. keep both live and
+        updated just like the "now" ticker and add current price of Options and equity there too)"): the NIFTY 50
+        member stocks with the trigger and against it, at the trigger bar's close and now (``n50_alignment``); India VIX
+        at the trigger, at the open and now, with its band; the stock's last price and the option's — the held
+        contract's, else the one this book would buy now. Read on every poll, like the trade map's "now". NSE only."""
+        if und is None or und.segment is Segment.MCX_FO:
+            return None
+        direction = Direction(sgn["direction"])
+        if ("now", direction) not in memo:
+            memo[("now", direction)] = self.n50_alignment(direction)
+        ts = int(sgn["ts"])
+        vix_now = self.india_vix()
+        stock = self.quotes.get(und.scrip_code)
+        inst = (ps or {}).get("instrument") or {}
+        code = str(inst.get("scrip_code") or (plan or {}).get("scripCode") or "")
+        q = self.quotes.get(code) if code else None
+        now = time.time()
+        return {
+            "n50": {"atTrigger": self.n50_alignment(direction, at_ts=ts), "now": memo[("now", direction)]},
+            "vix": {"atTrigger": (breadth or {}).get("vix") or self.vix_at(ts + TF_SECONDS[DECISION_TF]), "open": self.vix_open(),
+                    "now": vix_now, "band": regime_for_equity(vix_now).band.value if vix_now else None},
+            "stock": {"ltp": self.ltps.get(und.scrip_code), "ageS": round(now - stock.ts) if stock else None},
+            "option": None if q is None else {
+                "contract": inst.get("name") or (plan or {}).get("contract") or code, "held": bool(inst),
+                "ltp": q.ltp or None, "bid": q.bid or None, "ask": q.ask or None, "ageS": round(now - q.ts)},
+        }
+
     def _mirror_stop_state(self, pos: Position) -> dict[str, Any]:
         """Where an open stop-rule mirror's stop stands now: the stock's stop, the premium cap on the option
         bid, the option stop once the trail has lifted it, and — while the stock is through its stop — how
@@ -3946,6 +4050,7 @@ class Engine:
             }
 
         cards = []
+        market_memo: dict[Any, Any] = {}  # the NIFTY 50's alignment now, once per direction for the whole page
         for sgn in parents:
             sid = sgn["signal_id"]
             evs = ev_by_sig.get(sid, [])
@@ -4202,6 +4307,7 @@ class Engine:
                 "restingTargets": self._resting_targets_card(ps),
                 "verdicts": verdicts, "ctaCounter": cta_counter,
                 "stopRules": self._stop_rule_rows(book, ps, pos_by_key, trades_by_pos),
+                "market": self._card_market(sgn, ps, plan, und, breadth, market_memo),
             })
         counts: dict[str, int] = {}
         for c in cards:
@@ -6355,6 +6461,8 @@ class Engine:
                     self._legs_reanchor_done.clear()
                     self._daily_refresh_done.clear()
                     self._handled_signals.clear()
+                    self._vix_path.clear()
+                    self._n50_align.clear()
                     if self.s.has_credentials and self.s.engine_enabled:
                         await self.catalogue_loader.ensure()
 
