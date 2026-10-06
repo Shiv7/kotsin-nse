@@ -831,6 +831,15 @@ function TriggerCard({ book, c, open, onToggle, refresh, readOnly = false }: { b
 
 const RULE_TONE: Record<StopRuleRow['rule'], string> = { current: 'text-slate-200', E: 'text-sky-200', A: 'text-violet-200' }
 
+/** Which stop sold a stop-rule row. A mirror runs the stock's stop, so an option-bid trigger there is its premium
+ *  cap — the backstop both mirrors share, which sells on the first fresh bid with no confirmation (KOTAKBANK
+ *  6 Oct: the cap sold both mirrors at 10:00:04 while the stock was 2.9 % above its stop; the current stop, the
+ *  same 5.47 on the option mid held 75 s, sold at 11:24). */
+const isCap = (r: StopRuleRow) => r.rule !== 'current' && r.stop?.triggerOn === 'option bid'
+const stopName = (r: StopRuleRow) => (r.stop?.triggerOn === 'underlying' ? 'stock stop' : isCap(r) ? 'premium cap' : 'option stop')
+const stopNote = (r: StopRuleRow) =>
+  isCap(r) && r.entry && r.stop ? ` (${Math.round((1 - r.stop.level / r.entry) * 100)} % under the ₹${f(r.entry)} paid)` : ''
+
 /** The same trade under three stop rules, one line each: what it did, what it made, and — for a stop — the level,
  *  the read that breached it, the bid then and the fill. The mirrors keep their own rules after a manual close. */
 function StopRules({ rows }: { rows: StopRuleRow[] }) {
@@ -855,7 +864,7 @@ function StopRules({ rows }: { rows: StopRuleRow[] }) {
                   </span>
                   {r.stop ? (
                     <span className="w-full pl-36 text-[12.5px] text-slate-500 max-sm:pl-0">
-                      stop {f(r.stop.level)} → {r.stop.triggerOn === 'underlying' ? 'stock' : r.stop.triggerOn} {f(r.stop.triggerPrice)} → bid {f(r.stop.bidAtTrigger)} → fill {f(r.stop.fill)}
+                      {stopName(r)} {f(r.stop.level)}{stopNote(r)} → {r.stop.triggerOn === 'underlying' ? 'stock' : r.stop.triggerOn} {f(r.stop.triggerPrice)} → bid {f(r.stop.bidAtTrigger)} → fill {f(r.stop.fill)}
                     </span>
                   ) : null}
                   {r.live?.through ? (
