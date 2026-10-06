@@ -3276,6 +3276,25 @@ class Engine:
             return None
         return {"bids": [[p, q] for p, q in b.bids[:5]], "asks": [[p, q] for p, q in b.asks[:5]], "ageMs": round(b.age_ms(now))}
 
+    def _executable(self, scrip_code: str, qty: int, *, buy: bool, now: float | None = None) -> dict[str, Any] | None:
+        """What ``qty`` would trade at now, for a button (operator, 2026-10-06: the SKIP button's "≈ ₹5.97" was the mid —
+        "we need to write the price that we can buy at"): the touch on the side that trades — the ask to buy, the bid
+        to sell — and, on a fresh depth book, that side WALKED for every unit with the paper matcher's own ceiling
+        (``walk``, ``filled``: how much of ``qty`` the book holds). None without a price on that side."""
+        now = now or time.time()
+        bid, ask, _, _ = self._touch(scrip_code, now)
+        touch = ask if buy else bid
+        if not touch:
+            return None
+        out: dict[str, Any] = {"side": "buy" if buy else "sell", "touch": touch, "walk": None, "filled": None}
+        b = self.books.get(scrip_code)
+        levels = (b.asks if buy else b.bids) if b is not None else None
+        if b is not None and levels and qty > 0 and b.age_ms(now) <= self.matcher.age_limit_ms(now):
+            w = walk_book(levels, qty, touch=levels[0][0], ceiling_pct=self.matcher.ceiling_pct, buy=buy)
+            if w.filled:
+                out["walk"], out["filled"] = round(w.avg_price, 2), w.filled
+        return out
+
     def _note_mid(self, scrip_code: str, now: float, mid: float) -> None:
         """A held option's mid, at most a read a second, kept two minutes."""
         h = self._mid_hist.setdefault(scrip_code, deque())
@@ -4314,6 +4333,9 @@ class Engine:
                     "qty": lp.qty, "ladder": list(lp.option_targets), "edm": lp.option_edm, "underlying": self.ltps.get(lp.underlying.scrip_code),
                     "unrealised": round((mid - lp.entry) * lp.qty_remaining * lp.instrument.multiplier, 2) if mid else None,
                     "realised": round(realised * lp.instrument.multiplier, 2),
+                    # what SKIP would fetch: the bid (a short future buys back at the ask), walked for every lot left
+                    "exitAt": self._executable(lp.instrument.scrip_code, int(lp.qty_remaining),
+                                               buy=lp.instrument.kind is InstrumentKind.FUTURE and lp.direction is Direction.BEARISH),
                 }
             # the books whose decision is the signal row itself; every other book records its own
             # (a skip with its reason, or its own resting entry) since each places its own order
@@ -4625,8 +4647,10 @@ class Engine:
             except Exception as exc:  # noqa: BLE001 — a preview must never fail the page
                 plan = {"ok": False, "reason": f"preview failed: {exc}"[:120]}
             self._counter_preview[ck] = (time.time(), plan)
+        # the price is read fresh on every poll, not from the cached preview: what the button would pay NOW
+        entry_at = self._executable(str(plan["scripCode"]), int(plan.get("qty") or 0), buy=True) if plan.get("ok") and plan.get("scripCode") else None
         return {**base, "action": "take", "enabled": bool(plan.get("ok")), "contract": plan.get("contract"), "type": plan.get("type"),
-                "reason": None if plan.get("ok") else str(plan.get("reason") or "no plan"), **self._cta_size(None, plan)}
+                "reason": None if plan.get("ok") else str(plan.get("reason") or "no plan"), **self._cta_size(None, plan), "entryAt": entry_at}
 
     def _resting_target_card(self, ps: dict[str, Any] | None) -> dict[str, Any] | None:
         """The next rung's target sell resting for this card's open position, if any."""
@@ -4815,6 +4839,9 @@ class Engine:
             "oi": getattr(q, "oi", None) if q else None, "delta": round(abs(delta), 2), "lots": sizing.lots, "qty": sizing.qty, "outlay": round(sizing.outlay, 0),
             "lotSize": inst.lot_size, "optionSl": option_sl, "ladder": list(ladder), "edm": edm, "ladderNote": note,
             "exitPlan": self._exit_plan(key, inst, sizing.qty, tuple(ladder), option_sl, sig.stop, underlying.segment) if sizing.ok else None,
+            # what TAKE would pay: the ask (a short future sells at the bid), walked for the whole quantity
+            "entryAt": self._executable(inst.scrip_code, int(sizing.qty or 0),
+                                        buy=not (inst.kind is InstrumentKind.FUTURE and sig.direction is Direction.BEARISH)),
         }
 
     def _aim_contract(self, underlying: Instrument, symbol: str, direction: Direction, entry: float, target1: float | None) -> dict[str, Any] | None:
