@@ -27,7 +27,7 @@ type Card = {
   // every rung's SELL resting, lowest first (since 3 Oct the whole ladder rests from the fill)
   restingTargets?: { rung: number; limit: number; qty: number; lots: number; placedTs: number }[]
   side?: 'CE' | 'PE' | 'LONG' | 'SHORT'
-  breadth?: { share: number | null; names: number; efficiency?: number; volBand?: string | null; gapDatr?: number; pivotsAhead?: string[]; openBar?: boolean; relVol?: number; relVolTier?: string; relVolMkt?: number; slotVol?: number; n50SlotVol?: number } | null
+  breadth?: { share: number | null; names: number; efficiency?: number; volBand?: string | null; gapDatr?: number; pivotsAhead?: string[]; openBar?: boolean; relVol?: number; relVolTier?: string; relVolMkt?: number; n50SurgeT?: number; slotVol?: number; n50SlotVol?: number } | null
   books?: BookRow[]
   cta?: { action: 'take' | 'skip' | 'taken'; enabled: boolean; contract: string | null; type?: string | null; bid?: number | null; ask?: number | null; spreadPct?: number | null; reason: string | null } & Size
   // a trigger the route sends COUNTER-TREND, on an in-trend book's card: the counter-trend book's buy
@@ -604,17 +604,20 @@ function TradeMap({ c }: { c: Card }) {
 }
 
 /** A 30m volume reading as a gauge: T (thick) and T−1 (thin) against the baseline, on 0 … 3×, with the
- *  dried line (0.85×) and the surge line (2.5×) marked. */
-function SurgeMeter({ label, t, t1, title }: { label: string; t: number | null | undefined; t1: number | null | undefined; title?: string }) {
+ *  dried line (0.85×) and the surge line (2.5×) marked; ``vs`` names the baseline under it. */
+function SurgeMeter({ label, t, t1, title, vs }: { label: string; t: number | null | undefined; t1: number | null | undefined; title?: string; vs?: string }) {
   const has = t !== null && t !== undefined
   const dried = has && t! < 0.85 && (t1 ?? 1) < 0.85, surge = has && t! >= 2.5
   const tone = dried ? 'bg-rose-400' : surge ? 'bg-emerald-400' : 'bg-sky-400'
   const w = (v: number | null | undefined) => `${Math.min(100, Math.max(0, ((v ?? 0) / 3) * 100))}%`
   if (!has) {
     return (
-      <div title={title} className="flex items-baseline justify-between">
-        <span className="text-[12px] font-semibold uppercase tracking-wide text-slate-400">{label}</span>
-        <span className="text-[13px] text-slate-500">no reading at this bar</span>
+      <div title={title} className="flex flex-col gap-0.5">
+        <div className="flex items-baseline justify-between">
+          <span className="text-[12px] font-semibold uppercase tracking-wide text-slate-400">{label}</span>
+          <span className="text-[13px] text-slate-500">no reading at this bar</span>
+        </div>
+        {vs && <span className="text-[11.5px] leading-snug text-slate-500">{vs}</span>}
       </div>
     )
   }
@@ -630,6 +633,58 @@ function SurgeMeter({ label, t, t1, title }: { label: string; t: number | null |
         <div className="absolute top-0 h-full w-px bg-rose-300/70" style={{ left: `${(0.85 / 3) * 100}%` }} title="0.85× — dried" />
         <div className="absolute top-0 h-full w-px bg-emerald-300/70" style={{ left: `${(2.5 / 3) * 100}%` }} title="2.5× — surge" />
       </div>
+      {vs && <span className="text-[11.5px] leading-snug text-slate-500">{vs}</span>}
+    </div>
+  )
+}
+
+/** The trigger's volume against the NIFTY 50's member stocks at the same 30m bar (the engine's ``relative_volume``,
+ *  operator 2026-10-05/06), on 0 … 10×. Thick: relVol — the bar ÷ its own usual for that half hour (the median of
+ *  the same slot in up to 20 earlier sessions), over the members' median of the same ratio; the 09:45 gap switch
+ *  reads it (≥ 3×). Thin: relVolMkt — its surge (T ÷ T−2…T−7) over the members' median surge. Ticks at the
+ *  operator's tiers: 1× the market, 3× high, 5× very high, 7× strong. The yardstick is the member STOCKS' median
+ *  (≥ 25 of them must read) — neither the index, which has no volume of its own, nor the NIFTY future. */
+function RelVolMeter({ b }: { b: Card['breadth'] }) {
+  const rv = b?.relVol ?? null, mk = b?.relVolMkt ?? null
+  const MAX = 10
+  const at = (v: number) => `${(v / MAX) * 100}%`
+  const w = (v: number) => `${Math.min(100, Math.max(0, (v / MAX) * 100))}%`
+  const vs = "vs NIFTY 50 stocks — the median of the index's member stocks at the same 30m bar, not the index or the NIFTY future"
+  const title = "thick: this bar ÷ its usual for the half hour, over the NIFTY 50 stocks' same ratio (the 09:45 gap switch reads it, ≥ 3×) · thin: its surge (T ÷ T−2…T−7) over theirs"
+  const label = <span className="text-[12px] font-semibold uppercase tracking-wide text-slate-400">relative volume</span>
+  if (rv === null && mk === null) {
+    return (
+      <div title={title} className="flex flex-col gap-0.5">
+        <div className="flex items-baseline justify-between">{label}<span className="text-[13px] text-slate-500">no reading at this bar</span></div>
+        <span className="text-[11.5px] leading-snug text-slate-500">{vs}</span>
+      </div>
+    )
+  }
+  const lead = rv ?? mk!
+  const tone = lead >= 3 ? 'bg-emerald-400' : lead >= 1 ? 'bg-sky-400' : 'bg-rose-400'
+  const surge = mk !== null && b?.n50SurgeT != null ? mk * b.n50SurgeT : null
+  return (
+    <div title={title} className="flex flex-col gap-1">
+      <div className="flex items-baseline justify-between">
+        {label}
+        <span className={`text-[14px] font-semibold ${lead >= 3 ? 'text-emerald-300' : lead >= 1 ? 'text-slate-100' : 'text-rose-300'}`}>{rv !== null ? `${f(rv)}×` : '—'}<span className="text-[12px] font-normal text-slate-500">{rv !== null && b?.relVolTier ? ` ${b.relVolTier}` : ''} · surge {mk !== null ? `${f(mk)}×` : '—'}</span></span>
+      </div>
+      <div className="relative h-[14px] rounded bg-slate-800/80">
+        {rv !== null && <div className={`absolute left-0 top-[2px] h-[6px] rounded ${tone}`} style={{ width: w(rv) }} />}
+        {mk !== null && <div className={`absolute left-0 top-[10px] h-[2px] rounded opacity-60 ${tone}`} style={{ width: w(mk) }} />}
+        {[1, 3, 5, 7].map((x) => (
+          <div key={x} className={`absolute top-0 h-full w-px ${x === 3 ? 'bg-emerald-300/70' : 'bg-slate-300/40'}`} style={{ left: at(x) }} title={x === 1 ? '1× — the NIFTY 50 stocks' : x === 3 ? '3× — high: the 09:45 gap switch' : x === 5 ? '5× — very high' : '7× — strong'} />
+        ))}
+        {lead > MAX && <span className="absolute -right-0.5 -top-[3px] text-[12px] leading-none text-emerald-300">▸</span>}
+      </div>
+      <div className="relative h-[11px] text-[10.5px] leading-none text-slate-500">
+        {[1, 3, 5, 7].map((x) => <span key={x} className="absolute -translate-x-1/2" style={{ left: at(x) }}>{x}×</span>)}
+      </div>
+      <span className="text-[11.5px] leading-snug text-slate-500">{vs}</span>
+      {rv !== null && b?.slotVol != null && b?.n50SlotVol != null && (
+        <span className="text-[11.5px] leading-snug text-slate-400">thick {f(rv)}× = {f(b.slotVol)}× its usual half hour ÷ the NIFTY 50 stocks' {f(b.n50SlotVol)}×</span>
+      )}
+      {surge !== null && <span className="text-[11.5px] leading-snug text-slate-400">thin {f(mk)}× = its surge {f(surge)}× ÷ theirs {f(b?.n50SurgeT)}×</span>}
     </div>
   )
 }
@@ -744,8 +799,9 @@ function TriggerCard({ book, c, open, onToggle, refresh, readOnly = false }: { b
         <div className="mt-4 grid grid-cols-[minmax(0,1.65fr)_minmax(280px,1fr)] gap-5">
           <TradeMap c={c} />
           <div className="flex flex-col justify-center gap-3.5 rounded-xl bg-slate-950/50 px-4 py-3">
-            <SurgeMeter label="stock volume" t={eqSurge} t1={eqSurge1} title="trigger bar ÷ mean of T−2…T−7 · T / T−1" />
-            <SurgeMeter label="future volume" t={futT} t1={futT1} />
+            <SurgeMeter label="stock volume" t={eqSurge} t1={eqSurge1} title="trigger bar ÷ mean of T−2…T−7 · T / T−1" vs="vs its own previous six 30m bars (T−2…T−7) · thick T, thin T−1" />
+            <SurgeMeter label="future volume" t={futT} t1={futT1} title="the front future's trigger bar ÷ mean of its T−2…T−7 · T / T−1" vs="the front-month future vs its own previous six 30m bars" />
+            <RelVolMeter b={c.breadth} />
             <BreadthMeter share={c.breadth?.share} names={c.breadth?.names} />
           </div>
         </div>
