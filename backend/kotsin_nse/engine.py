@@ -2625,6 +2625,14 @@ class Engine:
                 await self._book_skip(key.value, sig, GRADED_F_RULES[key], gate="graded_f")
         if self.book_trades(StrategyKey.FUDKII_CT_Y_F.value, underlying.segment):
             await self._gap_fade(sig, bar, underlying, key=StrategyKey.FUDKII_CT_Y_F)
+        if bar is not None:
+            # the level reader reads a graded-F trigger too (operator, 2026-10-06: "yes make graded-F triggers run the
+            # level reader" — KOTAKBANK 09:45 crossed its monthly R1 and nothing read it): the card and the record show
+            # what it read; nothing trades on it, since no fade book takes a graded-F trigger on the route
+            try:
+                await self._read_route(sig, bar, underlying)
+            except Exception as exc:  # noqa: BLE001 — a reading never costs the trigger anything
+                log.warning("counter.route_unpublished_failed", symbol=sig.symbol, error=str(exc)[:160])
 
     @staticmethod
     async def _guarded(event: str, sig: Signal, job: Awaitable[Any]) -> None:
@@ -5023,6 +5031,27 @@ class Engine:
         pos.option_edm = edm
         pos.note += " · " + note
 
+    async def _read_route(self, sig: Signal, bar: UnifiedBar, underlying: Instrument) -> tuple[CounterDecision, list[Leg]]:
+        """The level reader on a trigger candle (strategy/counter.py ``counter_route``): every daily, weekly and monthly
+        level the equity's and the front future's 30m candle touched, crossed or rejected, raw and clustered, and the
+        route it reads — stamped on the alert, recorded as ``counter.route``. A trigger FUDKII did not publish reads on
+        the low-priority futures queue."""
+        legs = await self._counter_legs(underlying, bar, low_priority=not published(sig))
+        dec = counter_route(legs, bullish=sig.direction is Direction.BULLISH, st_flipped="ST flip" in sig.reason)
+        self.alerts.mark_route(sig.signal_id, decision=dec.to_json())
+        legs_json = [
+            {
+                "name": leg.name, "open": leg.open, "high": leg.high, "low": leg.low, "close": leg.close, "atr": round(leg.atr, 2),
+                "surgeT": leg.surge_t, "surgeT1": leg.surge_t1, "volume": leg.volume,
+                "levels": {p.label: round(p.price, 2) for p in leg.points},
+            }
+            for leg in legs
+        ]
+        await self.ledger.event("counter.route", {"signal_id": sig.signal_id, "symbol": sig.symbol, "legs": legs_json,
+                                                  "published": published(sig), **dec.to_json()})
+        log.info("counter.route", symbol=sig.symbol, route=dec.route, reason=dec.reason, published=published(sig))
+        return dec, legs
+
     async def _handle_counter(self, sig: Signal, bar: UnifiedBar) -> None:
         """The counter-trend route on a FUDKII trigger (strategy/counter.py). COUNTER → the fade is
         entered by CT-X through the ordinary entry path — the opposite OTM from the same selector,
@@ -5041,20 +5070,8 @@ class Engine:
             await self._market_fade(sig, bar, underlying)
         except Exception as exc:  # nor the market fade (a shadow)
             log.exception("market_fade.failed", symbol=sig.symbol, error=str(exc)[:160])
-        legs = await self._counter_legs(underlying, bar, low_priority=not published(sig))
+        dec, legs = await self._read_route(sig, bar, underlying)
         atr_v = legs[0].atr if legs else 0.0
-        dec = counter_route(legs, bullish=sig.direction is Direction.BULLISH, st_flipped="ST flip" in sig.reason)
-        self.alerts.mark_route(sig.signal_id, decision=dec.to_json())
-        legs_json = [
-            {
-                "name": leg.name, "open": leg.open, "high": leg.high, "low": leg.low, "close": leg.close, "atr": round(leg.atr, 2),
-                "surgeT": leg.surge_t, "surgeT1": leg.surge_t1, "volume": leg.volume,
-                "levels": {p.label: round(p.price, 2) for p in leg.points},
-            }
-            for leg in legs
-        ]
-        await self.ledger.event("counter.route", {"signal_id": sig.signal_id, "symbol": sig.symbol, "legs": legs_json, **dec.to_json()})
-        log.info("counter.route", symbol=sig.symbol, route=dec.route, reason=dec.reason)
         if dec.route != "COUNTER":
             return
         fade = flipped_signal(

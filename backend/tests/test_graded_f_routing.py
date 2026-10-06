@@ -178,3 +178,44 @@ def test_the_shadow_pages_graded_f_tab_shows_rt_y_and_the_ct_y_f_shadow_beside_r
     assert by["TCS"]["rt_y"] == {"status": "EXITED", "net": 800.0} and by["INFY"]["ct_y_f"] == {"status": "EXITED", "net": -300.0}
     t = got["total"]
     assert (t["rt_y_traded"], t["rt_y_net"], t["ct_y_f_traded"], t["ct_y_f_net"]) == (1, 800.0, 1, -300.0)
+
+
+@pytest.mark.asyncio
+async def test_the_level_reader_reads_a_graded_f_trigger_and_nothing_trades_on_it(settings, monkeypatch):
+    # operator, 2026-10-06: "yes make graded-F triggers run the level reader" — KOTAKBANK 09:45 crossed its monthly R1
+    # and, graded F, was never read. The route is stamped and recorded; no fade book enters on it, even on COUNTER.
+    import kotsin_nse.engine as engine_mod
+    from kotsin_nse.bars.unified import BarSource, UnifiedBar
+    from kotsin_nse.strategy.counter import NO_WALL, CounterDecision
+
+    e = Engine(settings)
+    await e.start()
+    try:
+        _seed(e, zones=[Zone(184.0, 6.0, ["1d.PIVOT"])])
+        trig = _unpublished(_trigger(Direction.BULLISH))
+        e._breadth_at[trig.signal_id] = {"share": 0.6, "names": 220, "atr30": 2.0, "openBar": False, "gapDatr": 0.05}
+        handled = []
+
+        async def capture(sig, bar, *, adopt=True):
+            handled.append(sig)
+
+        async def no_legs(und, bar, *, low_priority=False):
+            assert low_priority, "an unpublished trigger reads on the low-priority futures queue"
+            return []
+
+        e._handle_signal = capture  # type: ignore[method-assign]
+        monkeypatch.setattr(e, "_counter_legs", no_legs)
+        monkeypatch.setattr(engine_mod, "counter_route", lambda legs, **kw: CounterDecision("COUNTER", "at pivot", NO_WALL))
+        bar = UnifiedBar(symbol=trig.symbol, scrip_code=trig.symbol, tf="30m", ts=int(trig.ts), open=1, high=1, low=1, close=1,
+                         volume=1, source=BarSource.REST, complete=True)
+        await e._handle_counter_unpublished(trig, bar)
+        ev = await e.ledger.rows_between("events", 0, time.time() + 5)
+        routes = [x for x in ev if x["kind"] == "counter.route"]
+        assert len(routes) == 1 and routes[0]["route"] == "COUNTER" and routes[0]["published"] is False
+        assert handled == [], "read, recorded — never traded"
+        # no candle, no reading
+        await e._handle_counter_unpublished(_unpublished(_trigger(Direction.BEARISH)), None)
+        ev = await e.ledger.rows_between("events", 0, time.time() + 5)
+        assert len([x for x in ev if x["kind"] == "counter.route"]) == 1
+    finally:
+        await e.stop()
