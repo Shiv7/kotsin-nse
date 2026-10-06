@@ -340,6 +340,9 @@ function Cta({ book, c, onDone }: { book: string; c: Card; onDone: () => void })
   const mid = c.live?.mid ?? null
   const left = c.live?.qtyRemaining ?? c.position?.qty_remaining ?? 0
   const lot = c.position?.instrument.lot_size || 1
+  // the premium paid beside the close-now value: the button's ≈ is the mid now, not the fill (KOTAKBANK 6 Oct read
+  // "≈ ₹5.97 = ₹47,800" on a 7.30 buy — the operator asked why)
+  const paid = c.position?.entry ?? null
   const grey = 'inline-flex cursor-not-allowed items-center gap-2 rounded-xl border border-slate-700 bg-slate-800 px-5 py-2.5 text-[14.5px] font-bold text-slate-500'
   return (
     <div className="flex flex-wrap items-center gap-2.5">
@@ -354,7 +357,7 @@ function Cta({ book, c, onDone }: { book: string; c: Card; onDone: () => void })
         </div>
       )}
       {held ? (
-        <button disabled={busy !== null} onClick={() => act('skip')} className="inline-flex items-center gap-2 rounded-xl bg-rose-500 px-5 py-2.5 text-[14.5px] font-bold text-slate-950 shadow-[0_6px_20px_-8px_rgba(251,113,133,0.8)] hover:bg-rose-400 disabled:opacity-40"><I d={IC.x} />SKIP · close {Math.floor(left / lot)} lots ({left.toLocaleString('en-IN')}) at market{mid ? ` ≈ ₹${mid.toFixed(2)} = ${inr0(mid * left * (c.position?.instrument.multiplier || 1))}` : ''}</button>
+        <button disabled={busy !== null} onClick={() => act('skip')} className="inline-flex items-center gap-2 rounded-xl bg-rose-500 px-5 py-2.5 text-[14.5px] font-bold text-slate-950 shadow-[0_6px_20px_-8px_rgba(251,113,133,0.8)] hover:bg-rose-400 disabled:opacity-40"><I d={IC.x} />SKIP · close {Math.floor(left / lot)} lots ({left.toLocaleString('en-IN')}) at market{mid ? ` ≈ ₹${mid.toFixed(2)} = ${inr0(mid * left * (c.position?.instrument.multiplier || 1))}` : ''}{paid ? ` · paid ₹${paid.toFixed(2)} = ${inr0(paid * left * (c.position?.instrument.multiplier || 1))}` : ''}</button>
       ) : (
         canTake ? (
           <button disabled={busy !== null} onClick={() => act('take')} className="inline-flex items-center gap-2 rounded-xl bg-emerald-400 px-5 py-2.5 text-[14.5px] font-bold text-slate-950 shadow-[0_6px_20px_-8px_rgba(52,211,153,0.8)] hover:bg-emerald-300 disabled:opacity-40"><I d={IC.check} />TAKE {contractName(c.plan?.contract)}{sizeText(c.cta?.lots ? c.cta : { lots: c.plan?.lots, qty: c.plan?.qty, premium: c.plan?.premium, outlay: c.plan?.outlay })}</button>
