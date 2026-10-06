@@ -19,6 +19,13 @@ type TargetEv = { rung: number; limit: number; qty: number; placedTs: number; ts
 type Card = {
   // the same trade under the book's current stop and its two mirrors' (operator, 2026-10-04): null = none held
   stopRules?: StopRuleRow[] | null
+  // the live strip (operator, 2026-10-06): the NIFTY 50 members with / against the trigger, India VIX, the prices now
+  market?: {
+    n50: { atTrigger: Align | null; now: Align | null }
+    vix: { atTrigger: number | null; open: number | null; now: number | null; band: string | null }
+    stock: { ltp: number | null; ageS: number | null }
+    option: { contract: string; held: boolean; ltp: number | null; bid: number | null; ask: number | null; ageS: number } | null
+  } | null
   verdicts?: { rtY: Verdict | null; ctY: Verdict | null; ctM?: Verdict | null }
   pending?: (ExecA & { restingS?: number; contract?: string; forTwins?: boolean; parentWhy?: string }) | null
   execLog?: { entry?: ExecA; exits?: (ExecA & { reason?: string; qty?: number })[]; targets?: TargetEv[] } | null
@@ -33,7 +40,7 @@ type Card = {
   // a trigger the route sends COUNTER-TREND, on an in-trend book's card: the counter-trend book's buy
   // is the live button (operator, 2026-09-29) — RT-Y's tab → CT-Y, the others → CT-X
   ctaCounter?: ({ book: string; label: string; action: 'take' | 'taken' | 'held'; enabled: boolean; contract: string | null; type?: string | null; reason: string | null } & Size) | null
-  signalId: string; symbol: string; direction: 'BULLISH' | 'BEARISH'; ts: number; grade: string | null; rr: number | null; reason: string
+  signalId: string; symbol: string; direction: 'BULLISH' | 'BEARISH'; triggerDirection?: 'BULLISH' | 'BEARISH'; ts: number; grade: string | null; rr: number | null; reason: string
   entry: number; stop: number; targets: number[] | null; stopPct: number
   confluence: { stop_zone?: string; target_zones?: string[]; fortress?: number; room_ratio?: number; note?: string }
   evidence: Record<string, number>; parentDecision: string | null; parentReason: string | null
@@ -52,6 +59,7 @@ type Card = {
   rtCard: { confidence?: { score: number }; odds?: { pT1: number | null; note?: string }; wallAhead?: { price: number; strength: number; members: string[] } | null; wallBehind?: { price: number; strength: number; members: string[] } | null; stop?: { equityStop: number; optionStop: number; delta: number } } | null
   pros: string[]; cons: string[]
 }
+type Align = { with: number; against: number; flat: number; names: number }
 /** What a button buys: its lots, quantity, the price of one and the money it needs. */
 type Size = { lots?: number | null; qty?: number | null; premium?: number | null; outlay?: number | null }
 const sizeText = (s?: Size | null) =>
@@ -808,6 +816,7 @@ function TriggerCard({ book, c, open, onToggle, refresh, readOnly = false }: { b
             <BreadthMeter share={c.breadth?.share} names={c.breadth?.names} />
           </div>
         </div>
+        <LiveStrip c={c} />
         <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1.5 px-1">
           <KV k="ATR 30m" v={f(c.atr)} />
           {c.stopPct > 0 && <KV k="stop" v={`${c.stopPct.toFixed(2)}% away`} tone={c.stopPct < 0.2 ? 'text-rose-300' : undefined} title={c.stopPct < 0.2 ? "inside one bar's noise" : ''} />}
@@ -829,6 +838,79 @@ function TriggerCard({ book, c, open, onToggle, refresh, readOnly = false }: { b
       </div>
       {open && <Expanded book={book} c={c} />}
     </article>
+  )
+}
+
+/** The card's live strip, read on every poll like the trade map's "now" (operator, 2026-10-06: "factor in india vix at the
+ *  time of trigger and its allignment (trigger direction allignment with nifty50 constituents and countre-trend
+ *  allignment as well. keep both live and updated just like the "now" ticker and add current price of Options and
+ *  equity there too)"). The NIFTY 50's member stocks against their own day open — with the TRIGGER's direction, or
+ *  against it (the counter-trend side) — at the trigger bar's close and now; India VIX at the open, the trigger and
+ *  now (a falling VIX goes with a bullish trigger, a rising one with a bearish); the stock and the option now. */
+function LiveStrip({ c }: { c: Card }) {
+  const m = c.market
+  if (!m) return null
+  const bull = c.triggerDirection ? c.triggerDirection === 'BULLISH' : c.direction === 'BULLISH'
+  const a = m.n50.now, t = m.n50.atTrigger
+  const pct = (x: number, n: number) => `${Math.round((x / n) * 100)}%`
+  const vixMove = (from: number | null, to: number | null) => (from && to ? ((to - from) / from) * 100 : null)
+  const vixWord = (mv: number | null) => {
+    if (mv === null) return null
+    if (Math.abs(mv) < 0.05) return <span className="text-slate-400">flat</span>
+    const withIt = (mv < 0) === bull
+    return <span className={withIt ? 'text-emerald-300' : 'text-rose-300'}>{mv < 0 ? '↓' : '↑'} {Math.abs(mv).toFixed(1)}% — {withIt ? 'with' : 'against'} the trigger</span>
+  }
+  const o = m.option
+  const mid = o ? (o.bid && o.ask ? (o.bid + o.ask) / 2 : o.ltp) : null
+  const paid = o?.held ? c.position?.entry ?? null : null
+  const stockMove = m.stock.ltp ? ((m.stock.ltp - c.entry) / c.entry) * 100 : null
+  const row = 'grid grid-cols-[140px_minmax(0,1fr)] items-baseline gap-x-3 max-sm:grid-cols-1'
+  const head = 'text-[12px] font-semibold uppercase tracking-wide text-slate-400'
+  return (
+    <div className="mt-3 flex flex-col gap-2 rounded-xl border border-slate-800 bg-slate-950/40 px-4 py-3 text-[13.5px]">
+      <div className="flex items-center gap-2 text-[12px] font-semibold uppercase tracking-wider text-sky-300">
+        <span className="h-2 w-2 animate-pulse rounded-full bg-sky-400" />live · now<span className="font-normal normal-case tracking-normal text-slate-500">— updates with the page; "at the trigger" is the {ist(c.ts + 1800)} close</span>
+      </div>
+      <div className={row}>
+        <span className={head}>NIFTY 50 stocks</span>
+        {a ? (
+          <div className="flex min-w-0 flex-col gap-1">
+            <div className="relative flex h-[10px] overflow-hidden rounded bg-slate-800/80" title="each member stock against its own day open">
+              <div className="bg-emerald-400/80" style={{ width: pct(a.with, a.names) }} />
+              <div className="bg-slate-500/70" style={{ width: pct(a.flat, a.names) }} />
+              <div className="bg-rose-400/80" style={{ width: pct(a.against, a.names) }} />
+              {t ? <div className="absolute top-0 h-full w-[2px] bg-white" style={{ left: pct(t.with, t.names) }} title={`at the trigger: ${t.with} of ${t.names} with it`} /> : null}
+            </div>
+            <span className="text-slate-300">
+              <b className="text-emerald-300">{a.with}</b> of {a.names} with the trigger ({pct(a.with, a.names)}) · <b className="text-rose-300">{a.against}</b> against — the counter-trend side ({pct(a.against, a.names)}){a.flat ? ` · ${a.flat} flat` : ''}
+              <span className="text-slate-500"> · at the trigger {t ? `${t.with} with / ${t.against} against (${pct(t.with, t.names)} / ${pct(t.against, t.names)})` : '—'} · vs each stock's own day open</span>
+            </span>
+          </div>
+        ) : <span className="text-slate-500">no reading (under 25 members priced)</span>}
+      </div>
+      <div className={row}>
+        <span className={head}>India VIX</span>
+        <span className="text-slate-300">
+          <b className="text-slate-100">{f(m.vix.now)}</b> now{m.vix.band ? ` (${m.vix.band.toLowerCase()})` : ''} · {f(m.vix.atTrigger)} at the trigger · {f(m.vix.open)} at the open
+          <span className="text-slate-500"> · open → trigger </span>{vixWord(vixMove(m.vix.open, m.vix.atTrigger)) ?? <span className="text-slate-500">—</span>}
+          <span className="text-slate-500"> · trigger → now </span>{vixWord(vixMove(m.vix.atTrigger, m.vix.now)) ?? <span className="text-slate-500">—</span>}
+        </span>
+      </div>
+      <div className={row}>
+        <span className={head}>prices now</span>
+        <span className="text-slate-300">
+          stock <b className="text-slate-100">{f(m.stock.ltp)}</b>{stockMove !== null ? <span className={stockMove * (bull ? 1 : -1) >= 0 ? 'text-emerald-300' : 'text-rose-300'}> ({stockMove >= 0 ? '+' : ''}{stockMove.toFixed(2)}% on the {f(c.entry)} close)</span> : null}
+          {m.stock.ageS !== null && m.stock.ageS > 30 ? <span className="text-amber-300"> · {m.stock.ageS}s old</span> : null}
+          {o ? (
+            <>
+              <span className="text-slate-500"> · </span>{o.held ? (c.live ? 'held' : 'traded') : 'would buy'} {contractName(o.contract) ?? o.contract} <b className="text-slate-100">{f(o.bid)} / {f(o.ask)}</b>
+              <span className="text-slate-400"> (mid {f(mid)}{paid && mid ? <span className={mid >= paid ? 'text-emerald-300' : 'text-rose-300'}>; {mid >= paid ? '+' : ''}{(((mid - paid) / paid) * 100).toFixed(1)}% on the {f(paid)} paid</span> : null})</span>
+              {o.ageS > 30 ? <span className="text-amber-300"> · {o.ageS}s old</span> : null}
+            </>
+          ) : <span className="text-slate-500"> · no option quote</span>}
+        </span>
+      </div>
+    </div>
   )
 }
 
