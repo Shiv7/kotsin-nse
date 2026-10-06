@@ -12,7 +12,7 @@ type Route = { route: string; reason: string; summary?: string; wall?: { strengt
 type Order = { ts: number; avg_price: number | null; filled: number | null; qty: number; reason: string; purpose: string }
 type Level = { label: string; price: number }
 type ExitRow = { kind: 'target' | 'stop' | 'trail' | 'time'; at: string; action: string; qty: number | null }
-type Exec = { side: 'buy' | 'sell'; touch: number; walk: number | null; filled: number | null }
+type Exec = { side: 'buy' | 'sell'; touch: number; walk: number | null; filled: number | null; touchQty?: number | null }
 type Plan = { entryAt?: Exec | null; ok: boolean; reason?: string; contract?: string; strike?: number; type?: string; premium?: number; bid?: number | null; ask?: number | null; spreadPct?: number | null; delta?: number; lots?: number; qty?: number; outlay?: number; lotSize?: number; optionSl?: number; ladder?: number[]; edm?: number; ladderNote?: string; exitPlan?: { policy: string; rows: ExitRow[] } | null }
 type BookRow = { book: string; label: string; status: 'OPEN' | 'EXITED' | 'NONE'; side: 'CE' | 'PE' | 'LONG' | 'SHORT' | null; openedTs: number | null; closedTs: number | null; exitReason: string | null; pnl: number | null }
 type Verdict = { action: string; state?: string; gate?: string | null; why: string[] | string; side?: string; stop?: number | null; targets?: number[]; rr?: number | null; grade?: string | null; breadth?: number | null }
@@ -66,20 +66,24 @@ type Size = { lots?: number | null; qty?: number | null; premium?: number | null
 const sizeText = (s?: Size | null) =>
   s?.lots && s?.qty && s?.premium ? ` · ${s.lots} lots (${s.qty.toLocaleString('en-IN')}) × ₹${s.premium.toFixed(2)} = ${inr0(s.outlay ?? s.premium * s.qty)}` : ''
 /** A button's price that can actually trade (operator, 2026-10-06: the SKIP button's "≈ ₹5.97" was the mid — "we need
- *  to write the price that we can buy at"): the side's depth walked for the whole quantity on a fresh book, else its
- *  touch — the ask to buy, the bid to sell — with which one it is. Null when the book has no price on that side. */
-const execPx = (e: Exec | null | undefined, qty: number) => {
+ *  to write the price that we can buy at"): one order of N lots against the book — the touch (the ask to buy, the bid to
+ *  sell) and, on a fresh book, the average the whole order fills at across the levels it takes, said in lots ("bid 5.40
+ *  has 1 lot; 4 lots average 5.36"). Null when the book has no price on that side. */
+const lotsTxt = (units: number, lot: number) => { const n = Math.round(units / Math.max(1, lot)); return `${n} lot${n === 1 ? '' : 's'}` }
+const execPx = (e: Exec | null | undefined, qty: number, lot = 1) => {
   if (!e) return null
   const px = e.walk ?? e.touch
   const side = e.side === 'buy' ? 'ask' : 'bid'
+  const all = lotsTxt(qty, lot)
   const note = e.walk == null ? `at the ${side}`
-    : e.filled != null && e.filled < qty ? `${side} ${e.touch.toFixed(2)}; the book shows ${e.filled.toLocaleString('en-IN')} of ${qty.toLocaleString('en-IN')}`
-    : e.walk === e.touch ? `at the ${side}, all ${qty.toLocaleString('en-IN')} there` : `${side} ${e.touch.toFixed(2)}, walked for all ${qty.toLocaleString('en-IN')}`
+    : e.filled != null && e.filled < qty ? `${side} ${e.touch.toFixed(2)}; the book shows ${lotsTxt(e.filled, lot)} of ${all}`
+    : e.walk === e.touch ? `all ${all} at the ${side}`
+    : `${side} ${e.touch.toFixed(2)} has ${e.touchQty ? lotsTxt(e.touchQty, lot) : 'part'}; ${all} average ${e.walk.toFixed(2)}`
   return { px, note }
 }
 /** A buy button's size at the price it can buy at: lots, quantity, ₹ each and the money. */
 const execSizeText = (lots: number | null | undefined, qty: number | null | undefined, e: Exec | null | undefined, mult = 1) => {
-  const x = qty ? execPx(e, qty) : null
+  const x = qty ? execPx(e, qty, lots ? qty / lots : 1) : null
   return x && lots && qty ? ` · ${lots} lots (${qty.toLocaleString('en-IN')}) × ₹${x.px.toFixed(2)} = ${inr0(x.px * qty * mult)} (${x.note})` : null
 }
 type Resp = { book: string; day: string; wallet: { balance: number; day_start_balance: number; initial: number; trades: number } | null; counts: Record<string, number>; cards: Card[]; nowTs: number }
@@ -370,7 +374,7 @@ function Cta({ book, c, onDone }: { book: string; c: Card; onDone: () => void })
   // "≈ ₹5.97 = ₹47,800" on a 7.30 buy — the operator asked why)
   const paid = c.position?.entry ?? null
   const mult = c.position?.instrument.multiplier || 1
-  const sell = execPx(c.live?.exitAt, left)
+  const sell = execPx(c.live?.exitAt, left, lot)
   const grey = 'inline-flex cursor-not-allowed items-center gap-2 rounded-xl border border-slate-700 bg-slate-800 px-5 py-2.5 text-[14.5px] font-bold text-slate-500'
   return (
     <div className="flex flex-wrap items-center gap-2.5">
