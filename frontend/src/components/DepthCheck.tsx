@@ -2,23 +2,34 @@ import { useState } from 'react'
 import { cls, fmt, ist, istTime } from '../lib/api'
 import { usePoll } from '../lib/usePoll'
 import type { DepthCheck, DepthOrderCheck, DepthSummary, DepthVerdict } from '../types'
-import { Badge, Table } from './Ui'
+import { Badge, Card, Table } from './Ui'
 
 // The depth check (operator, 2026-10-09: "go ahead build it n tell me where to view it"). The paper matcher fills a
 // resting order WHOLE at its limit, with no queue and no share of the depth. Each fill is set against the book
 // recorded with it: how many lots it showed at the price, what the whole order would really have averaged, and how
-// many rupees kinder the paper fill was. Record-only: nothing here changes an order, a fill, a stop or a wallet.
+// many rupees kinder the paper fill was. A fill made by a trade printing through the price is counted but never
+// priced. One module serves both engines, so A's page and B's mean the same thing. Record-only: nothing here changes
+// an order, a fill, a stop or a wallet.
 
-const VERDICT_TONE: Record<DepthVerdict, 'green' | 'amber' | 'red' | 'slate'> = { full: 'green', partial: 'amber', thin: 'red', 'no book': 'slate' }
+const VERDICT_TONE: Record<DepthVerdict, 'green' | 'amber' | 'red' | 'blue' | 'slate'> = {
+  full: 'green',
+  partial: 'amber',
+  thin: 'red',
+  print: 'blue',
+  'no book': 'slate',
+}
 const VERDICT_TIP: Record<DepthVerdict, string> = {
   full: 'the book showed every lot we traded at the price or better',
   partial: 'the book showed at least half the lots at the price; the rest would have walked to worse levels',
   thin: 'the book showed under half the lots at the price; most of the order would have walked to worse levels',
+  print:
+    'filled by a trade printing through the price while the bid / ask never reached it: our order would have stood first at its price, so the book does not price it — counted, not in the rupees',
   'no book': 'no book was recorded with this fill (fills before 3 Oct 17:51, some exits), so it cannot be judged',
 }
 
 export const DEPTH_TIP =
-  'Each paper fill set against the book recorded with it. full: the book showed every lot at the price · partial: at least half · thin: under half · no book: none recorded. ' +
+  'Each paper fill set against the book recorded with it. full: the book showed every lot at the price · partial: at least half · thin: under half · ' +
+  'print: a trade went through the price while the touch never reached it (counted, never priced) · no book: none recorded. ' +
   '₹: how much kinder the paper fills were than walking that book (positive: the paper flattered the trade). Record-only. Click a row\'s Depth cell for each fill.'
 
 export function DepthChip({ verdict }: { verdict: DepthVerdict }) {
@@ -41,9 +52,14 @@ export function Kinder({ rs, className }: { rs: number | null | undefined; class
   )
 }
 
+function printsText(n: number) {
+  return `${n} on a print`
+}
+
 /** The trade ledger's Depth cell: the verdict and the rupees; a click opens each fill beneath the row. */
 export function DepthCell({ dc, open, onToggle }: { dc: DepthCheck | null | undefined; open: boolean; onToggle: () => void }) {
   if (!dc) return <td className="px-2 py-1.5 text-slate-600">—</td>
+  const unjudged = dc.fills - dc.checked - dc.prints
   return (
     <td className="px-2 py-1.5">
       <button onClick={onToggle} className={cls('flex items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-slate-800', open && 'bg-slate-800')} aria-expanded={open}>
@@ -51,7 +67,13 @@ export function DepthCell({ dc, open, onToggle }: { dc: DepthCheck | null | unde
         {dc.checked > 0 && <Kinder rs={dc.optimismRs} />}
         <span className="text-[10px] text-slate-500">{open ? '▴' : '▾'}</span>
       </button>
-      {dc.fills > dc.checked && dc.checked > 0 && <div className="text-[10px] text-slate-600">{dc.fills - dc.checked} of {dc.fills} fills without a book</div>}
+      {(dc.prints > 0 && dc.verdict !== 'print') || (unjudged > 0 && dc.verdict !== 'no book') ? (
+        <div className="text-[10px] text-slate-600">
+          {[dc.prints > 0 && dc.verdict !== 'print' ? printsText(dc.prints) : '', unjudged > 0 && dc.verdict !== 'no book' ? `${unjudged} without a book` : '']
+            .filter(Boolean)
+            .join(' · ')}
+        </div>
+      ) : null}
     </td>
   )
 }
@@ -91,6 +113,7 @@ export function DepthDetail({ dc }: { dc: DepthCheck }) {
         </span>
         <span>
           Exits ({dc.exit.fills}) <DepthChip verdict={dc.exit.verdict} /> <Kinder rs={dc.exit.optimismRs} />
+          {dc.exit.prints > 0 && dc.exit.verdict !== 'print' && <span className="ml-1 text-slate-500">· {printsText(dc.exit.prints)}, not priced</span>}
         </span>
         <span>
           Trade <Kinder rs={dc.optimismRs} className="font-semibold" /> {dc.optimismRs != null && (dc.optimismRs >= 0 ? 'kinder on paper than the book' : 'harsher on paper than the book')}
@@ -123,17 +146,25 @@ export function DepthDetail({ dc }: { dc: DepthCheck }) {
                   </div>
                 )}
               </td>
-              <td className={cls('px-2 py-1', (o.shortfallLots ?? 0) > 0 ? 'text-rose-300' : 'text-slate-500')}>
-                {o.shortfallLots == null ? '—' : lotsText(o.shortfallLots, o.lotSize)}
-                {o.beyondBook && <div className="text-[10px] text-slate-500">past the book</div>}
+              <td className={cls('px-2 py-1', o.verdict !== 'print' && (o.shortfallLots ?? 0) > 0 ? 'text-rose-300' : 'text-slate-500')}>
+                {o.verdict === 'print' || o.shortfallLots == null ? '—' : lotsText(o.shortfallLots, o.lotSize)}
+                {o.beyondBook && o.verdict !== 'print' && <div className="text-[10px] text-slate-500">past the book</div>}
               </td>
-              <td className="px-2 py-1 tabular-nums">{fmt.n(o.realisticPrice)}</td>
+              <td className="px-2 py-1 tabular-nums">{o.verdict === 'print' ? <span className="text-slate-500">not priced</span> : fmt.n(o.realisticPrice)}</td>
               <td className="px-2 py-1">
-                <Kinder rs={o.optimismRs} />
+                {o.verdict === 'print' ? (
+                  <span
+                    className="text-slate-500"
+                    title={o.crossRs != null ? `taking the ${o.side === 'BUY' ? 'asks' : 'bids'} instead would have cost ${fmt.inr(Math.abs(o.crossRs))} ${o.crossRs >= 0 ? 'more' : 'less'} — not in any total` : undefined}
+                  >
+                    on a print
+                  </span>
+                ) : (
+                  <Kinder rs={o.optimismRs} />
+                )}
               </td>
               <td className="px-2 py-1">
                 <DepthChip verdict={o.verdict} />
-                {o.onPrint && <div className="text-[10px] text-slate-500" title="the touch never reached the price: a trade printing through it filled the order">on a print</div>}
               </td>
             </tr>
           ))}
@@ -145,7 +176,7 @@ export function DepthDetail({ dc }: { dc: DepthCheck }) {
 
 const SCOPES: [string, string][] = [
   ['today', 'today'],
-  ['start', 'since the start'],
+  ['start', 'since the log began'],
 ]
 const SETS: [string, string][] = [
   ['trading', 'trading books'],
@@ -170,8 +201,8 @@ function Toggle({ value, options, onChange }: { value: string; options: [string,
   )
 }
 
-/** The Overview's card: per book, the closed trades' fills checked against their books, how many were partial or
- *  thin, and the rupees the paper fills were kinder than those books. */
+/** The Overview's card: per book, the closed trades' fills checked against their books, how many were partial, thin or
+ *  on a print, and the rupees the paper fills were kinder than those books. */
 export function DepthCheckCard() {
   const [since, setSince] = useState('today')
   const [books, setBooks] = useState('trading')
@@ -179,18 +210,18 @@ export function DepthCheckCard() {
   const { data, error } = usePoll<DepthSummary>(`/api/depth-check?since=${since}&books=${books}`, 30000)
   const rows = data?.books ?? []
   const t = data?.total
+  const copied = rows.some((b) => b.copied > 0)
   return (
-    <section className="rounded-lg border border-slate-800 bg-slate-900/40">
-      <header className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 px-3 py-2">
-        <h2 className="text-sm font-semibold text-slate-200" title={DEPTH_TIP}>
-          Depth check · paper fills vs the recorded book
-        </h2>
-        <div className="flex flex-wrap items-center gap-2">
+    <Card
+      title={<span title={DEPTH_TIP}>Depth check · paper fills vs the recorded book</span>}
+      right={
+        <span className="flex flex-wrap items-center justify-end gap-2">
           <Toggle value={since} options={SCOPES} onChange={setSince} />
           <Toggle value={books} options={SETS} onChange={setBooks} />
-        </div>
-      </header>
-      <div className="space-y-2 p-3">
+        </span>
+      }
+    >
+      <div className="space-y-2">
         {error && <div className="text-xs text-rose-300">{error}</div>}
         {!data ? (
           <div className="text-xs text-slate-500">loading…</div>
@@ -198,7 +229,7 @@ export function DepthCheckCard() {
           <div className="text-xs text-slate-500">{since === 'today' ? 'no trade closed yet today' : 'no closed trade in these books'}</div>
         ) : (
           <>
-            <Table head={['Book', 'Trades', 'Fills checked', 'Partial', 'Thin', 'Paper kinder by']}>
+            <Table head={['Book', 'Trades', 'Fills checked', 'Partial', 'Thin', 'On a print', 'Paper kinder by']}>
               {[
                 ...rows.map((b) => (
                   <tr key={b.book} className="border-b border-slate-900">
@@ -206,13 +237,17 @@ export function DepthCheckCard() {
                       {b.label}
                       {b.shadow && <span className="ml-1 text-[10px] text-slate-500">shadow</span>}
                     </td>
-                    <td className="px-2 py-1.5">{b.trades}</td>
-                    <td className="px-2 py-1.5" title={`${b.byVerdict.full} full · ${b.byVerdict.partial} partial · ${b.byVerdict.thin} thin · ${b.byVerdict['no book']} without a book`}>
+                    <td className="px-2 py-1.5">
+                      {b.trades}
+                      {b.copied > 0 && <span className="ml-1 text-[10px] text-slate-500" title="trades whose entry was another book's fill: it shows in this row too">{b.copied} copied entries</span>}
+                    </td>
+                    <td className="px-2 py-1.5" title={`${b.byVerdict.full} full · ${b.byVerdict.partial} partial · ${b.byVerdict.thin} thin · ${b.byVerdict.print} on a print · ${b.byVerdict['no book']} without a book`}>
                       {b.checked} <span className="text-slate-500">of {b.fills}</span>
                       {b.stale > 0 && <span className="ml-1 text-[10px] text-amber-400/80">{b.stale} stale</span>}
                     </td>
                     <td className={cls('px-2 py-1.5', b.byVerdict.partial ? 'text-amber-300' : 'text-slate-600')}>{b.byVerdict.partial}</td>
                     <td className={cls('px-2 py-1.5', b.byVerdict.thin ? 'text-rose-300' : 'text-slate-600')}>{b.byVerdict.thin}</td>
+                    <td className={cls('px-2 py-1.5', b.byVerdict.print ? 'text-sky-300' : 'text-slate-600')}>{b.byVerdict.print}</td>
                     <td className="px-2 py-1.5">
                       <Kinder rs={b.checked ? b.optimismRs : null} />
                     </td>
@@ -220,13 +255,16 @@ export function DepthCheckCard() {
                 )),
                 t && rows.length > 1 && (
                   <tr key="total" className="border-t-2 border-t-slate-700">
-                    <td className="px-2 py-1.5 font-semibold text-slate-100">all shown</td>
+                    <td className="px-2 py-1.5 font-semibold text-slate-100" title="every fill counted once, however many books' trades carry it">
+                      all shown
+                    </td>
                     <td className="px-2 py-1.5 font-semibold">{t.trades}</td>
                     <td className="px-2 py-1.5 font-semibold">
                       {t.checked} <span className="font-normal text-slate-500">of {t.fills}</span>
                     </td>
                     <td className="px-2 py-1.5 font-semibold text-amber-300">{t.byVerdict.partial}</td>
                     <td className="px-2 py-1.5 font-semibold text-rose-300">{t.byVerdict.thin}</td>
+                    <td className="px-2 py-1.5 font-semibold text-sky-300">{t.byVerdict.print}</td>
                     <td className="px-2 py-1.5 font-semibold">
                       <Kinder rs={t.checked ? t.optimismRs : null} />
                     </td>
@@ -236,8 +274,10 @@ export function DepthCheckCard() {
             </Table>
             <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500">
               <span>
-                closed trades{data.since ? ` since ${ist(data.since)}` : ''} · partial: at least half the lots were shown at the price, thin: under half ·
-                stop-rule mirrors re-use their book's entry fill, so they are summed apart
+                closed trades{data.since ? ` since ${ist(data.since)}` : ''} · fills checked: judged on a book (full, partial or thin) · partial: at least half
+                the lots were shown at the price, thin: under half · on a print: a trade went through the price while the touch never reached it, so the
+                book does not price it and it is not in the rupees
+                {copied ? " · a stop-rule mirror or the wide-stop shadow re-uses its book's entry fill: it shows in each row, but 'all shown' counts it once" : ''}
               </span>
               {data.worst.length > 0 && (
                 <button onClick={() => setShowWorst((v) => !v)} className="rounded bg-slate-800 px-2 py-0.5 text-slate-300 hover:text-white">
@@ -253,7 +293,10 @@ export function DepthCheckCard() {
                     <td className="whitespace-nowrap px-2 py-1 text-slate-300">{w.label}</td>
                     <td className="px-2 py-1 font-medium">{w.underlying}</td>
                     <td className="px-2 py-1"><Kinder rs={w.entryRs} /></td>
-                    <td className="px-2 py-1"><Kinder rs={w.exitRs} /></td>
+                    <td className="px-2 py-1">
+                      <Kinder rs={w.exitRs} />
+                      {w.prints > 0 && <span className="ml-1 text-[10px] text-slate-500">+{printsText(w.prints)}</span>}
+                    </td>
                     <td className="px-2 py-1"><Kinder rs={w.optimismRs} className="font-semibold" /></td>
                     <td className="px-2 py-1"><DepthChip verdict={w.verdict} /></td>
                     <td className="px-2 py-1 text-slate-400">{fmt.signedInr(w.net)}</td>
@@ -264,6 +307,6 @@ export function DepthCheckCard() {
           </>
         )}
       </div>
-    </section>
+    </Card>
   )
 }

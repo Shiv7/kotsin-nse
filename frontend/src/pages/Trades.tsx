@@ -67,7 +67,8 @@ const BOOK_SETS: [string, string][] = [
 
 export function Trades() {
   const [books, setBooks] = useState('trading')
-  const { data: trades, error } = usePoll<TradeRow[]>(`/api/trades?limit=200&books=${books}`, 8000)
+  // depth=1: each trade's fills against the recorded book, for the Depth column (only this page asks for it)
+  const { data: trades, error } = usePoll<TradeRow[]>(`/api/trades?limit=200&books=${books}&depth=1`, 8000)
   const { data: pnl } = usePoll<Pnl>(`/api/pnl?books=${books}`, 8000)
   const { data: grid } = usePoll<StopRuleGrid>('/api/stop-rules?since=start', 15000)
   // the rows whose fills are open beneath them (the Depth cell's click)

@@ -591,8 +591,10 @@ export interface TradeView {
 
 /** The depth check (operator, 2026-10-09: "go ahead build it n tell me where to view it"): each paper fill against the
  *  book recorded with it. full = the book showed every lot at the price; partial = at least half; thin = under half;
- *  no book = none recorded. Record-only: it never moves an order, a fill, a stop or a wallet. */
-export type DepthVerdict = 'full' | 'partial' | 'thin' | 'no book'
+ *  print = filled by a trade through the price while the touch never reached it (counted, never priced: our order
+ *  would have stood first at its price); no book = none recorded. Record-only: it never moves an order, a fill, a
+ *  stop or a wallet. One module serves both engines, so the words mean the same on each. */
+export type DepthVerdict = 'full' | 'partial' | 'thin' | 'print' | 'no book'
 
 export interface DepthOrderCheck {
   orderId: string
@@ -606,6 +608,10 @@ export interface DepthOrderCheck {
   market: boolean
   /** filled on a trade printing through the price while the touch never reached it */
   onPrint: boolean
+  /** a print fill: the touch on the side that trades, as it stood at the fill */
+  reach: number | null
+  /** a print fill: what taking the book instead would have cost, in rupees — to read, never summed */
+  crossRs: number | null
   side: 'BUY' | 'SELL'
   qty: number
   lots: number
@@ -625,7 +631,7 @@ export interface DepthOrderCheck {
   realisticPrice: number | null
   beyondBook: boolean
   beyondQty: number
-  /** rupees the paper fill was kinder than the realistic price (positive = the paper flattered it) */
+  /** rupees the paper fill was kinder than the realistic price (positive = the paper flattered it); null on a print */
   optimismRs: number | null
   verdict: DepthVerdict
   words: string
@@ -636,6 +642,7 @@ export interface DepthOrderCheck {
 export interface DepthSide {
   fills: number
   checked: number
+  prints: number
   verdict: DepthVerdict
   optimismRs: number | null
   orders: DepthOrderCheck[]
@@ -645,7 +652,9 @@ export interface DepthCheck {
   verdict: DepthVerdict
   optimismRs: number | null
   fills: number
+  /** fills judged on a book (full / partial / thin): the ones in the rupees */
   checked: number
+  prints: number
   stale: number
   lotSize: number
   /** a mirror's entry: the book whose fill it copied, and its name */
@@ -667,15 +676,19 @@ export interface DepthWorst {
   verdict: DepthVerdict
   entryRs: number | null
   exitRs: number | null
+  prints: number
 }
 
 export interface DepthTally {
   trades: number
+  /** fills, each counted once however many books' trades carry it */
   fills: number
   checked: number
   byVerdict: Record<DepthVerdict, number>
   optimismRs: number
   stale: number
+  /** trades whose entry was another book's fill (a stop-rule mirror, the wide-stop shadow) */
+  copied: number
 }
 
 export interface DepthSummary {
