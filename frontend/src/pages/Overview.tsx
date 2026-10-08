@@ -1,15 +1,19 @@
 import { useState } from 'react'
 import { ActiveTradesTable } from '../components/ActiveTrades'
+import { DepthCheckTable } from '../components/DepthCheck'
 import { StopRuleGridTable } from '../components/StopRuleGrid'
 import { Card, ErrorLine, Notes, Stat, StrategyBadge, Table } from '../components/Ui'
 import { cls, fmt, pnlColor } from '../lib/api'
 import { useEngine } from '../lib/engine'
 import { usePoll } from '../lib/usePoll'
-import type { Overview as OverviewData, StopRuleGrid } from '../types'
+import type { DepthCheckView, Overview as OverviewData, StopRuleGrid } from '../types'
 
 export function Overview() {
   const { data, error } = usePoll<OverviewData>('/api/overview', 3000)
   const { data: grid } = usePoll<StopRuleGrid>('/api/stop-rules?since=today', 10000)
+  // paper fills against the recorded book (operator, 2026-10-09) — the trading books, today or since the log began
+  const [depthSince, setDepthSince] = useState<'today' | 'start'>('today')
+  const { data: depth } = usePoll<DepthCheckView>(`/api/depth-check?since=${depthSince}&books=trading`, 15000)
   // the twin's active trades, read-only through /api/peer (the same switch as Live Alerts)
   const engine = useEngine()
   const [side, setSide] = useState<'self' | 'peer'>('self')
@@ -70,6 +74,25 @@ export function Overview() {
 
       <Card title="Strategy × stop rule · today" right="the same trades under the current stop, stop E and the adaptive stop">
         <StopRuleGridTable data={grid} />
+      </Card>
+
+      <Card
+        title="Depth check · paper fills against the recorded book"
+        right={
+          <span className="flex items-center gap-1">
+            {([['today', 'today'], ['start', 'since the log began']] as const).map(([k, label]) => (
+              <button
+                key={k}
+                onClick={() => setDepthSince(k)}
+                className={cls('rounded px-2 py-0.5 text-[11px]', depthSince === k ? 'bg-slate-700 text-white' : 'bg-slate-800 text-slate-400 hover:text-white')}
+              >
+                {label}
+              </button>
+            ))}
+          </span>
+        }
+      >
+        <DepthCheckTable data={depth} />
       </Card>
 
       <div className="grid gap-4 lg:grid-cols-2">

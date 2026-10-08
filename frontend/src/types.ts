@@ -232,6 +232,8 @@ export interface TradeRow {
   mark_basis?: 'bid' | 'last'
   /** a stop's prices, apart: the level that fired, the read that breached it, the bid and the depth-walk price then, the fill */
   stop?: { level: number; triggerPrice: number; triggerOn: string; bidAtTrigger: number | null; askAtTrigger: number | null; executable: number | null; fill: number | null } | null
+  /** each fill against the book recorded beside it (operator, 2026-10-09) — record only (an older engine serves none) */
+  depthCheck?: DepthCheck | null
   symbol: string
   underlying: string
   qty: number
@@ -248,6 +250,81 @@ export interface TradeRow {
   closed_ts: number
   duration_s: number
   grade: string
+}
+
+export type DepthVerdict = 'full' | 'partial' | 'thin' | 'no book'
+
+/** One paper fill against the five-level book recorded beside it (exec/depth_check.py). Quantities in units; lots beside them. */
+export interface DepthOrderCheck {
+  orderId: string
+  clientOrderId: string
+  purpose: 'ENTRY' | 'EXIT'
+  kind: string | null
+  reason: string
+  ts: number | null
+  /** the stored book read: depthAtFill, depthAtCross (the book a cross walked) or depthAtPlace */
+  bookField: string | null
+  side: 'BUY' | 'SELL' | null
+  qty: number
+  lots: number
+  lotSize: number
+  paperPrice: number | null
+  limit: number | null
+  /** a market order or a deadline cross: priced level by level, not at one price */
+  walked: boolean
+  source: 'fill' | 'place' | null
+  ageMs: number | null
+  visibleQty: number | null
+  visibleLots: number | null
+  covered: number | null
+  shortfallLots: number | null
+  realisticPrice: number | null
+  beyondBook: boolean
+  beyondQty: number
+  /** ₹ the paper fill gained over the realistic price on the whole quantity: positive = paper was kinder */
+  optimismRs: number
+  verdict: DepthVerdict
+  note: string
+}
+
+export interface DepthLeg {
+  fills: number
+  checked: number
+  qty: number
+  byVerdict: Record<DepthVerdict, number>
+  verdict: DepthVerdict
+  optimismRs: number
+  shortfallLots: number
+  paperPrice: number | null
+  realisticPrice: number | null
+  orders: DepthOrderCheck[]
+}
+
+export interface DepthCheck {
+  verdict: DepthVerdict
+  optimismRs: number
+  fills: number
+  checked: number
+  lotSize: number | null
+  entry: DepthLeg
+  exit: DepthLeg
+}
+
+export interface DepthSummary {
+  trades: number
+  fills: number
+  checked: number
+  byVerdict: Record<DepthVerdict, number>
+  optimismRs: number
+  worst: { id: string; strategy: string; underlying: string; symbol: string; closedTs: number; net: number; qty: number; verdict: DepthVerdict; optimismRs: number; entryRs: number; exitRs: number }[]
+}
+
+export interface DepthCheckView {
+  since: number | null
+  scope: 'today' | 'start'
+  set: string
+  books: (DepthSummary & { book: string; label: string; shadow: boolean })[]
+  total: DepthSummary | null
 }
 
 export interface Bar {
