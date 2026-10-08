@@ -10,6 +10,10 @@ both engines' feed health. The stop-rule mirrors (books ending _SE / _SA, 4 Oct:
 under stop E and the adaptive stop) are left out of that comparison — they re-trade their book's fills, so
 counting them in would count every trade three times — and shown apart: per engine and book, the trades
 closed under all three stops, with the current stop's net beside stop E's and the adaptive stop's.
+Last, per engine, the depth check (operator, 2026-10-09: "go ahead build it n tell me where to view it"). The day's
+closed trades are judged on the book recorded with each fill: per book, the fills, how many were partial or thin
+(the book showed fewer lots at the price than we traded), and how many rupees kinder the paper fills were than
+walking that book. backend/kotsin_nse/exec/depth_check.py does the judging (standard library only).
 Read-only: the databases are opened read-only, the health pages only read."""
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ import sys
 import urllib.request
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 IST = timezone(timedelta(hours=5, minutes=30))
 ENGINES = {
@@ -32,6 +37,8 @@ LABEL = {"FUDKII": "FUDKII", "FUDKII_RT_X": "RT-X", "FUDKII_RT_N": "RT-N", "FUDK
          "FUDKII_RT_MCX": "RT-MCX", "FUKAA": "FUKAA"}
 #: shadow books: compared like the others, but not a strategy's money in the stop-rule total
 SHADOWS = {"FUDKII_RT_Y_W1", "FUDKII_RT_Y_F", "FUDKII_CT_M"}
+#: the wide-stop shadow places no entry of its own: it copies RT-Y's fill (strategy/keys.py SHADOW_OF)
+SHADOW_OF = {"FUDKII_RT_Y_W1": "FUDKII_RT_Y"}
 
 
 def _mirror(book: str) -> bool:
@@ -101,6 +108,28 @@ def load(db: str, lo: float, hi: float):
             "grade": s.get("grade"), "rr": s.get("rr"), "pub": bool(pub if pub is not None else s.get("decision") != "NOT_PUBLISHED"),
             "why": (s.get("decision_reason") or "")[:110]}
     return pos, sig
+
+
+def depth(db: str, lo: float, hi: float) -> dict:
+    """The day's closed trades, each fill judged on the book recorded with it (exec/depth_check.py), summed per
+    book. A mirror's or the wide-stop shadow's entry is the fill it copied."""
+    backend = str(Path(__file__).resolve().parent.parent / "backend")
+    if backend not in sys.path:
+        sys.path.insert(0, backend)
+    try:
+        from kotsin_nse.exec.depth_check import check_trades, summarize
+    except Exception as exc:  # noqa: BLE001 - a report line, not a failure
+        return {"error": f"{exc.__class__.__name__}: {exc}"}
+    c = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    trades = [json.loads(j) for (j,) in c.execute("select json from trades where closed_ts >= ? and closed_ts < ?", (lo, hi))]
+    if not trades:
+        return summarize([], {})
+    first = min(_f(t.get("opened_ts")) or lo for t in trades)
+    orders = [json.loads(j) for (j,) in c.execute("select json from orders where ts >= ? and ts < ?", (first - 3600, hi + 60))]
+    ids = [str(t.get("position_id")) for t in trades]
+    positions = [json.loads(j) for (j,) in c.execute(f"select json from positions where id in ({','.join('?' * len(ids))})", ids)]
+    sources = {**{t["strategy"]: t["strategy"][:-3] for t in trades if _mirror(t["strategy"])}, **SHADOW_OF}
+    return summarize(trades, check_trades(trades, orders, positions=positions, sources=sources), order=list(LABEL))
 
 
 def health(port: int) -> str:
@@ -184,6 +213,34 @@ def main() -> None:
                   + (f"   ({r['waiting']} still open under a rule)" if r["waiting"] else "") + ("   shadow" if b in SHADOWS else ""))
         print(f"  {'trading':<8} {tot['n']:>6} {tot['current']:>10,.0f} {tot['E']:>10,.0f} {tot['A']:>10,.0f} | "
               f"{tot['E'] - tot['current']:>+9,.0f} {tot['A'] - tot['current']:>+9,.0f}")
+    for name, (db, _) in ENGINES.items():
+        d = depth(db, lo, hi)
+        print(f"\n  depth check · {name}: paper fills vs the recorded book (closed trades; kinder = rupees the paper fills "
+              f"beat walking that book; partial: at least half the lots shown at the price, thin: under half)")
+        if "error" in d:
+            print(f"  — not run: {d['error']}")
+            continue
+        rows = [b for b in d["books"] if not _mirror(b["book"])]
+        if not rows:
+            print("  — no closed trade")
+            continue
+        print(f"  {'book':<8} {'trades':>6} {'fills':>6} {'checked':>7} {'partial':>7} {'thin':>5} {'no book':>7} {'kinder ₹':>9}")
+        tot = {"trades": 0, "fills": 0, "checked": 0, "partial": 0, "thin": 0, "none": 0, "rs": 0.0}
+        for b in rows:
+            v = b["byVerdict"]
+            if b["book"] not in SHADOWS:
+                for k, x in (("trades", b["trades"]), ("fills", b["fills"]), ("checked", b["checked"]), ("partial", v["partial"]),
+                             ("thin", v["thin"]), ("none", v["no book"]), ("rs", b["optimismRs"])):
+                    tot[k] += x
+            print(f"  {LABEL.get(b['book'], b['book']):<8} {b['trades']:>6} {b['fills']:>6} {b['checked']:>7} {v['partial']:>7} "
+                  f"{v['thin']:>5} {v['no book']:>7} {b['optimismRs']:>9,.0f}" + ("   shadow" if b["book"] in SHADOWS else ""))
+        print(f"  {'trading':<8} {tot['trades']:>6} {tot['fills']:>6} {tot['checked']:>7} {tot['partial']:>7} {tot['thin']:>5} "
+              f"{tot['none']:>7} {tot['rs']:>9,.0f}")
+        mirrors = [b for b in d["books"] if _mirror(b["book"])]
+        if mirrors:
+            mf, mp = sum(b["fills"] for b in mirrors), sum(b["byVerdict"]["partial"] for b in mirrors)
+            mt, mr = sum(b["byVerdict"]["thin"] for b in mirrors), sum(b["optimismRs"] for b in mirrors)
+            print(f"  stop-rule mirrors (their book's entry re-used): {mf} fills, {mp} partial, {mt} thin, kinder {mr:,.0f}")
 
 
 if __name__ == "__main__":
