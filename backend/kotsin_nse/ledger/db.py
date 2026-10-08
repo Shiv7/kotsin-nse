@@ -397,6 +397,24 @@ class Ledger:
             out.append(d)
         return out
 
+    async def filled_orders_between(self, start: float, end: float) -> list[dict[str, Any]]:
+        """Every FILLED order placed in ``[start, end)``, oldest first, as its JSON with its decision — what the
+        depth check reads (exec/depth_check.py, operator 2026-10-09). The cancelled target sells, half the
+        table, are left in the database."""
+        stmt = (sa.select(orders.c.json, orders.c.decision)
+                .where(orders.c.ts >= start, orders.c.ts < end, orders.c.status == "FILLED").order_by(orders.c.ts))
+        async with self.engine.begin() as conn:
+            rows = (await conn.execute(stmt)).all()
+        return [{**json.loads(r[0]), "decision": r[1]} for r in rows]
+
+    async def first_depth_order(self) -> float | None:
+        """When the first order carrying a depth book was stored (``exec.depthAt…``, 5 Oct 2026 on engine A),
+        or None before any did."""
+        stmt = sa.select(sa.func.min(orders.c.ts)).where(orders.c.json.like('%"depthAt%'))
+        async with self.engine.begin() as conn:
+            v = (await conn.execute(stmt)).scalar()
+        return float(v) if v is not None else None
+
     async def gate_histogram(self, strategy: str | None = None) -> list[dict[str, Any]]:
         """Which gate is binding, as a number. The question ``NSE_BB_30`` could never answer."""
         stmt = sa.select(

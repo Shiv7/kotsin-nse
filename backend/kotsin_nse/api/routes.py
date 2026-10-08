@@ -33,6 +33,7 @@ from ..bars.unified import UnifiedBar
 from ..config import Segment
 from ..domain import Instrument, InstrumentKind, OptionType
 from ..engine import SELECTION_POLICY, Engine, _position_json
+from ..exec import depth_check as depth
 from ..exec.gateway import Mode
 from ..hotstocks.service import HotStocksService
 from ..ledger.db import events, rejections, signals, trades
@@ -41,6 +42,7 @@ from ..strategy.catalog import BOOKS, LIVE_KEYS
 from ..strategy.keys import (
     ALL_KEYS,
     SHADOW_BOOKS,
+    SHADOW_OF,
     STOP_MIRRORS,
     STOP_RULE_LABELS,
     StrategyKey,
@@ -106,13 +108,60 @@ class ProposeRequest(BaseModel):
 BOOK_SETS = "^(trading|mirrors|shadows|all)$"
 
 
-def _books_where(books: str) -> Any:
+def _book_keys(books: str) -> list[str] | None:
+    """The books of a book set, or None for every book."""
     keys = {
         "trading": [k for k in ALL_KEYS if k not in SHADOW_BOOKS],
         "mirrors": list(STOP_MIRRORS),
         "shadows": [k for k in SHADOW_BOOKS if k not in STOP_MIRRORS],
     }.get(books)
-    return None if keys is None else trades.c.strategy.in_([k.value for k in keys])
+    return None if keys is None else [k.value for k in keys]
+
+
+def _books_where(books: str) -> Any:
+    keys = _book_keys(books)
+    return None if keys is None else trades.c.strategy.in_(keys)
+
+
+def _entry_books(book: str) -> list[str]:
+    """Whose entry order a book's trade took, its own first: a stop-rule mirror opens on its source's fill, the
+    wide-stop shadow on RT-Y's — neither places an entry of its own."""
+    chain = [book]
+    while True:
+        cur = chain[-1]
+        src = stop_rule_of(cur)[0]
+        nxt = src if src != cur else _shadow_source(cur)
+        if not nxt or nxt in chain:
+            return chain
+        chain.append(nxt)
+
+
+def _shadow_source(book: str) -> str | None:
+    try:
+        src = SHADOW_OF.get(StrategyKey(book))
+    except ValueError:
+        return None
+    return src.value if src else None
+
+
+def _is_shadow(book: str) -> bool:
+    try:
+        return StrategyKey(book) in SHADOW_BOOKS
+    except ValueError:
+        return False
+
+
+async def _depth_checks(engine: Engine, rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Each trade's depth check (exec/depth_check.py; operator, 2026-10-09), worked out at read time from the
+    orders stored for it: one read of the filled orders across the trades' span, nothing written. A record —
+    it changes no order, fill, stop, wallet or decision."""
+    if not rows:
+        return {}
+    opened = [float(t.get("opened_ts") or t.get("closed_ts") or 0.0) for t in rows]
+    closed = [float(t.get("closed_ts") or 0.0) for t in rows]
+    stored = await engine.ledger.filled_orders_between(min(opened) - 3_600, max(closed) + 120)
+    mine = depth.orders_for_trades(rows, stored, _entry_books)
+    return {str(t.get("id")): depth.depth_check_for_trade(t, mine.get(str(t.get("id")), [])) for t in rows}
 
 
 def _rule_fields(strategy: str) -> dict[str, str]:
@@ -364,11 +413,44 @@ def build_app(engine: Engine) -> FastAPI:
     @api.get("/trades")
     async def recent_trades(limit: int = Query(100, le=500), books: str = Query("all", pattern=BOOK_SETS)) -> list[dict[str, Any]]:
         # the book's name, its side of the trigger and its stop rule come from the registry as the rows are
-        # served: rows already stored never carried them
+        # served: rows already stored never carried them. ``depthCheck``: each fill against the book recorded
+        # beside it (operator, 2026-10-09) — read from the stored orders, never stored itself
+        rows = await engine.ledger.recent(trades, limit, order_col="closed_ts", where=_books_where(books))
+        checks = await _depth_checks(engine, rows)
         return [
-            {**t, **describe_book(str(t.get("strategy") or "")), **_rule_fields(str(t.get("strategy") or "")), **_excursions(t)}
-            for t in await engine.ledger.recent(trades, limit, order_col="closed_ts", where=_books_where(books))
+            {**t, **describe_book(str(t.get("strategy") or "")), **_rule_fields(str(t.get("strategy") or "")), **_excursions(t),
+             "depthCheck": checks.get(str(t.get("id")))}
+            for t in rows
         ]
+
+    @api.get("/depth-check")
+    async def depth_check_view(
+        since: str = Query("today", pattern="^(today|start)$"), books: str = Query("trading", pattern=BOOK_SETS)
+    ) -> dict[str, Any]:
+        """Paper fills against the recorded book, per book (operator, 2026-10-09: "go ahead build it n tell me
+        where to view it"): fills checked, by verdict, the rupees the paper fills were kinder than the book, and
+        the ten worst trades. ``today``: the trades closed this session; ``start``: every trade since the first
+        order carried a depth book. Read-only: nothing here reaches an order."""
+        now = time.time()
+        if since == "today":
+            d = ist_today()
+            start: float | None = datetime(d.year, d.month, d.day, tzinfo=IST).timestamp()
+        else:
+            start = await engine.ledger.first_depth_order()
+        if start is None:
+            return {"since": None, "scope": since, "set": books, "books": [], "total": None}
+        keys = _book_keys(books)
+        rows = [t for t in await engine.ledger.rows_between("trades", start, now + 86_400) if keys is None or t.get("strategy") in keys]
+        checks = await _depth_checks(engine, rows)
+        by_book: dict[str, list[dict[str, Any]]] = {}
+        for t in rows:
+            by_book.setdefault(str(t.get("strategy") or ""), []).append(t)
+        order = {k.value: i for i, k in enumerate(ALL_KEYS)}
+        out = [
+            {"book": b, "label": describe_book(b)["strategy_label"], "shadow": _is_shadow(b), **depth.book_summary(ts, checks)}
+            for b, ts in sorted(by_book.items(), key=lambda kv: (_is_shadow(kv[0]), order.get(kv[0], len(order)), kv[0]))
+        ]
+        return {"since": start, "scope": since, "set": books, "books": out, "total": depth.book_summary(rows, checks) if rows else None}
 
     @api.get("/events")
     async def recent_events(limit: int = Query(100, le=500)) -> list[dict[str, Any]]:
