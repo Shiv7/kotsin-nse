@@ -397,6 +397,43 @@ class Ledger:
             out.append(d)
         return out
 
+    # -- what the depth check reads (exec/depth_check.py; operator, 2026-10-09: "go ahead build it n tell me where to
+    # view it"). Read-only, and the JSON comes back as text: the API parses it off the event loop it shares with the
+    # engine (review, 9 Oct 2026: parsing every order on the loop stalled it for up to 78 ms).
+
+    async def filled_order_json(self, start: float, end: float) -> list[str]:
+        """The JSON of every FILLED order placed in ``[start, end)``, oldest first, unparsed. The cancelled target
+        sells, more than half the table, stay in the database."""
+        stmt = (sa.select(orders.c.json).where(orders.c.ts >= start, orders.c.ts < end, orders.c.status == "FILLED")
+                .order_by(orders.c.ts))
+        async with self.engine.begin() as conn:
+            return [r[0] for r in (await conn.execute(stmt)).all()]
+
+    async def position_json(self, ids: Collection[str]) -> list[str]:
+        """The stored JSON of the positions named, unparsed (a contract's lot size lives there)."""
+        keep = sorted({str(i) for i in ids if i})
+        out: list[str] = []
+        async with self.engine.begin() as conn:
+            for k in range(0, len(keep), 500):  # under SQLite's bound-parameter limit
+                stmt = sa.select(positions.c.json).where(positions.c.id.in_(keep[k : k + 500]))
+                out += [r[0] for r in (await conn.execute(stmt)).all()]
+        return out
+
+    async def trades_mark(self, start: float) -> tuple[int, float | None]:
+        """How many trades have closed since ``start`` and when the newest closed: a cached summary of them is
+        good for as long as this does not move."""
+        stmt = sa.select(sa.func.count(), sa.func.max(trades.c.closed_ts)).where(trades.c.closed_ts >= start)
+        async with self.engine.begin() as conn:
+            n, last = (await conn.execute(stmt)).one()
+        return int(n or 0), (float(last) if last is not None else None)
+
+    async def first_depth_order(self) -> float | None:
+        """When the first order carrying a depth book (``exec.depthAt…``) was stored, or None before any was."""
+        stmt = sa.select(sa.func.min(orders.c.ts)).where(orders.c.json.like('%"depthAt%'))
+        async with self.engine.begin() as conn:
+            v = (await conn.execute(stmt)).scalar()
+        return float(v) if v is not None else None
+
     async def gate_histogram(self, strategy: str | None = None) -> list[dict[str, Any]]:
         """Which gate is binding, as a number. The question ``NSE_BB_30`` could never answer."""
         stmt = sa.select(

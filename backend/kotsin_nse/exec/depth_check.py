@@ -10,13 +10,20 @@ walked (``depthAtCross``), and most orders keep the book from when they were pla
 
 This module reads those stored books. For each fill it reports how much the book showed at or better than the
 paper price, the price the whole quantity would really have averaged, and how many rupees kinder the paper fill
-was than that. The API calls it when a page asks (``/api/trades``' ``depthCheck``, ``/api/depth-check``), and so
-does deploy/compare_ab.py. Nothing in the order path imports it (tests/test_depth_check.py checks this), so it
-can never move an order, a fill, a stop, a wallet or a decision. Nothing here raises on a malformed or empty
+was than that. The API calls it when a page asks (``/api/trades?depth=1``'s ``depthCheck``, ``/api/depth-check``),
+and so does phase 35's deploy/compare_ab.py, for both engines. Nothing in the order path imports it (tests/test_depth_check.py checks this), so
+it can never move an order, a fill, a stop, a wallet or a decision. Nothing here raises on a malformed or empty
 book: such a fill is "no book".
 
-It uses only the standard library and no run-time syntax newer than Python 3.9, so compare_ab.py can load it
-under the system interpreter.
+A resting limit also fills when a trade prints THROUGH its price while the touch never reaches it (exec/resting.py
+``fills``). Our order would then have stood first at its price, so the other side of the book is not what it would
+have cost: the honest alternative is no fill, or part of one. Such a fill gets its own verdict, ``print``, and
+stays out of the rupees (review, 9 Oct 2026: on 8 Oct these were half the "kinder" total on both engines). What
+taking the book instead would have cost is kept beside it as ``crossRs``, to read, never summed.
+
+One module, the same on both engines (review, 9 Oct 2026: the two copies had drifted, and "thin" meant under one
+lot on A but under half the lots on B). It uses only the standard library and no run-time syntax newer than
+Python 3.9, so compare_ab.py can load it under the system interpreter.
 """
 
 from __future__ import annotations
@@ -37,8 +44,11 @@ PLACE_GOOD_FOR_S = 2.0
 #: How many trades the summary's "worst" lists keep.
 WORST_N = 10
 
-VERDICTS = ("full", "partial", "thin", "no book")
-_RANK = {"full": 0, "partial": 1, "thin": 2, "no book": -1}
+#: Every verdict. full / partial / thin are judged on the book and priced; ``print`` filled on a trade through
+#: the price and is not priced; ``no book`` had nothing recorded to judge on.
+VERDICTS = ("full", "partial", "thin", "print", "no book")
+#: The verdicts judged on the book, best first: a leg or a trade carries the worst of its fills.
+_RANK = {"full": 0, "partial": 1, "thin": 2}
 _TAG_LOTS = re.compile(r"-L(\d+)$")
 
 
@@ -110,26 +120,31 @@ def depth_check(
     source: str | None,
     *,
     multiplier: Any = 1,
+    reach: Any = None,
 ) -> dict[str, Any]:
     """One fill against the book recorded with it.
 
     ``side`` is ``"BUY"`` or ``"SELL"``. ``qty`` is the units filled and ``fill_price`` the paper price.
     ``limit`` is the order's limit. None means a market order (or a crossed exit), which the matcher walked
     through the book. ``depth`` is the stored book ``{bids: [[px, qty]..], asks: [[px, qty]..], ageMs}``.
-    ``source`` says which book it is (``"fill"``, ``"cross"`` or ``"place"``).
+    ``source`` says which book it is (``"fill"``, ``"cross"`` or ``"place"``). ``reach`` is the touch on the side
+    that trades as it was recorded with the fill (``bookAtFill``: the ask for a buy, the bid for a sell).
 
     * **visible**: what the book showed at or better than the paper price, as units and whole lots. A buy
       counts asks at or below it, a sell bids at or above it. A walked order is judged at the worst level its
       walk reached, because that is the last price it paid.
     * **realistic price**: a limit fill gets the visible part at the paper price. The rest walks on through
       the levels beyond it, up the asks for a buy and down the bids for a sell. A walked order gets each level
-      at its own price. Whatever the five levels cannot hold is priced at the last level and flagged
-      ``beyondBook``. For a limit fill that price is never better than the paper price, because a limit fills
-      at its own price or not at all.
+      at its own price, rounded to the paisa as the matcher rounds its walk (exec/paper.py). Whatever the five
+      levels cannot hold is priced at the last level and flagged ``beyondBook``. For a limit fill that price is
+      never better than the paper price, because a limit fills at its own price or not at all.
     * **optimismRs**: how many rupees kinder the paper fill was than that price, over the whole quantity.
       Positive means the paper was kinder.
     * **verdict**: ``full`` when the book showed every lot, ``partial`` when it showed at least
-      ``THIN_BELOW`` of them, ``thin`` below that, and ``no book`` when there was nothing to judge on.
+      ``THIN_BELOW`` of them, ``thin`` below that, and ``no book`` when there was nothing to judge on. A limit
+      whose touch at the fill never reached its price (``reach``, else the book's own best level when the book is
+      the one at the fill) was filled by a trade printing through it: ``print``, with no ``optimismRs``. What
+      taking the book would have cost instead is ``crossRs``, to read only.
     """
     buy = str(getattr(side, "value", side) or "").upper() == "BUY"
     q, px = _pos(qty), _pos(fill_price)
@@ -143,6 +158,7 @@ def depth_check(
         "paperPrice": px, "limit": _num(limit), "market": market, "source": None, "ageMs": None, "stale": False,
         "visibleQty": None, "visibleLots": None, "covered": None, "shortfallLots": None, "touch": None, "touchQty": None,
         "realisticPrice": None, "beyondBook": False, "beyondQty": 0, "optimismRs": None, "verdict": "no book",
+        "onPrint": False, "reach": None, "crossRs": None,
     }
     if q is None or px is None:
         return {**out, "words": "no fill price or quantity to judge"}
@@ -183,6 +199,8 @@ def depth_check(
             last = max(last, px) if buy else min(last, px)
         cost, beyond = cost + rem * last, rem
     realistic = cost / q
+    if market:
+        realistic = round(realistic, 2)  # the matcher prices its walk to the paisa (exec/paper.py)
     optimism = ((realistic - px) if buy else (px - realistic)) * q * mult
     covered = min(visible, q) / q
     verdict = "full" if covered >= 1 - 1e-9 else "partial" if covered >= THIN_BELOW else "thin"
@@ -194,6 +212,13 @@ def depth_check(
         touch=levels[0][0], touchQty=int(levels[0][1]), realisticPrice=round(realistic, 4), beyondBook=beyond > 0,
         beyondQty=round(beyond), optimismRs=round(optimism, 2), verdict=verdict,
     )
+    if not market:
+        # a limit fills on the touch reaching it OR on a trade printing through it (exec/resting.py ``fills``)
+        at = _pos(reach)
+        if at is None and source == "fill":
+            at = levels[0][0]  # no quote kept with the fill: the book at the fill says where the touch was
+        if at is not None and ((at > px + tol) if buy else (at < px - tol)):
+            out.update(verdict="print", onPrint=True, reach=at, crossRs=out["optimismRs"], optimismRs=None)
     out["words"] = _aged(_words(out, buy=buy, lot=lot), out)
     return out
 
@@ -203,6 +228,11 @@ def _words(c: dict[str, Any], *, buy: bool, lot: int) -> str:
     have gone, and the rupees."""
     want = c["lots"] if lot > 1 else c["qty"]
     vis = c["visibleLots"] if lot > 1 else c["visibleQty"]
+    if c["verdict"] == "print":
+        cross = c["crossRs"] or 0.0
+        return (f"filled on a trade printing through {c['paperPrice']:.2f} while the {'ask' if buy else 'bid'} was "
+                f"{c['reach']:.2f}: our order would have stood first at its price, so the book does not price it "
+                f"(taking the {'asks' if buy else 'bids'} instead: {_inr(abs(cross))} {'worse' if cross >= 0 else 'better'})")
     if c["market"]:
         head = f"walked the {'asks' if buy else 'bids'}: the book held {_count(vis, lot)} up to the last level taken"
     else:
@@ -252,22 +282,16 @@ def depth_check_for_order(order: Any, *, lot_size: Any = None, multiplier: Any =
     market = crossed or ex.get("limit") is None
     depth, source, why = _book_of(ex, market=market)
     price = _pos(order.get("avg_price")) or _pos(ex.get("fillPrice"))
+    buy = str(order.get("side") or "").upper() == "BUY"
+    at_fill = ex.get("bookAtFill")
+    reach = at_fill.get("ask" if buy else "bid") if isinstance(at_fill, Mapping) else None
     c = depth_check(order.get("side"), filled or order.get("qty"), price, None if market else ex.get("limit"), depth,
-                    lot_size, source, multiplier=multiplier)
+                    lot_size, source, multiplier=multiplier, reach=reach)
     if why and c["verdict"] == "no book":
         c["words"] = why
-    # a resting limit fills on the touch reaching it OR on a trade printing through it (exec/resting.py ``fills``):
-    # when the touch recorded at the fill never reached the price, a print filled it, not the book
-    at_fill = ex.get("bookAtFill")
-    touch: Mapping[str, Any] = at_fill if isinstance(at_fill, Mapping) else {}
-    reach = _pos(touch.get("ask" if c["side"] == "BUY" else "bid"))
-    on_print = bool(source == "fill" and not market and price and reach is not None
-                    and (reach > price + 1e-6 * price if c["side"] == "BUY" else reach < price - 1e-6 * price))
-    if on_print and c["verdict"] != "no book":
-        c["words"] = f"{c['words']}; filled on a trade printing through {price:.2f}, the {'ask' if c['side'] == 'BUY' else 'bid'} then {reach:.2f}"
     return {
         **c, "orderId": order.get("id"), "clientOrderId": order.get("client_order_id"), "purpose": str(order.get("purpose") or ""),
-        "kind": str(ex.get("kind") or ("market" if market else "")), "crossed": crossed, "onPrint": on_print,
+        "kind": str(ex.get("kind") or ("market" if market else "")), "crossed": crossed,
         "filledTs": _num(ex.get("filledTs")) or _num(order.get("ts")), "reason": order.get("reason") or "",
     }
 
@@ -286,14 +310,19 @@ def lot_size_from_tags(trade: Mapping[str, Any], orders: Iterable[Mapping[str, A
 
 
 def _worst(verdicts: Iterable[str]) -> str:
-    vs = [v for v in verdicts if v != "no book"]
-    return max(vs, key=lambda v: _RANK[v]) if vs else "no book"
+    """The worst book-judged verdict; failing one, ``print`` when a fill was on a print, else ``no book``."""
+    vs = list(verdicts)
+    judged = [v for v in vs if v in _RANK]
+    if judged:
+        return max(judged, key=lambda v: _RANK[v])
+    return "print" if "print" in vs else "no book"
 
 
 def _side(checks: list[dict[str, Any]]) -> dict[str, Any]:
-    judged = [c for c in checks if c["verdict"] != "no book"]
+    judged = [c for c in checks if c["verdict"] in _RANK]
     return {
-        "fills": len(checks), "checked": len(judged), "verdict": _worst(c["verdict"] for c in checks),
+        "fills": len(checks), "checked": len(judged), "prints": sum(1 for c in checks if c["verdict"] == "print"),
+        "verdict": _worst(c["verdict"] for c in checks),
         "optimismRs": round(sum(c["optimismRs"] for c in judged), 2) if judged else None, "orders": checks,
     }
 
@@ -307,7 +336,8 @@ def depth_check_for_trade(
 ) -> dict[str, Any]:
     """A closed trade's fills against their books: the entry, the exits summed (stop, target rungs and
     crosses alike), and the total rupees the paper fills were kinder. ``orders`` are the trade's own filled
-    orders (``orders_for_trade``). ``entry_from`` names the book whose entry fill a mirror copied."""
+    orders (``orders_for_trade``). ``entry_from`` names the book whose entry fill a mirror copied. A fill on a
+    print counts in ``prints``, never in the rupees."""
     orders = [o for o in orders if isinstance(o, Mapping)]
     lot = _pos(lot_size) or lot_size_from_tags(trade, orders) or 1
     mult = _pos(trade.get("multiplier")) or 1
@@ -315,11 +345,11 @@ def depth_check_for_trade(
     checks.sort(key=lambda c: c["filledTs"] or 0.0)
     entry = _side([c for c in checks if c["purpose"] == "ENTRY"])
     exits = _side([c for c in checks if c["purpose"] == "EXIT"])
-    judged = [c for c in checks if c["verdict"] != "no book"]
+    judged = [c for c in checks if c["verdict"] in _RANK]
     return {
         "verdict": _worst(c["verdict"] for c in checks), "optimismRs": round(sum(c["optimismRs"] for c in judged), 2) if judged else None,
-        "fills": len(checks), "checked": len(judged), "stale": sum(1 for c in judged if c["stale"]), "lotSize": int(lot),
-        "entryFrom": entry_from, "entry": entry, "exit": exits,
+        "fills": len(checks), "checked": len(judged), "prints": sum(1 for c in checks if c["verdict"] == "print"),
+        "stale": sum(1 for c in judged if c["stale"]), "lotSize": int(lot), "entryFrom": entry_from, "entry": entry, "exit": exits,
     }
 
 
@@ -390,14 +420,14 @@ def check_trades(
 
 
 def _blank() -> dict[str, Any]:
-    return {"trades": 0, "fills": 0, "checked": 0, "byVerdict": {v: 0 for v in VERDICTS}, "optimismRs": 0.0, "stale": 0}
+    return {"trades": 0, "fills": 0, "checked": 0, "byVerdict": {v: 0 for v in VERDICTS}, "optimismRs": 0.0, "stale": 0, "copied": 0}
 
 
 def _worst_row(t: Mapping[str, Any], dc: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "tradeId": t.get("id"), "book": t.get("strategy"), "underlying": t.get("underlying"), "symbol": t.get("symbol"),
         "closedTs": _num(t.get("closed_ts")), "net": _num(t.get("net")), "optimismRs": dc["optimismRs"], "verdict": dc["verdict"],
-        "entryRs": dc["entry"]["optimismRs"], "exitRs": dc["exit"]["optimismRs"],
+        "entryRs": dc["entry"]["optimismRs"], "exitRs": dc["exit"]["optimismRs"], "prints": dc.get("prints", 0),
     }
 
 
@@ -408,28 +438,42 @@ def summarize(
     order: Sequence[str] = (),
     worst_n: int = WORST_N,
 ) -> dict[str, Any]:
-    """Per book: the trades, the fills, how many had a book to judge on and each verdict, the total rupees the
+    """Per book: the trades, the fills, how many were judged on a book and each verdict, the total rupees the
     paper fills were kinder, how many books were stale, and the ``worst_n`` trades the paper flattered most.
-    The same again over every trade given (``total``, ``worst``). The caller picks the books summed: a
-    stop-rule mirror copies its book's entry fill, so summing mirrors in counts it again. ``order`` lists the books
-    in the order to show them; any other book follows."""
+    The same again over every trade given (``total``, ``worst``).
+
+    A fill is counted once however many trades carry it. A stop-rule mirror and the wide-stop shadow copy their
+    book's entry fill: it shows in each of their rows (``copied`` says how many), but the total counts it once
+    (review, 9 Oct 2026: with the mirrors shown, one RT-Y entry was summed up to six times). Fills on a print
+    count under ``byVerdict.print`` and never in the rupees. ``order`` lists the books in the order to show them;
+    any other book follows."""
     books: dict[str, dict[str, Any]] = {}
+    seen: dict[str, set[Any]] = {}
+    seen_total: set[Any] = set()
     total = _blank()
     worst_all: list[dict[str, Any]] = []
     for t in trades:
         dc = checks.get(str(t.get("id")))
         if dc is None:
             continue
-        b = books.setdefault(str(t.get("strategy") or ""), {**_blank(), "worst": []})
-        for agg in (b, total):
+        name = str(t.get("strategy") or "")
+        b = books.setdefault(name, {**_blank(), "worst": []})
+        fills = [*dc["entry"]["orders"], *dc["exit"]["orders"]]
+        for agg, counted in ((b, seen.setdefault(name, set())), (total, seen_total)):
             agg["trades"] += 1
-            agg["fills"] += dc["fills"]
-            agg["checked"] += dc["checked"]
-            agg["stale"] += dc["stale"]
-            agg["optimismRs"] += dc["optimismRs"] or 0.0
-            for side in (dc["entry"], dc["exit"]):
-                for c in side["orders"]:
-                    agg["byVerdict"][c["verdict"]] += 1
+            for i, c in enumerate(fills):
+                oid = c.get("orderId") or f"{t.get('id')}#{i}"
+                if oid in counted:
+                    continue
+                counted.add(oid)
+                agg["fills"] += 1
+                agg["byVerdict"][c["verdict"] if c["verdict"] in agg["byVerdict"] else "no book"] += 1
+                if c["verdict"] in _RANK:
+                    agg["checked"] += 1
+                    agg["optimismRs"] += c["optimismRs"] or 0.0
+                    agg["stale"] += 1 if c["stale"] else 0
+        if dc.get("entryFrom"):
+            b["copied"] += 1
         if dc["optimismRs"] is not None and dc["optimismRs"] > 0:
             row = _worst_row(t, dc)
             b["worst"].append(row)

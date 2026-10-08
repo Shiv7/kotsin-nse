@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import re
 import time
-from dataclasses import asdict
+from collections import OrderedDict
+from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -133,24 +135,99 @@ ENTRY_SOURCES: dict[str, str] = {
 }
 
 
-async def _depth_checks(engine: Engine, rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Trade id → its fills checked against the books stored with them (exec/depth_check.py; operator, 2026-10-09:
-    "go ahead build it n tell me where to view it"). Read at request time from the stored orders: no schema
-    change, nothing written, nothing the engine reads. An entry is placed before its position opens (at most a
-    minute's wait, the momentum look and the chase), so the orders are read from an hour before the first opening."""
-    if not rows:
-        return {}
-    opened = [float(t.get("opened_ts") or t.get("closed_ts") or 0.0) for t in rows]
-    closed = [float(t.get("closed_ts") or 0.0) for t in rows]
-    lo, hi = min(opened), max(max(closed), max(opened))
-    order_rows, pos_rows = await asyncio.gather(
-        engine.ledger.rows_between("orders", lo - 3_600, hi + 60), engine.ledger.rows_between("positions", lo - 1, max(opened) + 1)
-    )
-    checks = depth_check.check_trades(rows, order_rows, positions=pos_rows, sources=ENTRY_SOURCES)
-    for dc in checks.values():
-        if dc.get("entryFrom"):
-            dc["entryFromLabel"] = describe_book(dc["entryFrom"])["strategy_label"]
-    return checks
+#: closed trades whose depth check is kept worked out: a check is a few KB, and both engines close about 100 a day
+DEPTH_CACHE_TRADES = 5_000
+
+
+def _depth_work(rows: list[dict[str, Any]], order_json: list[str], position_json: list[str]) -> dict[str, dict[str, Any]]:
+    """The checks themselves, run in a worker thread: parse the stored rows and judge each trade's fills."""
+    return depth_check.check_trades(rows, [json.loads(j) for j in order_json], positions=[json.loads(j) for j in position_json],
+                                    sources=ENTRY_SOURCES)
+
+
+@dataclass(slots=True)
+class DepthReads:
+    """The depth check as the pages read it (exec/depth_check.py; operator, 2026-10-09: "go ahead build it n tell me
+    where to view it"). Worked out from the stored orders when a page asks: no schema change, nothing written,
+    nothing the engine reads.
+
+    The API shares the engine's event loop (main.py), so the work is kept small and off it (review, 9 Oct 2026). A
+    closed trade's orders are all stored before its row (engine ``_book_exit``), so its check never changes and is
+    worked out once. Only FILLED orders are read, and they are parsed and judged in a worker thread. A summary is
+    kept until another trade closes."""
+
+    ledger: Any
+    #: trade id → its check, the oldest dropped past ``DEPTH_CACHE_TRADES``
+    checks: OrderedDict[str, dict[str, Any]] = field(default_factory=OrderedDict)
+    #: (scope, book set) → (from when, the trades table's count and newest close then, the summary)
+    summaries: dict[tuple[str, str], tuple[float, tuple[int, float | None], dict[str, Any]]] = field(default_factory=dict)
+    #: when the first order carrying a depth book was stored, once one has been
+    first: float | None = None
+
+    async def for_trades(self, rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        """Trade id → its check. An entry is placed before its position opens (at most a minute's wait, the momentum
+        look and the chase), so a new trade's orders are read from an hour before it opened."""
+        todo = [t for t in rows if str(t.get("id")) not in self.checks]
+        made: dict[str, dict[str, Any]] = {}
+        if todo:
+            opened = [float(t.get("opened_ts") or t.get("closed_ts") or 0.0) for t in todo]
+            closed = [float(t.get("closed_ts") or 0.0) for t in todo]
+            order_json = await self.ledger.filled_order_json(min(opened) - 3_600, max(*closed, *opened) + 120)
+            position_json = await self.ledger.position_json([str(t.get("position_id") or "") for t in todo])
+            made = await asyncio.to_thread(_depth_work, todo, order_json, position_json)
+            for tid, dc in made.items():
+                if dc.get("entryFrom"):
+                    dc["entryFromLabel"] = describe_book(dc["entryFrom"])["strategy_label"]
+                self.checks[tid] = dc
+            while len(self.checks) > DEPTH_CACHE_TRADES:
+                self.checks.popitem(last=False)
+        out: dict[str, dict[str, Any]] = {}
+        for t in rows:
+            tid = str(t.get("id"))
+            found = made.get(tid) or self.checks.get(tid)
+            if found is not None:
+                out[tid] = found
+        return out
+
+    async def summary(self, since: str, books: str) -> dict[str, Any]:
+        """Per book: the closed trades' fills against their books (``depth_check.summarize``). ``today``: the trades
+        closed this session; ``start``: every trade since the first order carried a depth book."""
+        if since == "today":
+            d = ist_today()
+            start: float | None = datetime(d.year, d.month, d.day, tzinfo=IST).timestamp()
+        else:
+            if self.first is None:
+                self.first = await self.ledger.first_depth_order()
+            start = self.first
+        if start is None:
+            return {"since": None, "scope": since, "bookSet": books, **depth_check.summarize([], {})}
+        mark = await self.ledger.trades_mark(start)
+        hit = self.summaries.get((since, books))
+        if hit is not None and hit[0] == start and hit[1] == mark:
+            return hit[2]
+        keys = _book_keys(books)
+        keep = None if keys is None else {k.value for k in keys}
+        rows = [t for t in await self.ledger.rows_between("trades", start, time.time() + 86_400) if keep is None or t.get("strategy") in keep]
+        checks = await self.for_trades(rows)
+        s = await asyncio.to_thread(depth_check.summarize, rows, checks, order=[k.value for k in ALL_KEYS])
+
+        def label(book: str) -> str:
+            try:
+                return StrategyKey(book).display_name
+            except ValueError:
+                return book
+
+        shadows = {k.value for k in SHADOW_BOOKS}
+        for b in s["books"]:
+            b["label"] = label(b["book"])
+            b["shadow"] = b["book"] in shadows
+            for w in b["worst"]:
+                w["label"] = b["label"]
+        for w in s["worst"]:
+            w["label"] = label(str(w["book"]))
+        out = {"since": start, "scope": since, "bookSet": books, **s}
+        self.summaries[(since, books)] = (start, mark, out)
+        return out
 
 
 def _rule_fields(strategy: str) -> dict[str, str]:
@@ -418,67 +495,48 @@ def build_app(engine: Engine) -> FastAPI:
         where = rejections.c.strategy == strategy if strategy else None
         return await engine.ledger.recent(rejections, limit, where=where)
 
+    #: the depth check's reads, kept for the app's life: a closed trade's check is worked out once
+    depth_reads = DepthReads(engine.ledger)
+
     @api.get("/trades")
-    async def recent_trades(limit: int = Query(100, le=500), books: str = Query("all", pattern=BOOK_SETS)) -> list[dict[str, Any]]:
+    async def recent_trades(
+        limit: int = Query(100, le=500), books: str = Query("all", pattern=BOOK_SETS), depth: bool = Query(False)
+    ) -> list[dict[str, Any]]:
         # the book's name, its side of the trigger and its stop rule come from the registry as the rows are
         # served: rows already stored never carried them
         rows = await engine.ledger.recent(trades, limit, order_col="closed_ts", where=_books_where(books))
-        # each trade's fills against the books recorded with them: read here, never stored, never acted on
-        try:
-            checks = await _depth_checks(engine, rows)
-        except Exception as exc:  # noqa: BLE001 - a record-only column must never cost the ledger its page
-            log.warning("depth_check.failed", error=str(exc)[:160])
-            checks = {}
+        # ``depth=1``, asked by the Trades page alone: each trade's fills against the books recorded with them, read
+        # here, never stored, never acted on. Any other caller (the Signals page polls 500 rows) neither pays for it
+        # nor gets it (review, 9 Oct 2026)
+        checks: dict[str, dict[str, Any]] | None = None
+        if depth:
+            try:
+                checks = await depth_reads.for_trades(rows)
+            except Exception as exc:  # noqa: BLE001 - a record-only column must never cost the ledger its page
+                log.warning("depth_check.failed", error=str(exc)[:160])
+                checks = {}
         return [
             {**t, **describe_book(str(t.get("strategy") or "")), **_rule_fields(str(t.get("strategy") or "")), **_excursions(t),
-             "depthCheck": checks.get(str(t.get("id")))}
+             **({"depthCheck": checks.get(str(t.get("id")))} if checks is not None else {})}
             for t in rows
         ]
-
-    #: /api/depth-check answers, kept a few seconds: the Overview polls it, and a session's trades change slowly
-    depth_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
 
     @api.get("/depth-check")
     async def depth_check_view(
         since: str = Query("today", pattern="^(today|start)$"), books: str = Query("trading", pattern=BOOK_SETS)
     ) -> dict[str, Any]:
         """The paper fills against the books recorded with them, per book (operator, 2026-10-09: "go ahead build it
-        n tell me where to view it"). For each book: the closed trades, their fills, how many had a book to judge
-        on, each verdict (full / partial / thin / no book), the total rupees the paper fills were kinder than that
-        book, and the ten trades it flattered most. ``today`` covers trades closed this session; ``start`` covers
-        every closed trade (those before 3 Oct 17:51 have no book and count as "no book"). Record-only: nothing
-        here reaches an order, a stop, a wallet or a decision."""
-        now = time.time()
-        hit = depth_cache.get((since, books))
-        if hit is not None and now - hit[0] < 10:
-            return hit[1]
-        if since == "today":
-            d = ist_today()
-            start = datetime(d.year, d.month, d.day, tzinfo=IST).timestamp()
-        else:
-            start = 0.0
-        keys = _book_keys(books)
-        keep = None if keys is None else {k.value for k in keys}
-        rows = [t for t in await engine.ledger.rows_between("trades", start, now + 86_400) if keep is None or t.get("strategy") in keep]
-        s = depth_check.summarize(rows, await _depth_checks(engine, rows), order=[k.value for k in ALL_KEYS])
-
-        def label(book: str) -> str:
-            try:
-                return StrategyKey(book).display_name
-            except ValueError:
-                return book
-
-        for b in s["books"]:
-            b["label"] = label(b["book"])
-            b["shadow"] = b["book"] in {k.value for k in SHADOW_BOOKS}
-            for w in b["worst"]:
-                w["label"] = b["label"]
-        for w in s["worst"]:
-            w["label"] = label(str(w["book"]))
-        first = min((float(t.get("closed_ts") or now) for t in rows), default=None)
-        out = {"since": start if since == "today" else first, "scope": since, "bookSet": books, **s}
-        depth_cache[(since, books)] = (now, out)
-        return out
+        n tell me where to view it"). For each book: the closed trades, their fills, how many were judged on a book,
+        each verdict (full / partial / thin / print / no book), the total rupees the paper fills were kinder than that
+        book, and the ten trades it flattered most. A fill on a print is counted, never priced; a fill several books
+        share (a mirror's copied entry) counts once in the total. ``today`` covers trades closed this session;
+        ``start`` every trade since the first order carried a depth book. Record-only: nothing here reaches an
+        order, a stop, a wallet or a decision."""
+        try:
+            return await depth_reads.summary(since, books)
+        except Exception as exc:  # said plainly on the card, never a stack trace
+            log.warning("depth_check.summary_failed", error=str(exc)[:160])
+            raise HTTPException(503, f"the depth check could not be read: {str(exc)[:160]}") from exc
 
     @api.get("/events")
     async def recent_events(limit: int = Query(100, le=500)) -> list[dict[str, Any]]:
