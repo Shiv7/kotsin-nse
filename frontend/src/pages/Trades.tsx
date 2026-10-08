@@ -1,5 +1,5 @@
 import { Fragment, useState } from 'react'
-import { DepthCell, DepthDetail } from '../components/DepthCheck'
+import { DEPTH_TIP, DepthCell, DepthDetail } from '../components/DepthCheck'
 import { RuleBadge, StopRuleGridTable } from '../components/StopRuleGrid'
 import { Badge, Card, ErrorLine, GradeBadge, Stat, StrategyBadge, Table } from '../components/Ui'
 import { cls, contractName, fmt, ist, pnlColor } from '../lib/api'
@@ -11,7 +11,7 @@ import type { Pnl, StopRuleGrid, TradeRow } from '../types'
  * round-trip cost was flat brokerage; a single "P&L" column hides exactly the thing that decided
  * whether the strategy was viable.
  */
-const LEDGER_HEAD = ['Closed (IST)', 'Strategy', 'Stop rule', 'Trend', 'Underlying', 'Instrument', 'Qty', 'Entry', 'Exit', 'Gross', 'Charges', 'Net', 'R', 'MFE', 'MAE', 'Exit reason', 'Depth', 'Grade', 'Held']
+const LEDGER_HEAD = ['Closed (IST)', 'Strategy', 'Stop rule', 'Trend', 'Underlying', 'Instrument', 'Qty', 'Entry', 'Exit', 'Gross', 'Charges', 'Net', 'Depth', 'R', 'MFE', 'MAE', 'Exit reason', 'Grade', 'Held']
 
 /** What the R columns mean, on hover. All three are in R: 1R is the premium risked per unit at entry,
  *  entry − the first option stop. R is the result after charges; MFE and MAE are price moves alone. */
@@ -21,7 +21,7 @@ const LEDGER_TIPS: Record<string, string> = {
   R: 'Net P&L after charges ÷ the money risked at entry (entry − first option stop, × quantity).',
   MFE: 'Maximum favourable excursion: the best the position could have been SOLD for while held — the bid, the last trade when there was none, and every fill — in R: (price − entry) ÷ (entry − first stop), with that price and the rupees open then. Before charges. Rows marked "last" (closed before 4 Oct) used the last trade alone.',
   MAE: 'Maximum adverse excursion: the worst the position could have been SOLD for while held — the bid, the last trade when there was none, and every fill — in R; −1.00R is the first stop. The exit is never below it. Rows marked "last" (closed before 4 Oct) used the last trade alone, which a stop\'s fill can sit below.',
-  Depth: 'Each fill against the five-level book recorded beside it: the rupees the paper fills were kinder than that book (paper fills a resting order whole at its price; lots not on offer there are priced further down the book), and the worst verdict — full, partial, thin (not one whole lot at the price), no book. Click for each fill. A record only: it changes no order, stop or wallet.',
+  Depth: DEPTH_TIP,
   'Exit reason': 'For a stop: the LEVEL that fired → the read that breached it (TRIG) → the BID at that instant → the FILL. The gap level→trig is the 1 s read (and a book\'s grace); trig→bid is the spread; bid→fill is the depth walked for the lots.',
 }
 
@@ -67,10 +67,19 @@ const BOOK_SETS: [string, string][] = [
 
 export function Trades() {
   const [books, setBooks] = useState('trading')
-  const { data: trades, error } = usePoll<TradeRow[]>(`/api/trades?limit=200&books=${books}`, 8000)
+  // depth=1: each trade's fills against the recorded book, for the Depth column (only this page asks for it)
+  const { data: trades, error } = usePoll<TradeRow[]>(`/api/trades?limit=200&books=${books}&depth=1`, 8000)
   const { data: pnl } = usePoll<Pnl>(`/api/pnl?books=${books}`, 8000)
   const { data: grid } = usePoll<StopRuleGrid>('/api/stop-rules?since=start', 15000)
-  const [depthOpen, setDepthOpen] = useState<string | null>(null)
+  // the rows whose fills are open beneath them (the Depth cell's click)
+  const [open, setOpen] = useState<Set<string>>(new Set())
+  const toggle = (id: string) =>
+    setOpen((s) => {
+      const next = new Set(s)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
 
   return (
     <div className="space-y-4 p-4">
@@ -119,7 +128,7 @@ export function Trades() {
         </Card>
       )}
 
-      <Card title="Trade ledger" right="MFE / MAE: the best / worst the position could have been sold for while held — in R, then that price and the rupees open — hover a column name">
+      <Card title="Trade ledger" right="MFE / MAE: the best / worst the position could have been sold for while held — in R, then that price and the rupees open — Depth: the fills against the recorded book, click for each — hover a column name">
         <Table head={LEDGER_HEAD} tips={LEDGER_TIPS} empty="no closed trades yet">
           {(trades ?? []).map((t) => (
             <Fragment key={t.id}>
@@ -139,6 +148,7 @@ export function Trades() {
                 <td className={`px-2 py-1.5 ${pnlColor(t.gross)}`}>{fmt.signedInr(t.gross)}</td>
                 <td className="px-2 py-1.5 text-amber-400/80">{fmt.inr(t.charges)}</td>
                 <td className={`px-2 py-1.5 font-medium ${pnlColor(t.net)}`}>{fmt.signedInr(t.net)}</td>
+                <DepthCell dc={t.depthCheck} open={open.has(t.id)} onToggle={() => toggle(t.id)} />
                 <td className={`px-2 py-1.5 ${pnlColor(t.r_multiple)}`}>{fmt.r(t.r_multiple)}</td>
                 <Excursion r={t.mfe_r} price={t.mfe_price} inr={t.mfe_inr} tone="text-emerald-500/70" basis={t.mark_basis} />
                 <Excursion r={t.mae_r} price={t.mae_price} inr={t.mae_inr} tone="text-rose-500/70" basis={t.mark_basis} />
@@ -146,13 +156,18 @@ export function Trades() {
                   {t.exit_reason}
                   {t.stop && t.stop.level > 0 && <StopTrail s={t.stop} />}
                 </td>
-                <DepthCell d={t.depthCheck} open={depthOpen === t.id} onToggle={() => setDepthOpen(depthOpen === t.id ? null : t.id)} />
                 <td className="px-2 py-1.5">
                   <GradeBadge grade={t.grade} />
                 </td>
                 <td className="px-2 py-1.5 text-slate-500">{fmt.dur(t.duration_s)}</td>
               </tr>
-              {depthOpen === t.id && t.depthCheck && <DepthDetail d={t.depthCheck} colSpan={LEDGER_HEAD.length} />}
+              {open.has(t.id) && t.depthCheck && (
+                <tr className="border-b border-slate-900">
+                  <td colSpan={LEDGER_HEAD.length} className="p-0">
+                    <DepthDetail dc={t.depthCheck} />
+                  </td>
+                </tr>
+              )}
             </Fragment>
           ))}
         </Table>

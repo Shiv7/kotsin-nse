@@ -1,170 +1,312 @@
-import type { ReactNode } from 'react'
-import { cls, fmt, ist } from '../lib/api'
-import type { DepthCheck, DepthCheckView, DepthOrderCheck, DepthVerdict } from '../types'
-import { Badge } from './Ui'
+import { useState } from 'react'
+import { cls, fmt, ist, istTime } from '../lib/api'
+import { usePoll } from '../lib/usePoll'
+import type { DepthCheck, DepthOrderCheck, DepthSummary, DepthVerdict } from '../types'
+import { Badge, Card, Table } from './Ui'
 
-// The depth check (operator, 2026-10-09: "go ahead build it n tell me where to view it"): every paper fill against the
-// five-level book recorded beside it. The paper matcher fills a resting order WHOLE at its price; when fewer lots were
-// on offer there, the rest would have traded further down the book. A record only — it moves no order, stop or wallet.
+// The depth check (operator, 2026-10-09: "go ahead build it n tell me where to view it"). The paper matcher fills a
+// resting order WHOLE at its limit, with no queue and no share of the depth. Each fill is set against the book
+// recorded with it: how many lots it showed at the price, what the whole order would really have averaged, and how
+// many rupees kinder the paper fill was. A fill made by a trade printing through the price is counted but never
+// priced. One module serves both engines, so A's page and B's mean the same thing. Record-only: nothing here changes
+// an order, a fill, a stop or a wallet.
 
-const TONE: Record<DepthVerdict, 'green' | 'amber' | 'red' | 'slate'> = { full: 'green', partial: 'amber', thin: 'red', 'no book': 'slate' }
-const MEANS: Record<DepthVerdict, string> = {
-  full: 'the book held every lot at the price',
-  partial: 'some lots were on offer at the price, not all',
-  thin: 'not one whole lot was on offer at the price',
-  'no book': 'no depth book was recorded for this fill',
+const VERDICT_TONE: Record<DepthVerdict, 'green' | 'amber' | 'red' | 'blue' | 'slate'> = {
+  full: 'green',
+  partial: 'amber',
+  thin: 'red',
+  print: 'blue',
+  'no book': 'slate',
+}
+const VERDICT_TIP: Record<DepthVerdict, string> = {
+  full: 'the book showed every lot we traded at the price or better',
+  partial: 'the book showed at least half the lots at the price; the rest would have walked to worse levels',
+  thin: 'the book showed under half the lots at the price; most of the order would have walked to worse levels',
+  print:
+    'filled by a trade printing through the price while the bid / ask never reached it: our order would have stood first at its price, so the book does not price it — counted, not in the rupees',
+  'no book': 'no book was recorded with this fill (fills before 3 Oct 17:51, some exits), so it cannot be judged',
 }
 
-export function VerdictChip({ v }: { v: DepthVerdict }) {
+export const DEPTH_TIP =
+  'Each paper fill set against the book recorded with it. full: the book showed every lot at the price · partial: at least half · thin: under half · ' +
+  'print: a trade went through the price while the touch never reached it (counted, never priced) · no book: none recorded. ' +
+  '₹: how much kinder the paper fills were than walking that book (positive: the paper flattered the trade). Record-only. Click a row\'s Depth cell for each fill.'
+
+export function DepthChip({ verdict }: { verdict: DepthVerdict }) {
   return (
-    <span title={MEANS[v]} className="whitespace-nowrap">
-      <Badge tone={TONE[v]}>{v}</Badge>
+    <span title={VERDICT_TIP[verdict]} className="whitespace-nowrap">
+      <Badge tone={VERDICT_TONE[verdict]}>{verdict}</Badge>
     </span>
   )
 }
 
-/** Rupees the paper fill was kinder than the book: amber when it was, quiet at zero. */
+/** Rupees the paper was kinder: amber when it flattered the trade, quiet when it did not. */
 export function Kinder({ rs, className }: { rs: number | null | undefined; className?: string }) {
-  if (rs == null) return <span className="text-slate-600">DM</span>
-  return <span className={cls(rs > 0.5 ? 'text-amber-300' : rs < -0.5 ? 'text-sky-300' : 'text-slate-500', className)}>{fmt.inr(rs)}</span>
+  if (rs == null) return <span className={cls('text-slate-600', className)}>—</span>
+  const tone = rs >= 1 ? 'text-amber-300' : rs <= -1 ? 'text-sky-300' : 'text-slate-400'
+  return (
+    <span className={cls('tabular-nums', tone, className)} title={rs >= 0 ? `the paper fills were ${fmt.inr(rs)} kinder than the book` : `the paper fills were ${fmt.inr(-rs)} harsher than the book`}>
+      {rs < 0 ? '−' : ''}
+      {fmt.inr(Math.abs(rs))}
+    </span>
+  )
 }
 
-/** The Trades page's Depth cell: the trade's total and the worst verdict of its fills; a click opens the fills. */
-export function DepthCell({ d, open, onToggle }: { d: DepthCheck | null | undefined; open: boolean; onToggle: () => void }) {
-  if (!d) return <td className="px-2 py-1.5 text-slate-600">—</td>
+function printsText(n: number) {
+  return `${n} on a print`
+}
+
+/** The trade ledger's Depth cell: the verdict and the rupees; a click opens each fill beneath the row. */
+export function DepthCell({ dc, open, onToggle }: { dc: DepthCheck | null | undefined; open: boolean; onToggle: () => void }) {
+  if (!dc) return <td className="px-2 py-1.5 text-slate-600">—</td>
+  const unjudged = dc.fills - dc.checked - dc.prints
   return (
     <td className="px-2 py-1.5">
-      <button
-        onClick={onToggle}
-        className="flex items-center gap-1.5 whitespace-nowrap text-left hover:opacity-80"
-        title={d.checked ? `the paper fills were ${fmt.inr(d.optimismRs)} kinder than the recorded book — ${d.checked} of ${d.fills} fills had a book; click for each fill` : 'no fill of this trade recorded a depth book'}
-      >
-        {d.checked ? <Kinder rs={d.optimismRs} /> : null}
-        <VerdictChip v={d.verdict} />
-        <span className="text-[10px] text-slate-600">{open ? '▾' : '▸'}</span>
+      <button onClick={onToggle} className={cls('flex items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-slate-800', open && 'bg-slate-800')} aria-expanded={open}>
+        <DepthChip verdict={dc.verdict} />
+        {dc.checked > 0 && <Kinder rs={dc.optimismRs} />}
+        <span className="text-[10px] text-slate-500">{open ? '▴' : '▾'}</span>
       </button>
+      {(dc.prints > 0 && dc.verdict !== 'print') || (unjudged > 0 && dc.verdict !== 'no book') ? (
+        <div className="text-[10px] text-slate-600">
+          {[dc.prints > 0 && dc.verdict !== 'print' ? printsText(dc.prints) : '', unjudged > 0 && dc.verdict !== 'no book' ? `${unjudged} without a book` : '']
+            .filter(Boolean)
+            .join(' · ')}
+        </div>
+      ) : null}
     </td>
   )
 }
 
-function lots(n: number | null | undefined, lot: number) {
+function lotsText(n: number | null | undefined, lotSize: number) {
   if (n == null) return 'DM'
-  const unit = lot > 1 ? (n === 1 ? 'lot' : 'lots') : 'units'
-  return `${fmt.int(n)} ${unit}`
+  const unit = lotSize > 1 ? 'lot' : 'unit'
+  return `${n.toLocaleString('en-IN')} ${unit}${n === 1 ? '' : 's'}`
 }
 
-function bookLabel(o: DepthOrderCheck) {
+function orderName(o: DepthOrderCheck) {
+  if (o.purpose === 'ENTRY') return o.market ? 'entry · market' : 'entry'
+  if (o.kind === 'target') return 'target'
+  if (o.crossed) return 'exit · crossed'
+  if (o.market) return 'exit · market'
+  return 'exit'
+}
+
+function bookText(o: DepthOrderCheck) {
   if (!o.source) return 'none'
-  const at = o.bookField === 'depthAtCross' ? 'at the cross' : o.source === 'fill' ? 'at the fill' : 'at placement'
-  return `${at}${o.ageMs != null ? ` · ${(o.ageMs / 1000).toFixed(1)} s old` : ''}`
+  const at = o.source === 'fill' ? 'at the fill' : o.source === 'cross' ? 'walked at the cross' : 'at placement'
+  return o.ageMs == null ? at : `${at} · ${(o.ageMs / 1000).toFixed(1)} s old`
 }
 
-function legName(o: DepthOrderCheck) {
-  if (o.purpose === 'ENTRY') return 'entry'
-  if (o.kind === 'target') return 'target sell'
-  return o.walked ? 'exit, walked' : 'exit'
-}
+const DETAIL_HEAD = ['Fill', 'Time', 'Side', 'Lots', 'Paper price', 'Book', 'Shown at the price', 'Short', 'Realistic price', 'Paper kinder by', 'Verdict']
 
-/** A trade's fills, one line each: what the book held at the price, what the fill would have cost against it. */
-export function DepthDetail({ d, colSpan }: { d: DepthCheck; colSpan: number }) {
-  const fills = [...d.entry.orders, ...d.exit.orders]
+/** One trade's fills, each against its book: the lots the book showed at the paper price, the shortfall, the price
+ *  the whole order would really have averaged, the book's age and which book it was. */
+export function DepthDetail({ dc }: { dc: DepthCheck }) {
+  const orders = [...dc.entry.orders, ...dc.exit.orders]
   return (
-    <tr className="border-b border-slate-900 bg-slate-950/50">
-      <td colSpan={colSpan} className="px-3 py-2">
-        <div className="mb-1.5 text-[11px] text-slate-400">
-          Depth check — each fill against the book recorded beside it. Entry <Kinder rs={d.entry.optimismRs} /> · exits <Kinder rs={d.exit.optimismRs} /> ·
-          total <Kinder rs={d.optimismRs} className="font-semibold" /> the paper fills were kinder than the book
-          {d.checked < d.fills && <span className="text-slate-500"> · {d.fills - d.checked} of {d.fills} fills had no book</span>}
-        </div>
-        <table className="text-[11px]">
-          <thead>
-            <tr className="text-left text-slate-500">
-              {['Fill', 'Time', 'Side', 'Lots', 'Paper price', 'On offer at the price', 'Short by', 'Realistic price', 'Kinder by', 'Book', 'Verdict', ''].map((h) => (
-                <th key={h} className="whitespace-nowrap px-2 py-1 font-medium">{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {fills.map((o) => (
-              <tr key={o.orderId} className="border-t border-slate-900 align-top">
-                <td className="whitespace-nowrap px-2 py-1 text-slate-300" title={o.clientOrderId}>{legName(o)}</td>
-                <td className="whitespace-nowrap px-2 py-1 text-slate-500">{ist(o.ts, true)}</td>
-                <td className="px-2 py-1 text-slate-400">{o.side ?? 'DM'}</td>
-                <td className="whitespace-nowrap px-2 py-1">{lots(o.lots, o.lotSize)}</td>
-                <td className="px-2 py-1">{fmt.n(o.paperPrice)}</td>
-                <td className="whitespace-nowrap px-2 py-1">{o.source ? (o.walked ? `${lots(o.visibleLots, o.lotSize)} in the book` : lots(o.visibleLots, o.lotSize)) : '—'}</td>
-                <td className={cls('whitespace-nowrap px-2 py-1', o.shortfallLots ? 'text-amber-300' : 'text-slate-500')}>{o.source ? lots(o.shortfallLots, o.lotSize) : '—'}</td>
-                <td className="px-2 py-1">
-                  {o.source ? fmt.n(o.realisticPrice) : '—'}
-                  {o.beyondBook && <span className="ml-1 text-[9px] text-rose-300" title="the five levels did not hold the order: the rest is priced at the last level">beyond the book</span>}
-                </td>
-                <td className="px-2 py-1">{o.source ? <Kinder rs={o.optimismRs} /> : '—'}</td>
-                <td className="whitespace-nowrap px-2 py-1 text-slate-500">{bookLabel(o)}</td>
-                <td className="px-2 py-1"><VerdictChip v={o.verdict} /></td>
-                <td className="px-2 py-1 text-slate-500">{o.note}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </td>
-    </tr>
-  )
-}
-
-/** The Overview's card: per book, how many fills the book was checked against, how many were short, and the rupees. */
-export function DepthCheckTable({ data }: { data: DepthCheckView | null }) {
-  if (!data) return <div className="text-xs text-slate-500">loading…</div>
-  if (!data.since || !data.total || data.books.length === 0) {
-    return <div className="text-xs text-slate-500">{data.scope === 'today' ? 'no trade has closed today' : 'no order has recorded a depth book yet'}</div>
-  }
-  const t = data.total
-  const row = (key: string, label: ReactNode, s: typeof t, total?: boolean) => (
-    <tr key={key} className={cls('border-b border-slate-900', total && 'border-t-2 border-t-slate-700 font-semibold')}>
-      <td className={cls('whitespace-nowrap px-2 py-1.5', total ? 'text-slate-100' : 'text-slate-300')}>{label}</td>
-      <td className="px-2 py-1.5">
-        {s.checked}
-        {s.checked < s.fills && <span className="text-slate-600"> / {s.fills}</span>}
-      </td>
-      <td className="px-2 py-1.5 text-emerald-400/80">{s.byVerdict.full}</td>
-      <td className={cls('px-2 py-1.5', s.byVerdict.partial ? 'text-amber-300' : 'text-slate-600')}>{s.byVerdict.partial}</td>
-      <td className={cls('px-2 py-1.5', s.byVerdict.thin ? 'text-rose-300' : 'text-slate-600')}>{s.byVerdict.thin}</td>
-      <td className="px-2 py-1.5"><Kinder rs={s.optimismRs} /></td>
-    </tr>
-  )
-  return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-xs">
-        <thead>
-          <tr className="border-b border-slate-800 text-left text-slate-500">
-            <th className="px-2 py-1.5 font-medium">Book</th>
-            <th className="px-2 py-1.5 font-medium" title="fills that recorded a depth book / every fill">Fills checked</th>
-            <th className="px-2 py-1.5 font-medium" title={MEANS.full}>Full</th>
-            <th className="px-2 py-1.5 font-medium" title={MEANS.partial}>Partial</th>
-            <th className="px-2 py-1.5 font-medium" title={MEANS.thin}>Thin</th>
-            <th className="px-2 py-1.5 font-medium" title="what the paper fills gained over the same fills priced against the recorded book">Paper kinder by</th>
-          </tr>
-        </thead>
-        <tbody>
-          {data.books.map((b) => row(b.book, b.shadow ? <span className="text-slate-500">{b.label}</span> : b.label, b))}
-          {data.books.length > 1 && row('total', 'all books shown', t, true)}
-        </tbody>
-      </table>
-      {t.worst.length > 0 && t.worst[0].optimismRs > 0 && (
-        <div className="mt-2 text-[11px] text-slate-400">
-          <span className="text-slate-500">Most kinder: </span>
-          {t.worst.slice(0, 5).filter((w) => w.optimismRs > 0).map((w, i) => (
-            <span key={w.id}>
-              {i > 0 && ' · '}
-              {w.underlying} <Kinder rs={w.optimismRs} /> <span className="text-slate-600">({w.verdict})</span>
-            </span>
-          ))}
-        </div>
-      )}
-      <div className="mt-2 text-[10px] text-slate-500">
-        {data.scope === 'today' ? 'Trades closed today' : `Every trade since the first order recorded a depth book (${ist(data.since)})`}. Paper fills a resting order whole at its
-        price; when fewer lots sat at that price in the recorded five levels, the rest is priced further down the book. Record only — it changes no order,
-        stop or wallet. Each trade&apos;s fills are on the Trades page (Depth column).
+    <div className="space-y-2 bg-slate-950/60 px-3 py-2">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-slate-400">
+        <span>
+          Entry <DepthChip verdict={dc.entry.verdict} /> <Kinder rs={dc.entry.optimismRs} />
+          {dc.entryFrom && <span className="ml-1 text-slate-500">(copied from {dc.entryFromLabel ?? dc.entryFrom}'s fill)</span>}
+        </span>
+        <span>
+          Exits ({dc.exit.fills}) <DepthChip verdict={dc.exit.verdict} /> <Kinder rs={dc.exit.optimismRs} />
+          {dc.exit.prints > 0 && dc.exit.verdict !== 'print' && <span className="ml-1 text-slate-500">· {printsText(dc.exit.prints)}, not priced</span>}
+        </span>
+        <span>
+          Trade <Kinder rs={dc.optimismRs} className="font-semibold" /> {dc.optimismRs != null && (dc.optimismRs >= 0 ? 'kinder on paper than the book' : 'harsher on paper than the book')}
+        </span>
+        <span className="text-slate-600">lot {dc.lotSize.toLocaleString('en-IN')} · record-only: nothing here changed an order, a fill, a stop or a wallet</span>
       </div>
+      {orders.length === 0 ? (
+        <div className="text-[11px] text-slate-500">no filled order found for this trade</div>
+      ) : (
+        <Table head={DETAIL_HEAD}>
+          {orders.map((o) => (
+            <tr key={o.orderId} className="border-b border-slate-900 align-top">
+              <td className="px-2 py-1 text-slate-300">
+                <div className="whitespace-nowrap">{orderName(o)}</div>
+                <div className="max-w-[28rem] text-[10px] text-slate-500">{o.words}</div>
+              </td>
+              <td className="whitespace-nowrap px-2 py-1 text-slate-500">{istTime(o.filledTs)}</td>
+              <td className="px-2 py-1 text-slate-400">{o.side}</td>
+              <td className="whitespace-nowrap px-2 py-1">{lotsText(o.lotSize > 1 ? o.lots : o.qty, o.lotSize)}</td>
+              <td className="px-2 py-1 tabular-nums">{fmt.n(o.paperPrice)}</td>
+              <td className={cls('whitespace-nowrap px-2 py-1', o.stale ? 'text-amber-400' : 'text-slate-400')} title={o.stale ? 'older than the paper matcher\'s own 6 s limit: the market may have moved' : undefined}>
+                {bookText(o)}
+                {o.stale && ' · stale'}
+              </td>
+              <td className="whitespace-nowrap px-2 py-1">
+                {o.verdict === 'no book' ? '—' : lotsText(o.lotSize > 1 ? o.visibleLots : o.visibleQty, o.lotSize)}
+                {o.touch != null && (
+                  <div className="text-[10px] text-slate-500">
+                    {o.side === 'BUY' ? 'ask' : 'bid'} {fmt.n(o.touch)} × {(o.touchQty ?? 0).toLocaleString('en-IN')}
+                  </div>
+                )}
+              </td>
+              <td className={cls('px-2 py-1', o.verdict !== 'print' && (o.shortfallLots ?? 0) > 0 ? 'text-rose-300' : 'text-slate-500')}>
+                {o.verdict === 'print' || o.shortfallLots == null ? '—' : lotsText(o.shortfallLots, o.lotSize)}
+                {o.beyondBook && o.verdict !== 'print' && <div className="text-[10px] text-slate-500">past the book</div>}
+              </td>
+              <td className="px-2 py-1 tabular-nums">{o.verdict === 'print' ? <span className="text-slate-500">not priced</span> : fmt.n(o.realisticPrice)}</td>
+              <td className="px-2 py-1">
+                {o.verdict === 'print' ? (
+                  <span
+                    className="text-slate-500"
+                    title={o.crossRs != null ? `taking the ${o.side === 'BUY' ? 'asks' : 'bids'} instead would have cost ${fmt.inr(Math.abs(o.crossRs))} ${o.crossRs >= 0 ? 'more' : 'less'} — not in any total` : undefined}
+                  >
+                    on a print
+                  </span>
+                ) : (
+                  <Kinder rs={o.optimismRs} />
+                )}
+              </td>
+              <td className="px-2 py-1">
+                <DepthChip verdict={o.verdict} />
+              </td>
+            </tr>
+          ))}
+        </Table>
+      )}
     </div>
+  )
+}
+
+const SCOPES: [string, string][] = [
+  ['today', 'today'],
+  ['start', 'since the log began'],
+]
+const SETS: [string, string][] = [
+  ['trading', 'trading books'],
+  ['shadows', 'shadows'],
+  ['mirrors', 'stop-rule mirrors'],
+  ['all', 'all'],
+]
+
+function Toggle({ value, options, onChange }: { value: string; options: [string, string][]; onChange: (v: string) => void }) {
+  return (
+    <span className="flex items-center gap-1">
+      {options.map(([k, label]) => (
+        <button
+          key={k}
+          onClick={() => onChange(k)}
+          className={cls('rounded px-2 py-0.5 text-[11px]', value === k ? 'bg-slate-700 text-white' : 'bg-slate-800 text-slate-400 hover:text-white')}
+        >
+          {label}
+        </button>
+      ))}
+    </span>
+  )
+}
+
+/** The Overview's card: per book, the closed trades' fills checked against their books, how many were partial, thin or
+ *  on a print, and the rupees the paper fills were kinder than those books. */
+export function DepthCheckCard() {
+  const [since, setSince] = useState('today')
+  const [books, setBooks] = useState('trading')
+  const [showWorst, setShowWorst] = useState(false)
+  const { data, error } = usePoll<DepthSummary>(`/api/depth-check?since=${since}&books=${books}`, 30000)
+  const rows = data?.books ?? []
+  const t = data?.total
+  const copied = rows.some((b) => b.copied > 0)
+  return (
+    <Card
+      title={<span title={DEPTH_TIP}>Depth check · paper fills vs the recorded book</span>}
+      right={
+        <span className="flex flex-wrap items-center justify-end gap-2">
+          <Toggle value={since} options={SCOPES} onChange={setSince} />
+          <Toggle value={books} options={SETS} onChange={setBooks} />
+        </span>
+      }
+    >
+      <div className="space-y-2">
+        {error && <div className="text-xs text-rose-300">{error}</div>}
+        {!data ? (
+          <div className="text-xs text-slate-500">loading…</div>
+        ) : rows.length === 0 ? (
+          <div className="text-xs text-slate-500">{since === 'today' ? 'no trade closed yet today' : 'no closed trade in these books'}</div>
+        ) : (
+          <>
+            <Table head={['Book', 'Trades', 'Fills checked', 'Partial', 'Thin', 'On a print', 'Paper kinder by']}>
+              {[
+                ...rows.map((b) => (
+                  <tr key={b.book} className="border-b border-slate-900">
+                    <td className="whitespace-nowrap px-2 py-1.5 text-slate-300">
+                      {b.label}
+                      {b.shadow && <span className="ml-1 text-[10px] text-slate-500">shadow</span>}
+                    </td>
+                    <td className="px-2 py-1.5">
+                      {b.trades}
+                      {b.copied > 0 && <span className="ml-1 text-[10px] text-slate-500" title="trades whose entry was another book's fill: it shows in this row too">{b.copied} copied entries</span>}
+                    </td>
+                    <td className="px-2 py-1.5" title={`${b.byVerdict.full} full · ${b.byVerdict.partial} partial · ${b.byVerdict.thin} thin · ${b.byVerdict.print} on a print · ${b.byVerdict['no book']} without a book`}>
+                      {b.checked} <span className="text-slate-500">of {b.fills}</span>
+                      {b.stale > 0 && <span className="ml-1 text-[10px] text-amber-400/80">{b.stale} stale</span>}
+                    </td>
+                    <td className={cls('px-2 py-1.5', b.byVerdict.partial ? 'text-amber-300' : 'text-slate-600')}>{b.byVerdict.partial}</td>
+                    <td className={cls('px-2 py-1.5', b.byVerdict.thin ? 'text-rose-300' : 'text-slate-600')}>{b.byVerdict.thin}</td>
+                    <td className={cls('px-2 py-1.5', b.byVerdict.print ? 'text-sky-300' : 'text-slate-600')}>{b.byVerdict.print}</td>
+                    <td className="px-2 py-1.5">
+                      <Kinder rs={b.checked ? b.optimismRs : null} />
+                    </td>
+                  </tr>
+                )),
+                t && rows.length > 1 && (
+                  <tr key="total" className="border-t-2 border-t-slate-700">
+                    <td className="px-2 py-1.5 font-semibold text-slate-100" title="every fill counted once, however many books' trades carry it">
+                      all shown
+                    </td>
+                    <td className="px-2 py-1.5 font-semibold">{t.trades}</td>
+                    <td className="px-2 py-1.5 font-semibold">
+                      {t.checked} <span className="font-normal text-slate-500">of {t.fills}</span>
+                    </td>
+                    <td className="px-2 py-1.5 font-semibold text-amber-300">{t.byVerdict.partial}</td>
+                    <td className="px-2 py-1.5 font-semibold text-rose-300">{t.byVerdict.thin}</td>
+                    <td className="px-2 py-1.5 font-semibold text-sky-300">{t.byVerdict.print}</td>
+                    <td className="px-2 py-1.5 font-semibold">
+                      <Kinder rs={t.checked ? t.optimismRs : null} />
+                    </td>
+                  </tr>
+                ),
+              ]}
+            </Table>
+            <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500">
+              <span>
+                closed trades{data.since ? ` since ${ist(data.since)}` : ''} · fills checked: judged on a book (full, partial or thin) · partial: at least half
+                the lots were shown at the price, thin: under half · on a print: a trade went through the price while the touch never reached it, so the
+                book does not price it and it is not in the rupees
+                {copied ? " · a stop-rule mirror or the wide-stop shadow re-uses its book's entry fill: it shows in each row, but 'all shown' counts it once" : ''}
+              </span>
+              {data.worst.length > 0 && (
+                <button onClick={() => setShowWorst((v) => !v)} className="rounded bg-slate-800 px-2 py-0.5 text-slate-300 hover:text-white">
+                  {showWorst ? 'hide' : 'show'} the {data.worst.length} trades the paper flattered most
+                </button>
+              )}
+            </div>
+            {showWorst && (
+              <Table head={['Closed (IST)', 'Book', 'Underlying', 'Entry', 'Exits', 'Paper kinder by', 'Verdict', 'Net (paper)']}>
+                {data.worst.map((w) => (
+                  <tr key={w.tradeId} className="border-b border-slate-900">
+                    <td className="whitespace-nowrap px-2 py-1 text-slate-500">{ist(w.closedTs)}</td>
+                    <td className="whitespace-nowrap px-2 py-1 text-slate-300">{w.label}</td>
+                    <td className="px-2 py-1 font-medium">{w.underlying}</td>
+                    <td className="px-2 py-1"><Kinder rs={w.entryRs} /></td>
+                    <td className="px-2 py-1">
+                      <Kinder rs={w.exitRs} />
+                      {w.prints > 0 && <span className="ml-1 text-[10px] text-slate-500">+{printsText(w.prints)}</span>}
+                    </td>
+                    <td className="px-2 py-1"><Kinder rs={w.optimismRs} className="font-semibold" /></td>
+                    <td className="px-2 py-1"><DepthChip verdict={w.verdict} /></td>
+                    <td className="px-2 py-1 text-slate-400">{fmt.signedInr(w.net)}</td>
+                  </tr>
+                ))}
+              </Table>
+            )}
+          </>
+        )}
+      </div>
+    </Card>
   )
 }
