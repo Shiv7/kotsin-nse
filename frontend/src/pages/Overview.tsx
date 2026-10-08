@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { ActiveTradesTable } from '../components/ActiveTrades'
+import { DepthCheckCard } from '../components/DepthCheck'
 import { StopRuleGridTable } from '../components/StopRuleGrid'
 import { Card, ErrorLine, Notes, Stat, StrategyBadge, Table } from '../components/Ui'
 import { cls, fmt, pnlColor } from '../lib/api'
@@ -71,6 +72,8 @@ export function Overview() {
       <Card title="Strategy × stop rule · today" right="the same trades under the current stop, stop E and the adaptive stop">
         <StopRuleGridTable data={grid} />
       </Card>
+
+      <DepthCheckCard />
 
       <div className="grid gap-4 lg:grid-cols-2">
         <Card title="Wallets" right="one per book; the stop-rule mirrors' purses are in the grid above">

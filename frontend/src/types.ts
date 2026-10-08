@@ -232,6 +232,8 @@ export interface TradeRow {
   mark_basis?: 'bid' | 'last'
   /** a stop's prices, apart: the level that fired, the read that breached it, the bid and the depth-walk price then, the fill */
   stop?: { level: number; triggerPrice: number; triggerOn: string; bidAtTrigger: number | null; askAtTrigger: number | null; executable: number | null; fill: number | null } | null
+  /** the trade's fills against the books recorded with them, read at request time (record-only; an older engine serves none) */
+  depthCheck?: DepthCheck | null
   symbol: string
   underlying: string
   qty: number
@@ -585,4 +587,104 @@ export interface TradeView {
     note: string | null
   }
   path: Record<string, number | string | boolean | null>
+}
+
+/** The depth check (operator, 2026-10-09: "go ahead build it n tell me where to view it"): each paper fill against the
+ *  book recorded with it. full = the book showed every lot at the price; partial = at least half; thin = under half;
+ *  no book = none recorded. Record-only: it never moves an order, a fill, a stop or a wallet. */
+export type DepthVerdict = 'full' | 'partial' | 'thin' | 'no book'
+
+export interface DepthOrderCheck {
+  orderId: string
+  clientOrderId?: string | null
+  purpose: string
+  /** "entry" | "exit" | "target" | "market" */
+  kind: string
+  /** an exit crossed at its deadline: it walked the book */
+  crossed: boolean
+  /** walked the book (a market order or a cross), judged level by level */
+  market: boolean
+  /** filled on a trade printing through the price while the touch never reached it */
+  onPrint: boolean
+  side: 'BUY' | 'SELL'
+  qty: number
+  lots: number
+  lotSize: number
+  paperPrice: number | null
+  limit: number | null
+  /** the book judged on: at the fill, the one a cross walked, or at placement (a fill at placement only) */
+  source: 'fill' | 'cross' | 'place' | null
+  ageMs: number | null
+  stale: boolean
+  visibleQty: number | null
+  visibleLots: number | null
+  covered: number | null
+  shortfallLots: number | null
+  touch: number | null
+  touchQty: number | null
+  realisticPrice: number | null
+  beyondBook: boolean
+  beyondQty: number
+  /** rupees the paper fill was kinder than the realistic price (positive = the paper flattered it) */
+  optimismRs: number | null
+  verdict: DepthVerdict
+  words: string
+  filledTs: number | null
+  reason: string
+}
+
+export interface DepthSide {
+  fills: number
+  checked: number
+  verdict: DepthVerdict
+  optimismRs: number | null
+  orders: DepthOrderCheck[]
+}
+
+export interface DepthCheck {
+  verdict: DepthVerdict
+  optimismRs: number | null
+  fills: number
+  checked: number
+  stale: number
+  lotSize: number
+  /** a mirror's entry: the book whose fill it copied, and its name */
+  entryFrom: string | null
+  entryFromLabel?: string
+  entry: DepthSide
+  exit: DepthSide
+}
+
+export interface DepthWorst {
+  tradeId: string
+  book: string
+  label: string
+  underlying: string
+  symbol: string
+  closedTs: number | null
+  net: number | null
+  optimismRs: number
+  verdict: DepthVerdict
+  entryRs: number | null
+  exitRs: number | null
+}
+
+export interface DepthTally {
+  trades: number
+  fills: number
+  checked: number
+  byVerdict: Record<DepthVerdict, number>
+  optimismRs: number
+  stale: number
+}
+
+export interface DepthSummary {
+  since: number | null
+  scope: 'today' | 'start'
+  bookSet: string
+  thinBelow: number
+  staleMs: number
+  books: (DepthTally & { book: string; label: string; shadow: boolean; worst: DepthWorst[] })[]
+  total: DepthTally
+  worst: DepthWorst[]
 }
