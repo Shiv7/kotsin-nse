@@ -295,6 +295,7 @@ async def test_the_trades_listing_carries_each_trades_depth_check_and_writes_not
     assert one["entry"]["orders"][0]["visibleLots"] == 2 and one["entry"]["orders"][0]["shortfallLots"] == 2
     assert [o["source"] for o in one["exit"]["orders"]] == ["fill", "cross"]
     assert mirror["entryFrom"] == "FUDKII_RT_Y" and mirror["optimismRs"] == pytest.approx(233.75) and mirror["verdict"] == "thin"
+    assert mirror["entryFromLabel"] == "FUDKII-RT-Y", "the page names the book whose fill the mirror copied"
     assert old["verdict"] == "no book" and old["optimismRs"] is None and old["fills"] == 1 and old["checked"] == 0
     assert rows["trd-1"]["strategy_label"] == "FUDKII-RT-Y", "the other served fields are untouched"
     async with _client(e) as c:

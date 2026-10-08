@@ -146,7 +146,11 @@ async def _depth_checks(engine: Engine, rows: list[dict[str, Any]]) -> dict[str,
     order_rows, pos_rows = await asyncio.gather(
         engine.ledger.rows_between("orders", lo - 3_600, hi + 60), engine.ledger.rows_between("positions", lo - 1, max(opened) + 1)
     )
-    return depth_check.check_trades(rows, order_rows, positions=pos_rows, sources=ENTRY_SOURCES)
+    checks = depth_check.check_trades(rows, order_rows, positions=pos_rows, sources=ENTRY_SOURCES)
+    for dc in checks.values():
+        if dc.get("entryFrom"):
+            dc["entryFromLabel"] = describe_book(dc["entryFrom"])["strategy_label"]
+    return checks
 
 
 def _rule_fields(strategy: str) -> dict[str, str]:
