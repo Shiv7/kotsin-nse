@@ -40,11 +40,22 @@ const BLANK: Filters = {
   from: '', to: '', search: '', staleOnly: false,
 }
 
-/** The filters kept from the last visit. Storage can be missing or refuse (a private window): the page works without it. */
+/** The filters kept from the last visit. Storage can be missing or refuse (a private window): the page works without it. A
+ *  saved field is kept only with the type it should have: an older or hand-edited entry ({"books": null}) took the page
+ *  down on every visit, with "show everything" out of reach (review, 2026-10-09). */
 function loadFilters(): Filters {
   try {
     const raw = window.localStorage.getItem(STORE)
-    return raw ? { ...BLANK, ...(JSON.parse(raw) as Partial<Filters>) } : BLANK
+    const saved: unknown = raw ? JSON.parse(raw) : null
+    if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return BLANK
+    const s = saved as Record<string, unknown>
+    const out: Record<string, unknown> = { ...BLANK }
+    for (const [k, want] of Object.entries(BLANK)) {
+      const v = s[k]
+      if (Array.isArray(want) ? Array.isArray(v) && v.every((x) => typeof x === 'string') : typeof v === typeof want) out[k] = v
+    }
+    if (!['both', 'self', 'peer'].includes(out.engines as string)) out.engines = 'both'
+    return out as Filters
   } catch {
     return BLANK
   }
@@ -64,9 +75,11 @@ function activeCount(f: Filters): number {
   return lists + (f.engines !== 'both' ? 1 : 0) + (!f.mirrors ? 1 : 0) + (!f.shadows ? 1 : 0) + (f.from || f.to ? 1 : 0) + (f.search.trim() ? 1 : 0) + (f.staleOnly ? 1 : 0)
 }
 
-const stale = (r: LiveTradeRow) => r.orderBook.state !== 'fresh'
+const notFresh = (r: LiveTradeRow) => r.orderBook.state !== 'fresh'
+/** The IST day of an epoch second, YYYY-MM-DD: an entry from an earlier day sorts before any time today. */
+const istDay = (ts: number) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(ts * 1000))
 
-function passes(r: Row, f: Filters): boolean {
+function passes(r: Row, f: Filters, today: string): boolean {
   if (f.engines !== 'both' && r.origin !== f.engines) return false
   if (f.books.length && !f.books.includes(r.source_book || r.book)) return false
   if (f.variants.length && !f.variants.includes(r.variant)) return false
@@ -78,11 +91,15 @@ function passes(r: Row, f: Filters): boolean {
   if (f.winning.length && !f.winning.includes(r.winning.direction ?? '')) return false
   if (f.vsTrade.length && !f.vsTrade.includes(r.winning.vsTrade ?? '')) return false
   if (f.aligned.length && !f.aligned.includes(r.market.aligned)) return false
-  if (f.from && r.openedHm < f.from) return false
-  if (f.to && r.openedHm > f.to) return false
-  const q = f.search.trim().toLowerCase()
-  if (q && !`${r.underlying} ${r.contract} ${contractName(r.contract)}`.toLowerCase().includes(q)) return false
-  if (f.staleOnly && !stale(r) && !r.staleExits) return false
+  // the entry-time range is today's: a trade carried from an earlier day is before any "from"
+  const at = `${r.openedDay ?? today} ${r.openedHm}`
+  if (f.from && at < `${today} ${f.from}`) return false
+  if (f.to && at > `${today} ${f.to}`) return false
+  // every word, in any order: "270 CE" finds "LTF 27 OCT 2026 CE 270"
+  const words = f.search.trim().toLowerCase().split(/[\s,]+/).filter(Boolean)
+  const hay = `${r.underlying} ${r.contract} ${contractName(r.contract)}`.toLowerCase()
+  if (words.length && !words.every((w) => hay.includes(w))) return false
+  if (f.staleOnly && !notFresh(r) && !r.staleExits) return false
   return true
 }
 
@@ -135,7 +152,7 @@ function FilterPanel({ f, set, books, engine }: { f: Filters; set: (f: Filters) 
     <div className="space-y-2 rounded-lg border border-slate-800 bg-slate-900/70 p-3">
       {engine?.peer && (
         <Group label="Engines">
-          {([['both', 'both'], ['self', engine.name || 'this engine'], ['peer', engine.peer.name || 'twin']] as const).map(([v, label]) => (
+          {([['both', 'both'], ['self', engine.name || 'this engine'], ['peer', engine.peer.name || 'other engine']] as const).map(([v, label]) => (
             <Chip key={v} on={f.engines === v} onClick={() => set({ ...f, engines: v })}>{label}</Chip>
           ))}
         </Group>
@@ -148,7 +165,7 @@ function FilterPanel({ f, set, books, engine }: { f: Filters; set: (f: Filters) 
         {(['current', 'E', 'A'] as StopRule[]).map((v) => <Chip key={v} on={f.variants.includes(v)} onClick={() => set({ ...f, variants: toggle(f.variants, v) })}>{RULE_LABEL[v]}</Chip>)}
       </Group>
       <Group label="Twins · shadows">
-        <Chip on={f.mirrors} onClick={() => set({ ...f, mirrors: !f.mirrors })} title="the stop-rule mirrors: the same fill under stop E and the adaptive stop">{f.mirrors ? 'mirrors shown' : 'mirrors hidden'}</Chip>
+        <Chip on={f.mirrors} onClick={() => set({ ...f, mirrors: !f.mirrors })} title="the twins: each book's stop-rule mirrors, the same fill under stop E and the adaptive stop">{f.mirrors ? 'twins shown' : 'twins hidden'}</Chip>
         <Chip on={f.shadows} onClick={() => set({ ...f, shadows: !f.shadows })} title="the other shadow books: the wide stop, graded F, CT-M">{f.shadows ? 'shadows shown' : 'shadows hidden'}</Chip>
       </Group>
       <Group label="P&L">{many('pnl', [['profit', 'profit'], ['loss', 'loss'], ['neutral', 'neutral']])}</Group>
@@ -158,17 +175,18 @@ function FilterPanel({ f, set, books, engine }: { f: Filters; set: (f: Filters) 
         <span className="mx-1 text-slate-700">|</span>
         {many('vsTrade', [['with', 'with the trade'], ['against', 'against it']])}
       </Group>
-      <Group label="Market aligned">{many('aligned', [['yes', 'yes'], ['no', 'no'], ['unknown', 'unknown']])}</Group>
+      <Group label="Market aligned">{many('aligned', [['yes', 'yes'], ['no', 'no'], ['unchanged', 'unchanged'], ['unknown', 'unknown']])}</Group>
       <Group label="Entry time">
         <input type="time" value={f.from} onChange={(e) => set({ ...f, from: e.target.value })} className="rounded border border-slate-700 bg-slate-950 px-1.5 py-0.5 text-[12px] text-slate-200" />
         <span className="text-[12px] text-slate-500">to</span>
         <input type="time" value={f.to} onChange={(e) => set({ ...f, to: e.target.value })} className="rounded border border-slate-700 bg-slate-950 px-1.5 py-0.5 text-[12px] text-slate-200" />
+        <span className="text-[11px] text-slate-600">today, IST</span>
       </Group>
       <Group label="Scrip / OTM">
-        <input value={f.search} onChange={(e) => set({ ...f, search: e.target.value })} placeholder="LTF, 270 CE …" className="w-56 rounded border border-slate-700 bg-slate-950 px-2 py-0.5 text-[12px] text-slate-200" />
+        <input value={f.search} onChange={(e) => set({ ...f, search: e.target.value })} placeholder="LTF, CE 270 …" className="w-56 rounded border border-slate-700 bg-slate-950 px-2 py-0.5 text-[12px] text-slate-200" />
       </Group>
       <Group label="Order book">
-        <Chip on={f.staleOnly} onClick={() => set({ ...f, staleOnly: !f.staleOnly })} title="a book older than the paper matcher's limit, no book at all, or exits already refused for a stale book">stale only</Chip>
+        <Chip on={f.staleOnly} onClick={() => set({ ...f, staleOnly: !f.staleOnly })} title="a book older than the paper matcher's limit, no book at all, or exits already refused for a stale book">stale or no book only</Chip>
       </Group>
       <div className="pt-1">
         <button type="button" onClick={() => set(BLANK)} className="text-[12px] text-slate-400 underline decoration-dotted hover:text-white">show everything</button>
@@ -202,7 +220,7 @@ function Tile({ k, v, sub, tone, title }: { k: string; v: React.ReactNode; sub?:
 
 const STATE_TONE = { profit: 'green', loss: 'red', neutral: 'slate' } as const
 
-export function LiveTradeCard({ r, neutralRule, twin }: { r: Row; neutralRule: string; twin: boolean }) {
+export function LiveTradeCard({ r, neutralRule, other, today }: { r: Row; neutralRule: string; other: boolean; today: string }) {
   const [open, setOpen] = useState(false)
   const m = r.money
   const se = m.slippage.entry
@@ -216,8 +234,8 @@ export function LiveTradeCard({ r, neutralRule, twin }: { r: Row; neutralRule: s
       <header className="flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0 space-y-1">
           <div className="flex flex-wrap items-center gap-1.5">
-            <span className={cls('rounded px-1.5 py-0.5 text-[11px] font-semibold', twin ? 'bg-violet-900/70 text-violet-100' : 'bg-sky-900/60 text-sky-100')} title={twin ? 'the twin engine, read through /api/peer' : 'this engine'}>
-              {r.engineName || (twin ? 'twin' : 'this engine')}
+            <span className={cls('rounded px-1.5 py-0.5 text-[11px] font-semibold', other ? 'bg-violet-900/70 text-violet-100' : 'bg-sky-900/60 text-sky-100')} title={other ? 'the other engine, read through /api/peer' : 'this engine'}>
+              {r.engineName || (other ? 'other engine' : 'this engine')}
             </span>
             <span className="text-[14px] font-semibold text-slate-100">{r.mirror ? r.source_label : r.bookLabel}</span>
             <Badge tone={r.variant === 'current' ? 'slate' : r.variant === 'E' ? 'blue' : 'violet'}>{RULE_LABEL[r.variant] ?? r.variant}</Badge>
@@ -234,8 +252,8 @@ export function LiveTradeCard({ r, neutralRule, twin }: { r: Row; neutralRule: s
             </span>
           </div>
           <div className="text-[12.5px] text-slate-400">
-            entry <b className="text-slate-200">₹{px(r.entry)}</b> at {hms(r.openedTs)}
-            {r.entryFrom && <span className="text-slate-500"> · the fill {r.source_label} took{r.entryFrom !== r.source_book ? ` (via ${r.entryFrom})` : ''}</span>}
+            entry <b className="text-slate-200">₹{px(r.entry)}</b> at {r.openedDay && r.openedDay !== today ? `${r.openedDay} ` : ''}{hms(r.openedTs)}
+            {r.entryFrom && <span className="text-slate-500"> · the fill {r.entryFromLabel || r.entryFrom} took</span>}
             {' · '}trigger <Badge tone={dirTone(r.triggerDirection)}>{dirArrow(r.triggerDirection)}</Badge>
             {r.triggerTs != null && <span> · bar {hms(r.triggerTs).slice(0, 5)}–{hms(r.triggerTs + 1800).slice(0, 5)}</span>}
             {r.triggerClose != null && <span> · close {fmt.n(r.triggerClose)}</span>}
@@ -248,11 +266,11 @@ export function LiveTradeCard({ r, neutralRule, twin }: { r: Row; neutralRule: s
       <div className="mt-2 flex flex-wrap items-baseline gap-x-4 gap-y-1 text-[13px]">
         <span className="text-slate-400">LTP <b className="text-slate-100">{fmt.n(r.quote.ltp)}</b></span>
         <span className="text-slate-400">bid <b className="text-slate-100">{fmt.n(r.quote.bid)}</b> / ask <b className="text-slate-100">{fmt.n(r.quote.ask)}</b></span>
-        <span className="text-slate-400">mid {fmt.n(r.quote.mid)}</span>
-        <span className={cls('text-[12px]', r.quote.ageS != null && r.quote.ageS > r.quote.limitS ? 'text-rose-300' : 'text-slate-500')}>quote {fmt.n(r.quote.ageS, 0)} s</span>
+        <span className="text-slate-400">mid {r.quote.mid == null ? 'DM' : px(r.quote.mid)}</span>
+        <span className={cls('text-[12px]', r.quote.ageS != null && r.quote.ageS > r.quote.limitS ? 'text-rose-300' : 'text-slate-500')} title="LTP, bid, ask and mid are the quote's: the one the exit loop judges the stop on and marks the position at">quote {fmt.n(r.quote.ageS, 0)} s</span>
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-3">
-        <span className={cls('text-[22px] font-bold tabular-nums', pnlColor(r.pnl.unrealised))} title={`the open lots at the ${r.pnl.basis ?? 'last price'}: what they could be sold for now`}>
+        <span className={cls('text-[22px] font-bold tabular-nums', pnlColor(r.pnl.unrealised))} title={r.pnl.basis === 'last' ? "the open lots at the last trade: the quote has no fresh bid, as the engine marks them then" : `the open lots at the quote's ${r.pnl.basis ?? 'last price'}, as the engine marks them: what they could be sold for now`}>
           {fmt.signedInr(r.pnl.unrealised)}
         </span>
         {r.pnl.state && <span title={neutralRule}><Badge tone={STATE_TONE[r.pnl.state]}>{r.pnl.state.toUpperCase()}</Badge></span>}
@@ -266,18 +284,23 @@ export function LiveTradeCard({ r, neutralRule, twin }: { r: Row; neutralRule: s
         <Tile k="Charges so far" v={rs(m.chargesSoFar.total)} sub={`entry ${rs(m.chargesSoFar.entry)}${m.chargesSoFar.exits ? ` · slices ${rs(m.chargesSoFar.exits)}` : ''}`} tone="text-amber-300" />
         <Tile k="Slippage so far" v={slip(m.slippage.totalVsMidRs)} tone={m.slippage.totalVsMidRs > 0 ? 'text-rose-300' : m.slippage.totalVsMidRs < 0 ? 'text-emerald-300' : 'text-slate-100'}
           title="the entry fill against the mid of the book when its order was placed, and every slice sold against the mid when its order was placed; the signal's premium beside it"
-          sub={se ? <>fill {px(se.fill)} vs signal {px(se.ref)}: {slip(se.vsRefRs)} · vs mid {px(se.midAtPlace)}: {slip(se.vsMidRs)}{se.copiedFrom ? ` · the fill ${se.copiedFrom} took` : ''}</> : 'no order trail'} />
-        <Tile k="Charges at exit" v={rs(m.exitCharges.total)} tone="text-amber-300" title="the charge model (data/charges.toml) on the open lots sold at the bid now"
+          sub={se ? <>fill {px(se.fill)} vs signal {px(se.ref)}: {slip(se.vsRefRs)} · vs mid {px(se.midAtPlace)}: {slip(se.vsMidRs)}{se.copiedFrom ? ` · the fill ${se.copiedFromLabel || se.copiedFrom} took` : ''}</> : 'no order trail'} />
+        <Tile k="Charges at exit" v={rs(m.exitCharges.total)} tone="text-amber-300" title="the charge model (data/charges.toml) on the open lots sold at the mark now: the quote's bid"
           sub={`${lots(m.exitCharges.qty)} at ${fmt.n(m.exitCharges.price)}`} />
-        <Tile k="Exit now · slippage" v={ex?.basis === 'none' || !ex ? 'DM' : cost(ex.vsLtpRs)} tone={ex?.vsLtpRs ? 'text-rose-300' : 'text-slate-100'}
-          title="the open lots sold at market now: walked down the recorded bids while the book is fresh (the quote's bid alone otherwise), against the last trade and the mid"
+        <Tile k="Exit now · slippage" v={ex?.basis === 'none' || !ex ? 'DM' : cost(ex.vsLtpRs)}
+          tone={ex?.vsLtpRs != null && ex.vsLtpRs > 0 ? 'text-rose-300' : ex?.vsLtpRs != null && ex.vsLtpRs < 0 ? 'text-emerald-300' : 'text-slate-100'}
+          title="the open lots sold at market now, against the last trade and the mid: a fresh book walked down its bids (against its own mid); a stale book's shape moved to the quote's bid and walked (against the quote's mid, an approximation); no book, the quote's bid alone"
           sub={!ex || ex.basis === 'none' ? 'no bid to sell into' : (
             <>
-              vs LTP · {cost(ex.vsMidRs)} vs mid · avg {fmt.n(ex.avg)}
+              vs LTP · {cost(ex.vsMidRs)} vs {ex.feed === 'book' ? "the book's" : "the quote's"} mid {ex.mid == null ? 'DM' : px(ex.mid)} · avg {fmt.n(ex.avg)}
+              {ex.basis === 'shape' && <span className="text-rose-300"> · the book is stale: its shape under the quote&apos;s bid, an approximation (the matcher would refuse an exit now)</span>}
               {ex.basis === 'touch' && (
                 <span className={ex.bookState === 'stale' ? 'text-rose-300' : 'text-amber-300'}>
                   {ex.bookState === 'stale' ? ' · the book is stale: the quote\'s bid alone (the matcher would refuse it now)' : ' · no depth: the quote\'s bid alone'}
                 </span>
+              )}
+              {ex.feed === 'book' && ex.quoteTouch != null && ex.touch != null && Math.abs(ex.quoteTouch - ex.touch) > 1e-6 && (
+                <span className="text-amber-300"> · the book&apos;s {r.side === 'LONG' ? 'bid' : 'ask'} {px(ex.touch)}, the quote&apos;s {px(ex.quoteTouch)}</span>
               )}
               {w && w.beyondQty > 0 && <span className="text-rose-300"> · {lots(w.beyondQty)} past the 5 levels</span>}
               {w && w.matcherQty < w.qty && <span className="text-amber-300"> · one cross sells {lots(w.matcherQty)}</span>}
@@ -405,22 +428,35 @@ export function LiveTradeCards({ engine }: { engine: EngineId | null }) {
     saveFilters(f)
   }
 
+  // a card only from a read that answered: an engine that stops answering keeps its last read in ``usePoll``, and its cards
+  // would freeze on screen (their book age, their P&L) and count as open after they closed (review, 2026-10-09)
+  const ownData = own.error ? null : own.data
+  const twinData = engine?.peer && !twin.error ? twin.data : null
   const rows: Row[] = useMemo(() => {
     const tag = (d: LivePositions | null, side: Side, fallback: string) => (d?.rows ?? []).map((r) => ({ ...r, origin: side, engineName: r.engine || d?.engine || fallback }))
-    return [...tag(own.data, 'self', engine?.name ?? ''), ...tag(engine?.peer ? twin.data : null, 'peer', engine?.peer?.name ?? 'twin')].sort((a, b) => b.openedTs - a.openedTs)
-  }, [own.data, twin.data, engine])
+    return [...tag(ownData, 'self', engine?.name ?? ''), ...tag(twinData, 'peer', engine?.peer?.name ?? 'other engine')].sort((a, b) => b.openedTs - a.openedTs)
+  }, [ownData, twinData, engine])
   const books = useMemo(() => {
     const seen = new Map<string, string>()
     for (const r of rows) seen.set(r.source_book || r.book, r.source_label || r.bookLabel)
     for (const b of filters.books) if (!seen.has(b)) seen.set(b, b)
     return [...seen.entries()].sort((a, b) => a[1].localeCompare(b[1]))
   }, [rows, filters.books])
-  const shown = rows.filter((r) => passes(r, filters))
+  const today = istDay(ownData?.nowTs ?? twinData?.nowTs ?? Date.now() / 1000)
+  const shown = rows.filter((r) => passes(r, filters, today))
   const n = activeCount(filters)
-  const staleN = shown.filter((r) => stale(r)).length
-  const open = shown.reduce((s, r) => s + (r.pnl.unrealised ?? 0), 0)
-  const neutralRule = own.data?.neutralRule ?? ''
+  const staleN = shown.filter((r) => r.orderBook.state === 'stale').length
+  const noBookN = shown.filter((r) => r.orderBook.state === 'none').length
+  // the open P&L of the books that trade, engine by engine: a mirror re-trades its book's fill and a shadow is a comparison,
+  // so summing them in would count one fill several times (the Trades page's rule)
+  const openBy = new Map<string, number>()
+  for (const r of shown) if (!r.mirror && !r.shadow) openBy.set(r.engineName, (openBy.get(r.engineName) ?? 0) + (r.pnl.unrealised ?? 0))
+  const shownEngines = [...new Set(shown.map((r) => r.engineName))]
+  const neutralRule = ownData?.neutralRule ?? twinData?.neutralRule ?? ''
   const twinDown = engine?.peer && twin.error
+  const tagged = (d: LivePositions | null, name: string) =>
+    d ? [...d.notes, ...d.skipped.map((s) => `${s.book} ${s.positionId}: not shown — ${s.error}`)].map((x) => (engine?.peer ? `${d.engine || name}: ${x}` : x)) : []
+  const messages = [...tagged(ownData, engine?.name || 'this engine'), ...tagged(twinData, engine?.peer?.name || 'the other engine')]
 
   return (
     <div className="space-y-3 p-4">
@@ -432,9 +468,23 @@ export function LiveTradeCards({ engine }: { engine: EngineId | null }) {
           {n > 0 && <span className="ml-0.5 rounded-full bg-sky-500 px-1.5 text-[11px] font-bold text-white">{n}</span>}
         </button>
         <span className="text-[13px] text-slate-400">
-          {shown.length} of {rows.length} open{rows.length ? ' · open P&L ' : ''}
-          {rows.length > 0 && <b className={pnlColor(open)}>{fmt.signedInr(open)}</b>}
+          {shown.length} of {rows.length} open
+          {shownEngines.length > 0 && (
+            <span title="the open lots at the bid of the books that trade, each engine on its own: the twins (stop-rule mirrors) re-trade a book's fill and the shadows are comparisons, so they are left out, as on the Trades page">
+              {' · open P&L of the trading books '}
+              {shownEngines.map((name, i) => {
+                const v = openBy.get(name)
+                return (
+                  <span key={name}>
+                    {i > 0 && ' · '}{shownEngines.length > 1 || engine?.peer ? `${name} ` : ''}
+                    {v != null ? <b className={pnlColor(v)}>{fmt.signedInr(v)}</b> : <span className="text-slate-500">none open (twins and shadows only)</span>}
+                  </span>
+                )
+              })}
+            </span>
+          )}
           {staleN > 0 && <span className="text-rose-300"> · {staleN} on a stale book</span>}
+          {noBookN > 0 && <span className="text-rose-300"> · {noBookN} with no book</span>}
         </span>
         <span className="text-[11.5px] text-slate-500">
           read-only · every {POLL_MS / 1000} s · book limit now {own.data ? `${own.data.bookLimit.nowMs / 1000} s` : 'DM'}
@@ -443,21 +493,21 @@ export function LiveTradeCards({ engine }: { engine: EngineId | null }) {
       </div>
       {twinDown && (
         <div className="text-[12px] text-slate-500">
-          {engine?.peer?.name || 'The twin'}'s trades are not shown: {twin.error}
+          {engine?.peer?.name || 'The other engine'}&apos;s trades are not shown: {twin.error}
         </div>
       )}
-      {[...(own.data?.notes ?? []), ...(own.data?.skipped ?? []).map((s) => `${s.book} ${s.positionId}: not shown — ${s.error}`)].map((x) => (
+      {messages.map((x) => (
         <div key={x} className="text-[12px] text-amber-300">{x}</div>
       ))}
       {panel && <FilterPanel f={filters} set={setFilters} books={books} engine={engine} />}
       {!rows.length && !own.error && (
         <div className="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-8 text-center text-[13px] text-slate-500">
-          {own.data ? 'no open trades on ' + (engine?.peer ? 'either engine' : 'this engine') + ' right now' : 'loading…'}
+          {ownData ? 'no open trades on ' + (engine?.peer ? 'either engine' : 'this engine') + ' right now' : 'loading…'}
         </div>
       )}
       {rows.length > 0 && !shown.length && <div className="text-[13px] text-slate-500">no open trade passes the filters</div>}
       <div className="grid gap-3 2xl:grid-cols-2">
-        {shown.map((r) => <LiveTradeCard key={`${r.origin}:${r.id}`} r={r} neutralRule={neutralRule} twin={r.origin === 'peer'} />)}
+        {shown.map((r) => <LiveTradeCard key={`${r.origin}:${r.id}`} r={r} neutralRule={neutralRule} other={r.origin === 'peer'} today={today} />)}
       </div>
     </div>
   )

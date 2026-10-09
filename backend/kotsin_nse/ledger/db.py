@@ -444,6 +444,20 @@ class Ledger:
         async with self.engine.begin() as conn:
             return [r[0] for r in (await conn.execute(stmt)).all()]
 
+    async def exit_orders_after(self, after: int, start: float, statuses: Collection[str]) -> tuple[int, list[str]]:
+        """The JSON of the EXIT orders in one of ``statuses`` stored after row ``after`` (SQLite's rowid) and placed from
+        ``start``, oldest stored first, unparsed; and the last row stored now. The orders table is only ever inserted into
+        (``insert_order``), each row final as it is stored, so a caller that keeps the last row reads only what was stored
+        since, on the rowid's own index: ``ts`` has none, and a read by time scans the whole table (review, 9 Oct 2026)."""
+        rowid = sa.literal_column("orders.rowid")
+        async with self.engine.begin() as conn:
+            top = (await conn.execute(sa.select(sa.func.max(rowid)).select_from(orders))).scalar()
+            if top is None or int(top) <= after:
+                return after, []
+            stmt = (sa.select(orders.c.json).where(rowid > after, rowid <= int(top), orders.c.ts >= start, orders.c.purpose == "EXIT",
+                                                   orders.c.status.in_(sorted(set(statuses)))).order_by(rowid))
+            return int(top), [r[0] for r in (await conn.execute(stmt)).all()]
+
     async def signal_json(self, ids: Collection[str]) -> list[str]:
         """The stored JSON of the signals named, unparsed (``signal_id`` is unique and indexed)."""
         keep = sorted({str(i) for i in ids if i})
