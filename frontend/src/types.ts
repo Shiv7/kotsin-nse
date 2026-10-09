@@ -1,3 +1,5 @@
+import type { TradeMapCard } from './components/TradeMap'
+
 export type Mode = 'SHADOW' | 'PAPER' | 'LIVE_CAPPED' | 'LIVE'
 
 export interface Wallet {
@@ -234,6 +236,9 @@ export interface TradeRow {
   stop?: { level: number; triggerPrice: number; triggerOn: string; bidAtTrigger: number | null; askAtTrigger: number | null; executable: number | null; fill: number | null } | null
   /** the trade's fills against the books recorded with them, read at request time (record-only; an older engine serves none) */
   depthCheck?: DepthCheck | null
+  /** was the order book stale on the way out (2026-10-09): the exits refused for a stale book and the age of the book the
+   *  closing exit filled on, read from the stored orders at request time (an older engine serves none) */
+  staleBook?: StaleBook | null
   symbol: string
   underlying: string
   qty: number
@@ -700,4 +705,156 @@ export interface DepthSummary {
   books: (DepthTally & { book: string; label: string; shadow: boolean; worst: DepthWorst[] })[]
   total: DepthTally
   worst: DepthWorst[]
+}
+
+/** A closed trade's order book on the way out: exits refused because the book was older than the paper matcher's limit, and
+ *  the age of the book the closing exit filled on (``/api/trades`` with ``depth=1`` or ``stale=1``). */
+export interface StaleBook {
+  stale: boolean
+  refused: number
+  maxAgeMs: number | null
+  limitMs: number | null
+  lastRefusedTs: number | null
+  fillAgeMs: number | null
+  fillLimitMs: number | null
+  fillStale: boolean
+  /** "order book stale (2 exits refused, 45.6 s)" — empty when it was not */
+  words: string
+}
+
+/** One side of a recorded book walked for a quantity (api/live_trades.py ``walk_all``). */
+export interface LiveWalk {
+  avg: number
+  qty: number
+  inBook: number
+  beyondQty: number
+  levels: number
+  touch: number
+  touchQty: number
+  /** what the paper matcher would take in one cross (within its ceiling under the touch) */
+  matcherQty: number
+  matcherAvg: number | null
+}
+
+type NifAlign = { with: number; against: number; flat: number; names: number }
+
+/** One open position on /api/positions/live (api/live_trades.py): a card on the Options page's active trades. Read-only. */
+export interface LiveTradeRow {
+  id: string
+  engine: string
+  book: string
+  bookLabel: string
+  trend: 'trend' | 'counter-trend' | ''
+  stop_rule: StopRule
+  stop_rule_label: string
+  source_book: string
+  source_label: string
+  variant: StopRule
+  mirror: boolean
+  shadow: boolean
+  /** the book whose trade it is (a mirror's source) is a shadow */
+  sourceShadow: boolean
+  /** the book whose entry fill this one copied (a stop-rule mirror's source, the wide-stop shadow's RT-Y) */
+  entryFrom: string | null
+  underlying: string
+  segment: string
+  contract: string
+  scripCode: string
+  kind: string
+  optionType: 'CE' | 'PE' | null
+  side: 'LONG' | 'SHORT'
+  tradeDirection: 'BULLISH' | 'BEARISH'
+  triggerDirection: 'BULLISH' | 'BEARISH'
+  qty: number
+  qtyRemaining: number
+  lotSize: number
+  lots: number
+  lotsAtEntry: number
+  multiplier: number
+  entry: number
+  openedTs: number
+  openedHm: string
+  signalId: string
+  triggerId: string | null
+  triggerTs: number | null
+  triggerClose: number | null
+  grade: string | null
+  quote: { ltp: number | null; bid: number | null; ask: number | null; mid: number | null; ageS: number | null; limitS: number; spreadPct: number | null }
+  orderBook: {
+    state: 'fresh' | 'stale' | 'none'
+    ageS: number | null
+    limitS: number
+    stale: boolean
+    ts: number | null
+    depth: { bids: [number, number][]; asks: [number, number][]; ageMs: number } | null
+  }
+  pnl: {
+    unrealised: number | null
+    basis: 'bid' | 'ask' | 'last' | null
+    unrealisedLtp: number | null
+    realisedGross: number
+    tradeGross: number | null
+    band: number
+    state: 'profit' | 'loss' | 'neutral' | null
+    netIfExitNow: number | null
+    rNow: number | null
+    maxDdInr: number | null
+  }
+  money: {
+    chargesSoFar: { entry: number; exits: number; total: number }
+    exitCharges: { price: number | null; qty: number; total: number | null; brokerage?: number; stt?: number; exchange?: number; sebi?: number; stamp?: number; gst?: number }
+    slippage: {
+      entry: {
+        fill: number | null; ref: number | null; midAtPlace: number | null; bidAtPlace: number | null; askAtPlace: number | null; limit: number | null
+        vsRefRs: number | null; vsMidRs: number | null; vsRefPct: number | null; waitS: number | null; why?: string; outcome?: string; copiedFrom: string | null
+      } | null
+      exits: { reason: string | null; qty: number; fill: number | null; midAtPlace: number | null; vsMidRs: number | null }[]
+      totalVsMidRs: number
+    }
+    exitNow: {
+      basis: 'depth' | 'touch' | 'none'
+      avg: number | null
+      qty: number
+      vsLtpRs: number | null
+      vsMidRs: number | null
+      vsTouchRs: number | null
+      walk: LiveWalk | null
+      bookState?: 'fresh' | 'stale' | 'none'
+    } | null
+  }
+  staleExits: { count: number; maxAgeMs: number; limitMs: number | null; lastTs: number | null } | null
+  targets: {
+    option: { rung: number; price: number; hit: boolean; share: string | null; qty: number | null; lots: number | null; slippage: { avg: number; rs: number; touchQty: number; beyondQty: number; levels: number } | null }[]
+    equity: { price: number; passed: boolean }[]
+    future: { label: string; price: number; passed: boolean }[]
+    futureClose: number | null
+    futureLtp: number | null
+    optionStop: number
+    initialOptionStop: number
+    stopNow: number
+    line: number | null
+    equityStop: number
+    peakMid: number | null
+    armedBy: string | null
+    mirror: { equitySl: number; premiumCap: number; trailStop: number | null; through: { seconds: number; area: number; areaNeeded: number | null; maxSeconds: number } | null } | null
+    exitPlan: { policy: string; rows: { kind: string; at: string; action: string; qty: number | null }[] } | null
+  }
+  market: { aligned: 'yes' | 'no' | 'unknown'; atTrigger: NifAlign | null; now: NifAlign | null; shareAtTrigger?: number; shareNow?: number; why: string }
+  winning: { direction: 'BULLISH' | 'BEARISH' | 'FLAT' | null; vsTrade: 'with' | 'against' | 'flat' | null; stockMovePct: number | null; reasons: string[]; why: string }
+  /** the trade map's input, in the alert card's field names (components/TradeMap.tsx) */
+  map: TradeMapCard
+}
+
+export interface LivePositions {
+  engine: string
+  nowTs: number
+  count: number
+  rows: LiveTradeRow[]
+  skipped: { positionId: string; book: string; error: string }[]
+  notes: string[]
+  bookLimit: { nowMs: number; maxMs: number; openMaxMs: number; openWindow: string; ceilingPct: number }
+  quoteLimitS: number
+  neutralRule: string
+  recordOnly: boolean
+  tookMs: number
 }

@@ -27,7 +27,7 @@ const PAGES = [
   ['/review', 'Trade review'],
   ['/strategies', 'Strategies'],
   ['/chart', 'Chart'],
-  ['/options', 'Options'],
+  ['/options', 'Options · active trades'],
   ['/backtest', 'Backtest'],
   ['/committee', 'Committee'],
   ['/hot-stocks', 'Hot Stocks'],
