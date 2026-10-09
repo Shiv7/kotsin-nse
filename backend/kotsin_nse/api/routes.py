@@ -26,7 +26,7 @@ from typing import Any
 import sqlalchemy as sa
 import structlog
 from fastapi import APIRouter, FastAPI, HTTPException, Query, WebSocket
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -53,7 +53,7 @@ from ..strategy.keys import (
     stop_mirrors_of,
     stop_rule_of,
 )
-from . import daybook, export, peer, review, shadow
+from . import daybook, export, live_trades, peer, review, shadow
 from .ws import Hub, handle, pump
 
 log = structlog.get_logger(__name__)
@@ -481,6 +481,20 @@ def build_app(engine: Engine) -> FastAPI:
             out.append(row)
         return out
 
+    #: the active-trades page's reads (api/live_trades.py): each signal's trigger and levels are read once
+    live = live_trades.LiveTrades(engine, position_view=_position_view, rule_fields=_rule_fields, entry_sources=ENTRY_SOURCES)
+
+    @api.get("/positions/live")
+    async def positions_live() -> JSONResponse:
+        """Every open position of this engine, every book — the shadows and the stop-rule mirrors too — one card each
+        (operator, 2026-10-09: "in the dashabpord have a dedicated page for all actove trades ... in the form of cards"):
+        the contract, its lots, the money so far and an exit now would cost, the order book's age against the paper
+        matcher's own limit, the trigger and which way the stock has gone since, and the trade map (api/live_trades.py).
+        Record-only: it reads, it never changes a trade, an order, a stop or a wallet. Polled every few seconds by both
+        engines' pages, so it is kept light: the stored rows it reads are few and parsed off the event loop, and the answer
+        goes out as plain JSON (60 rows: FastAPI's encoder took 10 ms of the loop for what json.dumps does in 1.4)."""
+        return JSONResponse(await live.view())
+
     @api.get("/signals")
     async def recent_signals(limit: int = Query(100, le=500), unpublished: bool = False) -> list[dict[str, Any]]:
         # a trigger FUDKII graded F and did not publish (~20 at a busy bar) is listed only when asked
@@ -497,10 +511,13 @@ def build_app(engine: Engine) -> FastAPI:
 
     #: the depth check's reads, kept for the app's life: a closed trade's check is worked out once
     depth_reads = DepthReads(engine.ledger)
+    #: "was the order book stale on the way out", read from the stored exits, also worked out once per closed trade
+    stale_reads = live_trades.StaleBookReads(engine.ledger, limit_ms_at=engine.matcher.age_limit_ms)
 
     @api.get("/trades")
     async def recent_trades(
-        limit: int = Query(100, le=500), books: str = Query("all", pattern=BOOK_SETS), depth: bool = Query(False)
+        limit: int = Query(100, le=500), books: str = Query("all", pattern=BOOK_SETS), depth: bool = Query(False),
+        stale: bool = Query(False),
     ) -> list[dict[str, Any]]:
         # the book's name, its side of the trigger and its stop rule come from the registry as the rows are
         # served: rows already stored never carried them
@@ -515,9 +532,20 @@ def build_app(engine: Engine) -> FastAPI:
             except Exception as exc:  # noqa: BLE001 - a record-only column must never cost the ledger its page
                 log.warning("depth_check.failed", error=str(exc)[:160])
                 checks = {}
+        # ``staleBook`` (operator, 2026-10-09: "also in reason for exit: that orderbook was stale"): the exits refused for a
+        # stale book and the age of the book the closing exit filled on — read from the stored orders here, beside the
+        # exit reason, never written into it. With the depth check (the Trades page) or on its own (``stale=1``)
+        stale_books: dict[str, dict[str, Any]] | None = None
+        if depth or stale:
+            try:
+                stale_books = await stale_reads.for_trades(rows)
+            except Exception as exc:  # noqa: BLE001 - a record-only column must never cost the ledger its page
+                log.warning("stale_book.failed", error=str(exc)[:160])
+                stale_books = {}
         return [
             {**t, **describe_book(str(t.get("strategy") or "")), **_rule_fields(str(t.get("strategy") or "")), **_excursions(t),
-             **({"depthCheck": checks.get(str(t.get("id")))} if checks is not None else {})}
+             **({"depthCheck": checks.get(str(t.get("id")))} if checks is not None else {}),
+             **({"staleBook": stale_books.get(str(t.get("id")))} if stale_books is not None else {})}
             for t in rows
         ]
 
