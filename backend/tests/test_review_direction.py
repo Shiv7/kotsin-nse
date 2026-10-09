@@ -93,3 +93,50 @@ def test_the_skip_rules_hook_reads_a_file_only_when_one_exists(tmp_path):
     assert [r["fired"] for r in v["rules"]] == [True, False, None] and v["skipped"] is True
     d = direction_read(_card(), signal=SIGNAL, breadth=BREADTH, route=None, bars=[], nifty_bars=[], book_side="trend", skip_rules=loaded)
     assert d["skip"]["skipped"] is True and d["reads"][0]["stance"] == "unknown"
+
+
+# -- the 10 Oct review's fixes -------------------------------------------------------------------------------------------
+
+
+def test_a_trigger_carried_overnight_is_read_from_its_bars_close_and_names_the_first_print():
+    """CONCOR 8 Oct: the 7 Oct 15:15 trigger re-issued at the open with an 08:45 stamp. Its signal's entry is the session's
+    first print (441.85); the study's label (``oc_C``) is the bar's close (439.75) from 09:15, and so is the card's."""
+    carried_bar = BAR - 1800  # 08:45
+    sig = {"ts": carried_bar, "direction": "BEARISH", "entry": 101.0, "evidence": {"close": 100.0, "atr": 1.0},
+           "context": {"carried": {"from": "FUDKII-X-1-B", "firstPrint": 101.0, "prevClose": 100.0}}}
+    d = direction_read(_card(direction="BEARISH"), signal=sig, breadth={**BREADTH, "direction": "BEARISH"}, route=None,
+                       bars=bars([(100.1, 100.6)], start=BAR), nifty_bars=[], book_side="trend")
+    assert d["trigger"]["close"] == 100.0 and d["label"]["first"] == "up" and d["label"]["tradeRight"] is False
+    assert "the trigger's close 100 (carried overnight; this session's first print was 101)" in d["label"]["text"]
+
+
+def test_a_trigger_closing_at_15_15_is_read_on_the_next_session_as_the_study_reads_it():
+    """ASTRAL 8 Oct: the 14:45 bar closes at 15:15. The study measures it on the next session from 09:15 (an overnight gap
+    counts); the card did "not read here" — it now reads the next session's bars once they are recorded."""
+    late = BAR + 5.5 * 3600  # 14:45
+    nxt = BAR + 86_400  # the next session's 09:15
+    sig = {"ts": late, "direction": "BEARISH", "evidence": {"close": 100.0, "atr": 1.0}}
+    none_yet = direction_read(_card(direction="BEARISH"), signal=sig, breadth=None, route=None, bars=[], nifty_bars=[], book_side="trend")
+    assert none_yet["label"]["first"] is None and "its bars are not in yet" in none_yet["label"]["text"]
+    d = direction_read(_card(direction="BEARISH"), signal=sig, breadth=None, route=None, bars=[], nifty_bars=[], book_side="trend",
+                       next_bars=bars([(99.9, 100.2), (100.0, 100.7)], start=nxt), next_day="2026-10-10")
+    assert d["label"]["first"] == "up" and d["label"]["tradeRight"] is False and d["label"]["minutes"] == 1
+    assert "measured on the next session (2026-10-10) from 09:15" in d["label"]["text"]
+
+
+def test_a_skip_rules_file_of_another_shape_is_not_applied_and_never_raises(tmp_path):
+    from kotsin_nse.api.review_direction import read_skip_rules
+
+    for bad in ({"rules": [{"id": "R1", "all": 5}]}, {"rules": [{"id": "R1", "all": ["x"]}]}, {"rules": "no"},
+                {"rules": [{"id": "R1", "all": [{"fact": "a", "op": "~", "value": 1}]}]},
+                {"rules": [{"id": "R1", "all": [{"fact": "a", "op": "in", "value": 3}]}]}):
+        (tmp_path / SKIP_RULES_FILE).write_text(json.dumps(bad))
+        rules, note = read_skip_rules(tmp_path)
+        assert rules is None and load_skip_rules(tmp_path) is None and "not in the expected shape" in note
+    (tmp_path / SKIP_RULES_FILE).write_text("{not json")
+    assert read_skip_rules(tmp_path)[1].startswith(f"{SKIP_RULES_FILE} is not readable JSON")
+    (tmp_path / SKIP_RULES_FILE).unlink()
+    assert read_skip_rules(tmp_path) == (None, ""), "absent: nothing, and nothing to say"
+    # handed a malformed set anyway, the verdict is "unknown", never an exception
+    v = candidate_skip({"a": 1}, {"rules": [{"id": "R1", "all": 5}, {"id": "R2", "all": ["x"]}, {"id": "R3", "all": [{"fact": "a", "op": "in", "value": 3}]}]})
+    assert [r["fired"] for r in v["rules"]] == [None, None, None] and v["skipped"] is False

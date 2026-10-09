@@ -9,9 +9,12 @@ read is marked with or against THE TRADE by a threshold the review or the engine
 ``risk/limits.py`` RT_Y_LIMITS) — none is fitted here, and none is a verdict.
 
 Then the outcome label, the same-option study's (dir_skip, ``oc_ft50``): after the trigger bar's close, which side the
-stock reached 0.5 × ATR30 first, on the one-minute bars, to 15:15 that session. Both sides inside one minute: the minute's
-open beyond a level decides, else "ambiguous" (the study broke those on the 1 s tape, which the review does not read). A
-trigger closing at 15:15 or later is decided on the next session: not read here.
+stock reached 0.5 × ATR30 first, on the one-minute bars, to 15:15 that session, from the trigger bar's close — the study's
+``oc_C``, also for a trigger carried overnight (re-issued at the next open with an 08:45 stamp: the study measures the
+original bar's close from 09:15, and the card names the session's first print beside it). Both sides inside one minute:
+the minute's open beyond a level decides, else "ambiguous" (the study broke those on the 1 s tape, which the review does
+not read). A trigger closing at 15:15 or later (the 14:45 and 15:15 bars) is measured as the study measures it, on the
+next session from 09:15 (an overnight gap counts), once that session's bars are in the archive.
 
 The candidate skip rules are a HOOK: ``candidate_skip`` reads ``<data_dir>/skip_rules.candidate.json`` when the research
 writes one and shows nothing while it is absent. No rule is defined here. The file's shape, for whoever writes it::
@@ -20,7 +23,8 @@ writes one and shows nothing while it is absent. No rule is defined here. The fi
                                                 "all": [{"fact": "triggerCloseMin", "op": ">=", "value": 210}]}]}
 
 ``fact`` names a key of the block's ``facts`` (below); ``op`` one of < <= > >= == != in. A rule with a fact the record
-does not hold is "unknown", never fired.
+does not hold is "unknown", never fired. A file of another shape is not applied at all (``read_skip_rules`` says why): it
+shows nothing, as when absent, and never takes a card down.
 """
 
 from __future__ import annotations
@@ -71,6 +75,12 @@ def trigger_close_ts(bar_ts: float) -> float:
     return _at(bar_ts, 15, 30) if datetime.fromtimestamp(bar_ts, IST).strftime("%H:%M") == "15:15" else bar_ts + 1800
 
 
+def closes_late(bar_ts: float) -> bool:
+    """The trigger's bar closes at or after 15:15 (the 14:45 and 15:15 bars): its label is the next session's."""
+    close = trigger_close_ts(bar_ts)
+    return close >= _at(close, 15, 15)
+
+
 def first_touch(bars: Sequence[Mapping[str, Any]], *, start: float, end: float, close: float, atr: float, k: float = LABEL_ATR) -> dict[str, Any]:
     """Which way the stock reached ``k`` × ATR from ``close`` first, on the one-minute bars from ``start`` to ``end``:
     "up", "down", "none" (neither by ``end``) or "ambiguous" (both inside one minute, the open beyond neither)."""
@@ -113,10 +123,12 @@ def _read(key: str, label: str, stance: str, detail: str, **data: Any) -> dict[s
 
 def direction_read(card: Mapping[str, Any], *, signal: Mapping[str, Any] | None, breadth: Mapping[str, Any] | None,
                    route: Mapping[str, Any] | None, bars: Sequence[Mapping[str, Any]], nifty_bars: Sequence[Mapping[str, Any]],
-                   book_side: str, skip_rules: Mapping[str, Any] | None = None) -> dict[str, Any]:
+                   book_side: str, skip_rules: Mapping[str, Any] | None = None, next_bars: Sequence[Mapping[str, Any]] | None = None,
+                   next_day: str | None = None) -> dict[str, Any]:
     """The block: the decision-time reads (each with or against the trade), the right-direction label and, when the rules
     file exists, the candidate skip rules' verdict. ``card`` is the review's own row for the trade; ``book_side`` is
-    "trend" or "counter-trend" (the book follows or fades the trigger)."""
+    "trend" or "counter-trend" (the book follows or fades the trigger); ``next_bars`` are the stock's one-minute bars of
+    the next session (``next_day``), which decide a trigger that closed at or after 15:15."""
     th = THRESHOLDS
     trade_bull = card.get("direction") == "BULLISH"
     fade = book_side == "counter-trend"
@@ -124,7 +136,11 @@ def direction_read(card: Mapping[str, Any], *, signal: Mapping[str, Any] | None,
         ("BEARISH" if trade_bull else "BULLISH") if fade else ("BULLISH" if trade_bull else "BEARISH"))
     trig_bull = trig_dir == "BULLISH"
     ev = (signal or {}).get("evidence") or {}
+    ctx = (signal or {}).get("context")
+    carried = ctx.get("carried") if isinstance(ctx, Mapping) and isinstance(ctx.get("carried"), Mapping) else None
+    # the study's oc_C: the trigger bar's close, a carried trigger's too (its signal's entry is the next session's first print)
     close = _f(ev.get("close"))
+    first_print = _f((carried or {}).get("firstPrint"))
     atr = _f((breadth or {}).get("atr30")) or _f((card.get("stock") or {}).get("atr")) or _f(ev.get("atr"))
     bar_ts = _f((signal or {}).get("ts"))
     reads: list[dict[str, Any]] = []
@@ -236,21 +252,30 @@ def direction_read(card: Mapping[str, Any], *, signal: Mapping[str, Any] | None,
                              "minutes": None, "text": ""}
     if close_ts and close is not None and atr:
         end = _at(close_ts, 15, 15)
-        if close_ts >= end:
-            label.update(how="the trigger closed at or after 15:15: the next session decides, not read here")
+        start, basis = close_ts, (f"the trigger's close {close:g} (carried overnight; this session's first print was {first_print:g})"
+                                  if carried and first_print is not None else f"the trigger's close {close:g}")
+        nb = [b for b in next_bars or () if _f(b.get("ts")) is not None]
+        if close_ts >= end and nb:
+            # the study's next-session basis: from 09:15 of the next session, an overnight gap counting as the move
+            start = _at(min(float(b["ts"]) for b in nb), 9, 15)
+            end = _at(start, 15, 15)
+            basis = f"the trigger's close {close:g}, measured on the next session ({next_day or _hm(start)}) from 09:15"
+        if close_ts >= end and not nb:
+            label.update(how="the trigger closed at or after 15:15: the next session decides, and its bars are not in yet")
         else:
-            ft = first_touch(bars, start=close_ts, end=end, close=close, atr=atr)
+            ft = first_touch(nb if start != close_ts else bars, start=start, end=end, close=close, atr=atr)
             label.update(ft)
             if ft["first"] in ("up", "down"):
                 up = ft["first"] == "up"
                 label["triggerRight"] = up == trig_bull
                 label["tradeRight"] = up == trade_bull
-                label["minutes"] = round((ft["ts"] - close_ts) / 60)
+                label["minutes"] = round((ft["ts"] - start) / 60)
+        label["basis"] = basis
         if label["first"] in ("up", "down"):
-            label["text"] = (f"the stock reached {LABEL_ATR:g} ATR30 {'UP' if label['first'] == 'up' else 'DOWN'} first, {label['minutes']} min after "
-                             f"the trigger's close {close:g} ({_hm(label['ts'])}): the {'right' if label['tradeRight'] else 'wrong'} direction for this trade")
+            label["text"] = (f"the stock reached {LABEL_ATR:g} ATR30 {'UP' if label['first'] == 'up' else 'DOWN'} first at {_hm(label['ts'])}, "
+                             f"{label['minutes']} min after {basis}: the {'right' if label['tradeRight'] else 'wrong'} direction for this trade")
         elif label["first"] == "none":
-            label["text"] = f"the stock reached {LABEL_ATR:g} ATR30 neither way by 15:15 after the trigger's close {close:g}"
+            label["text"] = f"the stock reached {LABEL_ATR:g} ATR30 neither way by 15:15 after {basis}"
         elif label["first"] == "ambiguous":
             label["text"] = f"both sides of {LABEL_ATR:g} ATR30 inside one minute ({_hm(label['ts'])}): ambiguous on 1m bars"
         else:
@@ -273,26 +298,60 @@ _OPS = {"<": lambda a, b: a < b, "<=": lambda a, b: a <= b, ">": lambda a, b: a 
         "==": lambda a, b: a == b, "!=": lambda a, b: a != b, "in": lambda a, b: a in b}
 
 
-def load_skip_rules(data_dir: Path | None) -> dict[str, Any] | None:
-    """The candidate skip rules, when the research has written them; None while the file is absent or unreadable."""
+def skip_rules_problem(raw: Any) -> str | None:
+    """What keeps a rules file from being applied, or None when it has the shape the module's docstring gives: rules a
+    list of objects, each with an "all" list of conditions, each condition a "fact" name, a known "op" and a "value"."""
+    if not isinstance(raw, Mapping) or not isinstance(raw.get("rules"), list):
+        return "it has no list of rules"
+    for i, r in enumerate(raw["rules"]):
+        if not isinstance(r, Mapping) or not isinstance(r.get("all"), list) or not r["all"]:
+            return f"rule {i + 1} has no list of conditions"
+        for c in r["all"]:
+            if not isinstance(c, Mapping) or not isinstance(c.get("fact"), str) or c.get("op") not in _OPS or "value" not in c:
+                return f"rule {i + 1} ({r.get('id')}) has a condition of another shape"
+            if c["op"] == "in" and not isinstance(c["value"], list):
+                return f"rule {i + 1} ({r.get('id')}): \"in\" needs a list"
+    return None
+
+
+def read_skip_rules(data_dir: Path | None) -> tuple[dict[str, Any] | None, str]:
+    """The candidate skip rules when the research has written them, and a note when a file is there but cannot be applied
+    (unreadable, not JSON, or another shape): (None, "") while it is absent."""
     if data_dir is None:
-        return None
+        return None, ""
+    f = data_dir / SKIP_RULES_FILE
     try:
-        raw = json.loads((data_dir / SKIP_RULES_FILE).read_text())
-    except (OSError, ValueError):
-        return None
-    return raw if isinstance(raw, dict) and isinstance(raw.get("rules"), list) else None
+        raw = json.loads(f.read_text())
+    except FileNotFoundError:
+        return None, ""
+    except (OSError, ValueError) as exc:
+        return None, f"{SKIP_RULES_FILE} is not readable JSON ({exc.__class__.__name__}): the candidate skip rules are not applied"
+    why = skip_rules_problem(raw)
+    if why:
+        return None, f"{SKIP_RULES_FILE} is not in the expected shape ({why}): the candidate skip rules are not applied"
+    return raw, ""
+
+
+def load_skip_rules(data_dir: Path | None) -> dict[str, Any] | None:
+    """The candidate skip rules, when the research has written them; None while the file is absent, unreadable or of
+    another shape."""
+    return read_skip_rules(data_dir)[0]
 
 
 def candidate_skip(facts: Mapping[str, Any], rules: Mapping[str, Any]) -> dict[str, Any]:
     """Would the candidate skip rules have skipped this trigger: each rule fired (every condition held), not fired, or
-    unknown (a fact the record does not hold). Applies the file as written; defines nothing."""
+    unknown (a fact the record does not hold, or a condition it cannot compare). Applies the file as written; defines
+    nothing; a condition of another shape is "unknown", never an error (the file is checked on read as well)."""
     out = []
     for r in rules.get("rules") or ():
         if not isinstance(r, Mapping):
             continue
         state: bool | None = True
-        for cond in r.get("all") or ():
+        conds = r.get("all")
+        for cond in conds if isinstance(conds, list) else [None]:
+            if not isinstance(cond, Mapping):
+                state = None
+                break
             v = facts.get(str(cond.get("fact")))
             op = _OPS.get(str(cond.get("op")))
             if v is None or op is None:
@@ -300,7 +359,7 @@ def candidate_skip(facts: Mapping[str, Any], rules: Mapping[str, Any]) -> dict[s
                 break
             try:
                 ok = bool(op(v, cond.get("value")))
-            except TypeError:
+            except (TypeError, ValueError, AttributeError):
                 state = None
                 break
             if not ok:
@@ -310,4 +369,5 @@ def candidate_skip(facts: Mapping[str, Any], rules: Mapping[str, Any]) -> dict[s
     return {"name": rules.get("name"), "source": rules.get("source"), "rules": out, "skipped": any(x["fired"] for x in out)}
 
 
-__all__ = ["SKIP_RULES_FILE", "candidate_skip", "direction_read", "first_touch", "load_skip_rules", "trigger_close_ts"]
+__all__ = ["SKIP_RULES_FILE", "candidate_skip", "closes_late", "direction_read", "first_touch", "load_skip_rules", "read_skip_rules", "skip_rules_problem",
+           "trigger_close_ts"]

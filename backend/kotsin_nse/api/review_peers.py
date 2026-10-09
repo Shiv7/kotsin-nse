@@ -31,13 +31,23 @@ The spec is the same-option study's card_spec.md (9 Oct 2026; p1_legs → p5_car
   −(c_b − c_a). They sum to Δ exactly. The study's spec puts the final exit's difference on the whole qty (w = 1) and
   lets the rungs part take it back; the two agree whenever either trade sold no rung, and differ only in how the same
   exit total is split when both did (TCS 9 Oct: both sold the same two rungs at 36.40 and 42.75, then the trail at 41.35
-  against 40.35 — here the whole ₹450 is the final exit on the 450 left, not "rungs −₹450, exit +₹900").
+  against 40.35 — here the whole ₹450 is the final exit on the 450 left, not "rungs −₹450, exit +₹900"). The convention
+  when the two sold DIFFERENT shares at rungs (9 of the 437 better-peer groups of 8–9 Oct): the units only one side sold
+  at a rung are compared at the two final exits (they land in the exit parts at F_b − F_a), and the rungs part keeps only
+  what that side's rungs sold above its own final exit (TCS 9 Oct RT-N 25 % against RT-Y 50 %: exit +₹4,084, rungs
+  +₹821; w = 1 − max would read +₹2,363 / +₹2,003). Every split adds up to the same exit total, exactly.
 * **the stop rule**: when a and b run different stop rules (current / E / adaptive), a's own sibling a′ (the same fill,
   the mirror under b's rule) is used: a → a′ → b, and the target-rung, exit-decision and exit-fills parts of the a → a′
   link are the **stop rule** part. Two siblings: the whole exit difference is the stop rule.
 * **the lesson**: the study's deterministic rules (card_spec.md §5.4) on the pooled tables (``review_evidence``, or a
   newer ``<data_dir>/peer_evidence.json``), graded for the operator: "systematic (held across days and both engines)",
   "suggestive", or "one-off / paper artefact", always with the counts behind it. A refusal or a halt is never a lesson.
+  "Systematic" is stricter than card_spec.md's "consistent: both windows": each window must lean the card's way in
+  cases (over half, not half: FUDKII → RT-Y-W1's 3/3 to 1 Oct is a tie) and in rupees (its −₹13,507 to 1 Oct points the
+  other way) — lessons.md §4: only L1 (RT-Y's exits over RT-X's and RT-N's) holds in both windows.
+* **a card's own refused exit**: a trade whose own result rests on a refused paper exit (its modelled effect at least
+  ₹100 and at least half its net, or enough to flip its sign) is tagged a paper artefact on its own card, win or loss
+  (CONCOR 8 Oct RT-Y-F stop-E: +₹1,680 here, about −₹1,945 had the 10:18:37 exit filled at 9.85).
 """
 
 from __future__ import annotations
@@ -97,11 +107,13 @@ def _map(v: Any) -> Mapping[str, Any]:
     return v if isinstance(v, Mapping) else {}
 
 
-def inr(v: float | None, sign: bool = False) -> str:
-    """Rupees the Indian way, rounded to the rupee: ₹1,23,456; "−" for a loss, "+" when ``sign``."""
+def inr(v: float | None, sign: bool = False, paise: bool = False) -> str:
+    """Rupees the Indian way, rounded to the rupee (or to the paisa with ``paise``): ₹1,23,456; "−" for a loss, "+" when
+    ``sign``."""
     if v is None:
         return "—"
-    s = str(round(abs(v)))
+    whole, frac = (f"{abs(v):.2f}".split(".") if paise else (str(round(abs(v))), ""))
+    s = whole
     if len(s) > 3:
         head, tail = s[:-3], s[-3:]
         grp: list[str] = []
@@ -111,8 +123,9 @@ def inr(v: float | None, sign: bool = False) -> str:
         if head:
             grp.insert(0, head)
         s = ",".join(grp) + "," + tail
-    neg = v < 0 and s != "0"
-    return ("−" if neg else ("+" if sign and s != "0" else "")) + "₹" + s
+    zero = s == "0" and (not frac or frac == "00")
+    neg = v < 0 and not zero
+    return ("−" if neg else ("+" if sign and not zero else "")) + "₹" + s + (f".{frac}" if frac else "")
 
 
 def hms(ts: float | None) -> str:
@@ -204,6 +217,8 @@ PARAMS: tuple[tuple[str, str, Callable[[Any], str]], ...] = (
     ("max_premium_loss_pct", "premium cap", lambda v: "none" if v is None else f"{v:g} % below paid"),
     ("equity_stop_buffer_pct", "stock stop buffer", lambda v: "plan's stop" if v is None else f"plan's stop + {v:g} %"),
     ("stop_mode", "stop judged on", lambda v: "the option (sustained)" if v == "option" else "the stock"),
+    # derived (``_acting``): the stock-stop rules' catastrophe backstop, which acts only under them
+    ("bid_cap_pct", "premium cap on the bid", lambda v: "off (the option stop rules)" if v is None else f"{v:g} % under paid, sold at once"),
     ("arm_at_pct", "arms at", lambda v: "first rung touch" if v is None else f"+{v:g} % on the premium"),
     ("arm_mode", "arming", lambda v: str(v)),
     ("ladder_mode", "ladder", lambda v: {"mtf": "the option's own daily+weekly rungs", "daily_r": "the option's daily R1-R4"}.get(v, str(v))),
@@ -227,9 +242,13 @@ MECH_PARAMS = {
     "RAISED": ("arm_at_pct", "arm_mode", "sl_lag", "post_arm_sustain", "band_exit", "trail_arm_pct", "trail_giveback_pct",
                "breakeven_after_t1"),
     "TRAIL": ("peak_giveback_pct", "trail_dwell_samples", "band_exit", "trail_giveback_pct", "ladder_mode", "own_ladder"),
-    "STOP": ("max_premium_loss_pct", "sustain_s", "stop_mode", "eq_stop_area_pct_s", "equity_stop_buffer_pct",
+    "STOP": ("max_premium_loss_pct", "bid_cap_pct", "sustain_s", "stop_mode", "eq_stop_area_pct_s", "equity_stop_buffer_pct",
              "priced_option_stop", "min_stop_ticks"),
 }
+#: the stop rule's own parameters: what a stop-rule pair (current / E / adaptive) differs in
+STOP_RULE_PARAMS = ("stop_mode", "bid_cap_pct", "eq_stop_area_pct_s", "max_premium_loss_pct", "sustain_s")
+#: fields a record carries for a parameter the card derives rather than prints
+RAW_PARAMS = ("eq_stop_premium_cap_pct",)
 
 
 def params_json(limits: Any) -> dict[str, Any]:
@@ -238,7 +257,7 @@ def params_json(limits: Any) -> dict[str, Any]:
         return {}
     have = {f.name for f in fields(limits)}
     out: dict[str, Any] = {}
-    for k, _lab, _say in PARAMS:
+    for k in [k for k, _lab, _say in PARAMS] + list(RAW_PARAMS):
         if k not in have:
             continue
         v = getattr(limits, k)
@@ -246,14 +265,26 @@ def params_json(limits: Any) -> dict[str, Any]:
     return out
 
 
+def _acting(p: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The parameters as they act: the 25 % premium cap on the bid (``eq_stop_premium_cap_pct``) is set on every book but
+    sells only under the stock-stop rules (stop E / adaptive; ``stop_mode`` "equity"), so the card shows it as on there
+    and off under the option stop. A record from older code without the field shows nothing for it."""
+    mode = p.get("stop_mode")
+    if mode is None or (mode == "equity" and "eq_stop_premium_cap_pct" not in p):
+        return p
+    return {**p, "bid_cap_pct": p.get("eq_stop_premium_cap_pct") if mode == "equity" else None}
+
+
 def param_diffs(pa: Mapping[str, Any], pb: Mapping[str, Any], keys: Iterable[str] | None = None) -> list[dict[str, str]]:
-    """Each parameter whose value differs between two books: "label: this → peer"."""
+    """Each parameter whose value differs between two books: "label: this → peer". A parameter one side's record does not
+    carry (the twin on older code) is left out rather than read as "none"."""
     want = set(keys) if keys is not None else None
+    pa, pb = _acting(pa), _acting(pb)
     out = []
     for k, lab, say in PARAMS:
         if want is not None and k not in want:
             continue
-        if k not in pa and k not in pb:
+        if k not in pa or k not in pb:
             continue
         va, vb = pa.get(k), pb.get(k)
         if va != vb:
@@ -332,6 +363,9 @@ def _anatomy(rec: dict[str, Any], legs: list[dict[str, Any]], refused: list[dict
         "F": F, "D": D, "X": F - D, "T": T, "rho": rho, "xCf": F + T, "rs": sum(lg["qty"] for lg in rungs) / q,
         "rungs": [{"price": lg["fill"], "qty": lg["qty"], "ts": lg["ts"]} for lg in ins_rungs],
         "rungShare": sum(lg["qty"] for lg in ins_rungs) / q,
+        # the final legs as filled: a last TARGET leg sold with the trail is one of them (its price is in D and F)
+        "finalLegs": [{"reason": lg["reason"], "qty": lg["qty"], "fill": lg["fill"], "ref": lg["ref"], "ts": lg["ts"]}
+                      for lg in actual_fin if not lg["rung"]],
         "final": {"reason": rec["exitReason"], "ts": lf["ts"] or closed_ts, "fill": lf["fill"], "ref": lf["ref"], "level": lf["level"],
                   "triggerOn": lf["triggerOn"], "triggerPx": lf["triggerPx"], "why": lf["why"]},
         "mech": mech,
@@ -538,17 +572,34 @@ def _exit_side(r: Mapping[str, Any]) -> dict[str, Any]:
         "armedBy": p["armedBy"], "armedMin": round((p["armedTs"] - r["openedTs"]) / 60, 1) if p["armedTs"] else None,
         "peakMid": p["peakMid"], "trailDwell": p["trailDwell"], "equitySl": p["equitySl"],
         "rungs": a["rungs"], "rungShare": a["rungShare"], "heldMin": round(((r["closedTs"] or 0) - r["openedTs"]) / 60, 1),
+        "finalLegs": a.get("finalLegs") or [],
         "refused": None if ref is None else {"ts": ref["ts"], "kind": ref["kind"], "executable": ref["executable"], "ageMs": ref["ageMs"],
                                              "limitMs": ref["limitMs"], "text": ref["text"]},
         "audit": r["audit"],
     }
 
 
+def _legs_say(z: Mapping[str, Any]) -> str:
+    """When the final exit sold in legs with different reasons (a last TARGET leg with the trail), each leg: the decision
+    price the card quotes is their qty-weighted average, not one rule's price."""
+    legs = z["anat"].get("finalLegs") or []
+    if len({str(lg.get("reason")) for lg in legs}) < 2:
+        return ""
+    return (" (its final legs: " + ", ".join(f"{lg.get('reason') or '—'} {lg['qty']:,.0f} at {px(lg['fill'])} (decision {px(lg['ref'])})"
+                                             for lg in legs) + "; the decision price is their average)")
+
+
 def _exit_label(z: Mapping[str, Any]) -> tuple[str, float | None, float]:
     ref = z["anat"]["refused"]
     if ref is not None:
         return f"a {ref['kind']} attempt refused on a stale book", ref["ts"], z["anat"]["D"]
-    return z["anat"]["mech"], z["anat"]["final"]["ts"], z["anat"]["D"]
+    return z["anat"]["mech"] + _legs_say(z), z["anat"]["final"]["ts"], z["anat"]["D"]
+
+
+def _clip(text: str, n: int = 160) -> str:
+    """A reason the engine wrote, whole when short, cut at a word with "…" when not."""
+    t = str(text or "")
+    return t if len(t) <= n else t[:n].rsplit(" ", 1)[0] + "…"
 
 
 def part_line(k: str, v: float, t: Mapping[str, Any], p: Mapping[str, Any], chain: Mapping[str, Any] | None) -> str:
@@ -583,7 +634,7 @@ def part_line(k: str, v: float, t: Mapping[str, Any], p: Mapping[str, Any], chai
         for z, who in sides:
             r_ = z["anat"]["refused"]
             age = f"book {r_['ageMs'] / 1000:.1f} s old" + (f", limit {r_['limitMs'] / 1000:g} s" if r_["limitMs"] else "") if r_["ageMs"] else "a stale book"
-            bits.append(f"{who}'s {r_['kind']} exit was refused at {hms(r_['ts'])} ({age}; \"{r_['text'][:70]}\"; executable then "
+            bits.append(f"{who}'s {r_['kind']} exit was refused at {hms(r_['ts'])} ({age}; \"{_clip(r_['text'])}\"; executable then "
                         f"{px(r_['executable'])}). It got out at {hms(z['anat']['final']['ts'])} on {z['anat']['mech']} at {px(z['anat']['final']['fill'])}")
         return f"stale-book refusal {inr(v, True)} (MODELLED): " + "; ".join(bits)
     if k == "entry_paid":
@@ -605,7 +656,8 @@ def part_line(k: str, v: float, t: Mapping[str, Any], p: Mapping[str, Any], chai
         return (f"size {inr(v, True)}: {t['lots']:g} lots here vs {p['lots']:g}; the extra {p['lots'] - t['lots']:+g} lots at "
                 f"{inr(per_lot, True)} a lot (the two trades' average outcome)")
     if k == "charges":
-        return f"charges {inr(v, True)}: {inr(t['c'])} here vs {inr(p['c'])}"
+        paise = inr(t["c"]) == inr(p["c"])  # "−₹1: ₹178 here vs ₹178" says nothing: the paise do
+        return f"charges {inr(v, True)}: {inr(t['c'], paise=paise)} here vs {inr(p['c'], paise=paise)}"
     return f"{k} {inr(v, True)}"
 
 
@@ -614,6 +666,11 @@ def part_line(k: str, v: float, t: Mapping[str, Any], p: Mapping[str, Any], chai
 GRADE_SYSTEMATIC = "systematic (held across days and both engines)"
 GRADE_SUGGESTIVE = "suggestive"
 GRADE_ONE_OFF = "one-off / paper artefact"
+ANECDOTE = "anecdote (fewer than 5 cases on record)"
+GRADE_RANK = {GRADE_SYSTEMATIC: 2, GRADE_SUGGESTIVE: 1, GRADE_ONE_OFF: 0}
+EXCEPTION = "this trade is the exception: the pooled record points the other way"
+#: the stock-stop rules' catastrophe backstop as ``mechanism`` names it
+CAP_MECH = "premium cap (25 % on the bid)"
 
 
 def grade_of(strength: str) -> str:
@@ -630,21 +687,27 @@ def _sh(a: float, b: float) -> float:
 
 
 def strength(n: int, s: float, n_in: int, s_in: float, n_out: int, s_out: float, s_a: float | None, s_b: float | None,
-             windows: Mapping[str, str], n_min: int = 15) -> str:
-    """The deterministic "how sure" (card_spec.md §5.4); s = the share of the pooled, non-tied cases pointing the card's way."""
+             windows: Mapping[str, str], n_min: int = 15, sums_ok: bool | None = None) -> str:
+    """The deterministic "how sure" (card_spec.md §5.4); s = the share of the pooled, non-tied cases pointing the card's way.
+    "Both windows" asks more than the spec's s ≥ 0.5: each window must lean the card's way, over half its cases (a 3/3 tie
+    is no lean) and, when the row carries them (``sums_ok``), in rupees too (the numbers review of 10 Oct: FUDKII →
+    RT-Y-W1 was "consistent" on 3/3 and −₹13,507 to 1 Oct; lessons.md §4 holds only L1 in both windows)."""
     if n < 5:
-        return "anecdote (fewer than 5 cases on record)"
+        return ANECDOTE
     if s >= 0.7:
-        both = n_in >= 3 and n_out >= 3 and s_in >= 0.5 and s_out >= 0.5
+        lean_in, lean_out = n_in >= 3 and s_in > 0.5, n_out >= 3 and s_out > 0.5
+        both = lean_in and lean_out and sums_ok is not False
         eng = (s_a is None or s_a >= 0.5) and (s_b is None or s_b >= 0.5)
         if n >= n_min and both and eng:
             return "consistent: both windows and both engines"
+        if n >= n_min and both:
+            return "consistent in both windows, not in both engines"
         if n >= n_min:
-            w = windows.get("OUT", "OUT") if (n_out >= 3 and s_out >= 0.5) else windows.get("IN", "IN")
+            w = windows.get("OUT", "OUT") if lean_out else windows.get("IN", "IN")
             return f"consistent in {w} only; the other window disagrees or is too thin"
         return f"suggestive ({n} cases, under 15)"
     if s <= 0.3:
-        return "this trade is the exception: the pooled record points the other way"
+        return EXCEPTION
     return "mixed: the pooled record splits"
 
 
@@ -657,6 +720,17 @@ def _holm(row: Mapping[str, Any]) -> str:
             else f"; significant after counting {tried} contrasts (Holm p {ph:.2f})")
 
 
+def _times(n: int) -> str:
+    return "once" if n == 1 else f"{n} times"
+
+
+def _leans(a: float | None, b: float | None, positive: bool) -> bool | None:
+    """Both windows' rupees the card's way (``positive``: above zero), or None when the row does not carry them."""
+    if a is None or b is None:
+        return None
+    return (a > 0 and b > 0) if positive else (a < 0 and b < 0)
+
+
 def contrast_evidence(ev: Mapping[str, Any], con: str, card_says_y: bool) -> dict[str, Any]:
     """A pooled contrast row ("RT-X -> RT-Y") read the card's way: its sentence, strength and count."""
     S = ev.get("contrasts") or {}
@@ -665,8 +739,7 @@ def contrast_evidence(ev: Mapping[str, Any], con: str, card_says_y: bool) -> dic
         x, _, y = con.partition(" -> ")
         rev = f"{y} -> {x}"
         if rev not in S:
-            return {"text": "no pooled record for this pair", "strength": "anecdote (fewer than 5 cases on record)", "n": 0,
-                    "grade": GRADE_ONE_OFF, "contrast": con}
+            return {"text": "no pooled record for this pair", "strength": ANECDOTE, "n": 0, "grade": GRADE_ONE_OFF, "contrast": con}
         con, card_says_y, row = rev, not card_says_y, S[rev]
     uy, ux = int(row["units_y_better"] or 0), int(row["units_x_better"] or 0)
     yi, xi, yo, xo = (int(row[k] or 0) for k in ("y_better_IN", "x_better_IN", "y_better_OUT", "x_better_OUT"))
@@ -677,7 +750,8 @@ def contrast_evidence(ev: Mapping[str, Any], con: str, card_says_y: bool) -> dic
     sum_a, sum_b = _num(row.get("sum_A")) or 0.0, _num(row.get("sum_B")) or 0.0
     sa = None if abs(sum_a) < 1 or engine_family else (1.0 if (sum_a > 0) == card_says_y else 0.0)
     sb = None if abs(sum_b) < 1 or engine_family else (1.0 if (sum_b > 0) == card_says_y else 0.0)
-    st = strength(uy + ux, s, yi + xi, si, yo + xo, so, sa, sb, ev.get("windows") or {})
+    st = strength(uy + ux, s, yi + xi, si, yo + xo, so, sa, sb, ev.get("windows") or {},
+                  sums_ok=_leans(_num(row.get("sum_IN")), _num(row.get("sum_OUT")), card_says_y))
     x, _, y = con.partition(" -> ")
     if engine_family:
         x, y = f"{ENGINE_A}'s {x}", f"{ENGINE_B}'s {y}"
@@ -694,8 +768,7 @@ def first_out_evidence(ev: Mapping[str, Any], family: str, book: str, mech: str,
     """The pooled first-out row for this mechanism: how often holding past it paid."""
     row = next((r for r in ev.get("firstOut") or () if r["family"] == family and r["book"] == book and r["mech"] == mech), None)
     if row is None:
-        return {"text": "no other case of this rule firing first on a shared fill", "strength": "anecdote (fewer than 5 cases on record)",
-                "n": 0, "grade": GRADE_ONE_OFF}
+        return {"text": "no other case of this rule firing first on a shared fill", "strength": ANECDOTE, "n": 0, "grade": GRADE_ONE_OFF}
     g = {k: int(row[k] or 0) for k in ("holding_better_n", "early_better_n", "holding_better_IN", "early_better_IN", "holding_better_OUT",
                                         "early_better_OUT", "holding_better_A", "early_better_A", "holding_better_B", "early_better_B")}
     hb, eb = g["holding_better_n"], g["early_better_n"]
@@ -707,15 +780,56 @@ def first_out_evidence(ev: Mapping[str, Any], family: str, book: str, mech: str,
     else:
         s, si, so = _sh(eb, hb), _sh(ei, hi), _sh(eo, ho)
         sa, sb = (_sh(ea, ha) if ha + ea else None), (_sh(eB, hB) if hB + eB else None)
-    st = strength(hb + eb, s, hi + ei, si, ho + eo, so, sa, sb, ev.get("windows") or {})
-    who = SHORT.get(book, book) + ("" if family == "current" else " stop-E")
+    st = strength(hb + eb, s, hi + ei, si, ho + eo, so, sa, sb, ev.get("windows") or {},
+                  sums_ok=_leans(_num(row.get("held_sum_IN")), _num(row.get("held_sum_OUT")), card_says_hold))
+    # the stock-stop family pools stop E and the adaptive stop (identical on 286 of 297 copies): say so on a stop-A card too
+    who = f"{SHORT.get(book, book)}'s" if family == "current" else f"the {SHORT.get(book, book)} stock-stop mirrors' (stop-E and stop-A pooled)"
     win = ev.get("windows") or {}
-    text = (f"{who}'s {mech} fired first while a sibling book on the same fill held {int(row['early_exits'])} times "
-            f"({int(row['units'])} option-triggers, {int(row['days'])} sessions). The holders did better {hb} times and the early exit {eb} times "
+    text = (f"{who} {mech} fired first while a sibling book on the same fill held {_times(int(row['early_exits']))} "
+            f"({int(row['units'])} option-triggers, {int(row['days'])} sessions). The holders did better {_times(hb)} and the early exit {_times(eb)} "
             f"({win.get('IN', 'IN')} {hi}/{ei}, {win.get('OUT', 'OUT')} {ho}/{eo}; {ENGINE_A} {ha}/{ea}, {ENGINE_B} {hB}/{eB}). In total the holders made "
             f"{inr(row['held_sum'], True)} over the early exit. Those early exits came a median {(_num(row['median_exit_min']) or 0):.0f} min after "
             f"the fill, at {(_num(row['median_exit_vs_paid_pct']) or 0):+.1f} % of the premium paid")
     return {"text": text, "strength": st, "n": hb + eb, "grade": grade_of(st)}
+
+
+def cap_first_evidence(ev: Mapping[str, Any], book: str, card_says_cap: bool) -> dict[str, Any]:
+    """The pooled record of the stock-stop rules' 25 % bid cap selling first while the same fill under the current rule held
+    (lessons.md L5a and L5c; ``capFirst`` in the evidence, from the study's tables/mech_transitions_rows.csv, stop-E copies
+    — the adaptive stop's are the same events). Graded on the study's own pool where the book is in it (L5a: the trading
+    books with no premium cap of their own under the current rule, FUDKII and RT-X), else on the book's own copies."""
+    cf = ev.get("capFirst") or {}
+    own = (cf.get("books") or {}).get(book)
+    pool = next((q for q in cf.get("pools") or () if book in (q.get("books") or ())), None)
+    use = pool or own
+    if use is None:
+        return {"text": "no other case on record of the stock-stop rules' bid cap firing first on a shared fill", "strength": ANECDOTE,
+                "n": 0, "grade": GRADE_ONE_OFF}
+
+    def counts(r: Mapping[str, Any]) -> tuple[int, ...]:
+        return tuple(int(r.get(k) or 0) for k in ("cap_better", "held_better", "cap_better_A", "held_better_A", "cap_better_B", "held_better_B"))
+
+    cb, hb, ca, ha, cB, hB = counts(use)
+    if card_says_cap:
+        s, sa, sb = _sh(cb, hb), (_sh(ca, ha) if ca + ha else None), (_sh(cB, hB) if cB + hB else None)
+    else:
+        s, sa, sb = _sh(hb, cb), (_sh(ha, ca) if ca + ha else None), (_sh(hB, cB) if cB + hB else None)
+    win = ev.get("windows") or {}
+    # every case is from the stock-stop mirrors, which run from 5 Oct: one window only, never "both"
+    st = strength(cb + hb, s, 0, 0.0, cb + hb, s, sa, sb, win)
+
+    def say(r: Mapping[str, Any]) -> str:
+        c_b, h_b, c_a, h_a, c_B, h_B = counts(r)
+        return (f"on {int(r.get('copies') or 0)} copies ({int(r.get('units') or 0)} option-triggers, {int(r.get('days') or 0)} session(s): "
+                f"{r.get('where') or '—'}) the cap was better {_times(c_b)} and holding {h_b} ({ENGINE_A} {c_a}/{h_a}, {ENGINE_B} {c_B}/{h_B}); "
+                f"the cap made {inr(-(_num(r.get('held_sum')) or 0.0), True)} over holding")
+
+    text = f"the 25 % premium cap on the bid fired first while the current rule on the same fill held ({win.get('OUT', 'OUT')}; the stock-stop rules run from 5 Oct): "
+    if pool is not None:
+        text += f"over {pool.get('label') or 'the pool'}, {say(pool)}" + (f"; {SHORT.get(book, book)}'s own, {say(own)}" if own else "")
+    else:
+        text += f"{SHORT.get(book, book)}'s own, {say(use)}"
+    return {"text": text, "strength": st, "n": cb + hb, "grade": grade_of(st)}
 
 
 def _raise_rule(book: str) -> str:
@@ -730,14 +844,49 @@ def _cap(s: str) -> str:
 
 def _no_lesson(key: str, why: str, strength: str, text: str) -> dict[str, Any]:
     return {"key": key, "grade": GRADE_ONE_OFF, "gradeWhy": why, "strength": strength, "decided": None, "systematic": None,
-            "params": [], "evidence": [], "text": text}
+            "also": None, "params": [], "evidence": [], "text": text}
 
 
-def lesson(t: Mapping[str, Any], p: Mapping[str, Any], parts: Mapping[str, float], gap: float, ev: Mapping[str, Any]) -> dict[str, Any]:
+def _cap_first(t: Mapping[str, Any], p: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """The side the stock-stop rules' 25 % bid cap sold at least 5 s before the other side left, if one."""
+    for side, other in ((t, p), (p, t)):
+        if side["anat"]["mech"] == CAP_MECH and other["anat"]["final"]["ts"] - side["anat"]["final"]["ts"] >= 5:
+            return side
+    return None
+
+
+def _engine_why(t: Mapping[str, Any], p: Mapping[str, Any]) -> str:
+    """Why the same book and rule ended apart in the two engines, from the two positions' own stop records: the stops set at
+    the fill first (AMBER 8 Oct: the engines' plans differed — stock stops 6,723.8 against 6,821.15, option stops 134.12
+    against 125.93 — before phase 34's re-projection moved its line to 142.01), then the re-projection, then the feeds."""
+    a_, b_ = (t, p) if t["engine"] == ENGINE_A else (p, t)
+    pa_, pb_ = a_["position"], b_["position"]
+    stop_exit = mech_class(a_["anat"]["mech"]) == "STOP" or mech_class(b_["anat"]["mech"]) == "STOP"
+    ia, ib, fa, fb = pa_["optionSlInitial"], pb_["optionSlInitial"], pa_["optionSlFinal"], pb_["optionSlFinal"]
+    if stop_exit and ia is not None and ib is not None and abs(ia - ib) > 0.01:
+        moved = (f"; {_who(a_)}'s line then moved to {px(fa)} (phase 34 re-derives the option stop from the live delta every 10 s)"
+                 if a_["engine"] == ENGINE_A and fa is not None and abs(fa - ia) > 0.01 else "")
+        return (f"The two engines' stops differed from the fill: {_who(a_)}'s option stop started at {px(ia)} (its stock stop {px(pa_['equitySl'])}), "
+                f"{_who(b_)}'s at {px(ib)} (its stock stop {px(pb_['equitySl'])}){moved}. The plans differed before any re-projection, so it is not "
+                f"the re-projection alone. One case: an anecdote, not a lesson.")
+    if (a_["engine"] == ENGINE_A and b_["engine"] == ENGINE_B and a_["baseBook"] != "FUDKII" and stop_exit
+            and abs((fa or 0) - (fb or 0)) > 0.01):
+        return (f"The one rule the engines run differently decided it: both started from the same line, {_cap(ENGINE_A)} re-derives the option stop "
+                f"from the live delta every 10 s, so its line rose to {px(fa)} as the stock moved against the trade; {ENGINE_B} holds the line set "
+                f"at the fill ({px(fb)}). On record this decided only 3 option-triggers — an anecdote, not a lesson.")
+    return "The engines run the same rules here; the difference is feed timing on one exit or fill."
+
+
+def lesson(t: Mapping[str, Any], p: Mapping[str, Any], parts: Mapping[str, float], gap: float, ev: Mapping[str, Any], *,
+           separable: bool = True) -> dict[str, Any]:
     """The first rule that holds (card_spec.md §5.4), in two lines: what decided THIS pair (the mechanism that fired first, or
     the stop rule, or the engine), graded on its own pooled record, and — only when the pooled record holds it across both
-    windows and both engines — the systematic parameter difference between the two books, with every parameter in it. The
-    headline ``grade`` is the stronger of the two; each line keeps its own. A refusal or a halt is never a lesson."""
+    windows and both engines — the systematic parameter difference between the two books, with every parameter in it. A
+    stop-rule pair decided by the stock-stop rules' bid cap firing first has a third: the rule pair's own record (``also``;
+    ITC 8 Oct RT-N stop-E: the cap's 3 cases are an anecdote, RT-N's current rule beat stop-E 8 of 10 — lessons.md L6). The
+    headline ``grade`` is the strongest of them, unless this pair runs against the pooled record of what decided it (the
+    exception: then the other lines are context, not this card's lesson); each line keeps its own. A refusal or a halt is
+    never a lesson."""
     refs = ev.get("refusals") or {}
     if parts["refusal"] >= 0.5 * gap:
         return _no_lesson("artefact_refusal", "paper artefact: a stale-book refusal decided it", "paper artefact",
@@ -752,39 +901,57 @@ def lesson(t: Mapping[str, Any], p: Mapping[str, Any], parts: Mapping[str, float
                           f"{hms(side['anat']['final']['ts'])} — a halt or a forced flatten, not a book rule.")
     decided: dict[str, Any]
     systematic: dict[str, Any] | None = None
-    if t["engine"] == p["engine"] and t["baseBook"] == p["baseBook"]:
+    also: dict[str, Any] | None = None
+    same_book = t["baseBook"] == p["baseBook"]
+    if same_book and t["rule"] != p["rule"]:
+        # the stop rule, on this engine's own sibling or on the other engine's copy under another rule (PGEL 8 Oct: 100 % of
+        # the gap is the stop rule, through this fill's own sibling)
         e = contrast_evidence(ev, f"{t['label']} -> {p['label']}", True)
-        e["what"] = f"{t['label']} vs {p['label']} on the same fill"
+        e["what"] = f"{t['label']} vs {p['label']}" + (" on the same fill" if t["engine"] == p["engine"] else ", the other engine's copy")
         key = "stop_rule"
-        decided = {**e, "params": param_diffs(t["params"], p["params"], ("stop_mode", "eq_stop_area_pct_s", "max_premium_loss_pct", "sustain_s")),
-                   "text": f"The stop rule alone made this difference. Pooled, {e['text']}"}
-    elif t["engine"] != p["engine"] and t["baseBook"] == p["baseBook"] and t["rule"] == p["rule"]:
+        params = param_diffs(t["params"], p["params"], STOP_RULE_PARAMS)
+        if t["engine"] == p["engine"]:
+            lead = "The stop rule alone made this difference."
+        elif separable:
+            lead = (f"{_cap(_who(p))} is the other engine's copy under another stop rule: the stop rule made {inr(parts['stop_rule'], True)} of the "
+                    f"{inr(gap, True)} (through this fill's own sibling under that rule); the rest is the other engine's own exit and fills.")
+        else:
+            lead = (f"{_cap(_who(p))} is the other engine's copy under another stop rule; this fill has no sibling under that rule, so the stop rule "
+                    "cannot be split from the engine here.")
+        cap_side = _cap_first(t, p)
+        if cap_side is not None:
+            held = p if cap_side is t else t
+            ce = cap_first_evidence(ev, t["baseBook"], card_says_cap=cap_side is p)
+            ce["what"] = "the stock-stop rules' 25 % bid cap firing first"
+            mins = (cap_side["anat"]["final"]["ts"] - cap_side["openedTs"]) / 60
+            who_cap, who_held = ("This trade", _who(p)) if cap_side is t else (_cap(_who(p)), "this trade")
+            fired = (f"{who_cap}'s 25 % premium cap on the bid sold at once {mins:.0f} min after the fill, at {pct(cap_side['anat']['D'], cap_side['e'])} "
+                     f"of paid, while {who_held} under the {RULE_NAME.get(held['rule'], held['rule'])} held and left on {held['anat']['mech']} at "
+                     f"{pct(held['anat']['D'], held['e'])}.")
+            decided = {**ce, "params": params, "text": f"{lead} {fired} Pooled, {ce['text']}"}
+            also = {**e, "params": [], "text": f"For this rule pair, {e['text']}"}
+        else:
+            decided = {**e, "params": params, "text": f"{lead} Pooled, {e['text']}"}
+    elif same_book and t["engine"] != p["engine"]:
         e = contrast_evidence(ev, f"{SHORT.get(t['baseBook'], t['baseBook'])} -> {SHORT.get(p['baseBook'], p['baseBook'])}",
                               p["engine"] == ENGINE_B)
         e["what"] = f"{ENGINE_A} vs {ENGINE_B}, the same book"
-        a_, b_ = (t, p) if t["engine"] == ENGINE_A else (p, t)
-        reproj = (a_["engine"] == ENGINE_A and b_["engine"] == ENGINE_B and a_["baseBook"] != "FUDKII"
-                  and (mech_class(a_["anat"]["mech"]) == "STOP" or mech_class(b_["anat"]["mech"]) == "STOP")
-                  and abs((a_["position"]["optionSlFinal"] or 0) - (b_["position"]["optionSlFinal"] or 0)) > 0.01)
-        why = (f"The one rule the engines run differently decided it. {_cap(ENGINE_A)} re-derives the option stop from the live delta every 10 s, "
-               f"so its line rose to {px(a_['position']['optionSlFinal'])} as the stock moved against the trade; {ENGINE_B} holds the line set "
-               f"at the fill ({px(b_['position']['optionSlFinal'])}). On record this decided only 3 option-triggers — an anecdote, not a lesson."
-               if reproj else "The engines run the same rules here; the difference is feed timing on one exit or fill.")
         key = "engine"
-        decided = {**e, "params": [], "text": f"Same book and rule in the other engine. {why} Pooled {ENGINE_A} vs {ENGINE_B}, {e['text']}"}
+        decided = {**e, "params": [], "text": f"Same book and rule in the other engine. {_engine_why(t, p)} Pooled {ENGINE_A} vs {ENGINE_B}, {e['text']}"}
     else:
         pair = contrast_evidence(ev, f"{t['label']} -> {p['label']}", True)
         pair["what"] = f"{p['label']}'s exits over {t['label']}'s on the same trigger"
         if pair["grade"] == GRADE_SYSTEMATIC:
             systematic = {**pair, "params": param_diffs(t["params"], p["params"]),
                           "text": f"{p['label']}'s exit set over {t['label']}'s: {pair['text']}"}
+        book_pair = f". For this book pair, {pair['text']} [book pair: {pair['strength']}]"
         gap_s = p["anat"]["final"]["ts"] - t["anat"]["final"]["ts"]
         if abs(gap_s) < 5:
             key = "same_time"
             decided = {**pair, "what": "both left within 5 s", "params": [],
                        "text": "Both left within 5 s of each other: the difference is in the fills and the rungs; no rule fired at a different time"}
             if systematic is None:
-                decided["text"] += f". For this book pair, {pair['text']} [{pair['strength']}]"
+                decided["text"] += book_pair
         else:
             first = t if gap_s > 0 else p
             fam = "current" if first["rule"] == "current" else "stock-stop mirror"
@@ -816,15 +983,18 @@ def lesson(t: Mapping[str, Any], p: Mapping[str, Any], parts: Mapping[str, float
             decided = {**fo, "params": param_diffs(t["params"], p["params"], MECH_PARAMS.get(mc)),
                        "text": f"{what} Pooled, {fo['text']}"}
             if systematic is None:
-                decided["text"] += f". For this book pair, {pair['text']} [{pair['strength']}]"
-    evidence = [decided] + ([systematic] if systematic is not None else [])
-    head = systematic if systematic is not None else decided
-    text = f"{decided['text']} [{decided['strength']}]."
+                decided["text"] += book_pair
+    evidence = [decided] + [x for x in (also, systematic) if x is not None]
+    # a pair that runs against the pooled record of what decided it keeps that grade: the other lines are context
+    head = decided if decided["strength"] == EXCEPTION else max(evidence, key=lambda x: (GRADE_RANK.get(x["grade"], 0), x is decided))
+    text = f"{decided['text']} [{decided['what']}: {decided['strength']}]."
+    if also is not None:
+        text += f" {also['text']} [{also['what']}: {also['strength']}]."
     if systematic is not None:
-        text += (f" Systematic across the record — {systematic['text']} [{systematic['strength']}]. The parameters in that set: "
+        text += (f" Systematic across the record — {systematic['text']} [{systematic['what']}: {systematic['strength']}]. The parameters in that set: "
                  + ("; ".join(f"{d['label']} {d['this']} → {d['peer']}" for d in systematic["params"]) or "none differ") + ".")
     return {"key": key, "grade": head["grade"], "gradeWhy": f"{head['what']}: {head['strength']}, {head['n']} cases",
-            "strength": head["strength"], "decided": decided, "systematic": systematic, "params": decided["params"],
+            "strength": head["strength"], "decided": decided, "systematic": systematic, "also": also, "params": decided["params"],
             "evidence": evidence, "text": text}
 
 
@@ -846,15 +1016,44 @@ def _rank(r: Mapping[str, Any], t: Mapping[str, Any]) -> tuple[Any, ...]:
             BOOK_ORDER.index(r["baseBook"]) if r["baseBook"] in BOOK_ORDER else 99, RULE_ORDER.get(r["rule"], 9), r["openedTs"])
 
 
+def self_refusal(t: Mapping[str, Any]) -> dict[str, Any] | None:
+    """This trade's own refused exit, MODELLED as the decomposition models it: had the first priced refused exit filled at
+    the price the engine recorded then, the trade would have made ``net − q × rho``. A paper artefact when that moved at
+    least ₹100 and at least half the net, or flipped its sign — the result then rests on the paper matcher, not on a rule
+    (CONCOR 8 Oct RT-Y-F stop-E: +₹1,680 here; −₹1,945 had the 10:18:37 stock-stop exit filled at 9.85)."""
+    a = t.get("anat")
+    if t.get("status") != "CLOSED" or a is None or a["refused"] is None or t["net"] is None:
+        return None
+    eff = t["q"] * a["rho"]
+    if abs(eff) < 0.5:
+        return None
+    net, cf = t["net"], t["net"] - eff
+    artefact = abs(eff) >= 100 and (abs(eff) >= 0.5 * abs(net) or (net >= 0) != (cf >= 0))
+    r = a["refused"]
+    age = f"book {r['ageMs'] / 1000:.1f} s old" if r.get("ageMs") else "a stale book"
+    text = (f"This trade's own {r['kind']} exit was refused at {hms(r['ts'])} ({age}); it then left on {a['mech']} at {hms(a['final']['ts'])} "
+            f"({px(a['final']['fill'])}). Had the refused exit filled at {px(r['executable'])}, the price the engine recorded then (MODELLED), "
+            f"it would have made {inr(cf)} instead of {inr(net)}: the refusal moved {inr(eff, True)}.")
+    if artefact:
+        text += " Its result is a paper artefact, not a lesson."
+    return {"effect": eff, "netIfFilled": cf, "artefact": artefact, "kind": r["kind"], "ts": r["ts"], "executable": r["executable"],
+            "ageMs": r.get("ageMs"), "text": text}
+
+
 def peer_block(t: Mapping[str, Any], records: Sequence[Mapping[str, Any]], *, now: float, ev: Mapping[str, Any],
-               sib: Mapping[tuple[str, str], Mapping[str, Mapping[str, Any]]], src: Mapping[tuple[str, str], tuple[str, str]]) -> dict[str, Any]:
-    """The card's "same option elsewhere" block: every peer, and for every one that made more, the parts and the lesson."""
+               sib: Mapping[tuple[str, str], Mapping[str, Mapping[str, Any]]], src: Mapping[tuple[str, str], tuple[str, str]],
+               unread: str = "") -> dict[str, Any]:
+    """The card's "same option elsewhere" block: every peer, and for every one that made more, the parts and the lesson.
+    ``unread`` names a twin that was not read: every "no book or engine" line then says it covers this engine only."""
     peers = peers_of(t, records, now)
     rows = sorted((_peer_row(r, t) for r in peers), key=lambda x: (x["net"] is None, -(x["net"] or 0.0), x["openedTs"]))
+    scope = f"this engine only: {unread} was not read" if unread else ""
     base = {"contract": t["contract"], "scripCode": t["scripCode"], "rows": rows, "n": len(peers), "better": [], "betterExists": False,
-            "betterCount": 0, "class": "no peer", "headline": "", "outcome": None, "pooledTo": ev.get("pooledTo")}
+            "betterCount": 0, "class": "no peer", "headline": "", "outcome": None, "pooledTo": ev.get("pooledTo"), "scope": scope,
+            "selfRefusal": self_refusal(t)}
+    where = f" ({scope})" if scope else ""
     if not peers:
-        base["headline"] = "No other book or engine held this option at the same time."
+        base["headline"] = f"No other book{'' if unread else ' or engine'} held this option at the same time{where}."
         return base
     if t["status"] != "CLOSED":
         base.update({"class": "open", "headline": "peers: open — this trade is still running; the comparison comes when it closes"})
@@ -872,29 +1071,31 @@ def peer_block(t: Mapping[str, Any], records: Sequence[Mapping[str, Any]], *, no
     best = min(closed, key=lambda r: _rank(r, t))
     delta = best["net"] - t["net"]
     worse = sum(1 for r in closed if r["net"] < t["net"] - 1)
+    # the better peers, identical outcomes grouped under the one closest to this trade (its own sibling, then its own book,
+    # then its rule), which explains the gap best; the headline names that same one, so the card says one name for it
+    groups: dict[tuple[Any, ...], list[Mapping[str, Any]]] = {}
+    for r in better:
+        k = (r["engine"], round(r["net"], 2), round(r["x"], 4), round(r["e"], 4), r["q"], round(r["anat"]["final"]["ts"]))
+        groups.setdefault(k, []).append(r)
+    for members in groups.values():
+        members.sort(key=lambda r: (r["engine"] != t["engine"], r["baseBook"] != t["baseBook"], r["rule"] != t["rule"], _rank(r, t)))
+    named = next((m[0] for m in groups.values() if any(r is best for r in m)), best)
     if delta < thr:
         base["class"] = "best or within threshold"
-        base["headline"] = (f"No book or engine did meaningfully better on this option. The best peer, {_who(best)}, made {inr(best['net'])}, "
-                            f"{inr(delta, True)} against this trade's {inr(t['net'])}. {worse} of {len(closed)} peers did worse.")
+        base["headline"] = (f"No book{'' if unread else ' or engine'} did meaningfully better on this option{where}. The best peer, {_who(best)}, made "
+                            f"{inr(best['net'])}, {inr(delta, True)} against this trade's {inr(t['net'])}. {worse} of {len(closed)} peers did worse.")
         if t["net"] < 0 and best["net"] < 0:
             base["headline"] += " Every book on this option lost, so the trigger or its direction was the problem, not the exit."
     else:
         base["class"] = ("peer lost less (both lost)" if (t["net"] < 0 and best["net"] < 0) else
                          "peer won where this lost" if t["net"] < 0 <= best["net"] else "peer won more")
         n_match = sum(1 for r in closed if r is not best and r["net"] >= best["net"] - 1)
-        base["headline"] = (f"{_who(best)} made {inr(delta)} more on this same option: {inr(best['net'])} against {inr(t['net'])}"
-                            + (f" ({n_match} other peer(s) matched it)" if n_match else "") + "."
+        base["headline"] = (f"{_cap(_who(named))} made {inr(delta)} more on this same option: {inr(best['net'])} against {inr(t['net'])}"
+                            + (f" ({n_match} other {'peer' if n_match == 1 else 'peers'} matched it)" if n_match else "") + "."
                             + (" Every book on this option lost; the best only lost less. The trigger or its direction was the problem, "
                                "not the exit." if base["class"] == "peer lost less (both lost)" else ""))
-    # the better peers, identical outcomes grouped under the one the study's tie order puts first
-    groups: dict[tuple[Any, ...], list[Mapping[str, Any]]] = {}
-    for r in better:
-        k = (r["engine"], round(r["net"], 2), round(r["x"], 4), round(r["e"], 4), r["q"], round(r["anat"]["final"]["ts"]))
-        groups.setdefault(k, []).append(r)
     out = []
     for members in groups.values():
-        # identical outcomes: the one closest to this trade explains it best (its own sibling, then its own book, then its rule)
-        members.sort(key=lambda r: (r["engine"] != t["engine"], r["baseBook"] != t["baseBook"], r["rule"] != t["rule"], _rank(r, t)))
         p = members[0]
         gap = p["net"] - t["net"]
         parts, chain, note = pair_parts(t, p, sib, src)
@@ -910,15 +1111,17 @@ def peer_block(t: Mapping[str, Any], records: Sequence[Mapping[str, Any]], *, no
             "chainVia": None if chain is None else _peer_row(chain, t), "note": note, "meaningful": meaningful,
             "exits": {"this": _exit_side(chain or t), "peer": _exit_side(p), "thisIsChain": chain is not None},
             "paramDiffs": param_diffs(t["params"], p["params"]) if (t["baseBook"] != p["baseBook"] or t["rule"] != p["rule"]) else [],
-            "lesson": lesson(t, p, parts, gap, ev) if meaningful else {
+            "lesson": lesson(t, p, parts, gap, ev, separable=not note) if meaningful else {
                 "key": "within_threshold", "grade": None, "gradeWhy": "", "strength": "", "decided": None, "systematic": None,
-                "params": [], "evidence": [],
+                "also": None, "params": [], "evidence": [],
                 "text": f"Within {inr(thr)} (₹100 or 0.5 % of the premium) of this trade: no lesson is read into it."},
         })
+    # the named one's group first: the chip, the headline and the first group say the same peer
+    out.sort(key=lambda g: g["peer"]["positionId"] != named["positionId"] or g["peer"]["engine"] != named["engine"])
     base["better"] = out
     base["betterCount"] = len(better)
     base["betterExists"] = any(g["meaningful"] for g in out)
-    base["best"] = None if delta < thr else _peer_row(best, t)
+    base["best"] = None if delta < thr else _peer_row(named, t)
     base["delta"] = delta
     return base
 
@@ -934,16 +1137,88 @@ def sibling_maps(records: Sequence[Mapping[str, Any]]) -> tuple[dict[tuple[str, 
 
 
 def peer_blocks(cards: Sequence[Mapping[str, Any]], records: Sequence[Mapping[str, Any]], *, engine: str, now: float,
-                ev: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
-    """Position id → its card's block, for every card of this engine."""
+                ev: Mapping[str, Any], unread: str = "") -> dict[str, dict[str, Any]]:
+    """Position id → its card's block, for every card of this engine. ``unread``: the twin's name when it was not read."""
     sib, src = sibling_maps(records)
     mine = {r["positionId"]: r for r in records if r["engine"] == engine}
     out = {}
     for c in cards:
         t = mine.get(str(c.get("id") or ""))
         if t is not None:
-            out[t["positionId"]] = peer_block(t, records, now=now, ev=ev, sib=sib, src=src)
+            out[t["positionId"]] = peer_block(t, records, now=now, ev=ev, sib=sib, src=src, unread=unread)
     return out
+
+
+# -- a record from the twin: the shape this code reads ---------------------------------------------------------------
+
+_NUM_T = (int, float)
+#: key → the types it may hold; a CLOSED record must also hold the closed keys, its anatomy the anatomy keys
+_SHAPE: dict[str, tuple[type, ...]] = {
+    "engine": (str,), "positionId": (str,), "book": (str,), "baseBook": (str,), "rule": (str,), "cls": (str,), "label": (str,),
+    "scripCode": (str,), "status": (str,), "openedTs": _NUM_T, "q": _NUM_T, "e": _NUM_T, "rEn": _NUM_T, "lots": _NUM_T,
+    "lotSize": _NUM_T, "params": (Mapping,), "refusals": (list,), "position": (Mapping,), "audit": (bool,),
+    "mirrorOf": (str, type(None)), "tradeId": (str, type(None)), "exitReason": (str, type(None)), "contract": (str, type(None)),
+    "entryAudit": (Mapping, type(None)), "closedTs": (*_NUM_T, type(None)), "signalId": (str, type(None)),
+}
+_CLOSED: dict[str, tuple[type, ...]] = {"closedTs": _NUM_T, "net": _NUM_T, "c": _NUM_T, "x": _NUM_T, "anat": (Mapping,)}
+_ANAT: dict[str, tuple[type, ...]] = {"F": _NUM_T, "D": _NUM_T, "X": _NUM_T, "T": _NUM_T, "rho": _NUM_T, "xCf": _NUM_T, "rs": _NUM_T,
+                                      "rungShare": _NUM_T, "rungs": (list,), "final": (Mapping,), "mech": (str,),
+                                      "refused": (Mapping, type(None))}
+_FINAL: dict[str, tuple[type, ...]] = {"ts": _NUM_T, "fill": _NUM_T, "ref": _NUM_T, "level": (*_NUM_T, type(None))}
+_POSITION = ("optionSlInitial", "optionSlFinal", "armedTs", "peakMid", "trailDwell", "equitySl")
+
+
+def _bad(d: Mapping[str, Any], shape: Mapping[str, tuple[type, ...]], where: str) -> str | None:
+    for k, types in shape.items():
+        v = d.get(k)
+        if k not in d or (isinstance(v, bool) and bool not in types) or not isinstance(v, types):
+            return f"{where}{k} is {type(v).__name__ if k in d else 'missing'}"
+    return None
+
+
+def record_problem(r: Any) -> str | None:
+    """What keeps a record (the twin's ``/api/review/legs``) from being compared here, or None when it has the shape
+    ``record`` builds. The twin is deployed and rolled back on its own, so a record from other code is checked, never
+    trusted: a bad one is left out with a note instead of taking the page down (safety review, 10 Oct)."""
+    if not isinstance(r, Mapping):
+        return "not an object"
+    bad = _bad(r, _SHAPE, "")
+    if bad:
+        return bad
+    if r["rule"] not in RULE_NAME:
+        return f"rule {r['rule']!r} is not one this code knows"
+    if r["q"] <= 0 or r["e"] <= 0:
+        return "qty or entry is not positive"
+    pos = r["position"]
+    for k in _POSITION:
+        if pos.get(k) is not None and (isinstance(pos.get(k), bool) or not isinstance(pos.get(k), _NUM_T)):
+            return f"position.{k} is {type(pos.get(k)).__name__}"
+    if r["status"] != "CLOSED":
+        return None if r["status"] == "OPEN" else f"status {r['status']!r}"
+    bad = _bad(r, _CLOSED, "") or _bad(r["anat"], _ANAT, "anat.") or _bad(r["anat"]["final"], _FINAL, "anat.final.")
+    if bad:
+        return bad
+    for g in r["anat"]["rungs"]:
+        if not isinstance(g, Mapping) or _bad(g, {"price": _NUM_T, "qty": _NUM_T, "ts": _NUM_T}, ""):
+            return "anat.rungs holds a leg of another shape"
+    ref = r["anat"]["refused"]
+    if ref is not None and _bad(ref, {"ts": _NUM_T, "kind": (str,), "text": (str,), "executable": (*_NUM_T, type(None)),
+                                      "ageMs": (*_NUM_T, type(None)), "limitMs": (*_NUM_T, type(None))}, "anat.refused."):
+        return "anat.refused is of another shape"
+    return None
+
+
+def checked_records(records: Iterable[Any]) -> tuple[list[dict[str, Any]], list[str]]:
+    """The records this code can compare, and what was wrong with each one left out."""
+    good: list[dict[str, Any]] = []
+    bad: list[str] = []
+    for r in records:
+        why = record_problem(r)
+        if why is None:
+            good.append(r)
+        else:
+            bad.append(f"{(r.get('positionId') if isinstance(r, Mapping) else None) or '?'}: {why}")
+    return good, bad
 
 
 # -- the evidence ------------------------------------------------------------------------------------------------------
@@ -974,7 +1249,7 @@ def load_evidence(data_dir: Path | None) -> dict[str, Any]:
 
 
 __all__ = [
-    "GRADE_ONE_OFF", "GRADE_SUGGESTIVE", "GRADE_SYSTEMATIC", "PARTS", "build_records", "decompose", "lesson", "load_evidence",
-    "mechanism", "overlaps", "pair_parts", "param_diffs", "params_json", "peer_block", "peer_blocks", "peers_of", "record",
-    "refusals_of", "sibling_maps", "whole_rupees",
+    "GRADE_ONE_OFF", "GRADE_SUGGESTIVE", "GRADE_SYSTEMATIC", "PARTS", "build_records", "cap_first_evidence", "checked_records",
+    "decompose", "lesson", "load_evidence", "mechanism", "overlaps", "pair_parts", "param_diffs", "params_json", "peer_block",
+    "peer_blocks", "peers_of", "record", "record_problem", "refusals_of", "self_refusal", "sibling_maps", "whole_rupees",
 ]

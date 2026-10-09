@@ -10,6 +10,7 @@ import ast
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import httpx
@@ -200,8 +201,9 @@ def test_a_halt_is_never_a_lesson():
 
 
 def test_the_lesson_names_the_systematic_difference_only_where_the_pooled_record_holds_it():
-    """RT-X → RT-Y on the same fill is the one contrast the study found in both windows and both engines (12 better, 3 worse):
-    it is graded systematic and names every parameter in the set; what decided this pair keeps its own, weaker grade."""
+    """RT-X → RT-Y on the same fill is one of the two contrasts the study found in both windows and both engines (L1: RT-X →
+    RT-Y 12 better, 3 worse, and RT-N → RT-Y): it is graded systematic and names every parameter in the set; what decided
+    this pair keeps its own, weaker grade."""
     a, b = records(trade("a", "FUDKII_RT_X", legs=[leg("exit", 900, 34.40, T0 + 120, ref=34.65, reason="SL-OP", stop={"level": 34.65})],
                          reason="SL-OP", sl=34.65),
                    trade("b", "FUDKII_RT_Y", legs=TRAIL))
@@ -422,3 +424,328 @@ def test_the_order_path_never_loads_the_review_reads():
             "print(any(m.startswith('kotsin_nse.api.review') for m in sys.modules))")
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True, cwd=PKG.parent).stdout.split()
     assert out == ["False"], out
+
+
+# -- the 10 Oct review's fixes (numbers, safety, UI lenses) ---------------------------------------------------------------
+
+
+def test_only_the_l1_contrasts_are_systematic_and_fudkii_to_w1_is_not():
+    """lessons.md §4: only L1 (RT-Y's exits over RT-X's and RT-N's) holds in both windows. FUDKII → RT-Y-W1 was graded
+    systematic on a 3/3 tie and −₹13,507 to 1 Oct: each window must now lean the card's way in cases and in rupees."""
+    ev = rp.load_evidence(None)
+    systematic = {(con, says) for con in ev["contrasts"] for says in (True, False)
+                  if rp.contrast_evidence(ev, con, says)["grade"] == rp.GRADE_SYSTEMATIC}
+    assert systematic == {("RT-X -> RT-Y", True), ("RT-N -> RT-Y", True)}
+    w1 = rp.contrast_evidence(ev, "FUDKII -> RT-Y-W1", True)
+    assert w1["grade"] == rp.GRADE_SUGGESTIVE and w1["strength"].startswith("consistent in 5–9 Oct only")
+    a, b = records(trade("a", "FUDKII", legs=[leg("exit", 900, 35.0, T0 + 200, ref=35.10, reason="SL-OP", stop={"level": 35.10})],
+                         reason="SL-OP", sl=35.10),
+                   trade("b", "FUDKII_RT_Y_W1", legs=[leg("exit", 900, 42.0, T0 + 3000, ref=42.10)]))
+    les = rp.lesson(a, b, parts_of(a, b, [a, b]), gap(a, b), ev)
+    assert les["systematic"] is None and les["grade"] != rp.GRADE_SYSTEMATIC
+
+
+def test_a_pair_against_the_record_of_what_decided_it_is_not_promoted():
+    """TCS / INDIGO RT-N: RT-N's give-back sold first and RT-Y did better — the pooled record says the early give-back is
+    usually right (7 of 8), so this card is the exception; RT-N → RT-Y's systematic line is shown as context only."""
+    a, b = records(trade("a", "FUDKII_RT_N", legs=[leg("exit", 900, 36.0, T0 + 900, ref=36.10, reason="TRAIL")]),
+                   trade("b", "FUDKII_RT_Y", legs=[leg("exit", 900, 41.0, T0 + 4000, ref=41.10)]))
+    les = rp.lesson(a, b, parts_of(a, b, [a, b]), gap(a, b), rp.load_evidence(None))
+    assert les["systematic"] is not None and les["systematic"]["grade"] == rp.GRADE_SYSTEMATIC
+    assert les["decided"]["strength"] == rp.EXCEPTION and les["grade"] == rp.GRADE_ONE_OFF
+
+
+def _paytm(engine_b: str = "phase 35") -> list[dict]:
+    """PAYTM 8 Oct 1500PE: RT-X's current rule held to a late option stop; its stop-E mirror's 25 % premium cap on the bid
+    sold at once (lessons.md L5a)."""
+    q, e = 2900, 24.70
+    cur = trade("cur", "FUDKII_RT_X", q=q, e=e, lot=725, reason="SL-OP", charges=120.0,
+                legs=[leg("exit", q, 13.90, T0 + 5400, ref=14.00, reason="SL-OP", stop={"level": 14.10, "triggerOn": "option mid"})])
+    mir = trade("mir", "FUDKII_RT_X_SE", q=q, e=e, lot=725, reason="SL-OP", charges=145.0, note="stop-rule mirror of cur",
+                legs=[leg("exit", q, 18.52, T0 + 600, ref=18.52, reason="SL-OP", stop={"level": 18.525, "triggerOn": "option bid"})])
+    return records(cur, mir, engine=engine_b)
+
+
+def test_the_bid_cap_is_named_and_graded_on_its_own_pooled_record():
+    """The stop-E mirror's 25 % premium cap on the bid decided it: the card names the cap as a parameter (off under the
+    option stop, 25 % under stop E) and grades it on L5a's 9 copies (FUDKII and RT-X, 9 of 9 for the cap): suggestive."""
+    a, b = _paytm()
+    assert b["anat"]["mech"] == rp.CAP_MECH
+    p = parts_of(a, b, [a, b])
+    exact(p, a, b)
+    les = rp.lesson(a, b, p, gap(a, b), rp.load_evidence(None))
+    assert les["key"] == "stop_rule" and les["decided"]["what"] == "the stock-stop rules' 25 % bid cap firing first"
+    assert les["grade"] == rp.GRADE_SUGGESTIVE and les["decided"]["n"] == 9 and "9 times and holding 0" in les["decided"]["text"]
+    assert {d["key"]: (d["this"], d["peer"]) for d in les["decided"]["params"]}["bid_cap_pct"] == (
+        "off (the option stop rules)", "25 % under paid, sold at once")
+    assert les["also"] is not None and les["also"]["what"].startswith("RT-X vs RT-X stop-E")
+
+
+def test_the_other_engines_copy_under_another_rule_is_a_stop_rule_lesson():
+    """PGEL 8 Oct: phase 34's FUDKII against phase 35's FUDKII stop-E is 100 % stop rule (through phase 34's own stop-E):
+    a stop-rule lesson, not a first-out one."""
+    a = records(trade("a", "FUDKII", legs=[leg("exit", 900, 30.0, T0 + 3000, ref=30.1, reason="SL-EQ")], reason="SL-EQ"), engine="phase 34")[0]
+    a2 = records(trade("a2", "FUDKII_SE", note="stop-rule mirror of a", reason="SL-OP",
+                       legs=[leg("exit", 900, 31.0, T0 + 600, ref=31.0, reason="SL-OP", stop={"level": 26.0, "triggerOn": "option bid"})]),
+                 engine="phase 34")[0]
+    b = records(trade("b", "FUDKII_SE", note="stop-rule mirror of pos-b0", reason="SL-OP",
+                      legs=[leg("exit", 900, 31.0, T0 + 600, ref=31.0, reason="SL-OP", stop={"level": 26.0, "triggerOn": "option bid"})]))[0]
+    p = parts_of(a, b, [a, a2, b])
+    exact(p, a, b)
+    les = rp.lesson(a, b, p, gap(a, b), rp.load_evidence(None))
+    assert les["key"] == "stop_rule" and "the other engine's copy" in les["decided"]["text"] and les["grade"] == rp.GRADE_SUGGESTIVE
+
+
+def test_the_engines_stops_set_at_the_fill_come_before_the_re_projection():
+    """AMBER 8 Oct: the two engines' RT-Y plans differed at the fill (stock stops 6,723.8 against 6,821.15, option stops
+    134.12 against 125.93); phase 34's re-projection only moved its line from 134.12 to 142.01."""
+    pa, ta = trade("a", "FUDKII_RT_Y", q=400, e=167.9, lot=100, sl0=134.12, sl=142.01, reason="SL-OP",
+                   legs=[leg("exit", 400, 135.88, T0 + 1200, ref=138.30, reason="SL-OP", stop={"level": 142.01, "triggerOn": "option mid"})])
+    pb, tb = trade("b", "FUDKII_RT_Y", q=400, e=167.9, lot=100, sl0=125.93, sl=125.93, reason="SL-OP",
+                   legs=[leg("exit", 400, 123.19, T0 + 1900, ref=124.40, reason="SL-OP", stop={"level": 125.93, "triggerOn": "option mid"})])
+    pa["equity_sl"], pb["equity_sl"] = 6723.8, 6821.15
+    a = records((pa, ta), engine="phase 34")[0]
+    b = records((pb, tb), engine="phase 35")[0]
+    les = rp.lesson(b, a, parts_of(b, a, [a, b]), gap(b, a), rp.load_evidence(None))
+    assert les["key"] == "engine" and les["grade"] == rp.GRADE_ONE_OFF
+    t = les["decided"]["text"]
+    assert "differed from the fill" in t and "134.12" in t and "125.93" in t and "6723.8" in t and "142.01" in t
+    assert "The one rule the engines run differently decided it" not in t
+
+
+def test_a_cards_own_refused_exit_makes_its_result_a_paper_artefact():
+    """CONCOR 8 Oct RT-Y-F stop-E: +₹1,680 on the card, about −₹1,945 had the refused 10:18:37 exit filled at 9.85."""
+    (cur, mir), _ = _concor()
+    s = rp.self_refusal(mir)
+    assert s["artefact"] and round(s["effect"]) == 3625 and round(s["netIfFilled"], 2) == -1945.31
+    assert "paper artefact" in s["text"] and "−₹1,945" in s["text"]
+    blk = rp.peer_blocks([{"id": "mir"}], [cur, mir], engine="phase 34", now=T0 + 99999, ev=rp.load_evidence(None))["mir"]
+    assert blk["selfRefusal"]["artefact"] and blk["class"] == "best or within threshold"
+    plain = records(trade("p", "FUDKII_RT_Y", legs=TRAIL))[0]
+    assert rp.self_refusal(plain) is None
+
+
+def test_the_headline_names_the_peer_the_group_names():
+    """LTF 9 Oct: phase 35's RT-N and RT-Y left identically; the headline, the chip and the first group all name RT-Y,
+    the one closest to this RT-Y trade (the study's tie order put RT-N first)."""
+    me = records(trade("me", "FUDKII_RT_Y", legs=[leg("exit", 900, 30.0, T0 + 9000, ref=30.1, reason="SL-OP")], reason="SL-OP"),
+                 engine="phase 34")[0]
+    out = [trade(pid, book, legs=[leg("exit", 900, 33.0, T0 + 4000, ref=33.0)]) for pid, book in (("n", "FUDKII_RT_N"), ("y", "FUDKII_RT_Y"))]
+    them = records(*out)
+    blk = rp.peer_blocks([{"id": "me"}], [me, *them], engine="phase 34", now=T0 + 99999, ev=rp.load_evidence(None))["me"]
+    assert blk["headline"].startswith("Phase 35's RT-Y made") and blk["better"][0]["peer"]["label"] == "RT-Y" and blk["best"]["label"] == "RT-Y"
+
+
+def test_a_twin_not_read_qualifies_every_no_one_did_better_line():
+    me = records(trade("me", "FUDKII_RT_Y", legs=TRAIL))[0]
+    alone = rp.peer_blocks([{"id": "me"}], [me], engine="phase 35", now=T0 + 99999, ev=rp.load_evidence(None), unread="phase 34")["me"]
+    assert alone["headline"] == "No other book held this option at the same time (this engine only: phase 34 was not read)."
+    worse = records(trade("w", "FUDKII_RT_X", legs=[leg("exit", 900, 30.0, T0 + 900)]))[0]
+    blk = rp.peer_blocks([{"id": "me"}], [me, worse], engine="phase 35", now=T0 + 99999, ev=rp.load_evidence(None), unread="phase 34")["me"]
+    assert blk["headline"].startswith("No book did meaningfully better on this option (this engine only: phase 34 was not read)")
+    assert blk["scope"] == "this engine only: phase 34 was not read"
+
+
+def test_a_final_exit_sold_in_legs_of_different_reasons_says_so_and_charges_show_paise_when_the_rupees_match():
+    rungs = [leg("target", 225, 36.40, T0 + 90, reason="TARGET")]
+    a = records(trade("a", "FUDKII_RT_Y", legs=[*rungs, leg("exit", 675, 40.35, T0 + 250, ref=41.10)], charges=177.52))[0]
+    b = records(trade("b", "FUDKII_RT_Y_W1", charges=177.91, legs=[*rungs, leg("exit", 225, 43.0, T0 + 900, ref=43.0, reason="TARGET"),
+                                                                    leg("exit", 450, 42.0, T0 + 900, ref=42.2, reason="TRAIL")]))[0]
+    p = parts_of(a, b, [a, b])
+    line = rp.part_line("exit_rule", p["exit_rule"], a, b, None)
+    assert "its final legs: TARGET 225 at 43 (decision 43), TRAIL 450 at 42 (decision 42.2)" in line
+    assert rp.part_line("charges", p["charges"], a, b, None).endswith("₹177.52 here vs ₹177.91")
+
+
+def test_a_refused_exits_reason_is_cut_at_a_word_with_an_ellipsis():
+    long = "underlying confirmed the breach at 444.30 — no grace; " * 5
+    assert rp._clip(long).endswith("…") and len(rp._clip(long)) <= 161 and rp._clip("short") == "short"
+
+
+def test_a_record_of_another_shape_is_named_not_compared():
+    (cur, mir), _ = _concor()
+    assert rp.record_problem(cur) is None and rp.record_problem(mir) is None
+    missing = {k: v for k, v in mir.items() if k != "mirrorOf"}
+    as_text = {**mir, "closedTs": "10:18"}
+    flag = {**mir, "q": True}
+    good, bad = rp.checked_records([cur, missing, as_text, flag, "nope", {**mir, "anat": {**mir["anat"], "final": {}}}])
+    assert good == [cur] and len(bad) == 5 and bad[0].startswith("mir: mirrorOf is missing")
+
+
+@pytest.mark.asyncio
+async def test_twin_records_of_another_shape_cost_only_themselves(tmp_path, monkeypatch):
+    """Safety review, 10 Oct: a twin record missing ``mirrorOf`` or with ``closedTs`` as text gave HTTP 500 and none of
+    this engine's cards (and was cached for 10 min). Now each is checked: a bad one is left out with a note, the good
+    ones are still compared; and should the comparison itself fail on the twin's records, the page falls back to this
+    engine's own."""
+    _ea, a = await _app(tmp_path, "a", A_ID, _a_rows())
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=a), base_url="http://t") as c:
+        legs = (await c.get("/api/review/legs", params={"day": "2026-10-09"})).json()
+    good = next(r for r in legs["records"] if r["positionId"] == "a-y")
+    broken = {**{k: v for k, v in good.items() if k != "mirrorOf"}, "positionId": "a-x"}
+    texty = {**good, "positionId": "a-z", "closedTs": "09:20"}
+
+    class Twin(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"engine": "phase 34", "records": [good, broken, texty]})
+
+    monkeypatch.setattr(peer, "_client", lambda: httpx.AsyncClient(transport=Twin(), timeout=5))
+    _eb, b = await _app(tmp_path, "b", B_ID, _b_rows())
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=b), base_url="http://t") as c:
+        r = await c.get("/api/review", params={"day": "2026-10-09", "mirrors": 1, "peers": 1})
+        assert r.status_code == 200
+        body = r.json()
+        assert any("2 of phase 34's records are of a shape this code does not read" in n for n in body["notes"])
+        y = next(t for t in body["trades"] if t["id"] == "b-y")
+        assert {x["positionId"] for x in y["peers"]["rows"]} == {"b-y-se", "a-y"}, "the good twin record is still compared"
+
+        def boom(*_a, **_k):
+            raise KeyError("mirrorOf")
+
+        real = rp.peer_blocks
+        monkeypatch.setattr(rp, "peer_blocks", lambda cards, recs, **kw: boom() if any(x["engine"] == "phase 34" for x in recs) else real(cards, recs, **kw))
+        r = await c.get("/api/review", params={"day": "2026-10-08", "to": "2026-10-09", "mirrors": 1, "peers": 1})
+        assert r.status_code == 200
+        body = r.json()
+        assert any("records could not be compared (KeyError)" in n for n in body["notes"]) and body["twin"]["read"] is False
+        y = next(t for t in body["trades"] if t["id"] == "b-y")
+        assert [x["positionId"] for x in y["peers"]["rows"]] == ["b-y-se"] and "this engine only" in y["peers"]["scope"]
+
+
+def test_a_huge_day_span_is_refused_before_a_date_list_is_built():
+    from fastapi import HTTPException
+
+    from kotsin_nse.api.routes import _review_days
+
+    t0 = time.perf_counter()
+    with pytest.raises(HTTPException) as e:
+        _review_days("0001-01-01", "9999-12-31")
+    assert e.value.status_code == 400 and time.perf_counter() - t0 < 0.05
+    assert len(_review_days("2026-09-26", "2026-10-11")) == 10, "16 calendar days, 10 sessions: still allowed"
+
+
+@pytest.mark.asyncio
+async def test_a_past_days_bars_are_kept_only_from_a_whole_read(tmp_path):
+    """Safety review, 10 Oct: a read that raced the midnight compaction got 0 bars and kept them for the life of the
+    process. A file that cannot be read now makes the read not whole and nothing of it is kept; a temp file (phase 35's
+    compaction, phase 34's rewrite of the day file) is never read as a day."""
+    import pandas as pd
+
+    from kotsin_nse.api.routes import ReviewReads
+
+    s = _settings(tmp_path, "bars")
+    e = Engine(s)
+    d = tmp_path / "bars" / "archive" / "bars"
+    d.mkdir(parents=True)
+    day = "2026-10-08"
+    rows = pd.DataFrame([{"symbol": "TCS", "ts": T0 - 86_400 + 60 * i, "o": 1.0, "h": 2.0, "l": 0.5, "c": 1.5, "v": 10.0} for i in range(5)])
+    rows.to_parquet(d / f"{day}.part-0001.parquet", index=False)
+    (d / f"{day}.part-0002.parquet").write_bytes(b"half written")
+    (d / f"{day}.tmp.parquet").write_bytes(b"the compaction's temp file")
+    reads = ReviewReads(e)
+    from datetime import date as _date
+    got = await reads.bars({"TCS"}, _date(2026, 10, 8))
+    assert got == {"TCS": []} and not reads.past_bars[_date(2026, 10, 8)], "a broken read keeps nothing"
+    (d / f"{day}.part-0002.parquet").unlink()
+    got = await reads.bars({"TCS"}, _date(2026, 10, 8))
+    assert len(got["TCS"]) == 5 and len(reads.past_bars[_date(2026, 10, 8)]["TCS"]) == 5, "read again, whole, and kept"
+    # phase 34's layout: the day file alone, rewritten through its temp name
+    rows.assign(ts=rows.ts - 86_400).to_parquet(d / "2026-10-07.parquet", index=False)
+    (d / "2026-10-07.tmp.parquet").write_bytes(b"being rewritten")
+    assert len((await reads.bars({"TCS"}, _date(2026, 10, 7)))["TCS"]) == 5
+
+
+@pytest.mark.asyncio
+async def test_old_twin_reads_are_dropped(tmp_path, monkeypatch):
+    from datetime import date as _date
+
+    from kotsin_nse.api import routes
+
+    _eb, _b = await _app(tmp_path, "b", B_ID, _b_rows())
+    reads = routes.ReviewReads(_eb)
+    old = time.time() - routes.TWIN_TTL_PAST_S - 1
+    for i in range(20):
+        reads.twin_reads[(f"2026-09-{i + 1:02d}",)] = (old, [], {"read": True})
+
+    class Down(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("refused", request=request)
+
+    monkeypatch.setattr(peer, "_client", lambda: httpx.AsyncClient(transport=Down(), timeout=5))
+    await reads.twin([_date(2026, 10, 9)])
+    assert list(reads.twin_reads) == [("2026-10-09",)]
+
+
+@pytest.mark.asyncio
+async def test_a_past_range_is_encoded_once_and_sent_again(tmp_path, monkeypatch):
+    _eb, b = await _app(tmp_path, "b", {"name": "phase 35"}, _b_rows())
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=b), base_url="http://t") as c:
+        first = await c.get("/api/review", params={"day": "2026-10-09", "peers": 1})
+        monkeypatch.setattr(rp, "peer_blocks", lambda *a, **k: (_ for _ in ()).throw(AssertionError("not computed again")))
+        again = await c.get("/api/review", params={"day": "2026-10-09", "peers": 1})
+    assert first.status_code == again.status_code == 200 and first.content == again.content
+    assert first.headers["content-type"] == "application/json"
+
+
+@pytest.mark.asyncio
+async def test_a_shadow_books_twins_go_with_it(tmp_path):
+    """UI review, 10 Oct: "shadows hidden" left RT-Y-W1's stop-E and adaptive twins on screen. Each card now says whether
+    the book whose fill it is is a shadow (``sourceShadow``), as the Options page does."""
+    rows = [trade("w", "FUDKII_RT_Y_W1", legs=TRAIL), trade("w-se", "FUDKII_RT_Y_W1_SE", note="stop-rule mirror of w", legs=TRAIL),
+            trade("y", "FUDKII_RT_Y", legs=TRAIL), trade("y-se", "FUDKII_RT_Y_SE", note="stop-rule mirror of y", legs=TRAIL)]
+    _eb, b = await _app(tmp_path, "b", {"name": "phase 35"}, rows)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=b), base_url="http://t") as c:
+        body = (await c.get("/api/review", params={"day": "2026-10-09", "mirrors": 1})).json()
+    by = {t["id"]: (t["shadow"], t["sourceShadow"], t["mirror"]) for t in body["trades"]}
+    assert by == {"w": (True, True, False), "w-se": (False, True, True), "y": (False, False, False), "y-se": (False, False, True)}
+
+
+#: the card as the review sent it before 9 Oct (75a0e1e ``review_trade``), and what 9-10 Oct added to it
+OLD_CARD_KEYS = {"id", "book", "label", "symbol", "contract", "direction", "grade", "counterTrend", "status", "qty", "entry", "exit",
+                 "exitReason", "openedTs", "closedTs", "signalTs", "net", "gross", "charges", "r", "mfeR", "maeR", "maxDdR", "stock", "option",
+                 "execution", "levels", "checks", "cause", "mirrors", "chart"}
+ADDED_CARD_KEYS = {"mirror", "variant", "sourceBook", "sourceLabel", "shadow", "sourceShadow", "triggerDirection", "engine", "day",
+                   "directionRead"}
+
+
+@pytest.mark.asyncio
+async def test_without_the_flags_every_old_field_is_as_the_review_computes_it(tmp_path):
+    """The review as it was, field by field: without ``mirrors``/``peers`` each card holds exactly the old keys plus the
+    additive ones, and every old key's value is the one ``review_day`` computes from the same rows with its old
+    arguments (no mirrors, no annotation)."""
+    from datetime import date as _date
+    from datetime import datetime as _dt
+
+    from kotsin_nse.api import review
+    from kotsin_nse.market.session import IST
+    from kotsin_nse.strategy.keys import StrategyKey
+
+    e, b = await _app(tmp_path, "b", {"name": "phase 35"}, _b_rows())
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=b), base_url="http://t") as c:
+        body = (await c.get("/api/review", params={"day": "2026-10-09"})).json()
+    start = _dt(2026, 10, 9, tzinfo=IST).timestamp()
+    rows = {k: await e.ledger.rows_between(k, start + (-3600 if k in ("signals", "events") else 0), start + 86_400 + (3 * 86_400 if k == "trades" else 0))
+            for k in ("positions", "trades", "signals", "events")}
+    old = review.review_day(positions=rows["positions"], trades=rows["trades"], signals=rows["signals"], events=rows["events"],
+                            bars_by_symbol={}, session_end=start + 86_400, labels={k.value: k.display_name for k in StrategyKey},
+                            mirror_books={k.value: (s.value, r) for k, (s, r) in STOP_MIRRORS.items()})
+    assert _date.fromisoformat(body["day"]) == _date(2026, 10, 9) and len(body["trades"]) == len(old["trades"]) == 1
+    for new, was in zip(body["trades"], old["trades"], strict=True):
+        assert set(new) == OLD_CARD_KEYS | ADDED_CARD_KEYS and set(new) - ADDED_CARD_KEYS == OLD_CARD_KEYS
+        assert {k: new[k] for k in OLD_CARD_KEYS} == json.loads(json.dumps({k: was[k] for k in OLD_CARD_KEYS}))
+    assert body["summary"] == json.loads(json.dumps(old["summary"])) and body["thresholds"] == old["thresholds"]
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_skip_rules_file_shows_nothing_and_says_so(tmp_path):
+    """Safety review, 10 Oct: ``"all": 5`` in skip_rules.candidate.json raised on every card, so the whole review was a 500."""
+    from kotsin_nse.api.review_direction import SKIP_RULES_FILE
+
+    e, b = await _app(tmp_path, "b", {"name": "phase 35"}, _b_rows())
+    (e.s.data_dir / SKIP_RULES_FILE).write_text(json.dumps({"rules": [{"id": "R1", "all": 5}]}))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=b), base_url="http://t") as c:
+        r = await c.get("/api/review", params={"day": "2026-10-09"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["skipRules"] is False and any("not in the expected shape" in n for n in body["notes"])
+    assert all(t["directionRead"]["skip"] is None for t in body["trades"])
