@@ -1,6 +1,16 @@
 export async function getJson<T>(path: string): Promise<T> {
   const res = await fetch(path, { headers: { Accept: 'application/json' } })
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText} — ${path}`)
+  if (!res.ok) {
+    // the server's own reason when it gave one ("at most 10 sessions in one review …"), else the path asked for
+    let detail = ''
+    try {
+      const j = await res.json()
+      if (j && typeof j.detail === 'string') detail = j.detail
+    } catch {
+      /* the body was not JSON */
+    }
+    throw new Error(`${res.status} ${res.statusText} — ${detail || path}`)
+  }
   return (await res.json()) as T
 }
 

@@ -5,6 +5,10 @@ import { RULE_LABEL } from '../components/StopRuleGrid'
 import { Badge, Card, ErrorLine, Stat, StrategyBadge } from '../components/Ui'
 import { cls, contractName, fmt, pnlColor } from '../lib/api'
 import { useEngine } from '../lib/engine'
+import {
+  BLANK, IST_S, QUICK, activeCount, bestBetter, chipOptions, hm, lessonLevel, loadFilters, maxTo, passes, quickOf, resultOf, saveFilters,
+  type Filters, type Side,
+} from '../lib/reviewFilters'
 import { usePoll } from '../lib/usePoll'
 import type { StopRule } from '../types'
 
@@ -18,6 +22,10 @@ import type { StopRule } from '../types'
 // features/parameters that led to better outcomes ... focus is on choosing the right direction of trade". So: a filter
 // (the Options page's pattern), the same option elsewhere on every card (api/review_peers.py: exact rupee parts that add up
 // to the gap, the lesson graded by the pooled record) and the direction block (api/review_direction.py). Read-only.
+//
+// 10 Oct review: the filters live in lib/reviewFilters.ts (tested by node: tests/reviewFilters.test.ts); a past range is
+// read once, not every 20 s, and the twins only when they are shown; a card says when the twin was not read, when its own
+// result rests on a refused paper exit, and how sure the lesson behind its "better" chip is.
 
 type Status = 'ok' | 'warn' | 'bad' | 'unknown'
 type Check = { key: string; question: string; status: Status; detail: string }
@@ -29,7 +37,7 @@ type Direction = {
   trigger: { direction: string; closeTs: number | null; close: number | null; atr: number | null }
   trade: 'BULLISH' | 'BEARISH'; fade: boolean; reads: Read[]; with: number; against: number; againstKeys: string[]
   label: { first: 'up' | 'down' | 'none' | 'ambiguous' | null; ts: number | null; minutes: number | null; how: string; level: number
-    triggerRight: boolean | null; tradeRight: boolean | null; text: string }
+    triggerRight: boolean | null; tradeRight: boolean | null; text: string; basis?: string }
   skip: SkipVerdict | null
 }
 type PeerRow = {
@@ -43,22 +51,26 @@ type ExitSide = {
   level: number | null; triggerOn: string | null; triggerPx: number | null; optionSlInitial: number | null; optionSlFinal: number | null
   armedBy: string | null; armedMin: number | null; peakMid: number | null; trailDwell: number | null; equitySl: number | null
   rungs: { price: number; qty: number; ts: number }[]; rungShare: number; heldMin: number; audit: boolean
+  finalLegs?: { reason: string | null; qty: number; fill: number; ref: number; ts: number }[]
   refused: { ts: number; kind: string; executable: number | null; ageMs: number | null; limitMs: number | null; text: string } | null
 }
 type Evidence = { what: string; text: string; strength: string; grade: string; n: number; params?: ParamDiff[] }
 type ParamDiff = { key: string; label: string; this: string; peer: string }
 type Lesson = {
   key: string; grade: string | null; gradeWhy: string; strength: string; text: string; params: ParamDiff[]
-  decided: Evidence | null; systematic: Evidence | null
+  decided: Evidence | null; systematic: Evidence | null; also?: Evidence | null
 }
 type BetterGroup = {
   peer: PeerRow; members: PeerRow[]; gap: number; gapRupees: number; rupees: Record<string, number>; residual: number; lines: PartLine[]
   relation: string; chainVia: PeerRow | null; note: string; meaningful: boolean; exits: { this: ExitSide; peer: ExitSide; thisIsChain: boolean }
   paramDiffs: ParamDiff[]; lesson: Lesson
 }
+type SelfRefusal = { effect: number; netIfFilled: number; artefact: boolean; kind: string; ts: number; executable: number | null; text: string }
 type Peers = {
-  contract: string; rows: PeerRow[]; n: number; better: BetterGroup[]; betterExists: boolean; betterCount: number; class: string
+  contract: string; scripCode?: string; rows: PeerRow[]; n: number; better: BetterGroup[]; betterExists: boolean; betterCount: number; class: string
   headline: string; outcome: string | null; pooledTo: string | null; delta?: number
+  // 10 Oct: "" when every engine was read, else what the comparison covers; this trade's own refused exit
+  scope?: string; selfRefusal?: SelfRefusal | null
 }
 type Trade = {
   id: string; book: string; label: string; symbol: string; contract: string | null; direction: 'BULLISH' | 'BEARISH'; grade: string | null
@@ -76,7 +88,7 @@ type Trade = {
   mirrors: Mirror[]
   chart: { ts: number; o: number; h: number; l: number; c: number }[]
   // 9 Oct 2026: absent from an engine that runs the older review (its cards then show without them)
-  mirror?: boolean; variant?: StopRule; sourceBook?: string; sourceLabel?: string; shadow?: boolean; triggerDirection?: string | null
+  mirror?: boolean; variant?: StopRule; sourceBook?: string; sourceLabel?: string; shadow?: boolean; sourceShadow?: boolean; triggerDirection?: string | null
   engine?: string; day?: string; directionRead?: Direction; peers?: Peers | null
 }
 type Day = {
@@ -84,113 +96,24 @@ type Day = {
   twin?: { name: string | null; read: boolean; note: string } | null; skipRules?: boolean
   summary: { trades: number; closed: number; open: number; losses: number; wins: number; net: number; causes: { key: string; label: string; trades: number; net: number }[] }
 }
-type Side = 'self' | 'peer'
 type Row = Trade & { origin: Side; engineName: string }
-
-const IST_S = 19800 // the chart's clock reads UTC; shift so its axis shows IST
 const ICON: Record<Status, string> = { ok: '✓', warn: '⚠', bad: '✗', unknown: '?' }
 const TONE: Record<Status, string> = { ok: 'text-emerald-400', warn: 'text-amber-300', bad: 'text-rose-400', unknown: 'text-slate-500' }
 const STANCE_TONE: Record<Stance, string> = { with: 'border-emerald-700/70 bg-emerald-950/30 text-emerald-200', against: 'border-rose-700/70 bg-rose-950/40 text-rose-200', neutral: 'border-slate-700 bg-slate-900 text-slate-300', unknown: 'border-slate-800 bg-slate-950 text-slate-500' }
 const STANCE_ICON: Record<Stance, string> = { with: '✓', against: '✗', neutral: '·', unknown: '?' }
-const hm = (ts: number | null | undefined) =>
-  ts ? new Date((ts + IST_S) * 1000).toISOString().slice(11, 16) : '—'
 const hms = (ts: number | null | undefined) => (ts ? new Date((ts + IST_S) * 1000).toISOString().slice(11, 19) : '—')
 const dur = (a: number | null, b: number | null) => (a && b ? fmt.dur(b - a) : '—')
 const todayIst = () => new Date(Date.now() + IST_S * 1000).toISOString().slice(0, 10)
+/** A new first day keeps the range's end while it is still a range of at most 10 sessions from it. */
+const dayChange = (days: { day: string; to: string }, day: string) => ({ day, to: days.to && (days.to < day || days.to > maxTo(day, todayIst())) ? '' : days.to })
 const px = (v: number | null | undefined) => (v == null ? '—' : Math.abs(v * 100 - Math.round(v * 100)) > 1e-6 ? v.toFixed(3) : v.toFixed(2))
 const lotsTxt = (n: number) => `${Number.isInteger(n) ? n : n.toFixed(2)} lot${n === 1 ? '' : 's'}`
 const GRADE_TONE = (g: string | null | undefined): 'green' | 'amber' | 'slate' => (g?.startsWith('systematic') ? 'green' : g === 'suggestive' ? 'amber' : 'slate')
+/** A net to the paisa, signed: the line that shows how a gap is made adds up exactly, where whole rupees can be ₹1 off. */
+const inrP = (v: number | null | undefined) =>
+  v == null ? 'DM' : `${v >= 0 ? '+' : '−'}₹${Math.abs(v).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 
-// -- the filters -----------------------------------------------------------------------------------------------------
-
-const STORE = 'kn.review.filters.v1'
-type Filters = {
-  engines: 'both' | Side
-  books: string[]
-  variants: StopRule[]
-  mirrors: boolean
-  shadows: boolean
-  result: string[]
-  trigger: string[]
-  rightDir: string[]
-  exitReasons: string[]
-  grades: string[]
-  causes: string[]
-  search: string
-  from: string
-  to: string
-  betterPeer: boolean
-}
-const BLANK: Filters = {
-  engines: 'self', books: [], variants: [], mirrors: false, shadows: true, result: [], trigger: [], rightDir: [], exitReasons: [], grades: [],
-  causes: [], search: '', from: '', to: '', betterPeer: false,
-}
-/** The page opens on the losses, as it always has. */
-const FIRST: Filters = { ...BLANK, result: ['loss'] }
-
-/** The filters kept from the last visit. Storage can be missing or refuse (a private window): the page works without it. A
- *  saved field is kept only with the type it should have (the Options page's rule: a hand-edited {"books": null} must never
- *  take the page down). */
-function loadFilters(): Filters {
-  try {
-    const raw = window.localStorage.getItem(STORE)
-    const saved: unknown = raw ? JSON.parse(raw) : null
-    if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return FIRST
-    const s = saved as Record<string, unknown>
-    const out: Record<string, unknown> = { ...BLANK }
-    for (const [k, want] of Object.entries(BLANK)) {
-      const v = s[k]
-      if (Array.isArray(want) ? Array.isArray(v) && v.every((x) => typeof x === 'string') : typeof v === typeof want) out[k] = v
-    }
-    if (!['both', 'self', 'peer'].includes(out.engines as string)) out.engines = 'self'
-    return out as Filters
-  } catch {
-    return FIRST
-  }
-}
-
-function saveFilters(f: Filters) {
-  try {
-    window.localStorage.setItem(STORE, JSON.stringify(f))
-  } catch {
-    /* not kept: the filters still apply on this page */
-  }
-}
-
-/** How many filters differ from the page's own view: this engine, the twins on their trade's row, every result, these days. */
-function activeCount(f: Filters, ranged: boolean): number {
-  const lists = [f.books, f.variants, f.result, f.trigger, f.rightDir, f.exitReasons, f.grades, f.causes].filter((x) => x.length).length
-  return lists + (f.engines !== 'self' ? 1 : 0) + (f.mirrors ? 1 : 0) + (!f.shadows ? 1 : 0) + (f.from || f.to ? 1 : 0) + (f.search.trim() ? 1 : 0) + (f.betterPeer ? 1 : 0) + (ranged ? 1 : 0)
-}
-
-const resultOf = (t: Trade) => (t.status === 'OPEN' ? 'open' : (t.net ?? 0) >= 0 ? 'win' : 'loss')
-const rightOf = (t: Trade) => {
-  const r = t.directionRead?.label.tradeRight
-  return r === true ? 'right' : r === false ? 'wrong' : 'neither'
-}
-
-function passes(t: Row, f: Filters, opts: { skipResult?: boolean } = {}): boolean {
-  if (f.engines !== 'both' && t.origin !== f.engines) return false
-  if (f.books.length && !f.books.includes(t.sourceBook || t.book)) return false
-  if (f.variants.length && !f.variants.includes(t.variant ?? 'current')) return false
-  if (!f.mirrors && t.mirror) return false
-  if (!f.shadows && t.shadow) return false
-  if (!opts.skipResult && f.result.length && !f.result.includes(resultOf(t))) return false
-  if (f.trigger.length && !f.trigger.includes(t.triggerDirection ?? '')) return false
-  if (f.rightDir.length && !f.rightDir.includes(rightOf(t))) return false
-  if (f.exitReasons.length && !f.exitReasons.includes(t.exitReason ?? 'open')) return false
-  if (f.grades.length && !f.grades.includes(t.grade ?? '—')) return false
-  if (f.causes.length && !f.causes.includes(t.cause.key)) return false
-  if (f.betterPeer && !t.peers?.betterExists) return false
-  const at = hm(t.openedTs)
-  if (f.from && at < f.from) return false
-  if (f.to && at > f.to) return false
-  // every word, in any order: "270 CE" finds "LTF 27 OCT 2026 CE 270"
-  const words = f.search.trim().toLowerCase().split(/[\s,]+/).filter(Boolean)
-  const hay = `${t.symbol} ${t.contract ?? ''} ${contractName(t.contract) ?? ''}`.toLowerCase()
-  if (words.length && !words.every((w) => hay.includes(w))) return false
-  return true
-}
+// -- the filters (lib/reviewFilters.ts) -----------------------------------------------------------------------------
 
 function FilterPanel({ f, set, opts, engine, days, setDays }: {
   f: Filters; set: (f: Filters) => void; engine: ReturnType<typeof useEngine>
@@ -235,13 +158,20 @@ function FilterPanel({ f, set, opts, engine, days, setDays }: {
         <span className="text-[11px] text-slate-600">IST</span>
       </Group>
       <Group label="Days">
-        <input type="date" value={days.day} max={todayIst()} onChange={(e) => e.target.value && setDays({ day: e.target.value, to: days.to && days.to < e.target.value ? '' : days.to })} className="rounded border border-slate-700 bg-slate-950 px-1.5 py-0.5 text-[12px] text-slate-200" />
+        <input type="date" value={days.day} max={todayIst()} onChange={(e) => e.target.value && setDays(dayChange(days, e.target.value))} className="rounded border border-slate-700 bg-slate-950 px-1.5 py-0.5 text-[12px] text-slate-200" />
         <span className="text-[12px] text-slate-500">to</span>
-        <input type="date" value={days.to} min={days.day} max={todayIst()} onChange={(e) => setDays({ ...days, to: e.target.value })} className="rounded border border-slate-700 bg-slate-950 px-1.5 py-0.5 text-[12px] text-slate-200" />
+        <input type="date" value={days.to} min={days.day} max={maxTo(days.day, todayIst())} onChange={(e) => setDays({ ...days, to: e.target.value && e.target.value > maxTo(days.day, todayIst()) ? maxTo(days.day, todayIst()) : e.target.value })} className="rounded border border-slate-700 bg-slate-950 px-1.5 py-0.5 text-[12px] text-slate-200" />
         <span className="text-[11px] text-slate-600">a range of up to 10 sessions; blank = the one day</span>
       </Group>
       <Group label="Same option">
-        <Chip on={f.betterPeer} onClick={() => set({ ...f, betterPeer: !f.betterPeer })} title="another book or engine made meaningfully more (₹100 or 0.5 % of the premium) on the same contract while this trade was held">a better peer exists</Chip>
+        {([['any', 'a better peer exists', 'another book or engine made meaningfully more (₹100 or 0.5 % of the premium) on the same contract while this trade was held'],
+          ['lesson', '… with a lesson', 'a better peer whose difference is not a stale-book refusal or a halt (those are paper artefacts or operator actions, never a lesson)'],
+          ['systematic', '… a systematic lesson', 'a better peer whose lesson held across both windows and both engines (lessons.md L1)']] as const).map(([v, label, title]) => (
+          <Chip key={v} on={f.better === v} onClick={() => set({ ...f, better: f.better === v ? '' : v })} title={title}>{label}</Chip>
+        ))}
+        <Chip on={!f.artefacts} onClick={() => set({ ...f, artefacts: !f.artefacts })} title="a card whose own result rests on an exit the paper matcher refused on a stale book (modelled at the price the engine recorded then)">
+          {f.artefacts ? 'paper artefacts shown' : 'paper artefacts hidden'}
+        </Chip>
       </Group>
       <div className="pt-1">
         <button type="button" onClick={() => { set(BLANK); setDays({ day: days.day, to: '' }) }} className="text-[12px] text-slate-400 underline decoration-dotted hover:text-white">show everything</button>
@@ -335,6 +265,8 @@ function ExitColumn({ e, title }: { e: ExitSide; title: string }) {
       {row('armed', e.armedBy ? `${e.armedBy}, ${e.armedMin ?? '—'} min in` : 'never')}
       {row('peak mid · dwell', `${e.peakMid ? px(e.peakMid) : '—'} · ${e.trailDwell ?? '—'}`)}
       {row('rungs sold', e.rungs.length ? `${e.rungs.map((r) => `${px(r.price)} ×${r.qty}`).join(', ')} (${(e.rungShare * 100).toFixed(0)} %)` : 'none')}
+      {e.finalLegs && new Set(e.finalLegs.map((l) => l.reason)).size > 1 &&
+        row('final legs', e.finalLegs.map((l) => `${l.reason ?? '—'} ${px(l.fill)} ×${l.qty}`).join(', '))}
       {row('held', `${e.heldMin} min`)}
       {e.refused && row('refused exit', `${e.refused.kind} at ${hms(e.refused.ts)}, book ${e.refused.ageMs != null ? `${(e.refused.ageMs / 1000).toFixed(1)} s` : '—'} old, executable ${px(e.refused.executable)}`)}
       {!e.audit && <div className="mt-0.5 text-[11px] text-amber-300">no exit audit: one leg at the ledger's average exit</div>}
@@ -368,6 +300,7 @@ function LessonBox({ l }: { l: Lesson }) {
       {l.decided || l.systematic ? (
         <>
           {l.decided && line('what decided this pair', l.decided)}
+          {l.also && line('this rule pair across the record', l.also)}
           {l.systematic && line('systematic across the record', l.systematic)}
         </>
       ) : (
@@ -381,7 +314,7 @@ function BetterBox({ g, t, open, toggleOpen }: { g: BetterGroup; t: Trade; open:
   const sum = Object.values(g.rupees).reduce((a, b) => a + b, 0)
   return (
     <div className="rounded border border-sky-900/60 bg-sky-950/15">
-      <button type="button" onClick={toggleOpen} className="flex w-full flex-wrap items-center gap-2 px-2.5 py-1.5 text-left">
+      <button type="button" onClick={toggleOpen} className="flex w-full flex-wrap items-center gap-2 px-2 py-1.5 text-left sm:px-2.5">
         <span className="text-[13px] font-semibold text-slate-100">{g.peer.engine}&apos;s {g.peer.label}</span>
         {g.members.length > 1 && <span className="text-[11.5px] text-slate-500">+ {g.members.length - 1} identical ({g.members.slice(1).map((m) => `${m.engine === g.peer.engine ? '' : `${m.engine} `}${m.label}`).join(', ')})</span>}
         <span className="text-[12px] text-slate-400">{g.relation}</span>
@@ -389,23 +322,25 @@ function BetterBox({ g, t, open, toggleOpen }: { g: BetterGroup; t: Trade; open:
         <span className="text-slate-500">{open ? '▾' : '▸'}</span>
       </button>
       {open && (
-        <div className="space-y-2 border-t border-sky-900/40 px-2.5 py-2">
+        <div className="space-y-2 border-t border-sky-900/40 px-2 py-2 sm:px-2.5">
           <div>
             <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">where the {fmt.signedInr(g.gapRupees)} came from — exact, from the record</div>
-            <table className="mt-1 w-full text-[12.5px]">
-              <tbody>
-                {g.lines.map((l) => (
-                  <tr key={l.key} className={cls('align-top', l.major ? 'text-slate-200' : 'text-slate-500')}>
-                    <td className={cls('w-24 whitespace-nowrap pr-3 text-right font-semibold tabular-nums', pnlColor(l.rupees))}>{fmt.signedInr(l.rupees)}</td>
-                    <td>{l.text}</td>
-                  </tr>
-                ))}
-                <tr className="border-t border-slate-800 text-slate-300">
-                  <td className="pr-3 text-right font-bold tabular-nums">{fmt.signedInr(sum)}</td>
-                  <td>= {g.peer.engine}&apos;s {g.peer.label} {fmt.signedInr(g.peer.net)} − this trade {fmt.signedInr(t.net)}{g.note ? ` · ${g.note}` : ''}</td>
-                </tr>
-              </tbody>
-            </table>
+            {/* the rupees above their words at phone width, beside them from sm up */}
+            <div className="mt-1 space-y-1 text-[12.5px]">
+              {g.lines.map((l) => (
+                <div key={l.key} className={cls('flex flex-col sm:flex-row sm:gap-3', l.major ? 'text-slate-200' : 'text-slate-500')}>
+                  <span className={cls('shrink-0 whitespace-nowrap font-semibold tabular-nums sm:w-24 sm:text-right', pnlColor(l.rupees))}>{fmt.signedInr(l.rupees)}</span>
+                  <span className="min-w-0">{l.text}</span>
+                </div>
+              ))}
+              <div className="flex flex-col border-t border-slate-800 pt-1 text-slate-300 sm:flex-row sm:gap-3">
+                <span className="shrink-0 whitespace-nowrap font-bold tabular-nums sm:w-24 sm:text-right">{fmt.signedInr(sum)}</span>
+                <span className="min-w-0">
+                  = {g.peer.engine}&apos;s {g.peer.label} {inrP(g.peer.net)} − this trade {inrP(t.net)} = {inrP(g.gap)}
+                  <span className="text-slate-500"> (to the paisa; the parts are whole rupees that add up to it)</span>{g.note ? ` · ${g.note}` : ''}
+                </span>
+              </div>
+            </div>
           </div>
           <div className="grid gap-4 md:grid-cols-2">
             <ExitColumn e={g.exits.this} title={g.exits.thisIsChain ? `this fill under the peer's stop rule (${g.exits.this.who})` : 'this trade'} />
@@ -434,16 +369,26 @@ function PeersBox({ p, t }: { p: Peers; t: Trade }) {
   const [all, setAll] = useState(false)
   const rows = all ? p.rows : p.rows.slice(0, 12)
   return (
-    <div className="rounded border border-slate-700 bg-slate-900/40 px-3 py-2">
+    <div className="rounded border border-slate-700 bg-slate-900/40 px-2 py-2 sm:px-3">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-[11px] uppercase tracking-wide text-slate-400">same option elsewhere</span>
         <span className="text-[12px] text-slate-500">{contractName(p.contract)} · {p.n} peer{p.n === 1 ? '' : 's'}</span>
-        {p.outcome && <Badge tone={OUTCOME_TONE[p.outcome] ?? 'slate'}>{p.outcome}</Badge>}
+        {p.outcome && <Badge tone={OUTCOME_TONE[p.outcome] ?? 'slate'}>{p.outcome}{p.scope ? ' here' : ''}</Badge>}
+        {p.scope && <span className="text-[11.5px] text-amber-300/80">{p.scope}</span>}
         {p.pooledTo && <span className="ml-auto text-[11px] text-slate-600">lessons pooled to {p.pooledTo}</span>}
       </div>
+      {p.selfRefusal && (
+        <div className={cls('mt-1 rounded border px-2 py-1 text-[12px]', p.selfRefusal.artefact ? 'border-amber-700 bg-amber-950/30 text-amber-200' : 'border-slate-700 text-slate-400')}>
+          {p.selfRefusal.artefact && <b>Paper artefact. </b>}{p.selfRefusal.text}
+        </div>
+      )}
       <div className="mt-1 text-[13px] text-slate-200">{p.headline}</div>
       {p.outcome === 'every variant lost' && (
-        <div className="mt-0.5 text-[12px] text-rose-300">No exit, stop rule or engine saved this option: only skipping the trigger would have.</div>
+        <div className="mt-0.5 text-[12px] text-rose-300">
+          {p.scope
+            ? `No exit or stop rule on this engine saved this option (${p.scope}): only skipping the trigger would have.`
+            : 'No exit, stop rule or engine saved this option: only skipping the trigger would have.'}
+        </div>
       )}
       {p.rows.length > 0 && (
         <div className="mt-1.5 overflow-x-auto">
@@ -563,9 +508,20 @@ function Facts({ t }: { t: Trade }) {
   )
 }
 
-function TradeCard({ t, showEngine }: { t: Row; showEngine: boolean }) {
+/** The "better on this option" chip says how sure its lesson is: a refusal or a halt is never one (greyed), else the grade. */
+const LEVEL_CHIP: Record<string, { tone: string; say: string }> = {
+  artefact: { tone: 'border-slate-600 bg-slate-800/60 text-slate-400', say: 'no lesson: a refusal or a halt' },
+  systematic: { tone: 'border-emerald-500/60 bg-emerald-500/10 text-emerald-200', say: 'systematic lesson' },
+  suggestive: { tone: 'border-amber-500/50 bg-amber-500/10 text-amber-200', say: 'suggestive lesson' },
+  'one-off': { tone: 'border-sky-500/40 bg-sky-500/5 text-sky-200/80', say: 'one-off' },
+}
+
+function TradeCard({ t, showEngine, showDay }: { t: Row; showEngine: boolean; showDay: boolean }) {
   const [open, setOpen] = useState((t.net ?? 0) < 0)
-  const better = t.peers?.betterExists && t.peers.better.find((g) => g.meaningful)
+  const better = bestBetter(t)
+  const level = lessonLevel(better)
+  const chip = level ? LEVEL_CHIP[level] : null
+  const artefact = t.peers?.selfRefusal?.artefact ? t.peers.selfRefusal : null
   return (
     <section className={cls('rounded-lg border bg-slate-900/40', t.mirror ? 'border-slate-800/70 border-dashed' : 'border-slate-800')}>
       <button onClick={() => setOpen(!open)} className="flex w-full flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-left">
@@ -584,11 +540,23 @@ function TradeCard({ t, showEngine }: { t: Row; showEngine: boolean }) {
         {t.grade && <Badge tone="slate">grade {t.grade}</Badge>}
         <DirectionBadge d={t.directionRead} />
         <span className="text-xs text-slate-500">
-          {t.day && showEngine ? `${t.day.slice(5)} ` : ''}{hm(t.openedTs)} → {t.closedTs ? hm(t.closedTs) : 'open'} · {t.status === 'OPEN' ? 'running' : dur(t.openedTs, t.closedTs)}
+          {t.day && (showDay || showEngine) ? `${t.day.slice(5)} ` : ''}{hm(t.openedTs)} → {t.closedTs ? hm(t.closedTs) : 'open'} · {t.status === 'OPEN' ? 'running' : dur(t.openedTs, t.closedTs)}
           {t.exitReason ? ` · ${t.exitReason}` : ''}
         </span>
-        {better && <span title={t.peers?.headline} className="rounded-full border border-sky-500/50 bg-sky-500/10 px-2 py-0.5 text-[11px] text-sky-200">{better.peer.engine && better.peer.engine !== t.engineName ? `${better.peer.engine}'s ` : ''}{better.peer.label} {fmt.signedInr(better.gapRupees)} better on this option</span>}
-        {t.peers?.outcome === 'every variant lost' && <span title="every book and engine on this option lost" className="rounded-full border border-rose-500/50 bg-rose-500/10 px-2 py-0.5 text-[11px] text-rose-200">every variant lost</span>}
+        {better && chip && (
+          <span title={`${t.peers?.headline ?? ''} ${better.lesson.gradeWhy || better.lesson.text}`} className={cls('rounded-full border px-2 py-0.5 text-[11px]', chip.tone)}>
+            {better.peer.engine && better.peer.engine !== t.engineName ? `${better.peer.engine}'s ` : ''}{better.peer.label} {fmt.signedInr(better.gapRupees)} better on this option · {chip.say}
+          </span>
+        )}
+        {artefact && (
+          <span title={artefact.text} className="rounded-full border border-amber-600/60 bg-amber-950/40 px-2 py-0.5 text-[11px] text-amber-200">
+            paper artefact: {fmt.signedInr(artefact.netIfFilled)} had the refused exit filled
+          </span>
+        )}
+        {t.peers?.outcome === 'every variant lost' && (
+          <span title={t.peers.scope ? `every book on this engine lost on this option (${t.peers.scope})` : 'every book and engine on this option lost'}
+            className="rounded-full border border-rose-500/50 bg-rose-500/10 px-2 py-0.5 text-[11px] text-rose-200">every variant lost{t.peers.scope ? ' here' : ''}</span>
+        )}
         <span className="ml-auto flex items-center gap-3">
           <span className={cls('text-xs', t.cause.key === 'win' ? 'text-emerald-400' : t.cause.key === 'open' ? 'text-slate-400' : 'text-rose-300')}>{t.cause.label}</span>
           <span className={cls('text-base font-semibold', pnlColor(t.net))}>{t.net == null ? 'open' : fmt.signedInr(t.net)}</span>
@@ -627,13 +595,6 @@ function TradeCard({ t, showEngine }: { t: Row; showEngine: boolean }) {
   )
 }
 
-const QUICK = [
-  ['losses', 'Losses', ['loss']],
-  ['all', 'All', []],
-  ['open', 'Open', ['open']],
-  ['wins', 'Wins', ['win']],
-] as const
-
 /** The review's summary over the cards the filters keep (the result buttons aside): the twins re-trade a fill and stay out. */
 function summarize(rows: Row[]) {
   const own = rows.filter((r) => !r.mirror)
@@ -668,50 +629,43 @@ export function Review() {
     saveFilters(f)
   }
   const f: Filters = engine?.peer ? filters : { ...filters, engines: 'self' }
-  const q = `day=${days.day}${days.to && days.to !== days.day ? `&to=${days.to}` : ''}&mirrors=1&peers=1`
-  const own = usePoll<Day>(f.engines !== 'peer' ? `/api/review?${q}` : null, 20000)
-  const twin = usePoll<Day>(engine?.peer && f.engines !== 'self' ? `/api/peer/review?${q}` : null, 20000)
-  const ownData = f.engines !== 'peer' ? own.data : null
-  const twinData = engine?.peer && f.engines !== 'self' && !twin.error ? twin.data : null
+  const ranged = !!days.to && days.to !== days.day
+  // the twins (stop-rule mirrors as cards) only when they are shown: 8 Oct is 4.2 MB with them, 0.6 MB without
+  const q = `day=${days.day}${ranged ? `&to=${days.to}` : ''}${f.mirrors ? '&mirrors=1' : ''}&peers=1`
+  // a range that ends before today no longer changes: read it once (the server keeps its answer); today's every 20 s
+  const every = (ranged ? days.to : days.day) >= todayIst() ? 20000 : 0
+  const ownPath = f.engines !== 'peer' ? `/api/review?${q}` : null
+  const twinPath = engine?.peer && f.engines !== 'self' ? `/api/peer/review?${q}` : null
+  const own = usePoll<Day>(ownPath, every)
+  const twin = usePoll<Day>(twinPath, every)
+  // only the answer to the question asked now: an error on a new range must not leave the old range's cards under its header
+  const ownData = ownPath && own.dataPath === ownPath ? own.data : null
+  const twinData = twinPath && twin.dataPath === twinPath && !twin.error ? twin.data : null
   const rows: Row[] = useMemo(() => {
     const tag = (d: Day | null, side: Side, fallback: string) => (d?.trades ?? []).map((t) => ({ ...t, origin: side, engineName: t.engine || d?.engine || fallback }))
     return [...tag(ownData, 'self', engine?.name || 'this engine'), ...tag(twinData, 'peer', engine?.peer?.name || 'twin')]
   }, [ownData, twinData, engine])
-  const opts = useMemo(() => {
-    const books = new Map<string, string>()
-    const reasons = new Set<string>()
-    const grades = new Set<string>()
-    const causes = new Map<string, string>()
-    for (const r of rows) {
-      books.set(r.sourceBook || r.book, r.sourceLabel || r.label)
-      reasons.add(r.exitReason ?? 'open')
-      grades.add(r.grade ?? '—')
-      causes.set(r.cause.key, r.cause.label)
-    }
-    for (const b of f.books) if (!books.has(b)) books.set(b, b)
-    return {
-      books: [...books.entries()].sort((a, b) => a[1].localeCompare(b[1])), reasons: [...reasons].sort(), grades: [...grades].sort(),
-      causes: [...causes.entries()].sort((a, b) => a[1].localeCompare(b[1])),
-    }
-  }, [rows, f.books])
+  const opts = useMemo(() => chipOptions(rows, filters), [rows, filters])
   const kept = rows.filter((t) => passes(t, f, { skipResult: true }))
   const shown = kept.filter((t) => !f.result.length || f.result.includes(resultOf(t))).sort((a, b) => (a.net ?? 0) - (b.net ?? 0))
   const s = summarize(kept)
-  const ranged = !!days.to && days.to !== days.day
   const n = activeCount(f, ranged)
-  const quick = QUICK.find(([, , r]) => r.length === f.result.length && r.every((x) => f.result.includes(x)))?.[0]
+  const quick = quickOf(f)
   const data = ownData ?? twinData
-  const notes = [...(ownData?.notes ?? []), ...(twinData?.notes ?? []).map((x) => `${twinData?.engine || 'twin'}: ${x}`)]
-  const loading = (f.engines !== 'peer' && !own.data) || (f.engines === 'peer' && !twin.data)
+  const twinName = engine?.peer?.name || 'The twin'
+  const notes = [...new Set([...(ownData?.notes ?? []), ...(twinData?.notes ?? []).map((x) => `${twinData?.engine || 'twin'}: ${x}`)])]
+  // the error that blocks what was asked: this engine's when its cards are asked for, else the twin's
+  const blocking = ownPath ? own.error : twin.error
+  const loading = !blocking && ((!!ownPath && !ownData) || (!ownPath && !!twinPath && !twinData))
   const showEngine = f.engines === 'both'
   return (
     <div className="space-y-4 p-4">
-      <ErrorLine error={f.engines !== 'peer' ? own.error : twin.error} />
+      <ErrorLine error={blocking ? (ownPath ? blocking : `${twinName}'s cards are not available: ${blocking}`) : null} />
       <div className="flex flex-wrap items-center gap-3">
         <h1 className="text-xl font-semibold text-slate-100">
           Trade review{f.engines === 'peer' && engine?.peer ? ` · ${engine.peer.name}` : f.engines === 'both' ? ' · both engines' : engine?.name ? ` · ${engine.name}` : ''}
         </h1>
-        <input type="date" value={days.day} max={todayIst()} onChange={(e) => e.target.value && setDays({ day: e.target.value, to: days.to && days.to < e.target.value ? '' : days.to })} className="rounded bg-slate-900 px-2 py-1 text-xs text-slate-200" />
+        <input type="date" value={days.day} max={todayIst()} onChange={(e) => e.target.value && setDays(dayChange(days, e.target.value))} className="rounded bg-slate-900 px-2 py-1 text-xs text-slate-200" />
         {ranged && <span className="text-xs text-slate-400">to {days.to}</span>}
         {engine?.peer && (
           <span className="flex items-center gap-1">
@@ -736,8 +690,8 @@ export function Review() {
         </span>
       </div>
       {panel && <FilterPanel f={f} set={setFilters} opts={opts} engine={engine} days={days} setDays={setDays} />}
-      {engine?.peer && f.engines !== 'self' && twin.error && (
-        <div className="text-[12px] text-slate-500">{engine.peer.name || 'The twin'}&apos;s cards are not shown: {twin.error}</div>
+      {ownPath && twinPath && twin.error && (
+        <div className="text-[12px] text-slate-500">{twinName}&apos;s cards are not shown: {twin.error}</div>
       )}
       {notes.map((x) => <div key={x} className="text-[12px] text-slate-500">{x}</div>)}
       {data && (
@@ -765,12 +719,12 @@ export function Review() {
       )}
       {loading ? (
         <div className="text-sm text-slate-500">loading…</div>
-      ) : shown.length === 0 ? (
+      ) : blocking && !data ? null : shown.length === 0 ? (
         <div className="text-sm text-slate-500">no trade passes the filters on {days.day}{ranged ? ` to ${days.to}` : ''}</div>
       ) : (
         <div className="space-y-2">
           {shown.map((t) => (
-            <TradeCard key={`${t.origin}:${t.id}`} t={t} showEngine={showEngine} />
+            <TradeCard key={`${t.origin}:${t.id}`} t={t} showEngine={showEngine} showDay={ranged} />
           ))}
         </div>
       )}
