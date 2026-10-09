@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Callable, Collection
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -491,12 +492,23 @@ _CAUSE_CHECK: dict[str, tuple[str, ...]] = {
 }
 
 
+#: what a caller may add to each reviewed card from the same reads (api/routes.py: the direction block): called with the
+#: card, the trigger's signal, its breadth and route events and the stock's minute bars
+Annotate = Callable[..., dict[str, Any]]
+
+
 def review_day(
     *, positions: list[dict[str, Any]], trades: list[dict[str, Any]], signals: list[dict[str, Any]], events: list[dict[str, Any]],
     bars_by_symbol: dict[str, list[dict[str, Any]]], session_end: float, labels: dict[str, str], mirror_books: dict[str, tuple[str, str]],
+    include_mirrors: bool = False, annotate: Annotate | None = None, shadow_books: Collection[str] = (),
 ) -> dict[str, Any]:
     """Every trade a trading or shadow book opened in the session (the stop-rule mirrors ride on their source's
-    row), each reviewed, and the session's losses grouped by root cause."""
+    row), each reviewed, and the session's losses grouped by root cause.
+
+    ``include_mirrors`` (operator, 2026-10-09: "add strategy and other filters", the twins among them): the stop-rule
+    mirrors are reviewed as cards of their own too, marked ``mirror`` with their ``variant``; they never enter the summary
+    (a mirror re-trades its source's fill). Every card carries its ``variant``, the book whose fill it is and the trigger's
+    own direction, and whatever ``annotate`` adds."""
     trade_of = {t.get("position_id"): t for t in trades}
     sig_of = {s.get("signal_id"): s for s in signals}
     ev_of: dict[tuple[str, str], dict[str, Any]] = {}
@@ -507,13 +519,15 @@ def review_day(
     by_key = {(p.get("strategy"), p.get("signal_id"), round(float(p.get("opened_ts") or 0))): p for p in positions}
     out = []
     for p in sorted(positions, key=lambda x: float(x.get("opened_ts") or 0)):
-        if p.get("strategy") in mirror_books:
+        book = str(p.get("strategy") or "")
+        is_mirror = book in mirror_books
+        if is_mirror and not include_mirrors:
             continue
         sid = str(p.get("signal_id") or "")
         parent = parent_signal_id(sid)
         mirrors = []
         for mk, (src, rule) in mirror_books.items():
-            if src != p.get("strategy"):
+            if is_mirror or src != p.get("strategy"):
                 continue
             m = by_key.get((mk, sid, round(float(p.get("opened_ts") or 0))))
             if m is None:
@@ -521,25 +535,34 @@ def review_day(
             mt = trade_of.get(m.get("id"))
             mirrors.append({"rule": rule, "book": mk, "status": m.get("status"), "exitReason": m.get("exit_reason"),
                             "exitPrice": m.get("exit_price"), "net": mt.get("net") if mt else None})
+        source, variant = mirror_books[book] if is_mirror else (book, "current")
         fade = ev_of.get(("counter.gap_fade", parent)) or ev_of.get(("counter.market_fade", parent))
-        out.append(review_trade(
-            p, trade=trade_of.get(p.get("id")), signal=sig_of.get(parent) or sig_of.get(sid),
-            breadth=ev_of.get(("regime.breadth", parent)), route=ev_of.get(("counter.route", parent)),
-            fade=fade if p.get("strategy") in COUNTER_TREND_BOOKS else None,
-            bars=bars_by_symbol.get(str(p.get("symbol") or ""), []), mirrors=mirrors, session_end=session_end,
-            label=labels.get(str(p.get("strategy")), str(p.get("strategy"))),
-        ))
+        signal = sig_of.get(parent) or sig_of.get(sid)
+        breadth, route = ev_of.get(("regime.breadth", parent)), ev_of.get(("counter.route", parent))
+        bars = bars_by_symbol.get(str(p.get("symbol") or ""), [])
+        card = review_trade(
+            p, trade=trade_of.get(p.get("id")), signal=signal, breadth=breadth, route=route,
+            fade=fade if source in COUNTER_TREND_BOOKS else None, bars=bars, mirrors=mirrors, session_end=session_end,
+            label=labels.get(book, book),
+        )
+        trigger_dir = str((sig_of.get(parent) or {}).get("direction") or (breadth or {}).get("direction") or "") or None
+        card.update(mirror=is_mirror, variant=variant, sourceBook=source, sourceLabel=labels.get(source, source),
+                    shadow=book in shadow_books, triggerDirection=trigger_dir)
+        if annotate is not None:
+            card.update(annotate(card, signal=signal, breadth=breadth, route=route, bars=bars, book=source))
+        out.append(card)
     causes: dict[str, dict[str, Any]] = {}
     for r in out:
-        if r["cause"]["key"] in ("win", "open"):
+        if r["cause"]["key"] in ("win", "open") or r.get("mirror"):
             continue
         c = causes.setdefault(r["cause"]["key"], {"key": r["cause"]["key"], "label": r["cause"]["label"], "trades": 0, "net": 0.0})
         c["trades"] += 1
         c["net"] += r["net"] or 0.0
-    closed = [r for r in out if r["status"] == "CLOSED"]
+    own = [r for r in out if not r.get("mirror")]
+    closed = [r for r in own if r["status"] == "CLOSED"]
     return {
         "trades": out, "thresholds": THRESHOLDS,
-        "summary": {"trades": len(out), "closed": len(closed), "open": len(out) - len(closed),
+        "summary": {"trades": len(own), "closed": len(closed), "open": len(own) - len(closed),
                     "losses": sum(1 for r in closed if (r["net"] or 0) < 0), "wins": sum(1 for r in closed if (r["net"] or 0) >= 0),
                     "net": round(sum(r["net"] or 0.0 for r in closed), 2),
                     "causes": sorted(causes.values(), key=lambda c: c["net"])},

@@ -100,6 +100,12 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
+name = "record-only review reads: nothing the engine trades with imports them"
+type = "forbidden"
+source_modules = ["kotsin_nse.engine", "kotsin_nse.exec", "kotsin_nse.risk", "kotsin_nse.strategy", "kotsin_nse.feed", "kotsin_nse.venue"]
+forbidden_modules = ["kotsin_nse.api.review_peers", "kotsin_nse.api.review_direction", "kotsin_nse.api.review_evidence"]
+
+[[tool.importlinter.contracts]]
 name = "only market.session knows about IST"
 type = "forbidden"
 source_modules = ["kotsin_nse.strategy", "kotsin_nse.risk", "kotsin_nse.bars", "kotsin_nse.exec"]
