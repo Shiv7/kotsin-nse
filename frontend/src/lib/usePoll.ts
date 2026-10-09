@@ -2,9 +2,12 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { getJson } from './api'
 
 /** Poll a JSON endpoint. Keeps the last good value on error so a blip does not blank the page,
- * and surfaces the error alongside it rather than instead of it. */
+ * and surfaces the error alongside it rather than instead of it. ``intervalMs`` 0 reads once (a past
+ * day that no longer changes); ``dataPath`` is the path the data came from, so a caller can tell an
+ * answer to an earlier question from the one it asked now. */
 export function usePoll<T>(path: string | null, intervalMs = 4000) {
   const [data, setData] = useState<T | null>(null)
+  const [dataPath, setDataPath] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const alive = useRef(true)
@@ -21,6 +24,7 @@ export function usePoll<T>(path: string | null, intervalMs = 4000) {
       const next = await getJson<T>(path)
       if (!alive.current) return
       setData(next)
+      setDataPath(path)
       setError(null)
     } catch (e) {
       if (alive.current) setError(e instanceof Error ? e.message : String(e))
@@ -38,12 +42,12 @@ export function usePoll<T>(path: string | null, intervalMs = 4000) {
       }
     }
     void refresh()
-    const id = setInterval(() => void refresh(), intervalMs)
+    const id = intervalMs > 0 ? setInterval(() => void refresh(), intervalMs) : undefined
     return () => {
       alive.current = false
-      clearInterval(id)
+      if (id !== undefined) clearInterval(id)
     }
   }, [refresh, intervalMs, path])
 
-  return { data, error, loading, refresh }
+  return { data, error, loading, refresh, dataPath }
 }
