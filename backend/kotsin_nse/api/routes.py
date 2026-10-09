@@ -19,10 +19,11 @@ import re
 import time
 from collections import OrderedDict
 from dataclasses import asdict, dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import httpx
 import sqlalchemy as sa
 import structlog
 from fastapi import APIRouter, FastAPI, HTTPException, Query, WebSocket
@@ -53,7 +54,7 @@ from ..strategy.keys import (
     stop_mirrors_of,
     stop_rule_of,
 )
-from . import daybook, export, live_trades, peer, review, shadow
+from . import daybook, export, live_trades, peer, review, review_direction, review_peers, shadow
 from .ws import Hub, handle, pump
 
 log = structlog.get_logger(__name__)
@@ -228,6 +229,139 @@ class DepthReads:
         out = {"since": start, "scope": since, "bookSet": books, **s}
         self.summaries[(since, books)] = (start, mark, out)
         return out
+
+
+#: the review's longest span of sessions in one read (each session reads its minute bars and its ledger rows)
+REVIEW_MAX_DAYS = 10
+#: the NIFTY 50 index in the minute archive: the direction block reads it from its open to the trigger's close
+NIFTY_SYMBOL = "NIFTY"
+#: past sessions whose minute bars are kept: they no longer change
+REVIEW_BAR_DAYS = 4
+#: how long a read of the twin's records is used again: a past session's for longer, today's while it is still trading
+TWIN_TTL_PAST_S, TWIN_TTL_TODAY_S, TWIN_TTL_FAILED_S = 600.0, 30.0, 15.0
+
+
+def _review_days(day: str | None, to: str | None) -> list[date]:
+    """The sessions a review spans: ``day`` (today if absent) to ``to`` (the same day if absent), weekends left out."""
+    try:
+        d0 = date.fromisoformat(day) if day else ist_today()
+        d1 = date.fromisoformat(to) if to else d0
+    except ValueError as exc:
+        raise HTTPException(400, f"day and to must be YYYY-MM-DD, not {day!r} / {to!r}") from exc
+    if d1 < d0:
+        raise HTTPException(400, f"to ({d1}) is before day ({d0})")
+    span = [d0 + timedelta(days=i) for i in range((d1 - d0).days + 1)]
+    days = [d for d in span if d.weekday() < 5] or [d0]
+    if len(days) > REVIEW_MAX_DAYS:
+        raise HTTPException(400, f"at most {REVIEW_MAX_DAYS} sessions in one review, not {len(days)}")
+    return days
+
+
+def _merge_summaries(sums: list[dict[str, Any]]) -> dict[str, Any]:
+    """The sessions' summaries as one: counts and money added, the causes merged."""
+    causes: dict[str, dict[str, Any]] = {}
+    for s in sums:
+        for c in s.get("causes") or ():
+            m = causes.setdefault(c["key"], {"key": c["key"], "label": c["label"], "trades": 0, "net": 0.0})
+            m["trades"] += c["trades"]
+            m["net"] += c["net"]
+    out = {k: sum(s.get(k) or 0 for s in sums) for k in ("trades", "closed", "open", "losses", "wins")}
+    return {**out, "net": round(sum(s.get("net") or 0.0 for s in sums), 2), "causes": sorted(causes.values(), key=lambda c: c["net"])}
+
+
+def _params_of(engine: Engine) -> Any:
+    """Book → its limits as the review cites them, from the exit engine that runs it (api/review_peers.py ``params_json``)."""
+    def of(book: str) -> dict[str, Any]:
+        ex = engine._exits_by_strategy.get(book, engine.exits)
+        return review_peers.params_json(ex.limits)
+    return of
+
+
+@dataclass(slots=True)
+class ReviewReads:
+    """What the review page reads besides the ledger rows: the minute bars (a past session's kept), this engine's trades as
+    the same-option block compares them, and the twin's (operator, 2026-10-09: "add there insights/pnl from another engine
+    or/and strategy that traded the same OTM at that time"). Record-only: nothing here writes, and the twin is read with
+    one GET on loopback (``peer.read_identity``; ``peer._client``), never a twin's twin."""
+
+    engine: Engine
+    #: past session → symbol → its one-minute bars
+    past_bars: OrderedDict[date, dict[str, list[dict[str, Any]]]] = field(default_factory=OrderedDict)
+    #: the sessions asked for → (when read, the twin's records, what to say about the read)
+    twin_reads: dict[tuple[str, ...], tuple[float, list[dict[str, Any]], dict[str, Any]]] = field(default_factory=dict)
+
+    async def bars(self, symbols: set[str], day: date) -> dict[str, list[dict[str, Any]]]:
+        """Each symbol's one-minute bars for ``day``: today's from the engine's store (each corrected to the broker's candle
+        as its minute closes), an earlier day's from the archive, read off the event loop and kept."""
+        e = self.engine
+        out: dict[str, list[dict[str, Any]]] = {}
+        if day == ist_today():
+            start = datetime(day.year, day.month, day.day, tzinfo=IST).timestamp()
+            for s in symbols:
+                rows = [b.to_json() for b in e.store.bars(s, "1m") if b.ts >= start]
+                if rows:
+                    out[s] = rows
+            missing = symbols - set(out)
+            if missing:
+                out.update(await asyncio.to_thread(_archive_bars, e.s.data_dir, missing, day))
+            return out
+        have = self.past_bars.get(day)
+        if have is None:
+            have = self.past_bars[day] = {}
+            while len(self.past_bars) > REVIEW_BAR_DAYS:
+                self.past_bars.popitem(last=False)
+        missing = symbols - set(have)
+        if missing:
+            have.update(await asyncio.to_thread(_archive_bars, e.s.data_dir, missing, day))
+        return {s: have.get(s, []) for s in symbols}
+
+    async def records(self, positions_: list[dict[str, Any]], trades_: list[dict[str, Any]], start: float, end: float,
+                      name: str) -> list[dict[str, Any]]:
+        """This engine's positions of the window as the same-option block reads them, with their refused exits."""
+        raw = await self.engine.ledger.exit_order_json(start - 60, end + 3 * 86_400, ("REJECTED",))
+        params_of = _params_of(self.engine)
+        params = {b: params_of(b) for b in {str(p.get("strategy") or "") for p in positions_}}
+
+        def work() -> list[dict[str, Any]]:
+            return review_peers.build_records(positions_, trades_, live_trades._parse(raw), engine=name,
+                                              params_of=lambda b: params.get(b, {}), now=time.time())
+        return await asyncio.to_thread(work)
+
+    async def twin(self, days: list[date]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """The twin's records of ``days`` and what to say about the read. A twin that is down, or runs code without the
+        read, costs the card only its other engine: this engine's peers are still shown, with a quiet note."""
+        ident = peer.read_identity(self.engine.s.data_dir)
+        if not ident.peer_url:
+            return [], {"name": None, "read": False, "note": ""}
+        key = tuple(d.isoformat() for d in days)
+        now = time.time()
+        hit = self.twin_reads.get(key)
+        past = days[-1] < ist_today()
+        if hit is not None:
+            ttl = TWIN_TTL_FAILED_S if not hit[2]["read"] else (TWIN_TTL_PAST_S if past else TWIN_TTL_TODAY_S)
+            if now - hit[0] < ttl:
+                return hit[1], hit[2]
+        who = ident.peer_name or "the twin"
+        recs: list[dict[str, Any]] = []
+        state: dict[str, Any] = {"name": ident.peer_name, "read": False, "note": ""}
+        try:
+            async with peer._client() as client:
+                r = await client.get(f"{ident.peer_url}/api/review/legs", params={"day": key[0], "to": key[-1]},
+                                     headers={"Accept": "application/json"})
+            body = r.json() if r.status_code == 200 else None
+            if isinstance(body, dict) and isinstance(body.get("records"), list):
+                recs = [x for x in body["records"] if isinstance(x, dict)]
+                state = {"name": body.get("engine") or ident.peer_name, "read": True, "note": "", "count": len(recs)}
+            elif r.status_code == 404:
+                state["note"] = f"{who} runs code without the same-option read: only this engine's books are compared"
+            else:
+                state["note"] = f"{who} answered {r.status_code}: only this engine's books are compared"
+        except (httpx.HTTPError, ValueError) as exc:
+            state["note"] = f"{who} is not answering ({exc.__class__.__name__}): only this engine's books are compared"
+        self.twin_reads[key] = (now, recs, state)
+        while len(self.twin_reads) > 16:
+            self.twin_reads.pop(next(iter(self.twin_reads)))
+        return recs, state
 
 
 def _rule_fields(strategy: str) -> dict[str, str]:
@@ -409,31 +543,98 @@ def build_app(engine: Engine) -> FastAPI:
             "boot_notes": engine.boot_notes,
         }
 
+    #: the review's reads kept between polls: a past day's minute bars, the twin's records (api/review_peers.py)
+    review_reads = ReviewReads(engine)
+
     @api.get("/review")
-    async def trade_review(day: str | None = None) -> dict[str, Any]:
+    async def trade_review(
+        day: str | None = None, to: str | None = None, mirrors: bool = Query(False), peers: bool = Query(False),
+    ) -> dict[str, Any]:
         """Every trade of a session, each from its trigger to its exit and what the stock did after, with the checks
         and the root cause of a loss (api/review.py; operator, 2026-10-05: "be accurate in identifying the root cause
-        of the loss for each trade")."""
-        try:
-            d = date.fromisoformat(day) if day else ist_today()
-        except ValueError as exc:
-            raise HTTPException(400, f"day must be YYYY-MM-DD, not {day!r}") from exc
-        start = datetime(d.year, d.month, d.day, tzinfo=IST).timestamp()
-        end = start + 86_400
-        positions_, trades_, signals_, events_ = await asyncio.gather(
-            engine.ledger.rows_between("positions", start, end),
-            engine.ledger.rows_between("trades", start, end + 3 * 86_400),  # an MCX trade carried overnight closes later
-            engine.ledger.rows_between("signals", start - 3_600, end),
-            engine.ledger.rows_between("events", start - 3_600, end),
-        )
-        bars = {sym: _minute_bars(engine, sym, d) for sym in {str(p.get("symbol") or "") for p in positions_} if sym}
-        out = review.review_day(
-            positions=positions_, trades=trades_, signals=signals_, events=events_, bars_by_symbol=bars,
-            session_end=min(time.time(), end) if d == ist_today() else end,
-            labels={k.value: k.display_name for k in StrategyKey},
-            mirror_books={k.value: (src.value, rule) for k, (src, rule) in STOP_MIRRORS.items()},
-        )
-        return {"day": d.isoformat(), **out}
+        of the loss for each trade").
+
+        Operator, 2026-10-09: "add strategy and other filters ... also add there insights/pnl from another engine or/and
+        strategy that traded the same OTM at that time ... focus is on choosing the right direction of trade". So: ``to``
+        reviews every session from ``day`` to it (at most ``REVIEW_MAX_DAYS``); ``mirrors=1`` adds the stop-rule mirrors as
+        cards of their own; every card carries its direction block (api/review_direction.py); ``peers=1`` adds the same
+        option elsewhere — every other book here and on the twin that held this contract at the same time, and for each
+        that made more, the exact rupee parts and the lesson (api/review_peers.py). Record-only: the twin is read with one
+        GET on loopback (``/api/review/legs``), which never reads its own twin. The work runs off the event loop."""
+        days = _review_days(day, to)
+        name = peer.read_identity(engine.s.data_dir).name
+        skip_rules = review_direction.load_skip_rules(engine.s.data_dir)
+        labels = {k.value: k.display_name for k in StrategyKey}
+        mirror_books = {k.value: (src.value, rule) for k, (src, rule) in STOP_MIRRORS.items()}
+        shadows = {k.value for k in SHADOW_BOOKS if k not in STOP_MIRRORS}
+        cards: list[dict[str, Any]] = []
+        summaries: list[dict[str, Any]] = []
+        positions_all: list[dict[str, Any]] = []
+        trades_all: list[dict[str, Any]] = []
+        thresholds: dict[str, float] = review.THRESHOLDS
+        for d in days:
+            start = datetime(d.year, d.month, d.day, tzinfo=IST).timestamp()
+            end = start + 86_400
+            positions_, trades_, signals_, events_ = await asyncio.gather(
+                engine.ledger.rows_between("positions", start, end),
+                engine.ledger.rows_between("trades", start, end + 3 * 86_400),  # an MCX trade carried overnight closes later
+                engine.ledger.rows_between("signals", start - 3_600, end),
+                engine.ledger.rows_between("events", start - 3_600, end),
+            )
+            symbols = {str(p.get("symbol") or "") for p in positions_} - {""}
+            bars = await review_reads.bars(symbols | {NIFTY_SYMBOL}, d) if symbols else {}
+            nifty = bars.get(NIFTY_SYMBOL, [])
+
+            def annotate(card: dict[str, Any], *, signal: Any, breadth: Any, route: Any, bars: Any, book: str, nifty: Any = nifty,
+                         day_s: str = d.isoformat()) -> dict[str, Any]:
+                return {"engine": name, "day": day_s, "directionRead": review_direction.direction_read(
+                    card, signal=signal, breadth=breadth, route=route, bars=bars, nifty_bars=nifty,
+                    book_side=describe_book(book)["trend"], skip_rules=skip_rules)}
+
+            out = await asyncio.to_thread(
+                review.review_day, positions=positions_, trades=trades_, signals=signals_, events=events_, bars_by_symbol=bars,
+                session_end=min(time.time(), end) if d == ist_today() else end, labels=labels, mirror_books=mirror_books,
+                include_mirrors=mirrors, annotate=annotate, shadow_books=shadows,
+            )
+            cards += out["trades"]
+            summaries.append(out["summary"])
+            thresholds = out["thresholds"]
+            positions_all += positions_
+            trades_all += trades_
+        notes: list[str] = []
+        twin_state: dict[str, Any] | None = None
+        if peers:
+            start = datetime(days[0].year, days[0].month, days[0].day, tzinfo=IST).timestamp()
+            end = datetime(days[-1].year, days[-1].month, days[-1].day, tzinfo=IST).timestamp() + 86_400
+            own = await review_reads.records(positions_all, trades_all, start, end, name)
+            twin, twin_state = await review_reads.twin(days)
+            if twin_state.get("note"):
+                notes.append(twin_state["note"])
+            mine = {r["positionId"] for r in own}
+            # the twin's rows from before it ran on its own are copies of this engine's (phase 35's 22 Sep - 1 Oct): one trade, not two
+            twin = [r for r in twin if r.get("positionId") not in mine]
+            ev = review_peers.load_evidence(engine.s.data_dir)
+            blocks = await asyncio.to_thread(review_peers.peer_blocks, cards, own + twin, engine=name, now=time.time(), ev=ev)
+            for c in cards:
+                c["peers"] = blocks.get(str(c.get("id") or ""))
+        return {"day": days[0].isoformat(), "to": days[-1].isoformat(), "days": [d.isoformat() for d in days], "engine": name,
+                "trades": cards, "thresholds": thresholds, "summary": _merge_summaries(summaries), "notes": notes,
+                "twin": twin_state, "skipRules": bool(skip_rules), "recordOnly": True}
+
+    @api.get("/review/legs")
+    async def trade_review_legs(day: str | None = None, to: str | None = None) -> Response:
+        """This engine's trades of ``day`` (to ``to``) as the twin's review compares them (api/review_peers.py ``record``):
+        every position, its fills, its exit legs, its refused exits and its book's parameters. Read by the twin's
+        ``/api/review?peers=1`` with one GET; it never reads a twin itself, so two engines cannot forward forever."""
+        days = _review_days(day, to)
+        start = datetime(days[0].year, days[0].month, days[0].day, tzinfo=IST).timestamp()
+        end = datetime(days[-1].year, days[-1].month, days[-1].day, tzinfo=IST).timestamp() + 86_400
+        name = peer.read_identity(engine.s.data_dir).name
+        positions_, trades_ = await asyncio.gather(
+            engine.ledger.rows_between("positions", start, end), engine.ledger.rows_between("trades", start, end + 3 * 86_400))
+        recs = await review_reads.records(positions_, trades_, start, end, name)
+        return Response(live_trades.encode({"engine": name, "days": [d.isoformat() for d in days], "records": recs, "recordOnly": True}),
+                        media_type="application/json")
 
     @api.get("/stop-rules")
     async def stop_rules(since: str = Query("today", pattern="^(today|start)$")) -> dict[str, Any]:
@@ -1554,25 +1755,25 @@ async def _mirror_rows(
     return {k: v for k, v in out.items() if v}, real_exit
 
 
-def _minute_bars(engine: Engine, symbol: str, day: date) -> list[dict[str, Any]]:
-    """The underlying's one-minute bars for ``day``: today's from the engine's store (each corrected to the broker's
-    candle as its minute closes), an earlier day's from the archive (as built from the feed)."""
-    start = datetime(day.year, day.month, day.day, tzinfo=IST).timestamp()
-    if day == ist_today():
-        rows = [b.to_json() for b in engine.store.bars(symbol, "1m") if b.ts >= start]
-        if rows:
-            return rows
+def _archive_bars(data_dir: Path, symbols: set[str], day: date) -> dict[str, list[dict[str, Any]]]:
+    """The one-minute bars of ``symbols`` for ``day`` from the archive (as built from the feed), every file of the day read
+    once for all of them: it was read again for each symbol, on the event loop, and a review of 8 Oct took 11 s that way."""
+    out: dict[str, list[dict[str, Any]]] = {s: [] for s in symbols}
     try:
         import pandas as pd
 
-        files = sorted((engine.s.data_dir / "archive" / "bars").glob(f"{day.isoformat()}*.parquet"))
-        if not files:
-            return []
-        frame = pd.concat([pd.read_parquet(f, columns=["symbol", "ts", "o", "h", "l", "c", "v"]) for f in files])
-        frame = frame[frame["symbol"] == symbol].drop_duplicates("ts", keep="last").sort_values("ts")
-        return [{"ts": float(r.ts), "o": float(r.o), "h": float(r.h), "l": float(r.l), "c": float(r.c), "v": float(r.v)} for r in frame.itertuples()]
+        files = sorted((data_dir / "archive" / "bars").glob(f"{day.isoformat()}*.parquet"))
+        if not files or not symbols:
+            return out
+        want = sorted(symbols)
+        frame = pd.concat([pd.read_parquet(f, columns=["symbol", "ts", "o", "h", "l", "c", "v"], filters=[("symbol", "in", want)]) for f in files])
+        frame = frame.drop_duplicates(["symbol", "ts"], keep="last").sort_values(["symbol", "ts"])
+        for sym, g in frame.groupby("symbol"):
+            out[str(sym)] = [{"ts": float(r.ts), "o": float(r.o), "h": float(r.h), "l": float(r.l), "c": float(r.c), "v": float(r.v)}
+                             for r in g.itertuples()]
     except Exception:  # noqa: BLE001 - a review without its chart still answers
-        return []
+        return out
+    return out
 
 
 def _position_view(engine: Engine, p: Any) -> dict[str, Any]:
