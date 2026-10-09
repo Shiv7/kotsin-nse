@@ -239,6 +239,13 @@ NIFTY_SYMBOL = "NIFTY"
 REVIEW_BAR_DAYS = 4
 #: how long a read of the twin's records is used again: a past session's for longer, today's while it is still trading
 TWIN_TTL_PAST_S, TWIN_TTL_TODAY_S, TWIN_TTL_FAILED_S = 600.0, 30.0, 15.0
+#: the twin reads kept at most (a 10-session read is about 3 MB); an expired one is dropped on the next read
+TWIN_KEEP = 8
+#: a past range's answer, encoded, is sent again for this long (the page asks once for a past range; a revisit is free),
+#: at most this many answers and this many bytes in all (a 10-session range with its twins is about 15 MB: not kept)
+REVIEW_PAST_TTL_S = 120.0
+REVIEW_ANSWERS_KEEP = 4
+REVIEW_ANSWERS_MAX_BYTES = 12_000_000
 
 
 def _review_days(day: str | None, to: str | None) -> list[date]:
@@ -250,6 +257,9 @@ def _review_days(day: str | None, to: str | None) -> list[date]:
         raise HTTPException(400, f"day and to must be YYYY-MM-DD, not {day!r} / {to!r}") from exc
     if d1 < d0:
         raise HTTPException(400, f"to ({d1}) is before day ({d0})")
+    # 10 sessions span at most 16 calendar days: a longer span is refused before a date list is built for it
+    if (d1 - d0).days > 2 * REVIEW_MAX_DAYS:
+        raise HTTPException(400, f"at most {REVIEW_MAX_DAYS} sessions in one review: {d0} to {d1} is {(d1 - d0).days + 1} days")
     span = [d0 + timedelta(days=i) for i in range((d1 - d0).days + 1)]
     days = [d for d in span if d.weekday() < 5] or [d0]
     if len(days) > REVIEW_MAX_DAYS:
@@ -277,6 +287,19 @@ def _params_of(engine: Engine) -> Any:
     return of
 
 
+def _late_symbols(positions_: list[dict[str, Any]], signals_: list[dict[str, Any]]) -> set[str]:
+    """The symbols whose trigger closed at or after 15:15 (the 14:45 and 15:15 bars): the direction label reads them on
+    the next session, as the study does."""
+    ts_of = {str(s.get("signal_id") or ""): s.get("ts") for s in signals_}
+    out = set()
+    for p in positions_:
+        sid = str(p.get("signal_id") or "")
+        ts = ts_of.get(review.parent_signal_id(sid)) or ts_of.get(sid)
+        if isinstance(ts, int | float) and review_direction.closes_late(float(ts)) and p.get("symbol"):
+            out.add(str(p["symbol"]))
+    return out
+
+
 @dataclass(slots=True)
 class ReviewReads:
     """What the review page reads besides the ledger rows: the minute bars (a past session's kept), this engine's trades as
@@ -285,14 +308,19 @@ class ReviewReads:
     one GET on loopback (``peer.read_identity``; ``peer._client``), never a twin's twin."""
 
     engine: Engine
-    #: past session → symbol → its one-minute bars
+    #: past session → symbol → its one-minute bars (only a whole, non-empty read is kept)
     past_bars: OrderedDict[date, dict[str, list[dict[str, Any]]]] = field(default_factory=OrderedDict)
     #: the sessions asked for → (when read, the twin's records, what to say about the read)
-    twin_reads: dict[tuple[str, ...], tuple[float, list[dict[str, Any]], dict[str, Any]]] = field(default_factory=dict)
+    twin_reads: OrderedDict[tuple[str, ...], tuple[float, list[dict[str, Any]], dict[str, Any]]] = field(default_factory=OrderedDict)
+    #: a past range's answer as sent: (sessions, mirrors, peers) → (when, how long it holds, the encoded bytes)
+    answers: OrderedDict[tuple[Any, ...], tuple[float, float, bytes]] = field(default_factory=OrderedDict)
 
     async def bars(self, symbols: set[str], day: date) -> dict[str, list[dict[str, Any]]]:
         """Each symbol's one-minute bars for ``day``: today's from the engine's store (each corrected to the broker's candle
-        as its minute closes), an earlier day's from the archive, read off the event loop and kept."""
+        as its minute closes), an earlier day's from the archive, read off the event loop. A past day's symbol is kept only
+        from a whole read that found bars: a read that raced the engine writing the day (phase 35's midnight compaction,
+        00:03-00:10 IST; phase 34's rewrite of the day file) or found nothing is read again next time, never kept as
+        "no bars" (safety review, 10 Oct)."""
         e = self.engine
         out: dict[str, list[dict[str, Any]]] = {}
         if day == ist_today():
@@ -303,7 +331,8 @@ class ReviewReads:
                     out[s] = rows
             missing = symbols - set(out)
             if missing:
-                out.update(await asyncio.to_thread(_archive_bars, e.s.data_dir, missing, day))
+                found, _whole = await asyncio.to_thread(_archive_bars, e.s.data_dir, missing, day)
+                out.update(found)
             return out
         have = self.past_bars.get(day)
         if have is None:
@@ -311,9 +340,12 @@ class ReviewReads:
             while len(self.past_bars) > REVIEW_BAR_DAYS:
                 self.past_bars.popitem(last=False)
         missing = symbols - set(have)
+        got: dict[str, list[dict[str, Any]]] = {}
         if missing:
-            have.update(await asyncio.to_thread(_archive_bars, e.s.data_dir, missing, day))
-        return {s: have.get(s, []) for s in symbols}
+            got, whole = await asyncio.to_thread(_archive_bars, e.s.data_dir, missing, day)
+            if whole:
+                have.update({s: rows for s, rows in got.items() if rows})
+        return {s: have.get(s) or got.get(s) or [] for s in symbols}
 
     async def records(self, positions_: list[dict[str, Any]], trades_: list[dict[str, Any]], start: float, end: float,
                       name: str) -> list[dict[str, Any]]:
@@ -328,13 +360,17 @@ class ReviewReads:
         return await asyncio.to_thread(work)
 
     async def twin(self, days: list[date]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        """The twin's records of ``days`` and what to say about the read. A twin that is down, or runs code without the
-        read, costs the card only its other engine: this engine's peers are still shown, with a quiet note."""
+        """The twin's records of ``days`` and what to say about the read. A twin that is down, runs code without the read,
+        or sends records of another shape (the two engines deploy and roll back apart) costs the card only its other
+        engine: this engine's peers are still shown, with a quiet note. Each record is checked before it is kept
+        (``review_peers.record_problem``)."""
         ident = peer.read_identity(self.engine.s.data_dir)
         if not ident.peer_url:
             return [], {"name": None, "read": False, "note": ""}
         key = tuple(d.isoformat() for d in days)
         now = time.time()
+        for k in [k for k, v in self.twin_reads.items() if now - v[0] >= TWIN_TTL_PAST_S]:
+            del self.twin_reads[k]
         hit = self.twin_reads.get(key)
         past = days[-1] < ist_today()
         if hit is not None:
@@ -350,8 +386,12 @@ class ReviewReads:
                                      headers={"Accept": "application/json"})
             body = r.json() if r.status_code == 200 else None
             if isinstance(body, dict) and isinstance(body.get("records"), list):
-                recs = [x for x in body["records"] if isinstance(x, dict)]
+                recs, bad = review_peers.checked_records(body["records"])
                 state = {"name": body.get("engine") or ident.peer_name, "read": True, "note": "", "count": len(recs)}
+                if bad:
+                    state.update(skipped=len(bad), note=f"{len(bad)} of {who}'s records are of a shape this code does not read and are left out "
+                                                         f"(first: {bad[0]})")
+                    log.warning("review.twin_records_skipped", twin=who, n=len(bad), first=bad[0])
             elif r.status_code == 404:
                 state["note"] = f"{who} runs code without the same-option read: only this engine's books are compared"
             else:
@@ -359,9 +399,28 @@ class ReviewReads:
         except (httpx.HTTPError, ValueError) as exc:
             state["note"] = f"{who} is not answering ({exc.__class__.__name__}): only this engine's books are compared"
         self.twin_reads[key] = (now, recs, state)
-        while len(self.twin_reads) > 16:
-            self.twin_reads.pop(next(iter(self.twin_reads)))
+        self.twin_reads.move_to_end(key)
+        while len(self.twin_reads) > TWIN_KEEP:
+            self.twin_reads.popitem(last=False)
         return recs, state
+
+    def answer(self, key: tuple[Any, ...]) -> bytes | None:
+        """A past range's answer as last sent, while it holds."""
+        hit = self.answers.get(key)
+        if hit is None or time.time() - hit[0] >= hit[1]:
+            self.answers.pop(key, None)
+            return None
+        return hit[2]
+
+    def keep_answer(self, key: tuple[Any, ...], body: bytes, ttl: float) -> None:
+        """Keep a past range's answer, the oldest dropped first: never more than ``REVIEW_ANSWERS_KEEP`` answers or
+        ``REVIEW_ANSWERS_MAX_BYTES`` in all, so the engine's memory does not grow with what was looked at."""
+        if len(body) > REVIEW_ANSWERS_MAX_BYTES:
+            return
+        self.answers[key] = (time.time(), ttl, body)
+        self.answers.move_to_end(key)
+        while len(self.answers) > REVIEW_ANSWERS_KEEP or sum(len(v[2]) for v in self.answers.values()) > REVIEW_ANSWERS_MAX_BYTES:
+            self.answers.popitem(last=False)
 
 
 def _rule_fields(strategy: str) -> dict[str, str]:
@@ -549,7 +608,7 @@ def build_app(engine: Engine) -> FastAPI:
     @api.get("/review")
     async def trade_review(
         day: str | None = None, to: str | None = None, mirrors: bool = Query(False), peers: bool = Query(False),
-    ) -> dict[str, Any]:
+    ) -> Response:
         """Every trade of a session, each from its trigger to its exit and what the stock did after, with the checks
         and the root cause of a loss (api/review.py; operator, 2026-10-05: "be accurate in identifying the root cause
         of the loss for each trade").
@@ -560,10 +619,20 @@ def build_app(engine: Engine) -> FastAPI:
         cards of their own; every card carries its direction block (api/review_direction.py); ``peers=1`` adds the same
         option elsewhere — every other book here and on the twin that held this contract at the same time, and for each
         that made more, the exact rupee parts and the lesson (api/review_peers.py). Record-only: the twin is read with one
-        GET on loopback (``/api/review/legs``), which never reads its own twin. The work runs off the event loop."""
+        GET on loopback (``/api/review/legs``), which never reads its own twin; a twin that is down, older or sends
+        records of another shape costs only its own rows.
+
+        Where the time goes: the minute-bar reads, the review and the comparison run in worker threads; the ledger reads,
+        their JSON parse and the encoding of the answer run on the event loop. The answer is encoded once
+        (``live_trades.encode``, not FastAPI's validating encoder), and a past range's answer is kept
+        ``REVIEW_PAST_TTL_S`` (the page asks for a past range once rather than every 20 s)."""
         days = _review_days(day, to)
+        past = days[-1] < ist_today()
+        key = (tuple(d.isoformat() for d in days), bool(mirrors), bool(peers))
+        if past and (kept := review_reads.answer(key)) is not None:
+            return Response(kept, media_type="application/json")
         name = peer.read_identity(engine.s.data_dir).name
-        skip_rules = review_direction.load_skip_rules(engine.s.data_dir)
+        skip_rules, skip_note = review_direction.read_skip_rules(engine.s.data_dir)
         labels = {k.value: k.display_name for k in StrategyKey}
         mirror_books = {k.value: (src.value, rule) for k, (src, rule) in STOP_MIRRORS.items()}
         shadows = {k.value for k in SHADOW_BOOKS if k not in STOP_MIRRORS}
@@ -572,6 +641,7 @@ def build_app(engine: Engine) -> FastAPI:
         positions_all: list[dict[str, Any]] = []
         trades_all: list[dict[str, Any]] = []
         thresholds: dict[str, float] = review.THRESHOLDS
+        notes: list[str] = [skip_note] if skip_note else []
         for d in days:
             start = datetime(d.year, d.month, d.day, tzinfo=IST).timestamp()
             end = start + 86_400
@@ -584,12 +654,25 @@ def build_app(engine: Engine) -> FastAPI:
             symbols = {str(p.get("symbol") or "") for p in positions_} - {""}
             bars = await review_reads.bars(symbols | {NIFTY_SYMBOL}, d) if symbols else {}
             nifty = bars.get(NIFTY_SYMBOL, [])
+            # a trigger closing at or after 15:15 is labelled on the next session, as the study labels it, once it is recorded
+            late = _late_symbols(positions_, signals_)
+            nxt: dict[str, list[dict[str, Any]]] = {}
+            nxt_day: str | None = None
+            if late:
+                nd = d + timedelta(days=1)
+                for _ in range(30):
+                    if engine.calendar.is_trading_day(nd):
+                        break
+                    nd += timedelta(days=1)
+                if nd <= ist_today():
+                    nxt, nxt_day = await review_reads.bars(late, nd), nd.isoformat()
 
             def annotate(card: dict[str, Any], *, signal: Any, breadth: Any, route: Any, bars: Any, book: str, nifty: Any = nifty,
-                         day_s: str = d.isoformat()) -> dict[str, Any]:
+                         day_s: str = d.isoformat(), nxt: dict[str, list[dict[str, Any]]] = nxt, nxt_day: str | None = nxt_day) -> dict[str, Any]:
                 return {"engine": name, "day": day_s, "directionRead": review_direction.direction_read(
                     card, signal=signal, breadth=breadth, route=route, bars=bars, nifty_bars=nifty,
-                    book_side=describe_book(book)["trend"], skip_rules=skip_rules)}
+                    book_side=describe_book(book)["trend"], skip_rules=skip_rules, next_bars=nxt.get(str(card.get("symbol") or "")),
+                    next_day=nxt_day)}
 
             out = await asyncio.to_thread(
                 review.review_day, positions=positions_, trades=trades_, signals=signals_, events=events_, bars_by_symbol=bars,
@@ -601,7 +684,6 @@ def build_app(engine: Engine) -> FastAPI:
             thresholds = out["thresholds"]
             positions_all += positions_
             trades_all += trades_
-        notes: list[str] = []
         twin_state: dict[str, Any] | None = None
         if peers:
             start = datetime(days[0].year, days[0].month, days[0].day, tzinfo=IST).timestamp()
@@ -614,12 +696,29 @@ def build_app(engine: Engine) -> FastAPI:
             # the twin's rows from before it ran on its own are copies of this engine's (phase 35's 22 Sep - 1 Oct): one trade, not two
             twin = [r for r in twin if r.get("positionId") not in mine]
             ev = review_peers.load_evidence(engine.s.data_dir)
-            blocks = await asyncio.to_thread(review_peers.peer_blocks, cards, own + twin, engine=name, now=time.time(), ev=ev)
+            peer_name = peer.read_identity(engine.s.data_dir).peer_name or "the twin"
+            unread = peer_name if (twin_state.get("name") is not None or twin_state.get("note")) and not twin_state.get("read") else ""
+            try:
+                blocks = await asyncio.to_thread(review_peers.peer_blocks, cards, own + twin, engine=name, now=time.time(), ev=ev,
+                                                 unread=unread)
+            except Exception as exc:  # the twin's records, not this engine's, are the ones that can surprise
+                if not twin:
+                    raise
+                log.warning("review.twin_compare_failed", error=repr(exc))
+                twin_state = {**twin_state, "read": False}
+                notes.append(f"{peer_name}'s records could not be compared ({exc.__class__.__name__}): only this engine's books are compared")
+                blocks = await asyncio.to_thread(review_peers.peer_blocks, cards, own, engine=name, now=time.time(), ev=ev,
+                                                 unread=peer_name)
             for c in cards:
                 c["peers"] = blocks.get(str(c.get("id") or ""))
-        return {"day": days[0].isoformat(), "to": days[-1].isoformat(), "days": [d.isoformat() for d in days], "engine": name,
-                "trades": cards, "thresholds": thresholds, "summary": _merge_summaries(summaries), "notes": notes,
-                "twin": twin_state, "skipRules": bool(skip_rules), "recordOnly": True}
+        body = live_trades.encode({
+            "day": days[0].isoformat(), "to": days[-1].isoformat(), "days": [d.isoformat() for d in days], "engine": name,
+            "trades": cards, "thresholds": thresholds, "summary": _merge_summaries(summaries), "notes": notes,
+            "twin": twin_state, "skipRules": bool(skip_rules), "recordOnly": True})
+        if past:
+            failed = bool(peers and twin_state is not None and twin_state.get("note"))
+            review_reads.keep_answer(key, body, TWIN_TTL_FAILED_S if failed else REVIEW_PAST_TTL_S)
+        return Response(body, media_type="application/json")
 
     @api.get("/review/legs")
     async def trade_review_legs(day: str | None = None, to: str | None = None) -> Response:
@@ -1755,25 +1854,39 @@ async def _mirror_rows(
     return {k: v for k, v in out.items() if v}, real_exit
 
 
-def _archive_bars(data_dir: Path, symbols: set[str], day: date) -> dict[str, list[dict[str, Any]]]:
+def _archive_day_files(data_dir: Path, day: date) -> list[Path]:
+    """The bar archive's files for ``day`` as the archive reads them: the day file, then any parts in order (phase 35
+    flushes parts and compacts them after the day; phase 34 rewrites the day file) — never a file still being written
+    under its temp name (``*.tmp.parquet``: both engines write through one, and the old ``{day}*.parquet`` glob read it)."""
+    d = data_dir / "archive" / "bars"
+    main = d / f"{day.isoformat()}.parquet"
+    parts = sorted(p for p in d.glob(f"{day.isoformat()}.part-*.parquet") if not p.name.endswith(".tmp.parquet")) if d.exists() else []
+    return ([main] if main.exists() else []) + parts
+
+
+def _archive_bars(data_dir: Path, symbols: set[str], day: date) -> tuple[dict[str, list[dict[str, Any]]], bool]:
     """The one-minute bars of ``symbols`` for ``day`` from the archive (as built from the feed), every file of the day read
-    once for all of them: it was read again for each symbol, on the event loop, and a review of 8 Oct took 11 s that way."""
+    once for all of them (it was read again for each symbol, on the event loop: a review of 8 Oct took 11 s that way), and
+    whether the read was whole. A file that cannot be read (the engine compacting or rewriting it as this reads) makes the
+    read not whole, so the caller keeps nothing from it and reads again."""
     out: dict[str, list[dict[str, Any]]] = {s: [] for s in symbols}
+    if not symbols:
+        return out, True
     try:
         import pandas as pd
 
-        files = sorted((data_dir / "archive" / "bars").glob(f"{day.isoformat()}*.parquet"))
-        if not files or not symbols:
-            return out
+        files = _archive_day_files(data_dir, day)
+        if not files:
+            return out, True
         want = sorted(symbols)
         frame = pd.concat([pd.read_parquet(f, columns=["symbol", "ts", "o", "h", "l", "c", "v"], filters=[("symbol", "in", want)]) for f in files])
         frame = frame.drop_duplicates(["symbol", "ts"], keep="last").sort_values(["symbol", "ts"])
         for sym, g in frame.groupby("symbol"):
             out[str(sym)] = [{"ts": float(r.ts), "o": float(r.o), "h": float(r.h), "l": float(r.l), "c": float(r.c), "v": float(r.v)}
                              for r in g.itertuples()]
-    except Exception:  # noqa: BLE001 - a review without its chart still answers
-        return out
-    return out
+    except Exception:  # noqa: BLE001 - a review without its chart still answers; not whole, so nothing of it is kept
+        return {s: [] for s in symbols}, False
+    return out, True
 
 
 def _position_view(engine: Engine, p: Any) -> dict[str, Any]:

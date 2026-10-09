@@ -1,7 +1,8 @@
 """The pooled evidence the review's same-option lessons cite (api/review_peers.py), as the same-option study left it.
 
-Generated from the study's two pooled tables (tables/contrasts.csv: every book-pair, stop-rule and engine contrast on
-the same fill; tables/first_out_by_mech.csv: each exit mechanism that fired first while a sibling book held) by
+Generated from the study's pooled tables (tables/contrasts.csv: every book-pair, stop-rule and engine contrast on the
+same fill; tables/first_out_by_mech.csv: each exit mechanism that fired first while a sibling book held;
+tables/mech_transitions_rows.csv: the stock-stop rules' 25 % bid cap firing first, lessons.md L5a/L5c) by
 ``make_evidence.py``; never edited by hand. A newer ``<data_dir>/peer_evidence.json`` written the same way after a close
 replaces it at read time (``review_peers.load_evidence``), so the evidence can grow without a deploy.
 """
@@ -118,4 +119,16 @@ EVIDENCE: dict[str, Any] = {
         {'family': 'stock-stop mirror', 'book': 'FUDKII_RT_Y', 'mech': 'stock stop', 'early_exits': 4.0, 'units': 2.0, 'days': 2.0, 'IN_n': 0.0, 'OUT_n': 4.0, 'held_sum': 38627.01, 'held_sum_IN': 0.0, 'held_sum_OUT': 38627.01, 'held_sum_A': 19014.08, 'held_sum_B': 19612.93, 'holding_better_n': 4.0, 'early_better_n': 0.0, 'holding_better_IN': 0.0, 'early_better_IN': 0.0, 'holding_better_OUT': 4.0, 'early_better_OUT': 0.0, 'holding_better_A': 2.0, 'early_better_A': 0.0, 'holding_better_B': 2.0, 'early_better_B': 0.0, 'held_sum_clean': 30985.69, 'n_artefact': 2.0, 'median_exit_min': 9.35, 'median_stop_vs_paid_pct': None, 'median_exit_vs_paid_pct': -11.51},
         {'family': 'stock-stop mirror', 'book': 'FUDKII', 'mech': 'raised stop (breakeven / rung / trail line)', 'early_exits': 32.0, 'units': 18.0, 'days': 4.0, 'IN_n': 0.0, 'OUT_n': 32.0, 'held_sum': 65575.44, 'held_sum_IN': 0.0, 'held_sum_OUT': 65575.44, 'held_sum_A': 33295.7, 'held_sum_B': 32279.74, 'holding_better_n': 28.0, 'early_better_n': 4.0, 'holding_better_IN': 0.0, 'early_better_IN': 0.0, 'holding_better_OUT': 28.0, 'early_better_OUT': 4.0, 'holding_better_A': 13.0, 'early_better_A': 2.0, 'holding_better_B': 15.0, 'early_better_B': 2.0, 'held_sum_clean': 65575.44, 'n_artefact': 0.0, 'median_exit_min': 6.72, 'median_stop_vs_paid_pct': 3.04, 'median_exit_vs_paid_pct': 1.34},
     ],
+    'capFirst': {
+        'books': {
+            'FUDKII': {'copies': 4, 'units': 3, 'days': 1, 'cap_better': 4, 'held_better': 0, 'ties': 0, 'held_sum': -25142.54, 'n_refusal': 0, 'where': 'PAYTM PE 1500 8 Oct, PAYTM PE 1440 8 Oct, PGEL PE 510 8 Oct', 'cap_better_A': 2, 'held_better_A': 0, 'held_sum_A': -12325.29, 'cap_better_B': 2, 'held_better_B': 0, 'held_sum_B': -12817.25},
+            'FUDKII_RT_N': {'copies': 3, 'units': 3, 'days': 1, 'cap_better': 2, 'held_better': 1, 'ties': 0, 'held_sum': 3550.25, 'n_refusal': 1, 'where': 'ITC PE 255 8 Oct, PAYTM PE 1500 8 Oct, PGEL PE 510 8 Oct', 'cap_better_A': 0, 'held_better_A': 0, 'held_sum_A': 0.0, 'cap_better_B': 2, 'held_better_B': 1, 'held_sum_B': 3550.25},
+            'FUDKII_RT_X': {'copies': 5, 'units': 4, 'days': 2, 'cap_better': 5, 'held_better': 0, 'ties': 0, 'held_sum': -30574.11, 'n_refusal': 1, 'where': 'BAJFINANCE CE 1010 5 Oct, PAYTM PE 1500 8 Oct, PAYTM PE 1440 8 Oct, PGEL PE 510 8 Oct', 'cap_better_A': 2, 'held_better_A': 0, 'held_sum_A': -12325.29, 'cap_better_B': 3, 'held_better_B': 0, 'held_sum_B': -18248.82},
+            'FUDKII_RT_Y': {'copies': 5, 'units': 4, 'days': 2, 'cap_better': 4, 'held_better': 1, 'ties': 0, 'held_sum': -3193.96, 'n_refusal': 0, 'where': 'KOTAKBANK CE 440 6 Oct, PAYTM PE 1500 8 Oct, PAYTM PE 1440 8 Oct, AMBER PE 6600 8 Oct', 'cap_better_A': 1, 'held_better_A': 1, 'held_sum_A': -342.43, 'cap_better_B': 3, 'held_better_B': 0, 'held_sum_B': -2851.53},
+            'FUDKII_RT_Y_W1': {'copies': 6, 'units': 4, 'days': 2, 'cap_better': 2, 'held_better': 4, 'ties': 0, 'held_sum': 18492.13, 'n_refusal': 0, 'where': 'KOTAKBANK CE 440 6 Oct, PAYTM PE 1500 8 Oct, PAYTM PE 1440 8 Oct, AMBER PE 6600 8 Oct', 'cap_better_A': 1, 'held_better_A': 2, 'held_sum_A': 16178.2, 'cap_better_B': 1, 'held_better_B': 2, 'held_sum_B': 2313.93},
+        },
+        'pools': [
+            {'label': 'the trading books with no premium cap of their own under the current rule (FUDKII and RT-X)', 'books': ['FUDKII', 'FUDKII_RT_X'], 'copies': 9, 'units': 4, 'days': 2, 'cap_better': 9, 'held_better': 0, 'ties': 0, 'held_sum': -55716.65, 'n_refusal': 1, 'where': 'PAYTM PE 1500 8 Oct, PAYTM PE 1440 8 Oct, PGEL PE 510 8 Oct, BAJFINANCE CE 1010 5 Oct', 'cap_better_A': 4, 'held_better_A': 0, 'held_sum_A': -24650.58, 'cap_better_B': 5, 'held_better_B': 0, 'held_sum_B': -31066.07},
+        ],
+    },
 }

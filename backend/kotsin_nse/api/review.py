@@ -507,8 +507,8 @@ def review_day(
 
     ``include_mirrors`` (operator, 2026-10-09: "add strategy and other filters", the twins among them): the stop-rule
     mirrors are reviewed as cards of their own too, marked ``mirror`` with their ``variant``; they never enter the summary
-    (a mirror re-trades its source's fill). Every card carries its ``variant``, the book whose fill it is and the trigger's
-    own direction, and whatever ``annotate`` adds."""
+    (a mirror re-trades its source's fill). Every card carries its ``variant``, the book whose fill it is (``sourceShadow``
+    when that book is a shadow) and the trigger's own direction, and whatever ``annotate`` adds."""
     trade_of = {t.get("position_id"): t for t in trades}
     sig_of = {s.get("signal_id"): s for s in signals}
     ev_of: dict[tuple[str, str], dict[str, Any]] = {}
@@ -546,8 +546,9 @@ def review_day(
             label=labels.get(book, book),
         )
         trigger_dir = str((sig_of.get(parent) or {}).get("direction") or (breadth or {}).get("direction") or "") or None
+        # a mirror goes with its book: hidden with the shadows when the book it copies is one (the Options page's rule)
         card.update(mirror=is_mirror, variant=variant, sourceBook=source, sourceLabel=labels.get(source, source),
-                    shadow=book in shadow_books, triggerDirection=trigger_dir)
+                    shadow=book in shadow_books, sourceShadow=source in shadow_books, triggerDirection=trigger_dir)
         if annotate is not None:
             card.update(annotate(card, signal=signal, breadth=breadth, route=route, bars=bars, book=source))
         out.append(card)
