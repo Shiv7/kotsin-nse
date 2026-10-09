@@ -117,7 +117,7 @@ const lotsTxt = (n: number) => `${Number.isInteger(n) ? n : n.toFixed(2)} lot${n
 const dirArrow = (d: string | null | undefined) => (d === 'BULLISH' ? '▲ bullish' : d === 'BEARISH' ? '▼ bearish' : d === 'FLAT' ? '◆ flat' : 'DM')
 const dirTone = (d: string | null | undefined): 'green' | 'red' | 'slate' => (d === 'BULLISH' ? 'green' : d === 'BEARISH' ? 'red' : 'slate')
 
-function Funnel() {
+export function Funnel() {
   return (
     <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="M3 4h18l-7 9v6l-4 2v-8L3 4z" />
@@ -125,7 +125,7 @@ function Funnel() {
   )
 }
 
-function Chip({ on, onClick, children, title }: { on: boolean; onClick: () => void; children: React.ReactNode; title?: string }) {
+export function Chip({ on, onClick, children, title }: { on: boolean; onClick: () => void; children: React.ReactNode; title?: string }) {
   return (
     <button type="button" title={title} onClick={onClick}
       className={cls('rounded-full border px-2.5 py-0.5 text-[12px]', on ? 'border-sky-400/60 bg-sky-400/15 text-sky-100' : 'border-slate-700 bg-slate-900 text-slate-400 hover:text-slate-200')}>
@@ -134,7 +134,7 @@ function Chip({ on, onClick, children, title }: { on: boolean; onClick: () => vo
   )
 }
 
-function Group({ label, children }: { label: string; children: React.ReactNode }) {
+export function Group({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="flex flex-wrap items-center gap-1.5">
       <span className="w-28 shrink-0 text-[11px] font-semibold uppercase tracking-wide text-slate-500">{label}</span>
@@ -143,7 +143,7 @@ function Group({ label, children }: { label: string; children: React.ReactNode }
   )
 }
 
-const toggle = <T,>(xs: T[], x: T) => (xs.includes(x) ? xs.filter((y) => y !== x) : [...xs, x])
+export const toggle = <T,>(xs: T[], x: T) => (xs.includes(x) ? xs.filter((y) => y !== x) : [...xs, x])
 
 function FilterPanel({ f, set, books, engine }: { f: Filters; set: (f: Filters) => void; books: [string, string][]; engine: EngineId | null }) {
   const many = (key: 'pnl' | 'trigger' | 'winning' | 'vsTrade' | 'aligned', opts: [string, string][]) =>
