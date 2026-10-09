@@ -434,6 +434,38 @@ class Ledger:
             v = (await conn.execute(stmt)).scalar()
         return float(v) if v is not None else None
 
+    # -- what the active-trades page reads (api/live_trades.py; operator, 2026-10-09: "a dedicated page for all actove
+    # trades"). Read-only, the JSON returned as text and parsed off the event loop, as the depth check's reads are.
+
+    async def exit_order_json(self, start: float, end: float, statuses: Collection[str]) -> list[str]:
+        """The JSON of every EXIT order in one of ``statuses`` placed in ``[start, end)``, oldest first, unparsed."""
+        stmt = (sa.select(orders.c.json).where(orders.c.ts >= start, orders.c.ts < end, orders.c.purpose == "EXIT",
+                                               orders.c.status.in_(sorted(set(statuses)))).order_by(orders.c.ts))
+        async with self.engine.begin() as conn:
+            return [r[0] for r in (await conn.execute(stmt)).all()]
+
+    async def signal_json(self, ids: Collection[str]) -> list[str]:
+        """The stored JSON of the signals named, unparsed (``signal_id`` is unique and indexed)."""
+        keep = sorted({str(i) for i in ids if i})
+        out: list[str] = []
+        async with self.engine.begin() as conn:
+            for k in range(0, len(keep), 500):  # under SQLite's bound-parameter limit
+                stmt = sa.select(signals.c.json).where(signals.c.signal_id.in_(keep[k : k + 500]))
+                out += [r[0] for r in (await conn.execute(stmt)).all()]
+        return out
+
+    async def event_json(self, kind: str, signal_ids: Collection[str], since: float) -> list[str]:
+        """The JSON of the ``kind`` events since ``since`` that name one of ``signal_ids``, oldest first, unparsed. The
+        kind is indexed; the signal id is read from the JSON by SQLite itself."""
+        keep = sorted({str(i) for i in signal_ids if i})
+        if not keep:
+            return []
+        stmt = (sa.select(events.c.json).where(events.c.kind == kind, events.c.ts >= since,
+                                               sa.func.json_extract(events.c.json, "$.signal_id").in_(keep[:500]))
+                .order_by(events.c.ts))
+        async with self.engine.begin() as conn:
+            return [r[0] for r in (await conn.execute(stmt)).all()]
+
     async def gate_histogram(self, strategy: str | None = None) -> list[dict[str, Any]]:
         """Which gate is binding, as a number. The question ``NSE_BB_30`` could never answer."""
         stmt = sa.select(
