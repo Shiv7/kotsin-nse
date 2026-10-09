@@ -708,16 +708,21 @@ export interface DepthSummary {
 }
 
 /** A closed trade's order book on the way out: exits refused because the book was older than the paper matcher's limit, and
- *  the age of the book the closing exit filled on (``/api/trades`` with ``depth=1`` or ``stale=1``). */
+ *  the age of the book that priced the closing exit when the depth priced it (``/api/trades`` with ``depth=1`` or ``stale=1``). */
 export interface StaleBook {
   stale: boolean
   refused: number
   maxAgeMs: number | null
   limitMs: number | null
   lastRefusedTs: number | null
+  /** the book's age when a cross or a market order priced the closing exit on the depth; null for a resting limit */
   fillAgeMs: number | null
   fillLimitMs: number | null
   fillStale: boolean
+  /** how the closing exit was priced: a cross or a market order on the depth, or a resting limit at its price on a touch */
+  fillHow?: 'cross' | 'market' | 'resting' | null
+  /** a resting limit's depth snapshot at the fill: kept for the record, not judged (the touch priced it, not the depth) */
+  depthAgeAtFillMs?: number | null
   /** "order book stale (2 exits refused, 45.6 s)" — empty when it was not */
   words: string
 }
@@ -754,8 +759,9 @@ export interface LiveTradeRow {
   shadow: boolean
   /** the book whose trade it is (a mirror's source) is a shadow */
   sourceShadow: boolean
-  /** the book whose entry fill this one copied (a stop-rule mirror's source, the wide-stop shadow's RT-Y) */
+  /** the book whose entry fill this one copied (a stop-rule mirror's source, the wide-stop shadow's RT-Y), and its name */
   entryFrom: string | null
+  entryFromLabel?: string | null
   underlying: string
   segment: string
   contract: string
@@ -774,18 +780,24 @@ export interface LiveTradeRow {
   entry: number
   openedTs: number
   openedHm: string
+  /** the IST day it was opened, YYYY-MM-DD */
+  openedDay?: string
   signalId: string
   triggerId: string | null
   triggerTs: number | null
   triggerClose: number | null
   grade: string | null
-  quote: { ltp: number | null; bid: number | null; ask: number | null; mid: number | null; ageS: number | null; limitS: number; spreadPct: number | null }
+  /** the contract's quote: the last trade, bid, ask and mid from one feed, the one the exit loop marks the position on */
+  quote: { ltp: number | null; bid: number | null; ask: number | null; mid: number | null; ageS: number | null; fresh?: boolean; limitS: number; spreadPct: number | null }
   orderBook: {
     state: 'fresh' | 'stale' | 'none'
     ageS: number | null
     limitS: number
     stale: boolean
     ts: number | null
+    /** the depth book's own best bid and ask */
+    bid?: number | null
+    ask?: number | null
     depth: { bids: [number, number][]; asks: [number, number][]; ageMs: number } | null
   }
   pnl: {
@@ -807,17 +819,26 @@ export interface LiveTradeRow {
       entry: {
         fill: number | null; ref: number | null; midAtPlace: number | null; bidAtPlace: number | null; askAtPlace: number | null; limit: number | null
         vsRefRs: number | null; vsMidRs: number | null; vsRefPct: number | null; waitS: number | null; why?: string; outcome?: string; copiedFrom: string | null
+        copiedFromLabel?: string | null
       } | null
       exits: { reason: string | null; qty: number; fill: number | null; midAtPlace: number | null; vsMidRs: number | null }[]
       totalVsMidRs: number
     }
+    /** depth: a fresh book walked, against its own touch and mid; shape: a stale book's shape moved to the quote's bid and
+     *  walked (an approximation), against the quote's mid; touch: the quote's bid alone; none: nothing to sell into */
     exitNow: {
-      basis: 'depth' | 'touch' | 'none'
+      basis: 'depth' | 'shape' | 'touch' | 'none'
       avg: number | null
+      value?: number | null
       qty: number
       vsLtpRs: number | null
       vsMidRs: number | null
       vsTouchRs: number | null
+      /** the mid and the touch it is measured against, from the feed it was priced on */
+      mid?: number | null
+      touch?: number | null
+      feed?: 'book' | 'quote'
+      quoteTouch?: number | null
       walk: LiveWalk | null
       bookState?: 'fresh' | 'stale' | 'none'
     } | null
@@ -839,7 +860,7 @@ export interface LiveTradeRow {
     mirror: { equitySl: number; premiumCap: number; trailStop: number | null; through: { seconds: number; area: number; areaNeeded: number | null; maxSeconds: number } | null } | null
     exitPlan: { policy: string; rows: { kind: string; at: string; action: string; qty: number | null }[] } | null
   }
-  market: { aligned: 'yes' | 'no' | 'unknown'; atTrigger: NifAlign | null; now: NifAlign | null; shareAtTrigger?: number; shareNow?: number; why: string }
+  market: { aligned: 'yes' | 'no' | 'unchanged' | 'unknown'; atTrigger: NifAlign | null; now: NifAlign | null; shareAtTrigger?: number; shareNow?: number; why: string }
   winning: { direction: 'BULLISH' | 'BEARISH' | 'FLAT' | null; vsTrade: 'with' | 'against' | 'flat' | null; stockMovePct: number | null; reasons: string[]; why: string }
   /** the trade map's input, in the alert card's field names (components/TradeMap.tsx) */
   map: TradeMapCard

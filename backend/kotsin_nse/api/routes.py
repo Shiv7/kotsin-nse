@@ -26,7 +26,7 @@ from typing import Any
 import sqlalchemy as sa
 import structlog
 from fastapi import APIRouter, FastAPI, HTTPException, Query, WebSocket
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -485,15 +485,16 @@ def build_app(engine: Engine) -> FastAPI:
     live = live_trades.LiveTrades(engine, position_view=_position_view, rule_fields=_rule_fields, entry_sources=ENTRY_SOURCES)
 
     @api.get("/positions/live")
-    async def positions_live() -> JSONResponse:
+    async def positions_live() -> Response:
         """Every open position of this engine, every book — the shadows and the stop-rule mirrors too — one card each
         (operator, 2026-10-09: "in the dashabpord have a dedicated page for all actove trades ... in the form of cards"):
         the contract, its lots, the money so far and an exit now would cost, the order book's age against the paper
         matcher's own limit, the trigger and which way the stock has gone since, and the trade map (api/live_trades.py).
         Record-only: it reads, it never changes a trade, an order, a stop or a wallet. Polled every few seconds by both
         engines' pages, so it is kept light: the stored rows it reads are few and parsed off the event loop, and the answer
-        goes out as plain JSON (60 rows: FastAPI's encoder took 10 ms of the loop for what json.dumps does in 1.4)."""
-        return JSONResponse(await live.view())
+        goes out as plain JSON (60 rows: FastAPI's encoder took 10 ms of the loop for what json.dumps does in 1.4), a value
+        that is not a number made null rather than failing the page (``live_trades.encode``)."""
+        return Response(live_trades.encode(await live.view()), media_type="application/json")
 
     @api.get("/signals")
     async def recent_signals(limit: int = Query(100, le=500), unpublished: bool = False) -> list[dict[str, Any]]:
