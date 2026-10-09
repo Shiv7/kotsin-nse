@@ -4,7 +4,7 @@ import { RuleBadge, StopRuleGridTable } from '../components/StopRuleGrid'
 import { Badge, Card, ErrorLine, GradeBadge, Stat, StrategyBadge, Table } from '../components/Ui'
 import { cls, contractName, fmt, ist, pnlColor } from '../lib/api'
 import { usePoll } from '../lib/usePoll'
-import type { Pnl, StopRuleGrid, TradeRow } from '../types'
+import type { Pnl, StaleBook, StopRuleGrid, TradeRow } from '../types'
 
 /**
  * Gross, charges and net are shown separately and never merged. On the previous book 81% of the
@@ -22,7 +22,7 @@ const LEDGER_TIPS: Record<string, string> = {
   MFE: 'Maximum favourable excursion: the best the position could have been SOLD for while held — the bid, the last trade when there was none, and every fill — in R: (price − entry) ÷ (entry − first stop), with that price and the rupees open then. Before charges. Rows marked "last" (closed before 4 Oct) used the last trade alone.',
   MAE: 'Maximum adverse excursion: the worst the position could have been SOLD for while held — the bid, the last trade when there was none, and every fill — in R; −1.00R is the first stop. The exit is never below it. Rows marked "last" (closed before 4 Oct) used the last trade alone, which a stop\'s fill can sit below.',
   Depth: DEPTH_TIP,
-  'Exit reason': 'For a stop: the LEVEL that fired → the read that breached it (TRIG) → the BID at that instant → the FILL. The gap level→trig is the 1 s read (and a book\'s grace); trig→bid is the spread; bid→fill is the depth walked for the lots.',
+  'Exit reason': 'For a stop: the LEVEL that fired → the read that breached it (TRIG) → the BID at that instant → the FILL. The gap level→trig is the 1 s read (and a book\'s grace); trig→bid is the spread; bid→fill is the depth walked for the lots. "order book stale": exits the paper matcher refused because the book was older than its limit (6 s, 10 s in the opening window), and a closing fill on a book older than that — read from the stored orders.',
 }
 
 /** An excursion: R on top, the option's price then and the rupees open then beneath. */
@@ -53,6 +53,20 @@ function StopTrail({ s }: { s: NonNullable<TradeRow['stop']> }) {
       SL {fmt.n(s.level)} → trig {fmt.n(s.triggerPrice)}
       {s.triggerOn === 'underlying' ? ' (stock)' : ''} → bid {fmt.n(s.bidAtTrigger)} → fill {fmt.n(s.fill)}
     </div>
+  )
+}
+
+/** "TRAIL · order book stale (2 exits refused, 14.8 s)" (operator, 2026-10-09: "also in reason for exit: that orderbook was
+ *  stale"): read from the stored orders beside the exit reason, which itself is unchanged. */
+function StaleNote({ s }: { s: StaleBook }) {
+  const tip = [
+    s.refused ? `${s.refused} exit order${s.refused > 1 ? 's' : ''} refused: the book was up to ${((s.maxAgeMs ?? 0) / 1000).toFixed(1)} s old${s.limitMs ? ` (limit ${(s.limitMs / 1000).toFixed(0)} s)` : ''}` : null,
+    s.fillAgeMs != null ? `the closing exit filled on a ${(s.fillAgeMs / 1000).toFixed(1)} s old book${s.fillLimitMs ? ` (limit ${(s.fillLimitMs / 1000).toFixed(0)} s)` : ''}` : null,
+  ].filter(Boolean).join(' · ')
+  return (
+    <span className="ml-1 whitespace-nowrap text-rose-300" title={tip}>
+      · {s.words}
+    </span>
   )
 }
 
@@ -154,6 +168,7 @@ export function Trades() {
                 <Excursion r={t.mae_r} price={t.mae_price} inr={t.mae_inr} tone="text-rose-500/70" basis={t.mark_basis} />
                 <td className="px-2 py-1.5 text-slate-400">
                   {t.exit_reason}
+                  {t.staleBook?.stale && <StaleNote s={t.staleBook} />}
                   {t.stop && t.stop.level > 0 && <StopTrail s={t.stop} />}
                 </td>
                 <td className="px-2 py-1.5">
