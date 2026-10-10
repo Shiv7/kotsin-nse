@@ -241,8 +241,12 @@ class Aggregator:
         if st.last_total_qty is None:  # first tick for this symbol; no baseline to subtract
             st.last_total_qty = total
             return 0.0
-        if total < st.last_total_qty:  # session reset or a stale frame; do not emit negative volume
-            st.last_total_qty = total
+        if total < st.last_total_qty:
+            # a stale frame: book nothing and KEEP the higher baseline — lowering it booked the
+            # same volume twice on the next frame (200, then a stale 100, then 250 booked 350;
+            # review, 2026-10-03). A new session resets the baseline in _roll_day, never here.
+            # Phase 35's rule since 3 Oct (3d8b329); here the 15:29 stock minute carried 1.00-1.09x
+            # the day's volume on 5-9 Oct (operator, 10 Oct: "lets fix engine A like engine B").
             return 0.0
         delta = total - st.last_total_qty
         st.last_total_qty = total

@@ -134,6 +134,48 @@ async def test_a_backwards_total_does_not_emit_negative_volume(equity):
     assert store.forming("RELIANCE", "1m").volume >= 0
 
 
+async def test_a_stale_frame_keeps_the_higher_baseline_and_counts_nothing_twice(equity):
+    """Phase 35's rule (3d8b329): 200, a stale 100, then 250 booked 350 when the stale frame
+    lowered the baseline; the 250 is all there is."""
+    store = BarStore()
+    agg = Aggregator(store, timeframes=("1m",))
+    agg.track(equity)
+    t = ist_ts("2026-10-05", "09:20")
+    agg.state[equity.scrip_code].connected_since = ist_ts("2026-10-05", "09:00")  # watching from the open
+    for dt, total in ((1, 200), (5, 100), (9, 250)):
+        await agg.on_tick({"scrip_code": equity.scrip_code, "ltp": 100.0, "total_qty": total, "ts": t + dt})
+    assert store.forming("RELIANCE", "1m").volume == 250, "200 + 50 — the stale 100 booked nothing"
+
+
+async def test_a_near_zero_frame_before_the_auction_print_does_not_book_the_day_again(equity):
+    """Live 5-9 Oct: the 15:29 stock minute carried 1.00-1.09x the whole day's volume. A frame with
+    a tiny total dropped the baseline, and the auction print's total booked the session a second time."""
+    store = BarStore()
+    agg = Aggregator(store, timeframes=("1m",))
+    agg.track(equity)
+    t = ist_ts("2026-10-09", "15:14")
+    agg.state[equity.scrip_code].connected_since = ist_ts("2026-10-09", "09:00")
+    await agg.on_tick({"scrip_code": equity.scrip_code, "ltp": 100.0, "total_qty": 1_000_000, "ts": t + 30})
+    await agg.on_tick({"scrip_code": equity.scrip_code, "ltp": 100.0, "total_qty": 12, "ts": t + 840})  # 15:28
+    await agg.on_tick({"scrip_code": equity.scrip_code, "ltp": 100.4, "total_qty": 1_020_000, "ts": t + 900})
+    assert store.forming("RELIANCE", "1m").volume == 20_000, "the auction's 20,000, not 1,019,988"
+
+
+async def test_the_next_session_still_starts_its_count_from_zero(equity):
+    """The day roll resets the baseline, so keeping yesterday's higher total never starves today."""
+    store = BarStore()
+    agg = Aggregator(store, timeframes=("1m",))
+    agg.track(equity)
+    agg.state[equity.scrip_code].connected_since = ist_ts("2026-10-08", "09:00")
+    await agg.on_tick(
+        {"scrip_code": equity.scrip_code, "ltp": 100.0, "total_qty": 2_450_000, "ts": ist_ts("2026-10-08", "15:29")}
+    )
+    t = ist_ts("2026-10-09", "09:15")
+    for total in (300, 700):
+        await agg.on_tick({"scrip_code": equity.scrip_code, "ltp": 101.0, "total_qty": total, "ts": t + 1})
+    assert store.forming("RELIANCE", "1m").volume == 700
+
+
 async def test_a_bucket_that_began_before_connect_is_tagged_partial(equity):
     """Excluded from determinism checks rather than looking like a volume collapse."""
     store = BarStore()
