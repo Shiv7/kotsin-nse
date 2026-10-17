@@ -394,7 +394,9 @@ def _bucket(decision: str) -> str:
 _LABEL = {"PAPER_FILLED": "filled", "WALLET_HALTED": "book halted",
           "REJECTED_BOOK": "stale depth", "NO_INSTRUMENT": "no strike",
           "PARENT_HALTED_TWINS_FED": "halted · twins traded", "PARENT_SKIPPED_TWINS_FED": "parent skipped · twins traded",
-          "PARENT_HALTED_TWINS_MISSED": "halted · twins missed", "PARENT_SKIPPED_TWINS_MISSED": "parent skipped · twins missed"}
+          "PARENT_HALTED_TWINS_MISSED": "halted · twins missed", "PARENT_SKIPPED_TWINS_MISSED": "parent skipped · twins missed",
+          # decided after the 15:10 NSE entry cutoff (the 14:45 bar, at 15:15): listed, never traded (operator, 2026-10-17)
+          "RECORDED_ONLY": "recorded only · after the entry cutoff", "PAST_ENTRY_CUTOFF": "past the entry cutoff"}
 
 
 def render(rows: list[dict[str, Any]], ticket: Ticket, ab: dict[str, Any] | None = None) -> str:

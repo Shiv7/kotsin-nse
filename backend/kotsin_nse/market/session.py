@@ -39,7 +39,7 @@ class SessionSpec:
     close: time
     #: entries stop here — the last window in which a new position may be opened
     entry_cutoff: time
-    #: every open position is flattened here (10 minutes before close, as validated on NSE cash)
+    #: every open position is flattened from here (NSE 15:14, out before 15:20 — operator, 2026-10-17)
     force_flat: time
 
     def contains(self, t: time) -> bool:
@@ -50,15 +50,27 @@ class SessionSpec:
 # 23:20 is inside both. The old stack's single NSE-shaped 15:20 constant would have closed every
 # commodity position eight hours early — see can2_consumer SEGMENT_FLAT.
 # The entry cutoff here is FUDKII's end-of-day PHASE (a bar starting 14:45 or later takes strong
-# signals only); the last minute a book may place an NSE entry is the engine's (engine.NSE_LAST_ENTRY_HM),
-# and so is the graded-F shadow's later flatten (engine.FORCE_FLAT_HM, 15:24 — every NSE position out
-# by 15:25, operator 2026-09-29).
+# signals only); the last minute a book may place an NSE entry is the engine's (engine.NSE_LAST_ENTRY_HM,
+# 15:10).
+# NSE: every open position of every book is flattened from 15:14 IST and must be OUT before 15:20
+# (operator, 2026-10-17: "if we are in trade till 15:14IST, then we exit at the first avenue before
+# 15:20IST"). It was 15:20 for the books and 15:24 for the graded-F shadow (out by 15:25, 2026-09-29);
+# no book has a later NSE flatten now. The close stays 15:30: it is the bar and signal close (the 15:15
+# closing-auction bar, the carry of its triggers), not the recorder's end — F&O ticks are recorded to
+# 15:40 (ops/fulltape.py WINDOW, operator 2026-10-17: "we will record tick till 15:40IST").
 SESSIONS: dict[Segment, SessionSpec] = {
-    Segment.NSE_EQ: SessionSpec(time(9, 15), time(15, 30), time(14, 45), time(15, 20)),
-    Segment.NSE_FO: SessionSpec(time(9, 15), time(15, 30), time(14, 45), time(15, 20)),
-    Segment.NSE_IDX: SessionSpec(time(9, 15), time(15, 30), time(14, 45), time(15, 20)),
+    Segment.NSE_EQ: SessionSpec(time(9, 15), time(15, 30), time(14, 45), time(15, 14)),
+    Segment.NSE_FO: SessionSpec(time(9, 15), time(15, 30), time(14, 45), time(15, 14)),
+    Segment.NSE_IDX: SessionSpec(time(9, 15), time(15, 30), time(14, 45), time(15, 14)),
     Segment.MCX_FO: SessionSpec(time(9, 0), time(23, 30), time(23, 0), time(23, 20)),
 }
+#: An NSE position the flatten could not sell by here — a stale book, no quote, a refused order — is
+#: filled on PAPER at the last known bid (else the last known price), flagged as forced, and alarms
+#: (operator, 2026-10-17). A LIVE book's position is never paper-filled: it alarms only.
+NSE_FORCED_FILL = time(15, 19)
+#: every NSE position must be OUT before this: one still open at or after it, or an exit filled at or
+#: after it, alarms (a structured log event, a ledger event, Telegram and a failing health line)
+NSE_OUT_BY = time(15, 20)
 
 
 class TradingCalendar:
@@ -166,6 +178,16 @@ def in_entry_window(segment: Segment, ts: float, calendar: TradingCalendar) -> b
 
 def past_force_flat(segment: Segment, ts: float) -> bool:
     return to_ist(ts).time() >= SESSIONS[segment].force_flat
+
+
+def past_nse_forced_fill(segment: Segment, ts: float) -> bool:
+    """From 15:19:00 an NSE position still open is filled on paper at its last known price (MCX: never)."""
+    return segment is not Segment.MCX_FO and to_ist(ts).time() >= NSE_FORCED_FILL
+
+
+def past_nse_out_by(segment: Segment, ts: float) -> bool:
+    """At or after 15:20:00 an NSE position is late: still open, or an exit filling now, alarms (MCX: never)."""
+    return segment is not Segment.MCX_FO and to_ist(ts).time() >= NSE_OUT_BY
 
 
 def seconds_to_close(segment: Segment, ts: float) -> float:

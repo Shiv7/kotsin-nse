@@ -25,14 +25,26 @@ Code: `engine.py` — `_handle_signal` (the trigger, once) → `_enter_book` (ev
 | **RT-MCX** | the commodity book | every FUDKII trigger on MCX (FUDKII's purse never trades MCX) | none | own ladder, RT-X's policy | ₹30 L |
 | **FUKAA (shadow)** | a separate strategy derived from FUDKII's context — FUDKII's trigger admitted only when volume confirms it; in SHADOW since 2 Oct (inputs fixed) | its own signals | its own, incl. the costs-against-T1 test: 4x volume on T or T-1 (else watched one bar), composite ≥ 60 | never trades: each signal is a SHADOW row and a `fukaa.shadow` event with its inputs and alignment (market with / against, OI quadrant); the Shadow page's *FUKAA · shadow* tab | ₹10 L, untouched |
 
-## 1b. The clock (operator, 29 Sep)
+## 1b. The clock (operator, 29 Sep; 17 Oct)
 
-- **Last NSE entry: 15:15** for every book — a trigger decided at 15:15 (the 14:45 bar) may still be entered
-  in that minute, nothing later (`PAST_ENTRY_CUTOFF`, recorded on the book's card). **The graded-F shadow:
-  before 15:23.** MCX keeps its own session. Paper and live alike (a live order still stops at 15:10 first).
-- **Every NSE position is out by 15:25:** the books keep the 15:20 flatten (moving it to 15:24 cost −₹29,932 over
-  24 Aug–28 Sep in the replay — 89 trades held to the close); the graded-F shadow, whose entries run to 15:22,
-  flattens from 15:24.
+- **Last NSE entry: 15:10** for every book, the graded-F shadow and the mirrors included (operator, 17 Oct;
+  it was 15:15, and 15:22 for the graded-F shadow) — the live gateway's own cutoff. Inclusive: 15:10:59 may
+  still enter, nothing later (`PAST_ENTRY_CUTOFF`, recorded on the book's card). A limit entry still resting
+  at the cutoff is cancelled, never filled after it. MCX keeps its own session. Paper and live alike.
+- **The 14:45 bar's triggers** — decided at 15:15, after the cutoff — are **recorded and listed, never
+  traded, never carried** (operator, 17 Oct: "record them but dont trade as of now. let it show on the
+  list"): the signal row reads `RECORDED_ONLY` with the reason (a graded-F trigger keeps `NOT_PUBLISHED`),
+  every book offered it records the cutoff as its skip, a `cutoff.recorded` event marks it, and every card
+  reads **RECORDED ONLY · after the entry cutoff** with no TAKE. No strike is chosen for one.
+- **Every NSE position is flattened from 15:14 and out before 15:20** (operator, 17 Oct: "if we are in trade
+  till 15:14IST, then we exit at the first avenue before 15:20IST") — every book, the graded-F shadow (its
+  15:24 removed), every stop-rule mirror, an operator TAKE's: sold into the bid at once, a refused try again
+  every 2 s. At **15:19** whatever is still open (a stale book, no quote, refused) is filled on paper at its
+  last known bid, else its last known price, flagged `eodForced` ("forced fill 15:19, stale book"), and
+  alarmed (`eod.forced_fill`: a log error, a ledger event, Telegram, the `nse_out_by` health line red for the
+  day). A LIVE book's position is never paper-filled (`eod.not_forced`). An NSE position still open at
+  **15:20**, or an NSE exit filling then, alarms (`eod.still_open`, `eod.exit_after_deadline`). Until 17 Oct:
+  the books flattened at 15:20 and the graded-F shadow at 15:24, out by 15:25 (29 Sep).
 - **A trigger decided at the close** — the 15:15 bar, complete at 15:30 — is not traded that day. It is kept
   (`CARRIED`, the `carry.queued` event, safe across the overnight restart) and at the next session's open it
   enters on its stock's **first print after 09:15**: through the trigger's stop → dropped (`carry.dropped`);
@@ -134,7 +146,8 @@ How an exit sells (PAPER with limit orders on; LIVE sells at once):
 | target | a SELL resting at the rung from the moment the contract is held — the next rung only, placed the instant the one below fills; fills on a touch |
 | **every stop** (SL-OP, SL-EQ, the hard floor) | **sold into the bid at its trigger, through the depth for every lot** (operator, 4 Oct: the simulated stop must not cross its level and then fill at a later, worse price for want of a stop order). The engine's stop is a software stop — a 1 s read of the level, then an order — so the price it can execute at the trigger is the bid, walked for the lots; that is the fill. Resting a limit at the mid first was a bet on the spread taken at the moment the thesis had failed: on the 43 stops that rested 26 Sep – 3 Oct it lost ₹30,712 against selling at the bid at the trigger (won on 15, lost on 24; DMART −₹7,692 / −₹5,458 / −₹5,458 in one 15 s rest). `KN_PAPER_LIMIT_EXIT_STOPS_AT_BID=false` falls back to the 3 Oct rule: only an urgent stop — the stock through its stop, the mid down 2 % in 30 s, a book 2 ticks wide — sells at once; a calm one rests at the mid and is sold at the bid after 15 s |
 | trail (the give-back line) | the mid, walked to the bid, 45 s — the walk beat the bid on 13 of 18 |
-| 15:20 flatten | the mid, walked to the bid, 10 s |
+| NSE flatten (15:14) | **sold into the bid at once** (operator, 17 Oct: "exit at the first avenue"); refused, again every 2 s; at 15:19 a forced paper fill at the last known bid. It was the mid, walked to the bid, 10 s |
+| MCX flatten (23:20) | the mid, walked to the bid, 10 s |
 
 Every order's trail keeps the book at placing and at the fill (or cross, or cancel) — the best bid and
 ask, and five levels a side, price and quantity (`depthAtPlace`, `depthAtFill`, `depthAtCross`,
@@ -178,7 +191,7 @@ stale-quote exit is still folded in. Trades closed before 4 Oct carry the last t
 (`mark_basis` "last" on the page): 47 of 120 had filled below that MAE, median 2.75 % of the premium.
 `peak_r`, the trail's watermark, still reads the last trade — a reporting fix moves no exit rule.
 
-**15:15 plan (recorded, not acted on).** At 15:15 each open NSE position's distance to its stop line
+**15:13 plan (recorded, not acted on).** At 15:13 (15:15 until the flatten moved to 15:14, 17 Oct) each open NSE position's distance to its stop line
 and its next target is written to the ledger as an `eod.plan` event with what the operator's rule
 would do: stop line within 3 % → exit now; else target within 3 % → wait for it; else flatten at the
 book's time as now (operator, 3 Oct: "if at 15:15 we are waiting for SL which is very near, we should
@@ -194,7 +207,9 @@ a price is a newer print: a broker snapshot replaces a held quote only when it h
 as a trade through a resting order. A held contract the feed cannot vouch for is marked fresh from the
 newest trade known, without a bid or ask the feed cannot vouch for. Known gap (before this change too):
 with the feed silent, a stale depth book and a snapshot carrying no bid, no fresh book can be built —
-an exit then waits for the feed, or for the 15:20 flatten's last-price fill.
+an exit then waits for the feed, or for the NSE flatten: from 15:14 it sells into the bid at once and
+tries again every 2 s, and at 15:19 whatever is still open is filled on paper at its last known bid,
+else its last known price, flagged and alarmed (operator, 17 Oct; it was the 15:20 flatten's last-price fill).
 
 ## 5b. Data-pipeline changes accepted 3 Oct (Shiv7's Stage 0–5, reviewed and fixed in phase35)
 

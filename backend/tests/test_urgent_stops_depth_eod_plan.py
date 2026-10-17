@@ -1,12 +1,14 @@
 """Exits read the book (operator, 2026-10-03): "place order smartly not blindly".
 
 * an urgent stop — the stock through its stop, the option falling fast, or a tight book — sells into
-  the bid at once; a calm option stop on a wide book still rests at the mid and walks; the trail,
-  targets and 15:20 keep their walk;
+  the bid at once; a calm option stop on a wide book still rests at the mid and walks; the trail and
+  targets keep their walk (the NSE flatten, 15:14, sells into the bid at once since 2026-10-17 — the
+  engine's rule, tests/test_nse_close_1514.py; the pure policy below still walks every EOD);
 * every order's trail carries five levels of depth, price and quantity ("check lots on sell");
-* at 15:15 each open NSE position's distance to its stop line and next target is RECORDED with what the
-  operator's rule would do ("if at 15:15 we are waiting for SL which is very near, we should exit asap,
-  in case the SL is away, then we wait if the target is close by") — never acted on."""
+* at 15:13 (15:15 until the flatten moved to 15:14, operator 2026-10-17) each open NSE position's
+  distance to its stop line and next target is RECORDED with what the operator's rule would do ("if at
+  15:15 we are waiting for SL which is very near, we should exit asap, in case the SL is away, then we
+  wait if the target is close by") — never acted on."""
 
 from __future__ import annotations
 
@@ -167,33 +169,34 @@ async def test_an_entry_records_five_levels_of_depth_at_the_order_and_at_the_fil
 
 
 @pytest.mark.asyncio
-async def test_at_1515_each_open_position_is_planned_and_recorded_never_acted_on(settings, clock):
-    clock[0] = _at(15, 15, 5)
+async def test_at_1513_each_open_position_is_planned_and_recorded_never_acted_on(settings, clock):
+    clock[0] = _at(15, 13, 5)
     e = await _engine(settings, clock)
     try:
         near_stop = _pos(clock, pid="near", option_sl=10.3)                          # mid 10.5: 1.9 % above its stop
         near_tgt = _pos(clock, pid="tgt", strategy="FUDKII", option_sl=8.0, targets=(10.75,))  # target 2.4 % away
-        far = _pos(clock, pid="far", strategy="FUDKII_RT_Y_F", option_sl=8.0)         # neither: flattened later
+        far = _pos(clock, pid="far", strategy="FUDKII_RT_Y_F", option_sl=8.0)         # neither: flattened at 15:14
         for p in (near_stop, near_tgt, far):
             e.positions[p.id] = p
         _book(e, 10.45, 10.55, clock[0])
-        e._eod_plan_day = ""  # the engine's own loop may already have looked at 15:15 with nothing open
+        e._eod_plan_day = ""  # the engine's own loop may already have looked at 15:13 with nothing open
         await e._record_eod_plan(clock[0])
         await e._record_eod_plan(clock[0] + 30)  # once a session
         ev = {x["positionId"]: x for x in await _rows(e, "events") if x.get("kind") == "eod.plan"}
         assert set(ev) == {"near", "tgt", "far"} and all(x["recordOnly"] for x in ev.values())
         assert ev["near"]["verdict"].startswith("exit now — the stop line 10.3 is 1.9% away") and ev["near"]["stopPct"] == 1.9
         assert ev["tgt"]["verdict"] == "wait for the target 10.75, 2.4% away" and ev["tgt"]["target"] == 10.75
-        assert ev["far"]["verdict"] == "flatten at 15:24 as now", "RT-Y-F flattens later than the session"
-        assert ev["near"]["nearPct"] == EOD_PLAN_NEAR_PCT == 3.0 and EOD_PLAN_HM == "15:15"
+        assert ev["far"]["verdict"] == "flatten at 15:14 as now", "RT-Y-F flattens with every NSE book since 2026-10-17"
+        assert all(x["flattenAt"] == "15:14" for x in ev.values())
+        assert ev["near"]["nearPct"] == EOD_PLAN_NEAR_PCT == 3.0 and EOD_PLAN_HM == "15:13"
         assert all(p.status == "OPEN" for p in (near_stop, near_tgt, far)) and not e._exit_resting("near"), "a record, not an order"
     finally:
         await e.stop()
 
 
 @pytest.mark.asyncio
-async def test_before_1515_nothing_is_recorded(settings, clock):
-    clock[0] = _at(15, 14, 59)
+async def test_before_1513_nothing_is_recorded(settings, clock):
+    clock[0] = _at(15, 12, 59)
     e = await _engine(settings, clock)
     try:
         e.positions["p"] = _pos(clock, pid="p")

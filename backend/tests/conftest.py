@@ -35,12 +35,32 @@ def _isolate_config_from_the_box() -> object:
 
 @pytest.fixture(autouse=True)
 def _entry_window_open(monkeypatch) -> None:
-    """Every book may enter at any hour of the suite: the NSE last-entry minutes (15:15, the graded-F
-    shadow's 15:22 — engine.NSE_LAST_ENTRY_HM) are read from the wall clock, and the suite runs at
+    """Every book may enter at any hour of the suite: the NSE last-entry minute (15:10 for every book
+    since 2026-10-17 — engine.NSE_LAST_ENTRY_HM) is read from the wall clock, and the suite runs at
     all hours. Their own tests put the real rule back with the ``entry_cutoff`` fixture."""
     from kotsin_nse.engine import Engine
 
     monkeypatch.setattr(Engine, "_past_last_entry", lambda self, book, underlying, *, now=None: None)
+
+
+@pytest.fixture(autouse=True)
+def _nse_deadline_off(monkeypatch) -> None:
+    """Every position may be held at any hour of the suite: the NSE 15:19 forced paper fill and the 15:20
+    out-by alarms (operator, 2026-10-17 — market/session.py ``past_nse_forced_fill`` / ``past_nse_out_by``)
+    read the wall clock, and the suite runs at all hours — after 15:19 every test's NSE position would be
+    force-filled before its own rule ran. The 15:14 flatten itself (``past_force_flat``) is left as it
+    always was. Their own tests put the real rule back with the ``nse_deadline`` fixture."""
+    monkeypatch.setattr("kotsin_nse.engine.past_nse_forced_fill", lambda *_a: False)
+    monkeypatch.setattr("kotsin_nse.engine.past_nse_out_by", lambda *_a: False)
+
+
+@pytest.fixture
+def nse_deadline(monkeypatch) -> None:
+    """The real NSE 15:19 forced fill and 15:20 out-by alarms, for the tests of them."""
+    from kotsin_nse.market import session
+
+    monkeypatch.setattr("kotsin_nse.engine.past_nse_forced_fill", session.past_nse_forced_fill)
+    monkeypatch.setattr("kotsin_nse.engine.past_nse_out_by", session.past_nse_out_by)
 
 
 @pytest.fixture

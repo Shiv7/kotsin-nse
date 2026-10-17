@@ -584,11 +584,11 @@ class Backtester:
             if (trailed > t.stop) if sign > 0 else (trailed < t.stop):
                 t.stop = trailed
 
-        # A bar is stamped with its START; the session's force-flat (15:20 NSE, 23:20 MCX) falls
-        # INSIDE the last bar, so testing the start let every position carry overnight — 12 EOD
-        # exits in 4,358 trades, and "TIME_STOP" winners that were really overnight gaps. The bar
-        # that contains the force-flat closes the trade at its close (the live engine flattens a
-        # few minutes earlier, at the then price).
+        # A bar is stamped with its START; the session's force-flat (NSE 15:14 since 2026-10-17 — inside the
+        # 14:45 bar; it was 15:20, inside the 15:15 bar — and MCX 23:20) falls INSIDE a bar, so testing the
+        # start let every position carry overnight — 12 EOD exits in 4,358 trades, and "TIME_STOP" winners
+        # that were really overnight gaps. The bar that contains the force-flat closes the trade at its
+        # close (the live engine flattens a minute or so earlier, at the then price).
         if self.p.decision_tf != "1d" and past_force_flat(
             self.p.segment, bar.ts + TF_SECONDS.get(self.p.decision_tf, 1800) - 1
         ):

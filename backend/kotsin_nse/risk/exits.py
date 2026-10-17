@@ -137,7 +137,7 @@ class ExitEngine:
             if mid <= pos.option_sl:
                 # breached, not yet sustained, equity unconfirmed — hold the STOP, but never the
                 # backstops: returning None here used to skip the halt, the daily-loss exit and
-                # the 15:20 force-flat for as long as the option sat under its stop.
+                # the session force-flat for as long as the option sat under its stop.
                 return self._backstops(pos, view, ltp)
         # the plain touch of the option stop — and, under the equity mode, only once ``_trail`` has raised the
         # level above the thesis stop: then it is the base book's trail (breakeven after T1, the 40 % give-back),

@@ -202,6 +202,11 @@ function SignalDetail({ s, trade }: { s: SignalRow; trade?: TradeRow }) {
   )
 }
 
+// a trigger decided after the 15:10 NSE entry cutoff (the 14:45 bar, at 15:15) is on the list, labelled, never traded
+// (operator, 2026-10-17: "record them but dont trade as of now. let it show on the list"); the reason is the row's title
+const decisionLabel = (d?: string) => (d === 'RECORDED_ONLY' ? 'RECORDED ONLY · after cutoff' : d ?? 'DM')
+const decisionTone = (d?: string): 'green' | 'blue' | 'amber' => (d === 'PAPER_FILLED' || d === 'SUBMITTED' ? 'green' : d === 'RECORDED_ONLY' || d === 'CARRIED' ? 'blue' : 'amber')
+
 export function Signals() {
   const [tab, setTab] = useState<'signals' | 'rejections'>('signals')
   const [open, setOpen] = useState<string | null>(null)
@@ -257,7 +262,7 @@ export function Signals() {
                       <td className="px-2 py-1.5 text-emerald-400/80">{fmt.n(s.targets?.[0])}</td>
                       <td className="px-2 py-1.5">{fmt.n(s.rr)}</td>
                       <td className="px-2 py-1.5"><GradeBadge grade={s.grade} /></td>
-                      <td className="px-2 py-1.5"><Badge tone={s.decision === 'PAPER_FILLED' || s.decision === 'SUBMITTED' ? 'green' : 'amber'}>{s.decision ?? 'DM'}</Badge></td>
+                      <td className="px-2 py-1.5" title={s.decision_reason ?? ''}><Badge tone={decisionTone(s.decision)}>{decisionLabel(s.decision)}</Badge></td>
                       <td className={cls('px-2 py-1.5 font-medium', pnlColor(t?.net))}>{t ? `${fmt.signedInr(t.net)} (${fmt.r(t.r_multiple)})` : '—'}</td>
                       <td className="px-2 py-1.5"><Gates gates={s.gates} /></td>
                     </tr>,

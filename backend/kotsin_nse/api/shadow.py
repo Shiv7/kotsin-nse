@@ -979,7 +979,7 @@ STOP_RULES = Brief(
     ),
     logic=(
         "A mirror opens only when its book fills and copies that fill exactly. Everything but the stop is the book's: targets, "
-        "the rung ratchet, the give-back line, the trail, the 15:20 flatten. It keeps running on its own rule when you close the "
+        "the rung ratchet, the give-back line, the trail, the NSE flatten (15:14). It keeps running on its own rule when you close the "
         "real trade by hand. Tape study 29 Sep – 1 Oct (73 trades): the option stop fired with the stock a median 13 % of the "
         "way to its own stop; 23 of 33 stock breaches were back inside within 5 min."
     ),
@@ -1014,7 +1014,7 @@ WIDE_STOP = Brief(
     logic=(
         "The shadow opens only when RT-Y opens, so the two books hold exactly the same trades. Everything else is RT-Y's: the +5% "
         "arm, the rung SL one step behind, the 3% give-back, the 75 s sustain, the hard floor 9% under the option stop, the "
-        "15:20 flat. Its option stop keeps re-projecting every 10 s from the wider equity stop, as RT-Y's does from its own."
+        "15:14 NSE flatten. Its option stop keeps re-projecting every 10 s from the wider equity stop, as RT-Y's does from its own."
     ),
     pros=(
         "Fewer stop-outs on a wick: on 19–25 Sep, gate-B trades made +6.30% against +3.90% on the touch, with 88% winners.",
