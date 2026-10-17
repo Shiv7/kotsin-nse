@@ -180,14 +180,23 @@ def past_force_flat(segment: Segment, ts: float) -> bool:
     return to_ist(ts).time() >= SESSIONS[segment].force_flat
 
 
-def past_nse_forced_fill(segment: Segment, ts: float) -> bool:
-    """From 15:19:00 an NSE position still open is filled on paper at its last known price (MCX: never)."""
-    return segment is not Segment.MCX_FO and to_ist(ts).time() >= NSE_FORCED_FILL
+def held_overnight(ts: float, opened_ts: float | None) -> bool:
+    """An NSE position opened on an earlier IST day than ``ts``: it was open past that day's 15:20, whatever the time
+    of day now (review, 2026-10-17: an engine down over the close and back after midnight held yesterday's position
+    as a normal one until 15:19 the next day, and one held in SHADOW never alarmed again)."""
+    return opened_ts is not None and opened_ts > 0 and ist_day(opened_ts) < ist_day(ts)
 
 
-def past_nse_out_by(segment: Segment, ts: float) -> bool:
-    """At or after 15:20:00 an NSE position is late: still open, or an exit filling now, alarms (MCX: never)."""
-    return segment is not Segment.MCX_FO and to_ist(ts).time() >= NSE_OUT_BY
+def past_nse_forced_fill(segment: Segment, ts: float, opened_ts: float | None = None) -> bool:
+    """From 15:19:00 an NSE position still open is filled on paper at its last known price (MCX: never) — and one
+    opened on an earlier IST day (``opened_ts``) at once."""
+    return segment is not Segment.MCX_FO and (to_ist(ts).time() >= NSE_FORCED_FILL or held_overnight(ts, opened_ts))
+
+
+def past_nse_out_by(segment: Segment, ts: float, opened_ts: float | None = None) -> bool:
+    """At or after 15:20:00 an NSE position is late: still open, or an exit filling now, alarms (MCX: never) — and one
+    opened on an earlier IST day (``opened_ts``) is late all day."""
+    return segment is not Segment.MCX_FO and (to_ist(ts).time() >= NSE_OUT_BY or held_overnight(ts, opened_ts))
 
 
 def seconds_to_close(segment: Segment, ts: float) -> float:

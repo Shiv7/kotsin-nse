@@ -67,8 +67,8 @@ Line numbers below are for the branch head. Paths are relative to the repo root.
 
 | File:line | Change |
 |---|---|
-| `engine.py:6281` `_eod_alarm()` | Raised once per position and kind (`_eod_alarmed`, `:846`). Each alarm does four things:<br>- writes a structured `log.error(kind, …)`;<br>- writes a ledger event;<br>- sends a Telegram message;<br>- adds a row read by the health check.<br>Kinds:<br>- `eod.forced_fill`;<br>- `eod.still_open`, for an NSE position open at or after 15:20:00 (`:5974`);<br>- `eod.exit_after_deadline`, for an NSE exit filled at or after 15:20:00 of any reason, raised in `_book_exit` (`:6543-6548`);<br>- `eod.not_forced`. |
-| `engine.py:6302` `_eod_check()`, added to `health_snapshot` at `:7071` | New `nse_out_by` health check. It is red for the rest of the IST day after any alarm, and while any NSE position is open after 15:20. Its detail gives the counts, the last four alarms and the rule. |
+| `engine.py:6281` `_eod_alarm()` | Raised once per position, kind and IST day (`_eod_alarmed`, `:846`; per day since the review fixes, §7 R2). Each alarm does four things:<br>- writes a structured `log.error(kind, …)`;<br>- writes a ledger event;<br>- sends a Telegram message;<br>- adds a row read by the health check.<br>Kinds:<br>- `eod.forced_fill`;<br>- `eod.still_open`, for an NSE position open at or after 15:20:00 (`:5974`);<br>- `eod.exit_after_deadline`, for an NSE exit filled at or after 15:20:00 of any reason, raised in `_book_exit` (`:6543-6548`);<br>- `eod.not_forced`. |
+| `engine.py:6302` `_eod_check()`, added to `health_snapshot` at `:7071` | New `nse_out_by` health check. It is red for the rest of the IST day after any alarm, also across a restart that day (§7 R3), and while any NSE position is open after 15:20. Its detail gives the counts, the last four alarms and the rule. |
 | `engine.py:6516` | `_exit_fail_note` keeps the last refusal for each position, as the forced fill's cause. It is cleared on a full fill. |
 
 ### 2.5 Entries never fill after the cutoff
@@ -95,7 +95,7 @@ Line numbers below are for the branch head. Paths are relative to the repo root.
 |---|---|
 | `engine.py:2297-2300` (`_decide` dispatch) | A new branch after the carry: `elif (late := self._after_entry_cutoff(sig)) is not None:` → `_record_after_cutoff`. |
 | `engine.py:2854` `_after_entry_cutoff()` | True when the trigger's bar is decided after `NSE_LAST_ENTRY_HM` and no later than the close, and it is not the close's own bar. In practice that is the 14:45 bar, decided at 15:15. It reads the bar time, not the wall clock. MCX is excluded. The reason text is "after the 15:10 NSE entry cutoff — recorded only: the 14:45 bar is decided at 15:15, and every NSE position is flattened from 15:14; not traded, not carried". |
-| `engine.py:2870` `_record_after_cutoff()` | No strike is chosen and nothing reaches the broker or the order path. The steps:<br>- A published trigger: its row is written as `RECORDED_ONLY` with the reason, and its ENTRY alert is adopted as for any trigger.<br>- An unpublished (graded F) trigger keeps its `NOT_PUBLISHED` row.<br>- Every book that would have been offered the trigger records an `rt_twin.skipped` with `gate="entry_cutoff"`. That is the same gate a book's own refusal after the minute uses, so the Shadow page and day-book summaries count it the same way. For a published trigger those books are RT-X, RT-N, RT-Y, CT-X and CT-Y; for an unpublished one, RT-Y-F, RT-Y and RT-X.<br>- A `cutoff.recorded` event is written.<br>- Nothing is queued for the carry. |
+| `engine.py:2870` `_record_after_cutoff()` | No strike is chosen and nothing reaches the order path (since §7 R5 the level reader's futures read is the one broker read). The steps:<br>- A published trigger: its row is written as `RECORDED_ONLY` with the reason, and its ENTRY alert is adopted as for any trigger.<br>- An unpublished (graded F) trigger keeps its `NOT_PUBLISHED` row, the cutoff added to its reason (§7 R6).<br>- Every book that would have been offered the trigger records an `rt_twin.skipped` with `gate="entry_cutoff"`. That is the same gate a book's own refusal after the minute uses, so the Shadow page and day-book summaries count it the same way. For a published trigger those books are RT-X, RT-N, RT-Y, CT-X and CT-Y; for an unpublished one, RT-Y-F (RT-X, RT-Y without the gap switch, CT-Y, CT-X and CT-M record their graded-F rule instead, §7 R6).<br>- A `cutoff.recorded` event is written.<br>- Nothing is queued for the carry. |
 | `engine.py:4196`, `:4206`, `:4359`, `:4413` (`book_cards`) | New card state `RECORDED_ONLY`, for every book except FUDKII and RT-N on an unpublished trigger, which stay `NOT_PUBLISHED`. The TAKE button is disabled with the reason, and there is a new `recordedOnly` field. |
 | `api/daybook.py:398-399` | Day-book labels for `RECORDED_ONLY` and `PAST_ENTRY_CUTOFF`. |
 | `frontend/src/components/BookCards.tsx:55`, `:143-144`, `:624` | New type field, a `RECORDED ONLY · after the entry cutoff` chip, and the card's headline "Recorded only, not traded — `<reason>`". |
@@ -143,7 +143,7 @@ Line numbers below are for the branch head. Paths are relative to the repo root.
 
 | Check | Command | Result |
 |---|---|---|
-| Tests | `PYTHONPATH=. pytest -q` (backend) | **1080 passed**, 120 warnings. Baseline at `0af8c0f`: 1063 passed. |
+| Tests | `PYTHONPATH=. pytest -q` (backend) | **1080 passed** at `c15aebf`; **1088 passed** after the review fixes (§7). Baseline at `0af8c0f`: 1063 passed. |
 | Ruff | `ruff check kotsin_nse tests` | **All checks passed!** |
 | Import contracts | `lint-imports` | **5 kept, 0 broken** |
 | Frontend build | `npm run build` (`tsc --noEmit && vite build`) | Built; `frontend/dist` is a real directory |
@@ -158,9 +158,9 @@ Line numbers below are for the branch head. Paths are relative to the repo root.
 2. **The forced fill keeps reason `EOD` and adds a flag**, not a new `EOD_FORCED` reason. Existing analyses compare `exit_reason == "EOD"`: `committee/forensics.py:240`, `api/review_peers.py`, `api/review.py:453`. They keep counting these trades as day-end exits. The flag is on the order (note, `F` id, `eodForced`), the position and the trade.
 3. **Forced-fill price.** The newer bid of the depth book and the quote, of any age; then the last LTP; then the last mark; then the entry. One REST snapshot is taken first. Taking the entry as a last resort gives zero gross P&L. It happens only when nothing ever priced the contract, and the alarm says so.
 4. **LIVE and SHADOW are never paper-filled.** A LIVE book's lots are at the broker, and SHADOW places nothing. Both get `eod.not_forced`, and still `eod.still_open` at 15:20, to meet "any NSE position open at/after 15:20".
-5. **Alarms fire once per position and kind.** The health check stays red until the IST day ends. The health monitor's usual three consecutive reads apply.
+5. **Alarms fire once per position, kind and IST day** (per day since §7 R2). The health check stays red until the IST day ends, across a restart (§7 R3). The health monitor's usual three consecutive reads apply.
 6. **A trigger is "recorded only" based on its bar, not the wall clock.** The 14:45 bar is decided at 15:15. An earlier bar decided late, after 15:10, is still refused by each book's own `_past_last_entry` and recorded as `PAST_ENTRY_CUTOFF` with its reason.
-7. **Recorded-only triggers short-circuit dispatch.** They skip strike selection, the counter route and the level reader: no broker read, no subscription. Graded-F (unpublished) triggers keep `NOT_PUBLISHED` on their row, and their cards say RECORDED ONLY.
+7. **Recorded-only triggers short-circuit dispatch.** They skip strike selection and the counter route (no fade is planned): no subscription, no order. Since §7 R5 the level reader still reads them, record-only. Graded-F (unpublished) triggers keep `NOT_PUBLISHED` on their row, with the cutoff in its reason (§7 R6).
 8. **Tests switch the wall-clock deadline off by default** with an autouse fixture, matching `_entry_window_open`. Their own tests turn the real rule back on with `nse_deadline`.
 9. **`EOD_PLAN_HM` moved to 15:13** (option a) rather than being retired. The operator's text asked for 15:13.
 10. **`BAR_AUDIT_HM` stays 15:40.** It does not read what the recorder writes (§1).
@@ -176,10 +176,135 @@ Line numbers below are for the branch head. Paths are relative to the repo root.
   - From 15:14 a LIVE book's exit for a contract with no LTP now retries every 2 s at the broker.
   - There is no forced fill for LIVE.
   - Engine A runs paper. Review this before any live use.
-- **Overnight positions:** the deadline checks use time of day only, like `past_force_flat` always has. An NSE position somehow carried overnight is not flagged until 15:14/15:19/15:20 the next day, or immediately if it is already past 15:20 when seen.
+- **Overnight positions:** fixed by §7 R2. An NSE position opened on an earlier IST day is past the 15:19 forced fill and the 15:20 out-by from the first pass. The 15:14 flatten (`past_force_flat`) still reads the time of day only; see §7.
 - **Out of scope, as instructed:**
   - the option-pricing expiry close at 15:30;
   - index-future bars, still 15:29;
   - the MCX-holiday watchdog note.
 - **Research tools follow the new clock:** the backtest, RL env and tape replay. The backtest closes EOD trades at the 14:45 bar's close. Results from before this change are not comparable without a re-run.
 - **Graded-F triggers on `/api/signals`:** recorded-only graded-F triggers stay off the default `/api/signals` list, by its existing design. They appear on the cards and with `?unpublished=true`.
+
+---
+
+## 7. Review findings of 17 Oct and their outcome
+
+A review of `close-1514` raised six findings, all minor. Each one was checked against the code: the reviewer's
+probes (`review_tmp/test_adv_exit.py`, `review_tmp/rt/test_review_cutoff.py`) were run against this copy and
+reproduced every one. All six are fixed, in A and B the same way. Each has a test that fails on `c15aebf` and passes
+after the fix: the tests were run against `c15aebf`'s `kotsin_nse/` with the new tests in place, and all failed on
+their behaviour assertions.
+
+| # | Finding | Confirmed? | Outcome |
+|---|---|---|---|
+| R1 | A backoff from before 15:14 delays the 15:14 flatten by up to 30 s | Yes. Probe: a stop refused from 15:13:05 has `_exit_retry_at` = 15:14:05, and the position was still OPEN at 15:14:00 with a bid | Fixed |
+| R2 | Alarms are deduplicated per position, not per day, and the deadlines read the time of day only | Yes. Probe in SHADOW: day 2 at 15:20 gave no new `eod.still_open` and the health line was green | Fixed |
+| R3 | A restart turns the `nse_out_by` line green | Yes, from the code. `_eod_alarms` and `_eod_alarmed` lived in memory only | Fixed |
+| R4 | The forced fill is stamped with the pass's start, so a fill made after 15:20 raises no alarm | Yes. Probe: wall clock at 15:20:10, both fills stamped 15:19:00, 0 alarms | Fixed |
+| R5 | A recorded-only 14:45 trigger gets no level reading | Yes. Probe: `route_events == []` | Fixed |
+| R6 | A graded-F 14:45 trigger is not labelled "recorded only" on the trigger lists, and RT-X's card gives the cutoff as its reason | Yes. Probe: `NOT_PUBLISHED` with FUDKII's reason only; RT-X card RECORDED_ONLY | Fixed |
+
+### R1: the 15:14 flatten's first try never waits on an earlier backoff
+
+| File:line | Change |
+|---|---|
+| `backend/kotsin_nse/engine.py:855` | New `_exit_failed_at`: when each position's exit was last refused. |
+| `engine.py:6516`, `:6565` | Set beside `_exit_retry_at` in `_exit_cross` and `_exit_market`. |
+| `engine.py:6592`, `:6598` | Cleared with it in `_book_exit`. |
+| `engine.py:6243` `_backoff_before_flatten()` | New. True when the exit is an NSE flatten (`_nse_flatten`) and the last refusal came before the position's 15:14 force-flat. |
+| `engine.py:6406` (`_exit_now`) | A wait from `_exit_retry_at` is skipped when `_backoff_before_flatten` holds. |
+
+- The flatten's own refusals still wait `EOD_RETRY_S` (2 s), through `_exit_retry_s` as before.
+- Before 15:14, the stop keeps its 2-4-8-16-30 s backoff.
+- **Decision:** the reviewer suggested `min(retry_at, failed_at + 2 s)`. With that, a refusal at 15:13:59 would
+  still hold the flatten to 15:14:01. Instead, a refusal from before the flatten is passed over entirely, so the
+  first try is at 15:14:00, as the operator's "flattened at once" reads. A refusal at 15:13:59 followed by a try at
+  15:14:00 is harmless, because exit rejects never count toward the breaker.
+
+### R2: alarms once a day, and a position from an earlier day is past both deadlines
+
+| File:line | Change |
+|---|---|
+| `backend/kotsin_nse/market/session.py:183` `held_overnight()` | New. True for a position opened on an earlier IST day. |
+| `market/session.py:190`, `:196` | `past_nse_forced_fill()` and `past_nse_out_by()` take an optional `opened_ts`. Either is also true when `held_overnight` holds. MCX is still never past them. Without `opened_ts`, they read the time of day, as before. |
+| `engine.py:852` | `_eod_alarmed` is keyed by `(kind, position, IST day)`. |
+| `engine.py:6357` `_eod_alarm()` | The dedupe is per day. Earlier days' keys are dropped as today's are added. |
+| `engine.py:6380` `_eod_check()` | The `late` filter reads today's key, and passes `opened_ts`. |
+| `engine.py:6027-6030` (`_manage_positions`), `:6318` (`_force_eod_fill`), `:6627` (`_book_exit`) | Pass `pos.opened_ts`. |
+| `engine.py:6351` `_eod_still_open()` | New. The `eod.still_open` alarm, saying "held overnight" when the position is. |
+| `engine.py:6323-6324`, `:6629` | The forced fill's cause and the late-exit detail say "held from <day>" / "held overnight". |
+
+- In PAPER, yesterday's position is force-filled at its last known bid at the first pass. That includes a pass after
+  midnight, when an engine that was down over the close comes back. It raises `eod.forced_fill`, `eod.still_open` and
+  `eod.exit_after_deadline`.
+- In SHADOW and LIVE, it alarms (`eod.not_forced`, `eod.still_open`) at the first pass of every day it is held. The
+  health line stays red.
+- The conftest autouse `_nse_deadline_off` still pins both helpers to False (its lambdas take `*args`), so suite
+  positions with old `opened_ts` are not affected.
+- **Not changed:** the 15:14 flatten itself (`past_force_flat` / `_past_force_flat`) still reads the time of day. In
+  PAPER the forced fill already takes the position out at once. A LIVE book's overnight lots alarm, and are closed at
+  the broker.
+
+### R3: the `nse_out_by` line survives a restart
+
+| File:line | Change |
+|---|---|
+| `engine.py:372` | New `EOD_ALARM_KINDS`: the four alarm kinds. |
+| `engine.py:7077` `_load_eod_alarms()` | New. Reads today's events of those kinds back from the ledger. It uses `ledger.recent(events, …)` with the kind and today's start, so it never reads the whole day's events. Each event's `day` must be today. It rebuilds `_eod_alarms` (oldest first) and `_eod_alarmed`. |
+| `engine.py:881` (`start_core`) | Calls `_load_eod_alarms()` next to `_load_positions()`. |
+
+- A position already alarmed today is not alarmed again after the restart.
+
+### R4: a forced fill carries the clock of when it was made
+
+| File:line | Change |
+|---|---|
+| `engine.py:6026` (`_manage_positions`) | The 15:19 and 15:20 checks read `time.time()` as each position is reached, not the pass's start. |
+| `engine.py:6317` (`_force_eod_fill`) | `now` is read again after `_refresh_exit_book`. The fill, its order, the audit, `eodForced`, the trade and the alarms use it. When it is at or after 15:20, `eod.still_open` is raised there. `_book_exit` then raises `eod.exit_after_deadline` from the fill's own time. |
+
+### R5: the level reader reads a recorded-only trigger
+
+| File:line | Change |
+|---|---|
+| `engine.py:2890` (`_record_after_cutoff`) | After the record, `_read_route(sig, bar, und)` runs, with the same `except Exception` guard as `_handle_counter_unpublished`. The conditions mirror the routes it replaces: a FUDKII trigger; a published one off MCX; an unpublished one on NSE cash only. It runs last, so a slow futures read never holds the record. It places no order: no fade is planned, and nothing is subscribed. |
+| `engine.py:4434` (`book_cards`) | **Found while fixing R5.** With a COUNTER route read, an in-trend card offered a counter-trend button (`ctaCounter`). An older line in that block also reuses `state` for the button's note, so the card lost RECORDED_ONLY. That reuse is unchanged; it predates this branch. A recorded-only trigger (`cut_q`) now gets no counter-trend button, and the card keeps RECORDED_ONLY. |
+
+### R6: the trigger lists say "recorded only" for a graded-F trigger, and RT-X keeps its graded-F reason
+
+| File:line | Change |
+|---|---|
+| `engine.py:2294-2298` (`_decide`) | When `_after_entry_cutoff(sig)` holds, the `NOT_PUBLISHED` row's reason gets " · after the 15:10 NSE entry cutoff — recorded only: …". The decision stays `NOT_PUBLISHED`, so `?unpublished=true` and the counts on `/api/fudkii/today` work as before. |
+| `engine.py:2416` `_graded_f_rule()` | New. The `GRADED_F_RULES` text for a book that never trades a graded-F trigger, else None. RT-Y passes only through the gap switch. `_handle_unpublished` now uses it too, with the same behaviour. |
+| `engine.py:2890` (`_record_after_cutoff`) | On an unpublished trigger:<br>- RT-X, RT-Y without the gap switch, CT-Y, CT-X and CT-M record their `graded_f` skip with that rule, as `_handle_unpublished` and `_handle_counter_unpublished` have them do;<br>- RT-Y-F records the cutoff;<br>- the event has a new `gradedF` list. |
+| `engine.py:4405` (`book_cards`) | On such a card the TAKE reason stays the graded-F rule, not the cutoff. The TAKE was already disabled above for an unpublished trigger. |
+
+- **Decision:** the finding named RT-X and RT-Y. CT-Y, CT-X and CT-M had the same mislabel, since before this branch
+  `_handle_counter_unpublished` gave them a graded-F skip. They were fixed the same way.
+- CT-Y-F, whose gap fade never takes a 14:45 bar, and CT-M on a published trigger still have no skip row, and their
+  cards read RECORDED ONLY. This is unchanged and noted in B's §6.
+
+### Tests
+
+| File | Test | Covers |
+|---|---|---|
+| `backend/tests/test_nse_close_1514.py:100` | `test_a_position_opened_on_an_earlier_day_is_past_both_nse_deadlines_at_once` | R2, pure |
+| `:378` | `test_a_backoff_from_before_1514_never_holds_the_flatten` | R1 |
+| `:410` | `test_a_backoff_from_a_refusal_after_1514_still_waits_two_seconds` | R1 guard |
+| `:432` | `test_an_nse_position_still_open_on_a_later_day_alarms_again_and_the_line_is_red` | R2, SHADOW |
+| `:463` | `test_a_paper_position_from_an_earlier_day_is_forced_out_at_the_first_pass` | R2, PAPER at 00:45 |
+| `:486` | `test_the_out_by_line_stays_red_after_a_restart_the_same_day` | R3 |
+| `:519` | `test_a_forced_fill_made_after_1520_is_stamped_when_made_and_alarms` | R4 |
+| `backend/tests/test_entry_cutoff_and_carry.py:168` | `test_a_1445_trigger_decided_at_1515_is_recorded_and_listed_never_traded_nor_carried` (extended) | R6: the reason, `books` / `gradedF`, the skips, five cards and their TAKE reason, `?unpublished=true`, `/api/fudkii/today`. R5: `counter.route` for both triggers, the route on the alert. |
+| `:267` | `test_a_recorded_only_trigger_routed_counter_trend_offers_no_counter_trend_button` | R5, the card side |
+
+`docs/BOOKS.md:36-41`, `:45-53`: the clock section describes the fixes.
+
+### Results after the fixes
+
+| Check | Result |
+|---|---|
+| Copy check | `python -c "import kotsin_nse; print(kotsin_nse.__file__)"` → `…/close1514/engA_work/backend/kotsin_nse/__init__.py` |
+| `PYTHONPATH=. pytest -q` | **1088 passed** (1080 + 8 new) |
+| `ruff check kotsin_nse tests` | All checks passed |
+| `lint-imports` | 5 kept, 0 broken |
+| Time-of-day sweep (`fakeclock`) | 1088 passed at each of 00:30, 10:00, 15:16 and 15:21 IST |
+| Reviewer's probes | All three exit probes now fail their "expected the defect" assertion. The cutoff probe shows `route_events` = two `counter.route` and the cutoff in the F row's reason. |

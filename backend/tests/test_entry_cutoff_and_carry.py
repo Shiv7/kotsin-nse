@@ -23,6 +23,7 @@ from kotsin_nse.domain import Direction, Instrument, InstrumentKind
 from kotsin_nse.engine import (
     EOD_PLAN_HM,
     FORCE_FLAT_HM,
+    GRADED_F_RULES,
     IN_TREND_BOOKS,
     LAST_ENTRY_HM,
     NSE_FORCED_FILL_HM,
@@ -198,15 +199,30 @@ async def test_a_1445_trigger_decided_at_1515_is_recorded_and_listed_never_trade
         assert rows[pub.signal_id]["decision"] == "RECORDED_ONLY"
         assert rows[pub.signal_id]["decision_reason"].startswith("after the 15:10 NSE entry cutoff — recorded only")
         assert rows[f.signal_id]["decision"] == "NOT_PUBLISHED", "an unpublished trigger keeps FUDKII's own grade on its row"
+        f_why = rows[f.signal_id]["decision_reason"]
+        assert f_why.startswith("FUDKII's own") and "· after the 15:10 NSE entry cutoff — recorded only" in f_why, \
+            "... and its reason says it was decided after the cutoff, for the trigger lists (review, 2026-10-17)"
         ev = await e.ledger.rows_between("events", 0, time.time() + AHEAD)
         rec = {r["signal_id"]: r for r in ev if r.get("kind") == "cutoff.recorded"}
         assert set(rec) == {pub.signal_id, f.signal_id} and rec[pub.signal_id]["cutoff"] == "15:10"
         assert set(rec[pub.signal_id]["books"]) == {"FUDKII_RT_X", "FUDKII_RT_N", "FUDKII_RT_Y", "FUDKII_CT_X", "FUDKII_CT_Y"}
-        assert set(rec[f.signal_id]["books"]) == {"FUDKII_RT_Y_F", "FUDKII_RT_Y", "FUDKII_RT_X"}
+        assert rec[pub.signal_id]["gradedF"] == []
+        # the graded-F shadow would have taken it: recorded only; a book that never trades a graded-F trigger says that
+        assert set(rec[f.signal_id]["books"]) == {"FUDKII_RT_Y_F"}
+        assert set(rec[f.signal_id]["gradedF"]) == {"FUDKII_RT_Y", "FUDKII_RT_X", "FUDKII_CT_Y", "FUDKII_CT_X", "FUDKII_CT_M"}
         skips = {(r["book"], r["signal_id"]) for r in ev if r.get("kind") == "rt_twin.skipped" and r["gate"] == "entry_cutoff"}
         assert {(b, pub.signal_id) for b in rec[pub.signal_id]["books"]} <= skips
         assert {(b, f.signal_id) for b in rec[f.signal_id]["books"]} <= skips
+        graded = {(r["book"], r["reason"]) for r in ev if r.get("kind") == "rt_twin.skipped" and r["gate"] == "graded_f"
+                  and r["signal_id"] == f.signal_id}
+        assert graded == {(b, GRADED_F_RULES[StrategyKey(b)]) for b in rec[f.signal_id]["gradedF"]}
+        assert not [(b, s) for b, s in skips if s == f.signal_id and b in rec[f.signal_id]["gradedF"]], "not the cutoff for those"
         assert not [r for r in ev if r.get("kind") == "carry.queued"], "not carried to the next open"
+        # the level reader reads both, as every trigger (operator, 2026-10-06), record-only (review, 2026-10-17)
+        routes = {r["signal_id"]: r for r in ev if r.get("kind") == "counter.route"}
+        assert set(routes) == {pub.signal_id, f.signal_id} and routes[f.signal_id]["published"] is False
+        alert = next(a for a in e.alerts.feed("FUDKII_RT") if (a.get("evidence") or {}).get("signalId") == pub.signal_id)
+        assert (alert.get("card") or {}).get("route") is not None, "the route is stamped on its ENTRY alert"
 
         # on the list: every book's card reads RECORDED ONLY with the reason, and no TAKE
         today = date.today()
@@ -218,14 +234,21 @@ async def test_a_1445_trigger_decided_at_1515_is_recorded_and_listed_never_trade
         assert shadow["state"] == "RECORDED_ONLY" and shadow["cta"]["enabled"] is False
         parent_f = next(c for c in (await e.book_cards("FUDKII", today))["cards"] if c["signalId"] == f.signal_id)
         assert parent_f["state"] == "NOT_PUBLISHED", "FUDKII would not have traded its own F either"
+        assert "after the 15:10 NSE entry cutoff" in parent_f["parentReason"]
+        for book in ("FUDKII_RT_X", "FUDKII_RT_Y", "FUDKII_CT_X", "FUDKII_CT_Y", "FUDKII_CT_M"):
+            card = next(c for c in (await e.book_cards(book, today))["cards"] if c["signalId"] == f.signal_id)
+            assert card["state"] == "SKIPPED" and card["skip"]["reason"] == GRADED_F_RULES[StrategyKey(book)], (book, card["state"])
+            assert card["cta"]["enabled"] is False and card["cta"]["reason"] == GRADED_F_RULES[StrategyKey(book)], book
         # ... and on the Signals page's list (the API it reads), with the alert card adopted as any trigger's
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=build_app(e)), base_url="http://t") as c:
             listed = {r["signal_id"]: r for r in (await c.get("/api/signals")).json()}
             assert listed[pub.signal_id]["decision"] == "RECORDED_ONLY"
             assert "recorded only" in listed[pub.signal_id]["decision_reason"]
-            assert f.signal_id in {r["signal_id"] for r in (await c.get("/api/signals", params={"unpublished": "true"})).json()}
+            f_listed = {r["signal_id"]: r for r in (await c.get("/api/signals", params={"unpublished": "true"})).json()}[f.signal_id]
+            assert f_listed["decision"] == "NOT_PUBLISHED" and "recorded only" in f_listed["decision_reason"]
             today_list = (await c.get("/api/fudkii/today")).json()["signals"]
             assert any(r["signal_id"] == pub.signal_id and r["decision"] == "RECORDED_ONLY" for r in today_list)
+            assert any(r["signal_id"] == f.signal_id and "recorded only" in r["decision_reason"] for r in today_list)
         assert any((a.get("evidence") or {}).get("signalId") == pub.signal_id for a in e.alerts.feed("FUDKII_RT")), "the alert row"
 
         # an operator TAKE on the card after the cutoff is refused like any entry past it
@@ -236,6 +259,43 @@ async def test_a_1445_trigger_decided_at_1515_is_recorded_and_listed_never_trade
         monkeypatch.setattr(Engine, "_past_last_entry", lambda self, b, u, *, now=None: REAL_PAST_LAST_ENTRY(self, b, u, now=_at("15:15:05")))
         out = await e.operator_take("FUDKII_RT_Y", pub.signal_id)
         assert out["entered"] is False and out["decision"] == "PAST_ENTRY_CUTOFF" and not e.positions
+    finally:
+        await e.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_recorded_only_trigger_routed_counter_trend_offers_no_counter_trend_button(settings, monkeypatch):
+    """The level reader now reads a 14:45 trigger (review, 2026-10-17). When it reads COUNTER, the in-trend cards keep
+    RECORDED_ONLY, with no counter-trend button: nothing on a trigger recorded after the cutoff is traded."""
+    from kotsin_nse.bars.unified import UnifiedBar
+    from kotsin_nse.strategy.base import Outcome
+    from kotsin_nse.strategy.counter import NO_WALL, CounterDecision
+
+    e, _opt, sig = await _rt_y_trigger(settings, Direction.BULLISH, 0.7)
+    try:
+        pub = replace(sig, ts=_today_at("14:45"))
+        e._breadth_at[pub.signal_id] = {"share": 0.7, "names": 200}
+        bar = UnifiedBar("RELIANCE", "2885", "30m", pub.ts, 1495.0, 1502.0, 1494.0, 1500.0, 50_000.0, complete=True)
+
+        async def select(underlying, s, *, tape=True):
+            raise AssertionError("no strike is chosen for a trigger recorded after the cutoff")
+
+        e._select_instrument = select  # type: ignore[method-assign]
+        monkeypatch.setattr("kotsin_nse.engine.counter_route",
+                            lambda *_a, **_k: CounterDecision("COUNTER", "into a monthly R1 wall", NO_WALL, summary="R1 wall"))
+        monkeypatch.setattr(e.fudkii, "on_bar", lambda _ctx, _bar: Outcome(signals=[pub]))
+        monkeypatch.setattr(e.fukaa, "on_signal", lambda *_a: Outcome())
+        await e._decide(bar)
+        assert not e.positions and not e._resting
+        ev = await e.ledger.rows_between("events", 0, time.time() + AHEAD)
+        (route,) = [r for r in ev if r.get("kind") == "counter.route"]
+        assert route["route"] == "COUNTER" and not [r for r in ev if r.get("kind") == "counter.no_plan"], "read, nothing planned"
+        today = date.today()
+        for book in ("FUDKII", "FUDKII_RT_X", "FUDKII_RT_N", "FUDKII_RT_Y", "FUDKII_CT_X", "FUDKII_CT_Y"):
+            card = next(c for c in (await e.book_cards(book, today))["cards"] if c["signalId"] == pub.signal_id)
+            assert card["state"] == "RECORDED_ONLY", (book, card["state"])
+            assert card["ctaCounter"] is None and card["cta"]["enabled"] is False, book
+            assert card["route"]["route"] == "COUNTER", "the card shows what the reader read"
     finally:
         await e.stop()
 
