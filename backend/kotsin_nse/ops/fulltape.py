@@ -1,6 +1,7 @@
 """The full tape: the top of book of EVERY code on the market feed, once a second on change, for the
-whole NSE session (operator, 2026-09-27: record the bid/ask of every candidate strike so a coming day
-can be replayed against the real book; "auto-delete tapes older than 60 days").
+whole NSE session and on to 15:40, when F&O stop trading (operator, 2026-09-27: record the bid/ask of
+every candidate strike so a coming day can be replayed against the real book; "auto-delete tapes older
+than 60 days"; 2026-10-17: "we will record tick till 15:40IST").
 
 The tick tape (``ops/tape.py``) keeps what the engine held, considered or carded — enough to replay
 an exit, not to test a different rule, which may pick a strike nobody looked at. This keeps every
@@ -36,8 +37,11 @@ from ..market.session import IST, ist_hm
 log = structlog.get_logger(__name__)
 
 COLUMNS = ("scrip_code", "ts", "ltp", "bid", "ask", "quote_ts")
-#: the NSE session with a minute either side: pre-open prints and the close
-WINDOW = ("09:14", "15:31")
+#: the NSE session with a minute either side: pre-open prints, and F&O to 15:40 (operator, 2026-10-17:
+#: "we will record tick till 15:40IST" — F&O trade to 15:40 since 3 Aug 2026, and the old 15:31 end lost
+#: them). A minute compare, so this records through 15:41:59. Only the recorder runs on: the session close
+#: (bars, signals, the 15:15 closing-auction bar) stays 15:30 in market/session.py.
+WINDOW = ("09:14", "15:41")
 
 
 class QuoteLike(Protocol):

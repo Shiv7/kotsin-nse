@@ -34,6 +34,21 @@ def test_outside_the_session_and_mcx_are_not_recorded(tmp_path):
     assert t.sample(T0, q) == 1, "the NSE code, not the MCX one"
 
 
+def test_fo_ticks_are_recorded_to_1540_after_the_1530_close(tmp_path):
+    """Operator, 2026-10-17: "we will record tick till 15:40IST" — F&O trade to 15:40; the old 15:31 end lost
+    every F&O tick after it. Only the recorder runs on: the session close (bars, signals) stays 15:30."""
+    from kotsin_nse.config import Segment
+    from kotsin_nse.market.session import spec
+    from kotsin_nse.ops.fulltape import WINDOW
+
+    assert WINDOW == ("09:14", "15:41") and spec(Segment.NSE_FO).close.strftime("%H:%M") == "15:30"
+    t = FullTape(tmp_path)
+    at = lambda h, m, s=0: datetime(2026, 9, 28, h, m, s, tzinfo=IST).timestamp()  # noqa: E731
+    for k, (h, m, sec) in enumerate([(15, 29, 59), (15, 31, 30), (15, 35, 0), (15, 40, 59), (15, 41, 59)]):
+        assert t.sample(at(h, m, sec), {"1": Quote(ltp=10.0 + k, bid=9.9 + k, ask=10.1 + k, ts=at(h, m, sec))}) == 1, f"{h}:{m}:{sec}"
+    assert t.sample(at(15, 42), {"1": Quote(ltp=20.0, bid=19.9, ask=20.1, ts=at(15, 42))}) == 0, "15:42: the recorder has stopped"
+
+
 def test_each_flush_is_a_new_file_and_nothing_is_rewritten(tmp_path):
     t = FullTape(tmp_path)
     for k in range(3):
