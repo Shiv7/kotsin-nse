@@ -96,7 +96,8 @@ reports `loaded / failed / refused`.
 - **One rising stop:** `ratchet_sl = max(stepped rung SL, peak − 3 % [spread-floored])`, never lowered;
   trading through it ends the trade at once. Before the T1 touch the option-side stop is the equity
   stop through **live** delta (re-projected every 10 s), with the 75 s sustain and the 9 % hard floor.
-- No bar time-stop; NSE positions flatten at 15:20 IST (the graded-F shadow at 15:24, out by 15:25), MCX at 23:20.
+- No bar time-stop; NSE positions flatten from 15:14 IST, every book, out before 15:20 (operator, 2026-10-17; it was
+  15:20, the graded-F shadow 15:24), MCX at 23:20.
 
 **Three RT books off the same fill** (`risk/limits.py`, since 2026-09-23 evening). Every FUDKII
 NSE fill is mirrored into RT-X, RT-N and RT-Y, each on its own wallet; only the exit differs.

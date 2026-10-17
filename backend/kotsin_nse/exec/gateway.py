@@ -294,6 +294,27 @@ class Gateway:
         self._matcher.fills += 1
         return OrderResult(Decision.PAPER_FILLED, order, fill)
 
+    def force_paper_exit(self, intent: OrderIntent, *, price: float, now: float, note: str) -> OrderResult:
+        """The NSE out-by deadline's last resort (operator, 2026-10-17): a PAPER exit the flatten could not
+        fill by 15:19 — a stale book, no quote, every try refused — is filled whole at ``price`` (the last
+        known bid, else the last known price), without the matcher: no book walk, no age limit. The order
+        is FILLED with ``note`` saying so, and the engine flags and alarms it. Exits only, and never a
+        LIVE book's (the engine sends only paper positions here): a real position is never paper-closed."""
+        if intent.purpose is not Purpose.EXIT:
+            raise ValueError("only an exit is ever force-filled")
+        self._rollover()
+        order = self._order_for(intent, Mode.PAPER)
+        self._seen.add(intent.client_order_id)
+        charges = self._matcher.costs.leg(intent.instrument, intent.side, price, intent.qty).total
+        fill = Fill(price=round(price, 2), qty=intent.qty, ts=now, charges=charges, slippage_bps=None,
+                    book_age_ms=None, levels=0)
+        order.status, order.note = "FILLED", note
+        order.avg_price, order.filled = fill.price, fill.qty
+        order.charges, order.slippage_bps = fill.charges, fill.slippage_bps
+        self._ok(order)
+        self.orders_today += 1
+        return OrderResult(Decision.PAPER_FILLED, order, fill)
+
     def cancel_resting(self, order: Order, note: str) -> OrderResult:
         """A resting entry that ran out of time. Not a reject: nothing was refused, the market just
         never came to the limit — so it does not count toward the breaker."""

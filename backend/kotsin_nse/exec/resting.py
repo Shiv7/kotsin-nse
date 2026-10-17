@@ -25,7 +25,9 @@ trip to the spread and charges — buying at the ask and selling at the bid was 
   after the depth (DMART: bid 107.10 when its stock stop fired, crossed at 94.97 fifteen seconds
   later); +₹5,370 without DMART; the 25 Sep - 1 Oct replay, whose books are built from 1-minute
   candles and cannot show a 15-second collapse, −₹5,209. Insurance against the collapse, about even
-  otherwise. Trail, target and 15:20 exits keep the walk (it beat the bid there).
+  otherwise. Trail, target and MCX 23:20 exits keep the walk (it beat the bid there); the NSE flatten
+  (15:14) sells into the bid at once — the engine's ``NSE_EOD_AT_ONCE`` (operator, 2026-10-17: "we exit
+  at the first avenue").
 * **Momentum (entry)** — operator, 2026-09-26: "if it is racing ahead, take a call in 30th second and
   get in quickly", measured on "the option's move not the stock/equity's move". The run is the
   OPTION's mid against the signal price, in % of that price. One look at ``entry_race_check_s``: a

@@ -177,7 +177,9 @@ def mechanism(reason: str, trig_on: str | None, level: float | None, entry: floa
     if reason in HALTS:
         return "halt/forced"
     if reason == "EOD":
-        return "day-end 15:20"
+        # the NSE flatten: 15:20 (the graded-F shadow 15:24) until 17 Oct 2026, 15:14 since — no clock in the label,
+        # so a past trade is not relabelled with today's time
+        return "day-end flatten"
     if reason == "TARGET":
         return "last target rung"
     if reason == "TRAIL":

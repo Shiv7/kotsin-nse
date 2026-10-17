@@ -73,11 +73,13 @@ def test_env_mirrors_the_backtester_on_stops_targets_and_the_session():
     res = env.step(ACTION_INDEX["hold"])
     assert res.done and res.info["reason"] == "target" and res.info["exit"] == pytest.approx(104.0)
 
-    # the bar containing 15:20 IST flattens the position at its close
-    bars = _bars([(100, 100.5, 99.8, 100.2), (100.2, 100.8, 100.0, 100.5), (100.5, 100.9, 100.1, 100.7)], start="14:15")
+    # the bar containing the NSE flatten — 15:14 IST since 2026-10-17, so the 14:45 bar — flattens the
+    # position at its close (the env follows market/session.py SESSIONS, as the live loop does)
+    bars = _bars([(100, 100.5, 99.8, 100.2), (100.2, 100.8, 100.0, 100.5), (100.5, 100.9, 100.1, 100.7)], start="13:45")
     env = ExitEnv(bars, _ep(entry_index=0), max_bars=8, giveback_pct=40)
-    env.step(ACTION_INDEX["hold"])  # 14:45
-    res = env.step(ACTION_INDEX["hold"])  # 15:15 contains 15:20
+    res = env.step(ACTION_INDEX["hold"])  # 14:15
+    assert not res.done
+    res = env.step(ACTION_INDEX["hold"])  # 14:45 contains 15:14
     assert res.done and res.info["reason"] == "force_flat"
 
     # the time stop counts the fill bar as bar 1 (the backtester's bars_held), and a stop on the

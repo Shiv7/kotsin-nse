@@ -140,6 +140,8 @@ from .market.iv import (
 from .market.session import (
     IST,
     NSE_EQ_CONTINUOUS_UNTIL,
+    NSE_FORCED_FILL,
+    NSE_OUT_BY,
     TF_SECONDS,
     TradingCalendar,
     bucket_start,
@@ -152,6 +154,8 @@ from .market.session import (
     ist_today,
     on_session_grid,
     past_force_flat,
+    past_nse_forced_fill,
+    past_nse_out_by,
     session_buckets_back,
     session_close_ts,
     session_open_ts,
@@ -339,26 +343,36 @@ LIVE_MARGIN_FIELDS = ("NetAvailableMargin", "AvailableMargin", "ALB")
 _MIRRORS = {"FUDKII_RT_Y_W1": "FUDKII_RT_Y"}
 #: the books that take a FUDKII trigger in the trend's way, each judging it for itself
 IN_TREND_BOOKS = (StrategyKey.FUDKII, StrategyKey.FUDKII_RT_X, StrategyKey.FUDKII_RT_N, StrategyKey.FUDKII_RT_Y)
-#: The last minute any book may place a new NSE entry (operator, 2026-09-29: "3:15PM IST for NSE
-#: trading for all NSE trades for all strategies except for MCX ones, FUDKII-RT-Y-F. last entry time
-#: for FUDKII-RT-Y-F will be before 3:23PM"). Paper and live alike; MCX keeps its own session. Before
-#: this, no paper entry checked the clock: the graded-F shadow bought at 15:30, after the close
-#: (2026-09-29, −₹15,116).
-NSE_LAST_ENTRY_HM = "15:15"
-LAST_ENTRY_HM: dict[str, str] = {StrategyKey.FUDKII_RT_Y_F.value: "15:22"}
-#: "exit latest by 3:25PM IST not after for all NSE trades" (operator, 2026-09-29): every book keeps the
-#: session's 15:20 flatten — moving it to 15:24 cost −₹29,932 over 24 Aug–28 Sep in the replay (89 trades
-#: held to the close, every in-trend book worse) — and the graded-F shadow, whose entries run to 15:22,
-#: flattens from 15:24, out by 15:25.
-FORCE_FLAT_HM: dict[str, str] = {StrategyKey.FUDKII_RT_Y_F.value: "15:24"}
-# a stop-rule mirror flattens when its source does
-FORCE_FLAT_HM.update({m.value: FORCE_FLAT_HM[src.value] for m, (src, _r) in STOP_MIRRORS.items() if src.value in FORCE_FLAT_HM})
-#: The 15:15 plan (operator, 2026-10-03: "if at 15:15 we are waiting for SL which is very near, we should
+#: The last minute any book may place a new NSE entry — an inclusive minute compare, so "15:10" allows
+#: 15:10:59 (operator, 2026-10-17: the last NSE entry minute is 15:10, the live gateway's own cutoff,
+#: ``settings.live_entry_cutoff_ist``; every NSE position is flattened from 15:14 and out before 15:20).
+#: Paper and live alike, every book; MCX keeps its own session. It was 15:15, and 15:22 for the graded-F
+#: shadow (2026-09-29); before that no paper entry checked the clock: the graded-F shadow bought at
+#: 15:30, after the close (2026-09-29, −₹15,116). A trigger decided after it and before the close — the
+#: 14:45 bar, decided at 15:15 — is recorded and listed, never traded, never carried (``_after_entry_cutoff``).
+NSE_LAST_ENTRY_HM = "15:10"
+#: a book's own later NSE last-entry minute — none since 2026-10-17 (the graded-F shadow's 15:22 removed)
+LAST_ENTRY_HM: dict[str, str] = {}
+#: a book's own later NSE flatten — none since 2026-10-17: every NSE book, its stop-rule mirrors and the
+#: graded-F shadow (whose 15:24 is removed) flatten at the session's ``force_flat``, 15:14
+FORCE_FLAT_HM: dict[str, str] = {}
+#: The NSE deadline (market/session.py): every position out before NSE_OUT_BY_HM; from NSE_FORCED_FILL_HM
+#: a paper position the flatten could not sell is filled at its last known price, flagged and alarmed
+NSE_FORCED_FILL_HM = f"{NSE_FORCED_FILL:%H:%M}"
+NSE_OUT_BY_HM = f"{NSE_OUT_BY:%H:%M}"
+#: a failed NSE flatten tries again this soon, not on the 2-4-8-16-30 s backoff of other exits (16 Oct
+#: AUBANK: every try refused as a stale book, retried at +3, +4, +9, +16 s then every ~31 s, out 15:34:53)
+EOD_RETRY_S = 2.0
+#: why the NSE flatten sells into the bid at once, where a calm exit rests at the mid and walks
+#: (operator, 2026-10-17: "we exit at the first avenue"); MCX's 23:20 flatten keeps its walk
+NSE_EOD_AT_ONCE = "the NSE flatten sells at its first chance"
+#: The 15:13 plan (operator, 2026-10-03: "if at 15:15 we are waiting for SL which is very near, we should
 #: exit asap, in case the SL is away, then we wait if the target is close by ... by 15:15 you will know if
 #: we need to exit at 15:20"): at this minute every open NSE position's distance to its stop line and to
 #: its next target is RECORDED with what the rule would do — never acted on yet (30 Sep - 1 Oct: one
 #: position of nine had its stop that near, none a target). ``EOD_PLAN_NEAR_PCT`` is "near", % of the mid.
-EOD_PLAN_HM = "15:15"
+#: 15:13 since the flatten moved to 15:14 (operator, 2026-10-17): still a record, a minute before it.
+EOD_PLAN_HM = "15:13"
 EOD_PLAN_NEAR_PCT = 3.0
 #: The fade's nearer stop (``RiskLimits.fade_stop_nearer_level``): the first classic level at least FADE_LEVEL_MIN_ATR
 #: ATR30 past the close the trigger's way, and the stop FADE_LEVEL_BUFFER_ATR beyond it — when that is nearer than 1 ATR30
@@ -827,6 +841,11 @@ class Engine:
         self._n50_align: dict[tuple[int, str], dict[str, int] | None] = {}
         self._stale_positions: set[str] = set()
         self._shadow_exits: set[str] = set()
+        #: the NSE out-by deadline's alarms (operator, 2026-10-17): (kind, position) already raised, and the rows the
+        #: ``nse_out_by`` health line reads (today's only); the last refusal of each position's exit, for the forced fill
+        self._eod_alarmed: set[tuple[str, str]] = set()
+        self._eod_alarms: list[dict[str, Any]] = []
+        self._exit_fail_note: dict[str, str] = {}
         self._mode = Mode.SHADOW
         self._armed_until: float | None = None
         self._halted = False
@@ -2275,6 +2294,10 @@ class Engine:
                 # decided at or after the NSE close (the 15:15 bar completes at 15:30): no book can
                 # trade it now — carried to the next session's 09:15 open (operator, 2026-09-29)
                 jobs.append(self._guarded("carry.failed", sig, self._carry_queue(sig)))
+            elif (late := self._after_entry_cutoff(sig)) is not None:
+                # decided after the 15:10 entry cutoff and before the close (the 14:45 bar, at 15:15):
+                # recorded and listed, never traded, never carried (operator, 2026-10-17)
+                jobs.append(self._guarded("cutoff.record_failed", sig, self._record_after_cutoff(sig, bar, late)))
             elif published(sig):  # the in-trend books keep the parent's grade
                 jobs.append(self._guarded("signal.failed", sig, self._handle_signal(sig, bar, books=IN_TREND_BOOKS, adopt=True)))
                 jobs.append(self._guarded("counter.failed", sig, self._handle_counter(sig, bar)))
@@ -2596,6 +2619,10 @@ class Engine:
             return await refuse("SKIPPED", why, gate=gate, **extra)
         if (breach := self._stop_breached(sig, underlying, book_key)) is not None:
             return await refuse("STOP_BREACHED", breach)
+        if gated and (late := self._past_last_entry(book_key, underlying)):
+            # the gates may have waited on the broker (the volume read): the minute is read again before any order,
+            # so no entry is sent after the cutoff (operator, 2026-10-17)
+            return await refuse("PAST_ENTRY_CUTOFF", late, gate="entry_cutoff")
         book = self._exits_by_strategy.get(book_key)
         book_limits = book.limits if book is not None else self.limits
         option_sl = self.floored_option_stop(key, premium, raw_sl, inst.tick_size) if inst.is_option else raw_sl
@@ -2803,8 +2830,8 @@ class Engine:
 
     @staticmethod
     def _force_flat_hm(book: str, segment: Segment) -> str:
-        """When ``book``'s positions in ``segment`` are flattened: the session's, or the book's own
-        later NSE flatten (``FORCE_FLAT_HM``)."""
+        """When ``book``'s positions in ``segment`` are flattened: the session's (NSE 15:14 for every
+        book since 2026-10-17), or a book's own later NSE flatten (``FORCE_FLAT_HM``, empty now)."""
         own = FORCE_FLAT_HM.get(book) if segment is not Segment.MCX_FO else None
         return own or f"{spec(segment).force_flat:%H:%M}"
 
@@ -2813,8 +2840,8 @@ class Engine:
 
     def _past_last_entry(self, book: str, underlying: Instrument, *, now: float | None = None) -> str | None:
         """Why ``book`` may not place a new entry now, or None: past its last NSE entry minute
-        (``NSE_LAST_ENTRY_HM``, the graded-F shadow's own in ``LAST_ENTRY_HM``). MCX is not
-        restricted here (its own session)."""
+        (``NSE_LAST_ENTRY_HM``, 15:10 for every book since 2026-10-17; a book's own in ``LAST_ENTRY_HM``).
+        MCX is not restricted here (its own session)."""
         if underlying.segment is Segment.MCX_FO:
             return None
         now = time.time() if now is None else now
@@ -2823,6 +2850,46 @@ class Engine:
             return None
         return (f"past {BOOK_LABELS.get(book, book)}'s last NSE entry minute {last} IST ({to_ist(now):%H:%M:%S}) — "
                 f"its positions are flattened from {self._force_flat_hm(book, underlying.segment)}")
+
+    def _after_entry_cutoff(self, sig: Signal) -> str | None:
+        """Why a trigger is recorded and not traded, or None: decided after the last NSE entry minute and
+        before the close — the 14:45 bar, complete at 15:15, after the 15:10 cutoff (operator, 2026-10-17:
+        "record them but dont trade as of now. let it show on the list"). Read off the trigger's bar, not
+        the wall clock: a 14:15 bar decided late is refused by each book's own cutoff (``_past_last_entry``),
+        and the 15:15 bar, decided at the close, is carried (``_after_close``). MCX: never (its own session)."""
+        und = self.underlyings.get(sig.symbol)
+        if und is None or und.segment is Segment.MCX_FO or self._after_close(sig):
+            return None
+        decided = ist_hm(sig.ts + TF_SECONDS[DECISION_TF])
+        close = f"{spec(und.segment).close:%H:%M}"
+        if not (NSE_LAST_ENTRY_HM < decided <= close) or ist_hm(sig.ts) >= close:
+            return None
+        return (f"after the {NSE_LAST_ENTRY_HM} NSE entry cutoff — recorded only: the {ist_hm(sig.ts)} bar is decided at "
+                f"{decided}, and every NSE position is flattened from {spec(und.segment).force_flat:%H:%M}; not traded, not carried")
+
+    async def _record_after_cutoff(self, sig: Signal, bar: UnifiedBar | None, why: str) -> None:
+        """A trigger decided after the NSE entry cutoff (``_after_entry_cutoff``): recorded, listed and never traded
+        (operator, 2026-10-17). A published trigger's row says RECORDED_ONLY with the reason, and its ENTRY alert is
+        adopted as any trigger's (the Alerts page and the cards list it); an unpublished one keeps its NOT_PUBLISHED
+        row (FUDKII's own grade). Every book that would have been offered it records the cutoff as its skip — the
+        gate is the same ``entry_cutoff`` a book's own refusal past the minute records — and a ``cutoff.recorded``
+        event marks it for the cards. No strike is chosen and no broker is asked: nothing here can place an order."""
+        pub = published(sig)
+        und = self.underlyings.get(sig.symbol)
+        self._signals_today[sig.signal_id] = sig
+        if pub:
+            self.alerts.adopt_signal(sig.to_json(), bar)
+            await self.ledger.insert_signal(sig.to_json(), "RECORDED_ONLY", why)
+        # FUDKII's decision on a published trigger is its row; every other book offered it records its own
+        offered = [k for k in (*IN_TREND_BOOKS, *FADE_BOOKS) if k is not StrategyKey.FUDKII] if pub else list(UNPUBLISHED_BOOKS)
+        books = [k.value for k in offered if und is not None and self.book_trades(k.value, und.segment)]
+        await self.ledger.event("cutoff.recorded", {
+            "signal_id": sig.signal_id, "symbol": sig.symbol, "published": pub, "why": why, "books": books,
+            "decidedAt": int(sig.ts + TF_SECONDS[DECISION_TF]), "cutoff": NSE_LAST_ENTRY_HM,
+        })
+        for b in books:
+            await self._book_skip(b, sig, why, gate="entry_cutoff")
+        log.info("cutoff.recorded", symbol=sig.symbol, signal=sig.signal_id, published=pub, books=len(books))
 
     def _after_close(self, sig: Signal) -> bool:
         """A trigger decided at or after its NSE session's close — the 15:15 bar, complete at 15:30.
@@ -3366,6 +3433,10 @@ class Engine:
                 halted, why = True, f"{BOOK_LABELS.get(plan.key, plan.key)} halted — {plan.wallet.halt_reason}"
             if not halted and self.gateway.book_tripped(plan.key):
                 halted, why = True, f"{BOOK_LABELS.get(plan.key, plan.key)}'s order breaker is tripped"
+            if not halted and (late := self._past_last_entry(plan.key, plan.underlying, now=now)):
+                # an NSE entry never fills after the last entry minute: still resting at the cutoff, it is cancelled
+                # (operator, 2026-10-17 — every NSE position is flattened from 15:14)
+                halted, why = True, f"cancelled at the entry cutoff — {late}"
             dead = self._stop_breached(plan.sig, plan.underlying, plan.key)
             if halted or dead:
                 await self._entry_missed(r, now, bid, ask, dead or why)
@@ -4120,6 +4191,9 @@ class Engine:
             carry_q = next((e for e in evs if e.get("kind") == "carry.queued"), None)
             carried_here = carry_q is not None and key is not StrategyKey.FUDKII and (
                 key in IN_TREND_BOOKS if carry_q.get("published") else key in UNPUBLISHED_BOOKS)
+            # decided after the NSE entry cutoff (the 14:45 bar, at 15:15): recorded and listed, never traded, never
+            # carried (operator, 2026-10-17) — every book reads RECORDED ONLY, its skip carrying the same reason
+            cut_q = next((e for e in evs if e.get("kind") == "cutoff.recorded"), None)
             if ps:
                 state = "OPEN" if ps.get("status") == "OPEN" else "TRADED"
             elif pending is not None:
@@ -4128,6 +4202,8 @@ class Engine:
                 state = "CARRIED"
             elif unpublished and key in (StrategyKey.FUDKII, StrategyKey.FUDKII_RT_N):
                 state = "NOT_PUBLISHED"  # RT-N is as FUDKII: it trades what FUDKII publishes (2026-10-06)
+            elif cut_q is not None and (skip is None or skip.get("gate") == "entry_cutoff"):
+                state = "RECORDED_ONLY"
             elif skip is not None and (not owns_row or unpublished):
                 state = "SKIPPED"
             elif unpublished and own is None:
@@ -4280,6 +4356,8 @@ class Engine:
                 cta = {**cta, "action": "take", "enabled": False, "reason": why_not}
             if state == "CARRIED" or (carry_q is not None and key is StrategyKey.FUDKII):
                 cta = {**cta, "action": "take", "enabled": False, "reason": "after the close — carried to the next session's 09:15 open"}
+            if cut_q is not None and ps is None:
+                cta = {**cta, "action": "take", "enabled": False, "reason": str(cut_q.get("why") or "after the NSE entry cutoff — recorded only")}
             if pending is not None:
                 # a limit entry is working for this trigger: its fill (or its miss) decides; a TAKE now
                 # would enter the book a second time when the mirrored fill lands
@@ -4332,6 +4410,7 @@ class Engine:
                 "parentDecision": sgn.get("decision"), "parentReason": sgn.get("decision_reason"),
                 "candle": candle, "surgeT": s_t, "surgeT1": s_t1, "baseline": base, "volumeDoubt": vr.doubt or None, "spark": spark,
                 "route": route, "skip": skip, "operator": operator, "fade": fade, "state": state,
+                "recordedOnly": (cut_q or {}).get("why") if cut_q is not None else None,
                 "position": ps, "trade": trades_by_pos.get(ps["id"]) if ps else None, "exits": exits_by_pos.get(ps["id"], []) if ps else [],
                 "live": live, "rtCard": rt_card, "pros": pros, "cons": cons, "cta": cta, "breadth": breadth, "books": books_row,
                 "pending": pending, "execLog": (ps or {}).get("exec_log") or None,
@@ -5889,6 +5968,14 @@ class Engine:
         for pos in list(self.positions.values()):
             if pos.status != "OPEN":
                 continue
+            seg = pos.underlying.segment
+            # The NSE deadline (operator, 2026-10-17): flattened from 15:14, out before 15:20. Read before the
+            # no-quote skip below, so a contract that never printed is forced out and alarms like any other.
+            if past_nse_out_by(seg, now):
+                await self._eod_alarm("eod.still_open", pos, now,
+                                      f"still OPEN at {to_ist(now):%H:%M:%S} — not out before the {NSE_OUT_BY_HM} NSE deadline")
+            if past_nse_forced_fill(seg, now) and await self._force_eod_fill(pos, now):
+                continue
             ltp = self.ltps.get(pos.instrument.scrip_code)
             if ltp is None or ltp <= 0:
                 if pos.id not in self._stale_positions:
@@ -5906,6 +5993,12 @@ class Engine:
                         key=f"noquote:{pos.id}",
                     )
                 self._stale_positions.add(pos.id)
+                if seg is not Segment.MCX_FO and self._past_force_flat(pos.strategy, seg, now):
+                    # no last price, but the NSE flatten still takes its first avenue: a bid on the book or a
+                    # snapshot quote, if either shows one (``_place_exit_limit`` refreshes the book first)
+                    bid, _, _, _ = self._touch(pos.instrument.scrip_code, now)
+                    await self._exit(pos, ExitDecision(pos.id, ExitReason.EOD, bid or 0.0, pos.qty_remaining,
+                                                       "segment force-flat — the contract has no last price"), now)
                 continue
             wallet = self.wallets[pos.strategy]
             # Only an OPERATOR halt closes positions. The gateway breaker and the reconcile freeze
@@ -6048,6 +6141,9 @@ class Engine:
             # target, the rest behind a one-lot tranche): then it replaces the resting one.
             _, old, _ = resting.ctx
             urgent = self.limit_policy.exit_deadline(decision.reason) < resting.deadline_s
+            # from the NSE flatten no exit rests: one placed before 15:14 (a trail, a halt walking from the mid) is
+            # replaced by the sale into the bid (operator, 2026-10-17: "exit at the first avenue")
+            urgent = urgent or self._nse_flatten(pos, decision, now)
             if not (urgent or decision.qty > old.qty):
                 return
             self._resting.pop(resting.intent.client_order_id, None)
@@ -6075,6 +6171,159 @@ class Engine:
         finally:
             self._exits_in_flight.discard(pos.id)
 
+    def _nse_flatten(self, pos: Position, decision: Any, now: float) -> bool:
+        """The NSE flatten (operator, 2026-10-17: "if we are in trade till 15:14IST, then we exit at the first avenue
+        before 15:20IST"): an NSE position's exit at or after its 15:14 force-flat — the EOD exit itself, or whatever
+        rule beat it to the position that second (a halt, a stop, a rung) — sells into the bid at once and, refused,
+        tries again every EOD_RETRY_S. MCX keeps its walk and its backoff."""
+        if pos.underlying.segment is Segment.MCX_FO:
+            return False
+        return decision.reason is ExitReason.EOD or self._past_force_flat(pos.strategy, pos.underlying.segment, now)
+
+    def _exit_retry_s(self, pos: Position, decision: Any, n: int, now: float) -> float:
+        """How long a refused exit waits before it goes again: 2-4-8-16-30 s, so a contract nobody bids for cannot
+        fire a rejection a second — but the NSE flatten tries every EOD_RETRY_S, to be out before 15:20 (16 Oct
+        AUBANK: refused as a stale book from 15:20, retried every ~31 s, out at 15:34:53). Exit rejects never count
+        toward a book's breaker (exec/gateway.py), so the faster retry costs nothing there."""
+        delay = min(2.0**n, 30.0)
+        return min(delay, EOD_RETRY_S) if self._nse_flatten(pos, decision, now) else delay
+
+    def _fills_on_paper(self, pos: Position) -> bool:
+        """Does this position's exit fill on paper? PAPER: every book; LIVE: every book but the live ones
+        (``LIVE_BOOKS``, whose orders go to the broker); SHADOW places nothing."""
+        mode = self.mode()
+        if mode is Mode.PAPER:
+            return True
+        return mode in LIVE_MODES and pos.strategy not in self.LIVE_BOOKS
+
+    def _last_known_exit_price(self, pos: Position, now: float) -> tuple[float, str, float | None]:
+        """What the forced fill sells at: the last known bid — the newer of the depth book's and the quote's,
+        whatever its age — else the last known price, else the last mark, else the entry (nothing ever priced it).
+        A short (a future bought back) reads the ask. ``(price, source, age in seconds or None)``."""
+        code = pos.instrument.scrip_code
+        buy_back = pos.side is PosSide.SHORT
+        seen: list[tuple[float, float, str]] = []
+        b, q = self.books.get(code), self.quotes.get(code)
+        if b is not None and (px := (b.best_ask if buy_back else b.best_bid)):
+            seen.append((b.ts, float(px), "ask" if buy_back else "bid"))
+        if q is not None and (px := (q.ask if buy_back else q.bid)) and px > 0:
+            seen.append((q.ts, float(px), "ask" if buy_back else "bid"))
+        if seen:
+            ts, px, src = max(seen)
+            return px, src, round(now - ts, 1)
+        ltp = self.ltps.get(code)
+        if ltp and ltp > 0:
+            at = self._ltp_ts.get(code)
+            return float(ltp), "last price", round(now - at, 1) if at else None
+        mark = (self.position_marks.get(pos.id) or {}).get("mid")
+        if mark and mark > 0:
+            at = (self.position_marks.get(pos.id) or {}).get("ts")
+            return float(mark), "last mark", round(now - at, 1) if at else None
+        return float(pos.entry), "entry — no price was ever seen", None
+
+    async def _force_eod_fill(self, pos: Position, now: float) -> bool:
+        """From 15:19:00 an NSE position the flatten could not sell — a stale book, no quote, every try refused — is
+        filled on PAPER at its last known bid (else its last known price), flagged ``eodForced`` and alarmed (operator,
+        2026-10-17: "if we are in trade till 15:14IST, then we exit at the first avenue before 15:20IST"). Its working
+        sells come off first. A LIVE book's position is never paper-filled: it alarms, and is sold at the broker. True
+        when the position was dealt with here (filled, or an exit already in flight owns it this tick)."""
+        if pos.qty_remaining <= 0:
+            return False
+        if not self._fills_on_paper(pos):
+            mode = self.mode()
+            await self._eod_alarm("eod.not_forced", pos, now, f"still OPEN at {to_ist(now):%H:%M:%S} in {mode.value} — " + (
+                "SHADOW places nothing, so it is never paper-filled" if mode is Mode.SHADOW
+                else "a position at the broker is never paper-filled: close it there"))
+            return False
+        if pos.id in self._exits_in_flight:
+            return True  # an exit is being sent this instant; the next tick decides again
+        self._exits_in_flight.add(pos.id)
+        try:
+            flat = self._force_flat_hm(pos.strategy, pos.underlying.segment)
+            why = f"forced fill {NSE_FORCED_FILL_HM}"
+            resting = self._exit_resting(pos.id)
+            if resting is not None:  # a working exit is superseded; its id is spent
+                self._resting.pop(resting.intent.client_order_id, None)
+                self._exit_attempts[pos.id] = self._exit_attempts.get(pos.id, 0) + 1
+            await self._cancel_resting_targets(pos, now, why)
+            if pos.status != "OPEN" or pos.qty_remaining <= 0:
+                return True
+            await self._refresh_exit_book(pos.instrument, now)  # one last snapshot, so "last known" is as late as it can be
+            price, source, age = self._last_known_exit_price(pos, now)
+            cause = self._exit_fail_note.get(pos.id) or ("the contract has no last price" if not self.ltps.get(pos.instrument.scrip_code)
+                                                          else "not sold by the flatten")
+            aged = f", {age:g} s old" if age is not None else ""
+            note = (f"forced fill {NSE_FORCED_FILL_HM}, stale book — not out after the {flat} flatten ({cause[:160]}); "
+                    f"paper-filled at the last known {source} {price:g}{aged}")
+            qty = pos.qty_remaining
+            decision = ExitDecision(pos.id, ExitReason.EOD, price, qty, note)
+            attempt = self._exit_attempts.get(pos.id, 0)
+            intent = OrderIntent(
+                strategy=pos.strategy, instrument=pos.instrument, side=OrderSide.SELL, qty=qty, purpose=Purpose.EXIT,
+                signal_id=pos.signal_id, client_order_id=exit_client_order_id(pos, decision, attempt, forced=True), reason=note,
+                position_id=pos.id, ref_price=price, limit_price=price,
+            )
+            result = self.gateway.force_paper_exit(intent, price=price, now=now, note=note)
+            bid, ask, _, _ = self._touch(pos.instrument.scrip_code, now)
+            flag = {"at": now, "ist": f"{to_ist(now):%H:%M:%S}", "price": price, "priceFrom": source, "priceAgeS": age,
+                    "cause": cause[:200], "flattenFrom": flat}
+            audit = {"kind": "exit", "eodForced": flag, "signalTs": now, "placedTs": now, "filledTs": now, "fillPrice": result.fill.price,
+                     "bookAtForce": {"bid": bid, "ask": ask}, "depthAtForce": self._depth(pos.instrument.scrip_code, now), "outcome": note}
+            await self.ledger.insert_order(_order_json(result.order, audit), result.decision.value)
+            pos.exec_log["eodForced"] = flag
+            await self._book_exit(pos, decision, result, now, attempt, audit)
+            await self._eod_alarm("eod.forced_fill", pos, now, note, price=price, priceFrom=source, priceAgeS=age, cause=cause[:200],
+                                  qty=qty)
+            return True
+        finally:
+            self._exits_in_flight.discard(pos.id)
+
+    async def _eod_alarm(self, kind: str, pos: Position, now: float, detail: str, **extra: Any) -> None:
+        """One NSE out-by alarm per position and kind (operator, 2026-10-17): a structured error log, a ledger event,
+        Telegram, and a row the ``nse_out_by`` health line fails on for the rest of the IST day. ``eod.forced_fill`` —
+        filled at 15:19 at its last known price; ``eod.still_open`` — open at or after 15:20; ``eod.exit_after_deadline``
+        — an exit filled at or after 15:20; ``eod.not_forced`` — a LIVE position open at 15:19, never paper-filled."""
+        if (kind, pos.id) in self._eod_alarmed:
+            return
+        self._eod_alarmed.add((kind, pos.id))
+        day = ist_day(now).isoformat()
+        row = {"positionId": pos.id, "book": pos.strategy, "symbol": pos.underlying.symbol,
+               "contract": pos.instrument.name or pos.instrument.scrip_code, "qty": pos.qty_remaining,
+               "at": f"{to_ist(now):%H:%M:%S}", "day": day, "detail": detail, **extra}
+        self._eod_alarms = [a for a in self._eod_alarms if a.get("day") == day] + [{"kind": kind, **row}]
+        log.error(kind, **row)
+        try:
+            await self.ledger.event(kind, {**row, "atTs": now})
+        except Exception as exc:  # noqa: BLE001 — an alarm's record never costs the exit loop its pass
+            log.warning("eod.alarm_record_failed", kind=kind, error=str(exc)[:120])
+        self.telegram.fire_and_forget(f"🛑 {BOOK_LABELS.get(pos.strategy, pos.strategy)} {pos.underlying.symbol}: {detail}",
+                                      key=f"{kind}:{pos.id}")
+
+    def _eod_check(self) -> Check:
+        """The health line for the NSE deadline (operator, 2026-10-17): red for the rest of the IST day once any NSE
+        position was force-filled at 15:19, was still open at 15:20 or had an exit fill at or after 15:20 — and while one
+        is open past 15:20 now."""
+        now = time.time()
+        day = ist_day(now).isoformat()
+        alarms = [a for a in self._eod_alarms if a.get("day") == day]
+        late = [p for p in self.positions.values()
+                if p.status == "OPEN" and past_nse_out_by(p.underlying.segment, now)
+                and ("eod.still_open", p.id) not in self._eod_alarmed]
+        rule = (f"flatten {spec(Segment.NSE_EQ).force_flat:%H:%M}, forced fill {NSE_FORCED_FILL_HM}, "
+                f"out before {NSE_OUT_BY_HM}")
+        if not alarms and not late:
+            return Check("nse_out_by", True, value=0.0, detail=f"no NSE deadline alarm today · {rule}")
+        kinds: dict[str, int] = {}
+        for a in alarms:
+            kinds[a["kind"]] = kinds.get(a["kind"], 0) + 1
+        if late:
+            kinds["eod.still_open"] = kinds.get("eod.still_open", 0) + len(late)
+        names = ", ".join(f"{a['symbol']} {BOOK_LABELS.get(a['book'], a['book'])} ({a['kind'].removeprefix('eod.')} {a['at']})"
+                          for a in alarms[-4:])
+        counts = ", ".join(f"{n} {k.removeprefix('eod.').replace('_', ' ')}" for k, n in sorted(kinds.items()))
+        return Check("nse_out_by", False, value=float(sum(kinds.values())),
+                     detail=f"{day}: {counts}{f' — {names}' if names else ''} · {rule}")
+
     async def _exit_now(self, pos: Position, decision: Any, now: float) -> None:
         if now < self._exit_retry_at.get(pos.id, 0.0):
             return  # backing off after a rejected exit; the decision is re-made next pass
@@ -6093,6 +6342,8 @@ class Engine:
         stop = self._stop_record(pos, decision, now)
         run = self._option_fall(code, now, (bid + ask) / 2 if bid and ask else None)
         urgent = urgent_stop(decision.reason, bid, ask, run, self.limit_policy, pos.instrument.tick_size or 0.05)
+        if urgent is None and self._nse_flatten(pos, decision, now):
+            urgent = NSE_EOD_AT_ONCE  # no 10 s walk from the mid (operator, 2026-10-17: "exit at the first avenue")
         if urgent and bid:
             await self._exit_at_once(pos, decision, now, attempt, (bid, ask), run, urgent, stop)
             return
@@ -6182,7 +6433,8 @@ class Engine:
         if fill is None:
             n = attempt + 1
             self._exit_attempts[pos.id] = n
-            self._exit_retry_at[pos.id] = now + min(2.0**n, 30.0)
+            self._exit_retry_at[pos.id] = now + self._exit_retry_s(pos, decision, n, now)
+            self._exit_fail_note[pos.id] = result.order.note
             log.error("exit.cross_failed", position=pos.id, symbol=pos.underlying.symbol, reason=result.order.note)
             return
         await self._book_exit(pos, replace(decision, qty=qty), result, now, attempt, audit)
@@ -6229,7 +6481,8 @@ class Engine:
                 # rejections in twelve seconds and trip the engine-wide breaker.
                 n = attempt + 1
                 self._exit_attempts[pos.id] = n
-                self._exit_retry_at[pos.id] = now + min(2.0**n, 30.0)
+                self._exit_retry_at[pos.id] = now + self._exit_retry_s(pos, decision, n, now)
+            self._exit_fail_note[pos.id] = result.order.note
             log.error(
                 "exit.failed",
                 position=pos.id,
@@ -6260,6 +6513,7 @@ class Engine:
         else:
             self._exit_attempts.pop(pos.id, None)
             self._exit_retry_at.pop(pos.id, None)
+            self._exit_fail_note.pop(pos.id, None)
         done = ExitDecision(decision.position_id, decision.reason, decision.ref_price, filled, decision.note)
         entry_before = pos.qty_remaining
         gross = apply_exit(
@@ -6286,9 +6540,18 @@ class Engine:
             gross=round(gross, 2),
             charges=round(result.fill.charges, 2),
         )
+        filled_at = result.fill.ts or now
+        if past_nse_out_by(pos.underlying.segment, filled_at):
+            # any NSE exit filled at or after 15:20:00 — a stop that fired at 15:19 included (operator, 2026-10-17)
+            await self._eod_alarm("eod.exit_after_deadline", pos, filled_at,
+                                  f"exit filled {to_ist(filled_at):%H:%M:%S} — at or after the {NSE_OUT_BY_HM} NSE deadline",
+                                  reason=decision.reason.value, price=result.fill.price, qty=filled)
         if pos.status == "CLOSED":
             trade = _trade_from(pos, now)
-            await self.ledger.insert_trade(_trade_json(trade))
+            trade_row = _trade_json(trade)
+            if pos.exec_log.get("eodForced"):
+                trade_row["eod_forced"] = pos.exec_log["eodForced"]  # the 15:19 forced fill, flagged on the trade too
+            await self.ledger.insert_trade(trade_row)
             self.positions.pop(pos.id, None)
             if StrategyKey(pos.strategy) in STOP_MIRRORS:
                 return  # a stop-rule mirror is a measurement: no review of its signal (the book's own trade has one), no phone message
@@ -6805,6 +7068,7 @@ class Engine:
             ),
             self._volume_check(),
             self._bar_audit_check(),
+            self._eod_check(),
             Check(
                 "pivots_ready",
                 (daily.ready and not self._daily_failed and not self.leg_pivots.failed_codes)
@@ -6953,7 +7217,7 @@ _DEFINITIVE_REJECTIONS = frozenset({
 })
 
 
-def exit_client_order_id(pos: Position, decision: Any, attempt: int = 0, *, cross: bool = False) -> str:
+def exit_client_order_id(pos: Position, decision: Any, attempt: int = 0, *, cross: bool = False, forced: bool = False) -> str:
     """Idempotency key for an exit: the same position, rung and reason must always produce the
     same id (a retry is the same order), and two positions must never share one. It was keyed on
     the signal — and the RT twin carries its parent's signal id, so on 2026-09-23 14:35 the twin's
@@ -6962,16 +7226,19 @@ def exit_client_order_id(pos: Position, decision: Any, attempt: int = 0, *, cros
 
     ``attempt`` counts DEFINITIVE rejections of this exit. An order a venue refused, or one the
     paper matcher never priced, is not working anywhere, so its retry is a new order and needs a
-    new id; an order whose fate is unknown keeps the same id and stays blocked."""
+    new id; an order whose fate is unknown keeps the same id and stays blocked. ``forced``: the NSE
+    15:19 forced paper fill (operator, 2026-10-17), marked ``F`` so the order trail tells it from a real one."""
     ref = (pos.exec_log or {}).get("ref")
     if ref:
         # "FII-RTX-260926-192510-007-SLE0R1X-HINDUNILVR-1960CE-L4": the position's own entry ref, what
         # the exit is and at which rung, the retry and the cross — all inside the broker's 38 characters
         code = EXIT_CODES.get(decision.reason, str(decision.reason.value)[:3].upper())
-        return f"{ref}-{code}{pos.targets_hit}{f'R{attempt}' if attempt else ''}{'X' if cross else ''}-{_contract_tag(pos.instrument, pos.qty)}"
+        return (f"{ref}-{code}{pos.targets_hit}{f'R{attempt}' if attempt else ''}{'X' if cross else ''}{'F' if forced else ''}"
+                f"-{_contract_tag(pos.instrument, pos.qty)}")
     base = f"{pos.id}|EXIT|{pos.targets_hit}|{decision.reason.value}"  # a position opened before readable ids
     base = f"{base}|r{attempt}" if attempt else base
-    return f"{base}|X" if cross else base
+    base = f"{base}|X" if cross else base
+    return f"{base}|F" if forced else base
 
 
 def _position_json(p: Position) -> dict[str, Any]:

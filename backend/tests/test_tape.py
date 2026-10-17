@@ -340,15 +340,15 @@ def test_the_replay_counts_decision_bars_and_force_flats_the_way_the_live_loop_d
 
     opened = ist_ts(DAY, "09:47")  # inside the 09:45 bucket
     ticks = [Tick(int(ist_ts(DAY, hm)), 10.0, 9.95, 10.05, int(ist_ts(DAY, hm)))
-             for hm in ("09:47", "10:14", "10:15", "15:19", "15:20")]
+             for hm in ("09:47", "10:14", "10:15", "15:13", "15:14")]
     pos = _pos(option, equity, entry=10.0, stop=8.0, opened=opened)
     rep = replay_on_tape(Spy(RT_X_LIMITS), pos, Series("45678", ticks), None,
-                         start_ts=opened, end_ts=ist_ts(DAY, "15:20"), flatten_at_end=False)
+                         start_ts=opened, end_ts=ist_ts(DAY, "15:14"), flatten_at_end=False)
     at = dict((t, b) for t, b, _ in seen)
     assert at["09:47"] == 0 and at["10:14"] == 0, "the 09:45 bar has not closed yet"
-    assert at["10:15"] == 1 and at["15:20"] == 11
+    assert at["10:15"] == 1 and at["15:14"] == 10
     flat = dict((t, f) for t, _, f in seen)
-    assert not flat["15:19"] and flat["15:20"], "NSE force-flat is 15:20, and the replay knows it"
+    assert not flat["15:13"] and flat["15:14"], "NSE force-flat is 15:14 (operator, 2026-10-17), and the replay knows it"
     # every second with a quote is counted; the ones whose forward-filled quote had gone
     # stale are not evaluated, exactly as the live loop declines to evaluate them
     assert len(seen) == rep.seconds - rep.skipped_stale and rep.skipped_stale > 0

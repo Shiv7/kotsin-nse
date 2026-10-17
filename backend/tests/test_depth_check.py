@@ -475,11 +475,14 @@ async def test_before_any_depth_book_the_summary_says_so(tmp_path, clock):
 
 
 @pytest.mark.asyncio
-async def test_a_real_paper_entry_is_stored_with_the_book_the_check_reads(settings, clock):
+async def test_a_real_paper_entry_is_stored_with_the_book_the_check_reads(settings, clock, monkeypatch):
     """An entry filled through the engine's own paper path stores the book that the check judges it on. The position
     keeps the paper fill: the check changes nothing."""
     from tests.test_limit_orders import OPT, _engine, _sig
 
+    # the clock reads 15:30, past the NSE flatten — which sells into the bid at once since 2026-10-17 and would close
+    # the position in the pass that fills it; this test is about the entry's book, not the close
+    monkeypatch.setattr("kotsin_nse.engine.past_force_flat", lambda *_a: False)
     e = await _engine(settings, clock)
     try:
         def book(asks: list[tuple[float, int]]) -> None:
@@ -560,6 +563,9 @@ async def test_an_order_fills_and_a_trade_closes_with_the_depth_check_broken(set
         raise AssertionError("the order path called the depth check")
 
     assert {"depth_check", "depth_check_for_order", "depth_check_for_trade", "check_trades", "summarize"} <= set(_FUNCS)
+    # 15:30 on the clock is past the NSE flatten (15:14, sold into the bid at once since 2026-10-17): the operator's
+    # SKIP closes this trade, as the test means it to, not the flatten in the pass that fills the entry
+    monkeypatch.setattr("kotsin_nse.engine.past_force_flat", lambda *_a: False)
     with monkeypatch.context() as m:
         for name in _FUNCS:
             m.setattr(dc_module, name, boom)

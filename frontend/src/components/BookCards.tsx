@@ -50,6 +50,9 @@ type Card = {
   spark: [number, number][]; route: Route | null; skip: { reason: string; ts: number } | null; operator: { kind: string; ts: number }[]
   fade: { signal_id: string; direction: string; stop: number; targets: number[]; grade: string; rr: number; decision?: string; decision_reason?: string } | null
   state: string; routeLabel: string | null
+  // decided after the NSE entry cutoff (the 14:45 bar, at 15:15): recorded and listed, never traded, never carried —
+  // the reason, as the engine wrote it (operator, 2026-10-17: "record them but dont trade as of now. let it show on the list")
+  recordedOnly?: string | null
   atr: number | null; oi: number | null; oiChangePct: number | null
   clusters: { price: number; strength: number; members: string[]; wall: boolean; side: 'ahead' | 'behind' }[]
   futLevels: { close: number; atr: number | null; surgeT: number | null; surgeT1: number | null; volume: string; behind: Level | null; ahead: Level[] } | null
@@ -137,6 +140,8 @@ const STATE: Record<string, { label: string; tone: Tone }> = {
   // 2026-09-29: decided after the close, entered (or not) at the next open; the NSE last-entry minute
   CARRIED: { label: 'CARRIED · next 09:15 open', tone: 'sky' },
   PAST_ENTRY_CUTOFF: { label: 'PAST ENTRY CUTOFF', tone: 'slate' },
+  // 2026-10-17: decided after the 15:10 cutoff and before the close (the 14:45 bar) — on the list, never traded
+  RECORDED_ONLY: { label: 'RECORDED ONLY · after the entry cutoff', tone: 'sky' },
 }
 const stateOf = (s: string) => STATE[s] ?? { label: s.replace(/_/g, ' '), tone: 'slate' as Tone }
 const routeTone = (l: string | null): Tone => (l === 'COUNTER-TREND' ? 'orange' : l === 'SKIP' ? 'rose' : l === 'IN TREND' ? 'sky' : 'slate')
@@ -616,6 +621,7 @@ function TriggerCard({ book, c, open, onToggle, refresh, readOnly = false }: { b
     if (c.live) return { tone: 'amber', text: <>Holding · mid <b>{f(c.live.mid)}</b> ({pct(c.live.mid, c.position!.entry)} on the premium) · peak {f(c.live.peak)} · exit line {f(Math.max(c.live.line, c.live.optionSl))} · {c.live.armedBy ? `armed by ${c.live.armedBy}` : 'not armed yet'} · {c.live.qtyRemaining}/{c.live.qty} left</> }
     if (c.trade) return { tone: c.trade.net >= 0 ? 'emerald' : 'rose', text: <>Closed — {c.trade.exit_reason} · net <b>{inr(c.trade.net)}</b> · held {Math.round(c.trade.duration_s / 60)} min · best {f(c.trade.mfe_r)}R · worst {f(c.trade.mae_r)}R</> }
     if (c.state === 'CARRIED') return { tone: 'sky', text: <>Decided after the close — carried to the next session's 09:15 open</> }
+    if (c.state === 'RECORDED_ONLY') return { tone: 'sky', text: <>Recorded only, not traded — {human(c.recordedOnly ?? c.skip?.reason ?? c.parentReason)}</> }
     if (c.skip) return { tone: 'rose', text: <>Skipped at {ist(c.skip.ts, false)} — {human(c.skip.reason)}</> }
     if (c.state === 'NO_FILL') return { tone: 'slate', text: <>No entry — {c.parentDecision?.replace(/_/g, ' ').toLowerCase()}: {human(c.parentReason)}</> }
     if (c.state === 'IN_TREND') return { tone: 'slate', text: <>Routed in trend — the fade books stay flat. {c.route?.summary}</> }

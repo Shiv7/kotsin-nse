@@ -12,7 +12,9 @@ causes, both fixed here and each pinned below:
   later). The engine's stop is a software stop — a 1 s read of the level, then an order — so what it can
   execute at the trigger is the bid, walked through the depth for the lots. Now every stop sells there,
   at once, and its record keeps the LEVEL, the breaching READ, the BID / walk price at that instant and
-  the FILL apart (``Engine._stop_record``). The trail, the targets and the close keep their walk.
+  the FILL apart (``Engine._stop_record``). The trail and the targets keep their walk; so does MCX's
+  23:20 close. The NSE close (15:14) sells into the bid at once since 2026-10-17 (operator: "we exit at
+  the first avenue").
 """
 
 from __future__ import annotations
@@ -178,7 +180,7 @@ async def test_a_stale_option_quote_still_takes_the_equity_stop_at_the_depth_bid
 
 
 @pytest.mark.asyncio
-async def test_a_stop_takes_a_resting_target_off_and_sells_at_once_while_the_close_still_rests(settings, clock):
+async def test_a_stop_takes_a_resting_target_off_and_sells_at_once_and_so_does_the_nse_close(settings, clock):
     e = await _engine(settings, clock)
     try:
         pos = _pos(clock[0], strategy="FUDKII_RT_X", qty=5500)
@@ -193,9 +195,13 @@ async def test_a_stop_takes_a_resting_target_off_and_sells_at_once_while_the_clo
         assert pos.exec_log["exits"][-1]["stop"]["level"] == 18.2
         eod = _pos(clock[0], pid="p2", strategy="FUDKII_RT_X")
         e.positions[eod.id] = eod
+        e.wallets["FUDKII_RT_X"].commit(12.0 * 2750, clock[0])
         await e._exit(eod, ExitDecision(eod.id, ExitReason.EOD, 18.5, 2750, "segment force-flat"), clock[0])
-        r = e._exit_resting(eod.id)
-        assert r is not None and r.deadline_s == 10 and r.stop is None, "the close rests and walks; it has no level to record"
+        assert e._exit_resting(eod.id) is None and eod.status == "CLOSED" and eod.exit_price == 18.0, \
+            "the NSE close sells into the bid at once (operator, 2026-10-17) — no rest at the mid"
+        x = eod.exec_log["exits"][-1]
+        assert x["reason"] == "EOD" and "the NSE flatten sells at its first chance" in x["why"] and "stop" not in x, \
+            "it has no level to record"
     finally:
         await e.stop()
 
