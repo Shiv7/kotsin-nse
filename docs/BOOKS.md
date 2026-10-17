@@ -33,18 +33,24 @@ Code: `engine.py` — `_handle_signal` (the trigger, once) → `_enter_book` (ev
   at the cutoff is cancelled, never filled after it. MCX keeps its own session. Paper and live alike.
 - **The 14:45 bar's triggers** — decided at 15:15, after the cutoff — are **recorded and listed, never
   traded, never carried** (operator, 17 Oct: "record them but dont trade as of now. let it show on the
-  list"): the signal row reads `RECORDED_ONLY` with the reason (a graded-F trigger keeps `NOT_PUBLISHED`),
-  every book offered it records the cutoff as its skip, a `cutoff.recorded` event marks it, and every card
-  reads **RECORDED ONLY · after the entry cutoff** with no TAKE. No strike is chosen for one.
+  list"): the signal row reads `RECORDED_ONLY` with the reason (a graded-F trigger keeps `NOT_PUBLISHED`, the
+  cutoff added to its reason), every book offered it records the cutoff as its skip (a book that never trades a
+  graded-F trigger — RT-X, RT-Y without the gap switch, CT-Y, CT-X, CT-M — records that rule, as before), a
+  `cutoff.recorded` event marks it, and the cards read **RECORDED ONLY · after the entry cutoff** with no TAKE
+  and no counter-trend button. No strike is chosen for one; the level reader still reads it, record-only
+  (`counter.route`, the route on its alert and card).
 - **Every NSE position is flattened from 15:14 and out before 15:20** (operator, 17 Oct: "if we are in trade
   till 15:14IST, then we exit at the first avenue before 15:20IST") — every book, the graded-F shadow (its
   15:24 removed), every stop-rule mirror, an operator TAKE's: sold into the bid at once, a refused try again
-  every 2 s. At **15:19** whatever is still open (a stale book, no quote, refused) is filled on paper at its
-  last known bid, else its last known price, flagged `eodForced` ("forced fill 15:19, stale book"), and
-  alarmed (`eod.forced_fill`: a log error, a ledger event, Telegram, the `nse_out_by` health line red for the
+  every 2 s (a backoff left from a refusal before 15:14 never holds the 15:14 try). At **15:19** whatever is
+  still open (a stale book, no quote, refused) is filled on paper at its last known bid, else its last known
+  price, flagged `eodForced` ("forced fill 15:19, stale book"), and alarmed (`eod.forced_fill`: a log error, a
+  ledger event, Telegram, the `nse_out_by` health line red for the day, and still red after a restart that
   day). A LIVE book's position is never paper-filled (`eod.not_forced`). An NSE position still open at
-  **15:20**, or an NSE exit filling then, alarms (`eod.still_open`, `eod.exit_after_deadline`). Until 17 Oct:
-  the books flattened at 15:20 and the graded-F shadow at 15:24, out by 15:25 (29 Sep).
+  **15:20**, or an NSE exit filling then, alarms (`eod.still_open`, `eod.exit_after_deadline`), stamped with
+  the clock when it happened. The alarms are once a position, kind and day; a position opened on an earlier
+  day is past both deadlines from the first pass (paper: forced out at once). Until 17 Oct: the books
+  flattened at 15:20 and the graded-F shadow at 15:24, out by 15:25 (29 Sep).
 - **A trigger decided at the close** — the 15:15 bar, complete at 15:30 — is not traded that day. It is kept
   (`CARRIED`, the `carry.queued` event, safe across the overnight restart) and at the next session's open it
   enters on its stock's **first print after 09:15**: through the trigger's stop → dropped (`carry.dropped`);

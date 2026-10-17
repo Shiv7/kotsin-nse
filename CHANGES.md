@@ -95,10 +95,10 @@ as A's, line for line, apart from the offsets: session.py, `_manage_positions` .
 
 | File:line | Change |
 |---|---|
-| `engine.py:6548` `_eod_alarm()` | Identical to A. Raised once per position and kind. Each alarm writes a structured `log.error(kind, …)` and a ledger event, sends a Telegram message, and adds a row for the health line. The kinds are:<br>- `eod.forced_fill`;<br>- `eod.still_open` (`:6234`);<br>- `eod.exit_after_deadline` (`_book_exit`, `:6810`);<br>- `eod.not_forced`. |
-| `engine.py:6569` `_eod_check()`, added to `health_snapshot` at `:7461` | Identical check (`nse_out_by`). In B it sits after `bar_audit` and before B's own `duty_errors`, `zones` and `latency` lines. The rejected hunk was placed by hand there. |
+| `engine.py:6548` `_eod_alarm()` | Identical to A. Raised once per position, kind and IST day (per day since the review fixes, §8 R2). Each alarm writes a structured `log.error(kind, …)` and a ledger event, sends a Telegram message, and adds a row for the health line. The kinds are:<br>- `eod.forced_fill`;<br>- `eod.still_open` (`:6234`);<br>- `eod.exit_after_deadline` (`_book_exit`, `:6810`);<br>- `eod.not_forced`. |
+| `engine.py:6569` `_eod_check()`, added to `health_snapshot` at `:7461` | Identical check (`nse_out_by`), red across a restart the same day since §8 R3. In B it sits after `bar_audit` and before B's own `duty_errors`, `zones` and `latency` lines. The rejected hunk was placed by hand there. |
 | `engine.py:6704`, `:6752`, `:6783` | `_exit_fail_note` keeps the last refusal for each position, as the forced fill's cause. It is cleared on a full fill. |
-| `engine.py:7342-7346` (`_roll_day_state`) | **B only.** B resets per-day state in one place (its 3 Oct review). At the day roll:<br>- yesterday's alarm rows go;<br>- the raised kinds and the last refusal of positions no longer held go;<br>- a position still held keeps its raised kinds.<br>Behaviour is the same as A: A's health line already reads today's rows only, and a held position never alarms twice for one kind in either engine. This only stops the maps growing. |
+| `engine.py:7342-7346` (`_roll_day_state`) | **B only.** B resets per-day state in one place (its 3 Oct review). At the day roll:<br>- yesterday's alarm rows go;<br>- the raised kinds and the last refusal of positions no longer held go;<br>- a position still held keeps its raised kinds.<br>Behaviour is the same as A: A's health line already reads today's rows only, and a held position never alarms twice for one kind in either engine. This only stops the maps growing.<br>**Changed by §8 R2:** the raised kinds are keyed by day, and the roll keeps today's only, so a held position alarms again on the new day, as in A. |
 
 ### 2.5 Entries never fill after the cutoff
 
@@ -129,7 +129,7 @@ code as A's at the base, so the hunks landed unchanged.
 |---|---|
 | `engine.py:2529-2532` (`_decide` dispatch) | `elif (late := self._after_entry_cutoff(sig)) is not None:` → `_record_after_cutoff`. It comes after the carry and before the published and unpublished routes. |
 | `engine.py:3089` `_after_entry_cutoff()` | Read off the trigger's bar, not the wall clock. The bar must be decided after 15:10 and no later than the close, and must not be the close's own bar. That is the 14:45 bar. MCX is excluded. |
-| `engine.py:3105` `_record_after_cutoff()` | No strike is chosen and no broker is asked. The steps:<br>- A published trigger: its row is written as `RECORDED_ONLY` with the reason, and its ENTRY alert is adopted.<br>- An unpublished one keeps its `NOT_PUBLISHED` row.<br>- Every book offered it records an `rt_twin.skipped` with `gate="entry_cutoff"`.<br>- A `cutoff.recorded` event is written.<br>- Nothing is queued for the carry. |
+| `engine.py:3105` `_record_after_cutoff()` | No strike is chosen and nothing reaches the order path (since §8 R5 the level reader's futures read is the one broker read). The steps:<br>- A published trigger: its row is written as `RECORDED_ONLY` with the reason, and its ENTRY alert is adopted.<br>- An unpublished one keeps its `NOT_PUBLISHED` row, the cutoff added to its reason (§8 R6).<br>- Every book offered it records an `rt_twin.skipped` with `gate="entry_cutoff"`. On an unpublished trigger, RT-X, RT-Y without the gap switch, CT-Y, CT-X and CT-M record their graded-F rule instead (§8 R6).<br>- A `cutoff.recorded` event is written.<br>- Nothing is queued for the carry. |
 | `engine.py:4431`, `:4441`, `:4594`, `:4648` (`book_cards`) | New card state `RECORDED_ONLY`. The TAKE button is disabled with the reason. New field `recordedOnly`. |
 | `api/daybook.py:398-399` | Day-book labels for `RECORDED_ONLY` and `PAST_ENTRY_CUTOFF`. |
 | `frontend/src/components/BookCards.tsx:55`, `:144`, `:624` | New type field, the `RECORDED ONLY · after the entry cutoff` chip, and the card's headline. |
@@ -168,7 +168,7 @@ A's rewrites, applied unchanged. B's copies of these files took A's hunks cleanl
 
 | Check | Command | Result |
 |---|---|---|
-| Tests | `PYTHONPATH=. pytest -q` (backend) | **1156 passed**, 120 warnings. Baseline at `71036d2`: 1137 passed. |
+| Tests | `PYTHONPATH=. pytest -q` (backend) | **1156 passed** at `3d42b52`; **1164 passed** after the review fixes (§8). Baseline at `71036d2`: 1137 passed. |
 | Ruff | `ruff check kotsin_nse tests` | **All checks passed!** |
 | Import contracts | `lint-imports` | **5 kept, 0 broken** |
 | mypy gate | `python ../scripts/mypy_gate.py` | **Red at the base, and unchanged by this branch.** At `71036d2` the gate already reports "22 NEW mypy error(s)", in `api/live_trades.py`, `api/review.py`, `engine.py` (2), `ledger/db.py` and `strategy/regime_gates.py`. They come from commits after the baseline file was written (3 Oct). On this branch the gate's output is byte-identical to the base run: 0 new errors from this change. See §6. |
@@ -192,9 +192,9 @@ A's rewrites, applied unchanged. B's copies of these files took A's hunks cleanl
    - a flag, not a new exit reason;
    - the forced-fill price order;
    - LIVE and SHADOW are never paper-filled;
-   - alarms fire once per position and kind;
+   - alarms fire once per position, kind and IST day (since §8 R2);
    - "recorded only" is decided off the bar;
-   - recorded-only triggers short-circuit dispatch;
+   - recorded-only triggers short-circuit dispatch, but the level reader still reads them (since §8 R5);
    - the autouse deadline fixture in tests;
    - the plan moves to 15:13;
    - `BAR_AUDIT_HM` stays 15:40;
@@ -203,8 +203,8 @@ A's rewrites, applied unchanged. B's copies of these files took A's hunks cleanl
    in `_ltp_traded_ts`. The age is the observation, when B holds one for that price, as every B age guard reads
    it. Otherwise it is the trade time, which overstates the age rather than understating it.
 3. **mypy-safe `fillPrice`** (§2.3). The value is unchanged.
-4. **B's day roll prunes the deadline state** (§2.4). This follows B's own rule for per-day maps. A held
-   position keeps its raised kinds, so alarms are unchanged against A.
+4. **B's day roll prunes the deadline state** (§2.4). This follows B's own rule for per-day maps. Since §8 R2
+   it keeps today's raised kinds only, so alarms are the same as A's: once a position, kind and day.
 5. **The mypy baseline was not updated.** The gate fails at the base for reasons unrelated to this work. Running
    `--update` would silently accept 22 errors other commits introduced, and fixing them would touch unrelated
    live-engine code. Both are the operator's call.
@@ -217,7 +217,7 @@ A's rewrites, applied unchanged. B's copies of these files took A's hunks cleanl
 
 - **mypy gate is red at the base** (`71036d2`), with 22 errors not in `mypy-baseline.txt`. This branch adds none.
   The options are to fix them, or to run `uv run python ../scripts/mypy_gate.py --update` on purpose.
-- **Possible gap shared with A (not changed, so the engines stay alike):** `_record_after_cutoff` records
+- **Possible gap shared with A (partly closed by §8 R6, in both engines):** `_record_after_cutoff` records
   `entry_cutoff` skips for these books only:
   - a published trigger: RT-X, RT-N, RT-Y, CT-X and CT-Y;
   - an unpublished one: RT-Y-F, RT-Y and RT-X.
@@ -229,12 +229,17 @@ A's rewrites, applied unchanged. B's copies of these files took A's hunks cleanl
   Those books' cards still read RECORDED ONLY, because `cutoff.recorded` is found and they have no skip. But the
   books get no `rt_twin.skipped` row and are missing from the event's `books`. If wanted, fix it in both engines
   at once.
+
+  **Since §8 R6:** on an unpublished trigger, CT-Y, CT-X and CT-M write their `graded_f` skips again, as do RT-X and
+  RT-Y without the gap switch. Two books still have no skip row: CT-Y-F on an unpublished trigger, and CT-M on a
+  published one. Their cards read RECORDED ONLY.
 - **Shared with A:** the 15:19 fill takes one REST snapshot first. For a held contract the feed cannot vouch for,
   B's `_apply_snapshot` replaces the quote with the broker's last price and a 0/0 bid and ask. A's does the same.
   The forced fill then reads the depth book's last bid, or the last price, rather than the quote's older bid. The
   flatten's own 2 s retries refresh the same way from 15:14.
-- **Shared with A:** an NSE position held overnight (for example, a mode switched to SHADOW with lots open) keeps
-  the alarm kinds it raised. The next day the health line does not count it as late again for those kinds.
+- **Fixed by §8 R2 (both engines):** an NSE position held overnight (for example, a mode switched to SHADOW with
+  lots open) used to keep the alarm kinds it raised, and was silent the next day. It now alarms again each day it is
+  held, from the first pass, and the health line is red.
 - **Alarm channel:** B's `.env` is a symlink to A's, so B sends to the same Telegram chat. Each deadline alarm
   will arrive twice, once per engine, and the text does not say which engine sent it. This matches B's other
   messages today. Decide whether B should alarm, or label its messages.
@@ -262,8 +267,64 @@ A's rewrites, applied unchanged. B's copies of these files took A's hunks cleanl
 | 1 | `engine._last_known_exit_price`, last-price age | `_ltp_ts` (the LTP's arrival time) | the quote's `ts` when the quote holds that price; else `_ltp_traded_ts` (the trade time) | B has two clocks and no `_ltp_ts`. Same price, source and age for the same inputs. |
 | 2 | `engine._force_eod_fill`, audit `fillPrice` | `result.fill.price` | `result.fill.price if result.fill is not None else round(price, 2)` | B's mypy gate. Same value. |
 | 3 | `engine.health_snapshot` | `_eod_check()` after `bar_audit` | after `bar_audit`, before B's `duty_errors`, `zones` and `latency` lines | B has more health lines. Same check. |
-| 4 | `engine._roll_day_state` | no such hook. `_eod_alarms` is filtered by day lazily, `_eod_alarmed` and `_exit_fail_note` are never pruned | pruned at the IST day roll; held positions keep their alarm kinds | B's per-day-state rule. Alarms unchanged. |
+| 4 | `engine._roll_day_state` | no such hook. `_eod_alarms` and the day-keyed `_eod_alarmed` are pruned by day lazily in `_eod_alarm`; `_exit_fail_note` and `_exit_failed_at` are popped on a full fill | also pruned at the IST day roll: today's alarm rows and kinds kept; the refusal maps of positions no longer held dropped | B's per-day-state rule. Alarms are the same as A's. |
 | 5 | `docs/BOOKS.md:210-212` | (no such paragraph) | the two-clocks section's "15:20 flatten's last-price fill" now describes 15:14 and 15:19 | B-only doc text |
-| 6 | `tests/test_nse_close_1514.py` | `_ltp_ts` in the fallback test; 12 tests | `_ltp_traded_ts` plus two-clock assertions; plus the day-roll test (13 tests) | Follows 1 and 4 |
+| 6 | `tests/test_nse_close_1514.py` | `_ltp_ts` in the fallback test; 12 tests | `_ltp_traded_ts` plus two-clock assertions; plus the day-roll test (13 tests; since §8 it is `test_the_day_roll_drops_yesterdays_deadline_state`, and both files gained A's seven review tests) | Follows 1 and 4 |
 | 7 | `tests/test_full_tape.py` | the window test | the window test plus B's end-to-end post-close hub frame test (tape, OI archive, no bar, no `late_qty`) | Pins R1 on B's own tick path |
 | 8 | `CHANGES.md` | A's | this file | |
+
+---
+
+## 8. Review findings of 17 Oct and their outcome
+
+The same six findings as engine A's `CHANGES.md` §7 (R1-R6). The reviewer's probes reproduced every one in B, with
+the same numbers as in A. All six are fixed in B with the same code as A: the patch was applied hunk by hunk from A,
+and the changed functions are byte-identical in the two engines. The exceptions are B's own `_roll_day_state` and the
+earlier intentional differences in §7.
+
+Each test fails on `3d42b52` and passes after the fix. The tests were run against `3d42b52`'s `kotsin_nse/` with the
+new tests in place, and all failed on their behaviour assertions.
+
+| # | Finding | Confirmed? | Outcome |
+|---|---|---|---|
+| R1 | A backoff from before 15:14 delays the 15:14 flatten | Yes. Probe: `_exit_retry_at` = 15:14:05, OPEN at 15:14:00 | Fixed |
+| R2 | Alarms are deduplicated per position, not per day, and the deadlines read the time of day only | Yes. Probe: day-2 count stayed 1, line green. Here `_roll_day_state` kept held positions' keys on purpose | Fixed |
+| R3 | A restart turns the `nse_out_by` line green | Yes, from the code | Fixed |
+| R4 | The forced fill is stamped with the pass's start | Yes. Probe: both fills at 15:19:00 with the wall clock at 15:20:10, 0 alarms | Fixed |
+| R5 | A recorded-only trigger gets no level reading | Yes. Probe: `route_events == []` | Fixed |
+| R6 | A graded-F 14:45 trigger is not labelled on the lists, and RT-X's card shows the cutoff reason | Yes. Probe: the same F row and cards as A | Fixed |
+
+### Changes (B line numbers; the rationale and decisions are A's §7)
+
+| Finding | File:line |
+|---|---|
+| R1 | `backend/kotsin_nse/engine.py:924` `_exit_failed_at`; `:6783`, `:6832` set; `:6859`, `:6865` cleared; `:6503` `_backoff_before_flatten()`; `:6673` `_exit_now` |
+| R2 | `backend/kotsin_nse/market/session.py:183` `held_overnight()`, `:190` and `:196` take `opened_ts`; `engine.py:921` day-keyed `_eod_alarmed`; `:6624` `_eod_alarm()`; `:6618` `_eod_still_open()`; `:6647` `_eod_check()`; `:6287`, `:6583`, `:6894` pass `opened_ts`; `:6588`, `:6896` "held overnight" text |
+| R2, B only | `engine.py:7444-7455` (`_roll_day_state`): keeps today's alarm rows and raised kinds only, rather than the held positions' kinds. `_exit_failed_at` is pruned with `_exit_fail_note`. |
+| R3 | `engine.py:387` `EOD_ALARM_KINDS`; `:7392` `_load_eod_alarms()`; `:950` called in `start_core` |
+| R4 | `engine.py:6286` (`_manage_positions`): the clock is read per position; `:6582` (`_force_eod_fill`): the clock is read again after the snapshot, and `eod.still_open` is raised there |
+| R5 | `engine.py:3125` (`_record_after_cutoff`): `_read_route` runs last, guarded; `:4669` (`book_cards`): no counter-trend button on a recorded-only trigger |
+| R6 | `engine.py:2526-2530` (`_decide`): the cutoff is added to the `NOT_PUBLISHED` reason; `:2648` `_graded_f_rule()`, also used by `_handle_unpublished`; `:3125` the graded-F skips and the `gradedF` list; `:4640` (`book_cards`): the TAKE reason stays the graded-F rule |
+| Docs | `docs/BOOKS.md:36-41`, `:45-53` |
+
+### Tests
+
+- `backend/tests/test_nse_close_1514.py`: A's seven new tests (pure deadline test at `:104`; `:415`, `:447`, `:469`,
+  `:500`, `:523`, `:556`). They are unchanged from A, because none of them reads B's two clocks.
+- **B only, changed:** `test_the_day_roll_drops_the_deadline_state_of_closed_positions_only` became
+  `test_the_day_roll_drops_yesterdays_deadline_state` (`:389`). Yesterday's raised kinds go, even for a held
+  position. Today's stay. `_exit_failed_at` is pruned with `_exit_fail_note`. It pinned the old keys, and fails on
+  `3d42b52`.
+- `backend/tests/test_entry_cutoff_and_carry.py:168` (extended) and `:267` (new): identical to A.
+
+### Results after the fixes
+
+| Check | Result |
+|---|---|
+| Copy check | `python -c "import kotsin_nse; print(kotsin_nse.__file__)"` → `…/close1514/engB_work/backend/kotsin_nse/__init__.py` |
+| `PYTHONPATH=. pytest -q` | **1164 passed** (1156 + 8 new; the day-roll test was rewritten in place) |
+| `ruff check kotsin_nse tests` | All checks passed |
+| `lint-imports` | 5 kept, 0 broken |
+| mypy gate (`../scripts/mypy_gate.py`, scratch venv as in §4) | Exit 1, with output byte-identical to the base `71036d2` and to `3d42b52`: the same 22 errors that predate this work, and 0 new |
+| Time-of-day sweep (`fakeclock`) | 1164 passed at each of 00:30, 10:00, 15:16 and 15:21 IST |
+| Reviewer's probes | All three exit probes now fail their "expected the defect" assertion. The cutoff probe shows two `counter.route` events and the cutoff in the F row's reason. |
