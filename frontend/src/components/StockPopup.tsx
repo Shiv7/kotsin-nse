@@ -1,6 +1,6 @@
 import { createChart, LineStyle, type UTCTimestamp } from 'lightweight-charts'
 import { useEffect, useRef } from 'react'
-import { cls, fmt } from '../lib/api'
+import { cls, fmt, istChartOptions } from '../lib/api'
 import { usePoll } from '../lib/usePoll'
 import type { BoardRow, OHLCV, ProfileData, StructureData, VolumeProfileData } from '../types'
 
@@ -49,7 +49,7 @@ export function StockPopup({ row, day, at, trade, onClose }: Props) {
     const c = createChart(box.current, {
       layout: { background: { color: '#020617' }, textColor: '#94a3b8' },
       grid: { vertLines: { color: '#0f172a' }, horzLines: { color: '#0f172a' } },
-      timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#334155' },
+      ...istChartOptions,
       rightPriceScale: { borderColor: '#334155' },
       height: 340,
       width: box.current.clientWidth,
@@ -100,12 +100,13 @@ export function StockPopup({ row, day, at, trade, onClose }: Props) {
           shape: (z.side === 'BULLISH' ? 'arrowUp' : 'arrowDown') as 'arrowUp' | 'arrowDown',
           text: `BOS${z.bos_kind === 'OPENING_RANGE' ? ' OR' : ''}${z.state === 'BROKEN' ? ' ✕' : ''}`,
         })),
-        ...st.sweeps.map((w) => ({
+        // one dot per bar that swept something; only the last three are labelled
+        ...[...new Map(st.sweeps.map((w) => [Math.floor(w.ts / 300) * 300, w])).values()].map((w, i, all) => ({
           time: (Math.floor(w.ts / 300) * 300) as UTCTimestamp,
           position: (w.side === 'BULLISH' ? 'belowBar' : 'aboveBar') as 'belowBar' | 'aboveBar',
           color: '#a78bfa',
           shape: 'circle' as const,
-          text: `sweep ${w.kind.toLowerCase()}`,
+          text: i >= all.length - 3 ? `sweep ${w.kind.toLowerCase().replace('_', ' ')}` : '',
         })),
         ...(trade
           ? [

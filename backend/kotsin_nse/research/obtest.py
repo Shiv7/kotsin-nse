@@ -56,6 +56,12 @@ class Params:
     hard_stop_r: float = 2.0
     slip_bps: float = 5.0
     partial_at_r1: float = 0.5
+    #: close5 = S1 judged on a 5-minute close (the playbook); intrabar = a stop resting at S1
+    stop_mode: str = "close5"
+    #: skip a setup whose risk Z − S1 is under this fraction of the stock's average daily range
+    min_risk_adr: float = 0.0
+    #: only zones whose move began with a sweep of liquidity on the far side
+    require_sweep: bool = False
 
 
 @dataclass(slots=True)
@@ -142,8 +148,11 @@ def run_day(store: HistoryStore, day: date, p: Params, costs: CostModel) -> list
             t.mfe_r = max(t.mfe_r, fav / risk)
             t.mae_r = max(t.mae_r, adv / risk)
             hard = t.entry - sign * p.hard_stop_r * risk
+            if p.stop_mode == "intrabar":
+                hard = t.s1
             if (sign > 0 and lo <= hard) or (sign < 0 and h >= hard):
-                fill(t, remaining[sym], min(o, hard) if sign > 0 else max(o, hard), ts, "HARD_STOP", True)
+                why = "S1_TOUCH" if p.stop_mode == "intrabar" else "HARD_STOP"
+                fill(t, remaining[sym], min(o, hard) if sign > 0 else max(o, hard), ts, why, True)
                 close_out(t)
                 losses += 1
                 continue
@@ -210,7 +219,15 @@ def run_day(store: HistoryStore, day: date, p: Params, costs: CostModel) -> list
                 pending.pop(r.symbol, None)
                 continue
             su = r.setup
-            if su["state"] != "READY" or su["rr"] is None or su["rr"] < p.min_rr:
+            adr = rp.days[r.symbol].adr
+            too_tight = p.min_risk_adr > 0 and (adr is None or abs(su["z"] - su["s1"]) < p.min_risk_adr * adr)
+            if (
+                su["state"] != "READY"
+                or su["rr"] is None
+                or su["rr"] < p.min_rr
+                or too_tight
+                or (p.require_sweep and not su.get("swept_before"))
+            ):
                 pending.pop(r.symbol, None)
                 continue
             pending[r.symbol] = {**su, "side": r.side, "ts": ts, "align": r.align, "rank": r.rank}

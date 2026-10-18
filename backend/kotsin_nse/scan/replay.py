@@ -130,7 +130,7 @@ class DayReplay:
     def board_at(self, ts: int, *, setups: bool = True) -> Board:
         states = [st for d in self.days.values() if (st := state_at(d, ts)) is not None]
         board = build_board(ts, states, self.sectors)
-        return attach_setups(board, lambda s: self.structure_at(s, ts).setup) if setups else board
+        return attach_setups(board, lambda s: self.structure_at(s, ts)) if setups else board
 
     def structure_at(self, symbol: str, ts: int) -> Structure:
         """The 5m structure of ``symbol`` from the 5m bars fully closed by ``ts``."""

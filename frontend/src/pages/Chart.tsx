@@ -1,7 +1,7 @@
 import { createChart, type IChartApi, type ISeriesApi, type UTCTimestamp } from 'lightweight-charts'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Card, ErrorLine } from '../components/Ui'
-import { fmt, ist } from '../lib/api'
+import { fmt, ist, istChartOptions } from '../lib/api'
 import { usePoll } from '../lib/usePoll'
 import type { BarsResponse, UniverseRow } from '../types'
 
@@ -29,7 +29,7 @@ export function Chart() {
     const c = createChart(box.current, {
       layout: { background: { color: '#020617' }, textColor: '#94a3b8' },
       grid: { vertLines: { color: '#0f172a' }, horzLines: { color: '#0f172a' } },
-      timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#334155' },
+      ...istChartOptions,
       rightPriceScale: { borderColor: '#334155' },
       height: 520,
     })

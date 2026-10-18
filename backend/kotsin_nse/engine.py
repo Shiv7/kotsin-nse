@@ -550,11 +550,7 @@ class Engine:
             def _run() -> None:
                 board = self.scanner.scan(self.scan_symbols(), now, oi)
 
-                def setup_of(sym: str) -> Any:
-                    st = structure_from_store(self.store, sym, now)
-                    return st.setup if st else None
-
-                attach_setups(board, setup_of)
+                attach_setups(board, lambda sym: structure_from_store(self.store, sym, now))
 
             await asyncio.to_thread(_run)
         except Exception as exc:  # noqa: BLE001 - a failed scan waits for the next minute

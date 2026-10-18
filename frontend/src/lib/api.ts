@@ -76,3 +76,18 @@ export const cls = (...xs: (string | false | null | undefined)[]) => xs.filter(B
 
 export const pnlColor = (v: number | null | undefined) =>
   v == null ? 'text-slate-400' : v > 0 ? 'text-emerald-400' : v < 0 ? 'text-rose-400' : 'text-slate-300'
+
+/** lightweight-charts formats times in UTC; these render them in IST, the only clock a person reads. */
+const istTick = new Intl.DateTimeFormat('en-GB', { timeZone: IST, hour: '2-digit', minute: '2-digit', hour12: false })
+const istDay = new Intl.DateTimeFormat('en-GB', { timeZone: IST, day: '2-digit', month: 'short' })
+export const istChartOptions = {
+  localization: {
+    timeFormatter: (t: number) => `${istDay.format(new Date(t * 1000))} ${istTick.format(new Date(t * 1000))}`,
+  },
+  timeScale: {
+    timeVisible: true,
+    secondsVisible: false,
+    borderColor: '#334155',
+    tickMarkFormatter: (t: number, kind: number) => (kind <= 2 ? istDay.format(new Date(t * 1000)) : istTick.format(new Date(t * 1000))),
+  },
+}

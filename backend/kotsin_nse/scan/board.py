@@ -195,17 +195,20 @@ def build_board(
     )
 
 
-def attach_setups(board: Board, setup_of: Any) -> Board:
+def attach_setups(board: Board, structure_of: Any) -> Board:
     """Give every contender its structure setup, when the setup points the contender's way.
-    ``setup_of(symbol)`` → a ``structure.engine.Setup`` or None."""
+    ``structure_of(symbol)`` → a ``structure.engine.Structure`` or None."""
     for r in board.rows:
         if r.align is None:
             continue
-        su = setup_of(r.symbol)
+        st = structure_of(r.symbol)
+        su = st.setup if st is not None else None
         if su is not None and su.side == r.side:
+            zn = st.zones[su.zone_index]
             r.setup = {
                 "z": su.z, "s1": round(su.s1, 4), "r1": su.r1, "r2": su.r2, "rr": su.rr, "state": su.state,
                 "distance_pct": round((r.last / su.z - 1) * 100, 3) if su.z else None,
+                "swept_before": zn.swept_before, "impulse": zn.impulse, "bos_kind": zn.bos_kind,
+                "zone_low": zn.low, "zone_high": zn.high,
             }
     return board
-
