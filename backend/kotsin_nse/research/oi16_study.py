@@ -10,14 +10,17 @@ from kotsin_nse.market.session import ist_day
 from kotsin_nse.research.history import HistoryStore
 from kotsin_nse.research.oi16 import STATES, state_table
 
-root=Path('data-live/oi_daily'); hs=HistoryStore(Path('data-live/history'))
+root = Path('data-live/oi_daily')
+hs = HistoryStore(Path('data-live/history'))
 t=state_table(OiDailyStore(root), root)
 EXPLORE_END='2025-09-30'
 rows=[]
 for sym in t.symbol.unique():
     d1=hs.load(sym,'1d')
-    if d1.empty: continue
-    d1=d1.sort_values('ts').copy(); d1['day']=[ist_day(int(x)).isoformat() for x in d1.ts]
+    if d1.empty:
+        continue
+    d1 = d1.sort_values('ts').copy()
+    d1['day'] = [ist_day(int(x)).isoformat() for x in d1.ts]
     d1=d1.drop_duplicates('day',keep='last')
     adr=(d1.h-d1.l).rolling(50,min_periods=25).mean()
     d1['adr_pct']=adr/d1.c
@@ -36,8 +39,8 @@ print(f"{'#':>2} {'futures':15s} {'call':4s} {'put':4s} {'n':>6} | {'next day':>
 out=[]
 for s in range(1,17):
     g=x[x.state==s]
-    def tstat(col):
-        per=g.groupby('day')[col].mean()     # one number per session: days are the independent unit
+    def tstat(col, g=g):
+        per = g.groupby('day')[col].mean()  # one number per session: days are the independent unit
         return per.mean()/(per.std()/np.sqrt(len(per))) if len(per)>2 and per.std()>0 else np.nan
     f,cu,pu,rd=name[s]
     out.append((s,f,cu,pu,len(g),g.r1x.mean(),tstat('r1x'),100*(g.r1x>0).mean(),g.r3x.mean(),tstat('r3x'),rd))
