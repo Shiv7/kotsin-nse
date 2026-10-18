@@ -201,6 +201,31 @@ def run_mtf(settings: Settings, args: argparse.Namespace) -> None:
     print(f"  setups {sm['by_setup']}\n  exits {sm['by_exit']}\n  sides {sm['by_side']}")
 
 
+def run_fib(settings: Settings, args: argparse.Namespace) -> None:
+    """Trend pullbacks at Fibonacci + pivot + order-block confluence (research/fibob.py)."""
+    from dataclasses import fields
+
+    from .research.fibob import FibParams, run
+
+    known = {f.name for f in fields(FibParams)}
+    over: dict[str, object] = {}
+    for kv in args.set or []:
+        k, _, v = kv.partition("=")
+        if k not in known:
+            raise SystemExit(f"unknown parameter {k!r}; known: {', '.join(sorted(known))}")
+        cur = getattr(FibParams(), k)
+        over[k] = v if isinstance(cur, str) else (v.lower() == "true") if isinstance(cur, bool) else type(cur)(v)
+    syms = [x.strip().upper() for x in args.symbols.split(",") if x.strip()] or None
+    out = run(settings, date.fromisoformat(args.start), date.fromisoformat(args.end), FibParams(**over),  # type: ignore[arg-type]
+              symbols=syms, label=args.label)
+    sm = out["summary"]
+    print(f"{out['id']}  {sm['trades']} trades ({out['candidates']} candidates)  win {sm['win_rate']}%  avg {sm['avg_r']} R  "
+          f"total {sm['total_r']} R  net ₹{sm['net_inr']:,}  costs {sm['costs_r_per_trade']} R/trade  t(by week) {sm['t_by_week']}  "
+          f"months +{sm['months_positive']}/-{sm['months_negative']}  held {sm['avg_sessions_held']} sessions")
+    print(f"  funnel {out['funnel']}")
+    print(f"  confluence {sm['by_confluence']}\n  exits {sm['by_exit']}\n  sides {sm['by_side']}\n  OI {sm['by_oi_align']}")
+
+
 def run_obtest(settings: Settings, args: argparse.Namespace) -> None:
     """The order-block playbook over cached days, one day at a time (light on the CPU)."""
     from dataclasses import fields
@@ -260,6 +285,13 @@ def build_parser() -> argparse.ArgumentParser:
     pb.add_argument("--end", default="")
     pb.add_argument("--label", default="")
     pb.add_argument("--set", action="append", help="e.g. --set strategy=VA_REENTRY --set min_stop_adr=0.2")
+    fb = sub.add_parser("fib-backtest", help="trend pullbacks at Fibonacci + pivot + order-block confluence (1h → 15m)")
+    fb.add_argument("--start", required=True)
+    fb.add_argument("--end", required=True)
+    fb.add_argument("--symbols", default="")
+    fb.add_argument("--label", default="")
+    fb.add_argument("--set", action="append", help="e.g. --set zone=ote --set cpr_narrow=true --set oi_filter=WITH")
+
     oi = sub.add_parser("fetch-oi", help="NSE's daily F&O bhavcopy (official OI of every contract)")
     oi.add_argument("--start", required=True)
     oi.add_argument("--end", default=today.isoformat())
@@ -292,6 +324,8 @@ def cli() -> None:
         run_obtest(settings, args)
     elif command == "pb-backtest":
         run_playbook(settings, args)
+    elif command == "fib-backtest":
+        run_fib(settings, args)
     elif command == "fetch-oi":
         asyncio.run(fetch_oi(settings, args))
     elif command == "mtf-backtest":

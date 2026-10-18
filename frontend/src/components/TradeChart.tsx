@@ -28,6 +28,9 @@ export interface MtfTrade {
   mfe_r: number
   mae_r: number
   sessions_held: number
+  /** extra lines a strategy wants drawn: Fibonacci levels, the order block, pivots */
+  levels?: { price: number; title: string; color: string }[]
+  confluence?: string[]
 }
 
 const DAY = 86400
@@ -57,7 +60,11 @@ export function TradeChart({ t, onClose }: { t: MtfTrade; onClose: () => void })
     s.setData(data.bars.map((b) => ({ time: b.ts as UTCTimestamp, open: b.o, high: b.h, low: b.l, close: b.c })))
     const line = (price: number, color: string, title: string, style = LineStyle.Solid, width: 1 | 2 = 1) =>
       s.createPriceLine({ price, color, lineWidth: width, lineStyle: style, axisLabelVisible: true, title })
-    line(t.level, '#a78bfa', 'swept level', LineStyle.Dashed)
+    if (t.levels?.length) {
+      for (const l of t.levels) line(l.price, l.color, l.title, LineStyle.Dotted)
+    } else {
+      line(t.level, '#a78bfa', 'swept level', LineStyle.Dashed)
+    }
     line(t.entry, '#facc15', 'entry', LineStyle.Dotted)
     line(t.stop, '#f59e0b', 'stop', LineStyle.Solid, 2)
     line(t.t1, '#e2e8f0', 'T1', LineStyle.Dashed)
@@ -110,7 +117,11 @@ export function TradeChart({ t, onClose }: { t: MtfTrade; onClose: () => void })
           </div>
         </div>
         <div className="mb-3 grid grid-cols-2 gap-2 font-mono text-[11px] md:grid-cols-4">
-          <Cell k="SWEEP" v={`${fmt.n(t.level)} (wick ${fmt.n(t.wick)}) · ${ist(t.sweep_ts, false)}`} />
+          {t.confluence ? (
+            <Cell k="LEG" v={`${fmt.n(t.level)} → ${fmt.n(t.wick)} · broke ${ist(t.sweep_ts, false)} · ${t.confluence.join(' + ')}`} />
+          ) : (
+            <Cell k="SWEEP" v={`${fmt.n(t.level)} (wick ${fmt.n(t.wick)}) · ${ist(t.sweep_ts, false)}`} />
+          )}
           <Cell k="ENTRY" v={`${fmt.n(t.entry)} · ${ist(t.signal_ts, false)}`} />
           <Cell k="STOP / T1 / T2" v={`${fmt.n(t.stop)} / ${fmt.n(t.t1)} / ${fmt.n(t.t2)}`} />
           <Cell k="PLAN R:R" v={`1 : ${t.rr} · qty ${t.qty}`} />
