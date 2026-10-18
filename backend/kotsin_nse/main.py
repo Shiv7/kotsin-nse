@@ -135,6 +135,41 @@ async def fetch_history(settings: Settings, args: argparse.Namespace) -> None:
     _ = InstrumentKind  # imported for the type union above
 
 
+def run_obtest(settings: Settings, args: argparse.Namespace) -> None:
+    """The order-block playbook over cached days, one day at a time (light on the CPU)."""
+    from dataclasses import fields
+
+    from .research.history import HistoryStore
+    from .research.obtest import Params, cached_days, run
+
+    days = cached_days(HistoryStore(settings.data_dir / "history"))
+    if args.start:
+        days = [d for d in days if d >= date.fromisoformat(args.start)]
+    if args.end:
+        days = [d for d in days if d <= date.fromisoformat(args.end)]
+    if not days:
+        print("no cached 1m days in range — run fetch-history --all-fo --tf 1m,1d", file=sys.stderr)
+        raise SystemExit(1)
+    overrides: dict[str, object] = {}
+    for kv in args.set or []:
+        k, _, v = kv.partition("=")
+        f = {f.name: f for f in fields(Params)}.get(k)
+        if f is None:
+            raise SystemExit(f"unknown parameter {k!r}; known: {', '.join(x.name for x in fields(Params))}")
+        overrides[k] = v if f.type == "str" else (v.lower() == "true") if f.type == "bool" else type(getattr(Params(), k))(v)
+    p = Params(**overrides)  # type: ignore[arg-type]
+
+    def on_day(d: date, got: list, i: int, n: int) -> None:
+        r = sum(t.r for t in got)
+        print(f"  {d}  {len(got):>2} trades  {r:+6.2f} R   ({i}/{n})", flush=True)
+
+    out = run(settings, days, p, label=args.label, on_day=on_day)
+    sm = out["summary"]
+    print(f"\n{out['id']}  {sm['trades']} trades over {sm['days']} days  win {sm['win_rate']}%  avg {sm['avg_r']} R  "
+          f"total {sm['total_r']} R  net ₹{sm['net_inr']:,.0f} (costs ₹{sm['costs_inr']:,.0f})  t(by day) {sm['t_by_day']}")
+    print(f"exits: {sm['by_exit']}\nsides: {sm['by_side']}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="kotsin-nse", description="NSE/MCX trading engine on 5paisa")
     sub = p.add_subparsers(dest="command")
@@ -149,6 +184,11 @@ def build_parser() -> argparse.ArgumentParser:
     f.add_argument("--start", default=(today - timedelta(days=365)).isoformat())
     f.add_argument("--end", default=today.isoformat())
 
+    o = sub.add_parser("ob-backtest", help="the order-block playbook over cached 1m days")
+    o.add_argument("--start", default="")
+    o.add_argument("--end", default="")
+    o.add_argument("--label", default="")
+    o.add_argument("--set", action="append", help="a parameter, e.g. --set min_rr=2 --set side_rule=both")
     return p
 
 
@@ -167,6 +207,8 @@ def cli() -> None:
         asyncio.run(serve(settings))
     elif command == "fetch-history":
         asyncio.run(fetch_history(settings, args))
+    elif command == "ob-backtest":
+        run_obtest(settings, args)
     else:  # pragma: no cover - argparse rejects anything else
         raise SystemExit(f"unknown command {command}")
 

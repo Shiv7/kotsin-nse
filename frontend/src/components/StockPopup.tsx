@@ -4,11 +4,20 @@ import { cls, fmt } from '../lib/api'
 import { usePoll } from '../lib/usePoll'
 import type { BoardRow, OHLCV, ProfileData, StructureData, VolumeProfileData } from '../types'
 
+export interface TradeMarks {
+  entry_ts: number
+  entry: number
+  exits: { ts: number; price: number; why: string }[]
+  /** when the setup was taken — the structure is drawn as it stood then */
+  signal_at: string
+}
+
 interface Props {
   row: BoardRow
   /** replay: the day and the minute the board stands at; live: undefined */
   day?: string
   at?: string
+  trade?: TradeMarks
   onClose: () => void
 }
 
@@ -17,13 +26,15 @@ interface LiveBars {
 }
 
 /** One stock: 5-minute candles up to the board's minute, VWAP, volume, and the board's reading. */
-export function StockPopup({ row, day, at, onClose }: Props) {
+export function StockPopup({ row, day, at, trade, onClose }: Props) {
   const path = day
     ? `/api/history/bars/${row.symbol}?day=${day}&tf=5m${at ? `&until=${at}` : ''}`
     : `/api/bars/${row.symbol}?tf=5m&n=80`
   const { data, error } = usePoll<{ bars: OHLCV[] } | LiveBars>(path, day ? 600000 : 10000)
   const structure = usePoll<StructureData>(
-    day ? `/api/structure/${encodeURIComponent(row.symbol)}?day=${day}${at ? `&at=${at}` : ''}` : `/api/structure/${encodeURIComponent(row.symbol)}`,
+    day
+      ? `/api/structure/${encodeURIComponent(row.symbol)}?day=${day}&at=${trade?.signal_at ?? at ?? '15:30'}`
+      : `/api/structure/${encodeURIComponent(row.symbol)}`,
     day ? 600000 : 30000,
   )
   const profile = usePoll<ProfileData>(
@@ -96,9 +107,28 @@ export function StockPopup({ row, day, at, onClose }: Props) {
           shape: 'circle' as const,
           text: `sweep ${w.kind.toLowerCase()}`,
         })),
+        ...(trade
+          ? [
+              {
+                time: (Math.floor((trade.entry_ts - 60) / 300) * 300) as UTCTimestamp,
+                position: 'inBar' as const,
+                color: '#facc15',
+                shape: 'square' as const,
+                text: `IN ${trade.entry}`,
+              },
+              ...trade.exits.map((e) => ({
+                time: (Math.floor((e.ts - 60) / 300) * 300) as UTCTimestamp,
+                position: 'inBar' as const,
+                color: e.why === 'R1' || e.why === 'R2' ? '#22c55e' : e.why === 'EOD' ? '#94a3b8' : '#ef4444',
+                shape: 'square' as const,
+                text: `${e.why} ${e.price}`,
+              })),
+            ]
+          : []),
       ].sort((a, b) => (a.time as number) - (b.time as number))
       candles.setMarkers(marks)
     }
+    if (trade) candles.createPriceLine({ price: trade.entry, color: '#facc15', lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: true, title: 'entry' })
     const vp = profile.data?.volume
     if (vp) {
       candles.createPriceLine({ price: vp.poc, color: '#c084fc', lineWidth: 2, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: 'POC' })

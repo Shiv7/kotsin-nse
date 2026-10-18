@@ -13,6 +13,7 @@ works even when everything else is frozen.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from datetime import date
 from pathlib import Path
@@ -323,6 +324,20 @@ def build_app(engine: Engine) -> FastAPI:
         if out is None:
             raise HTTPException(404, f"no 1m bars for {sym}{' on ' + day if day else ' today'}")
         return {"symbol": sym, "day": day, "at": at if day else None, **out}
+
+    @api.get("/obtests")
+    async def obtests(limit: int = Query(30, le=100)) -> list[dict[str, Any]]:
+        """Saved runs of the order-block playbook backtest (run from the CLI: ``ob-backtest``)."""
+        from ..research.obtest import list_runs
+
+        return await asyncio.to_thread(list_runs, engine.s.data_dir / "obtests", limit)
+
+    @api.get("/obtests/{run_id}")
+    async def obtest(run_id: str) -> dict[str, Any]:
+        path = engine.s.data_dir / "obtests" / f"{run_id}.json"
+        if ".." in run_id or "/" in run_id or not path.exists():
+            raise HTTPException(404, f"no run {run_id}")
+        return json.loads(await asyncio.to_thread(path.read_text))
 
     @api.get("/history/bars/{symbol}")
     async def history_bars(symbol: str, day: str, tf: str = "5m", until: str | None = None) -> dict[str, Any]:
