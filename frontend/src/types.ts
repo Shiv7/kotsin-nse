@@ -40,6 +40,7 @@ export interface Health {
   armed_until: number | null
   checks: { name: string; ok: boolean; detail: string; value: number | null; consecutive_failures: number }[]
   feed: {
+    source: string
     connected: boolean
     messages: number
     ticks: number
@@ -49,6 +50,7 @@ export interface Health {
     silence_s: number | null
     subscriptions: Record<string, number>
   }
+  feed_rate: Record<string, Record<string, FeedRateRow>>
   bars: Record<string, number>
   gateway: Record<string, unknown>
   rest: Record<string, unknown>
@@ -76,4 +78,13 @@ export interface EventRow {
   kind?: string
   ts?: number
   [k: string]: unknown
+}
+
+export interface FeedRateRow {
+  instruments: number
+  measured: number
+  frames_per_min: number | null
+  trades_per_min: number | null
+  gap_median_s: number | null
+  gap_p90_s: number | null
 }

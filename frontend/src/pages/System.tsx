@@ -50,6 +50,26 @@ export function System() {
         </Table>
       </Card>
 
+      <Card title={`Feed rate — ${data.feed.source}`} right="measured this session; medians across contracts">
+        <Table head={['Source', 'Contracts', 'Measured', 'Frames / min', 'With new volume / min', 'Gap median', 'Gap p90']} empty="no quotes yet this session">
+          {Object.entries(data.feed_rate ?? {}).flatMap(([source, groups]) =>
+            Object.entries(groups).map(([group, r]) => (
+              <tr key={`${source}:${group}`} className="border-b border-slate-900">
+                <td className="px-2 py-1.5">
+                  {source} <span className="text-slate-500">{group}</span>
+                </td>
+                <td className="px-2 py-1.5">{r.instruments}</td>
+                <td className="px-2 py-1.5 text-slate-400">{r.measured}</td>
+                <td className="px-2 py-1.5">{fmt.n(r.frames_per_min)}</td>
+                <td className="px-2 py-1.5">{fmt.n(r.trades_per_min)}</td>
+                <td className="px-2 py-1.5">{r.gap_median_s != null ? `${r.gap_median_s}s` : 'DM'}</td>
+                <td className="px-2 py-1.5 text-slate-400">{r.gap_p90_s != null ? `${r.gap_p90_s}s` : 'DM'}</td>
+              </tr>
+            )),
+          )}
+        </Table>
+      </Card>
+
       <div className="grid gap-4 lg:grid-cols-2">
         <Card title="Feed">
           <KV obj={data.feed as unknown as Record<string, unknown>} />

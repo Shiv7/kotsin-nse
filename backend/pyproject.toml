@@ -85,3 +85,11 @@ forbidden_modules = ["zoneinfo"]
 # Direct imports only: these layers may go through market.session (that is the point), they just
 # may not reach for a timezone themselves.
 allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+name = "only feed/ opens the 5paisa socket"
+type = "forbidden"
+source_modules = ["kotsin_nse.engine", "kotsin_nse.bars", "kotsin_nse.exec", "kotsin_nse.api", "kotsin_nse.ops", "kotsin_nse.risk", "kotsin_nse.instrument"]
+forbidden_modules = ["kotsin_nse.venue.fivepaisa.ws"]
+# Direct imports only: the engine reaches the socket through feed/, which is the point.
+allow_indirect_imports = true

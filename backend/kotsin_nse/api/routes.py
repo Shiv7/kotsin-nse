@@ -137,6 +137,22 @@ def build_app(engine: Engine) -> FastAPI:
             ],
         }
 
+    @api.get("/feed")
+    async def feed() -> dict[str, Any]:
+        """Which source streams market data, what it can and cannot give, and how often it has
+        actually updated each kind of contract this session — measured, not quoted."""
+        c = engine.feed.capabilities
+        return {
+            "source": c.name,
+            "capabilities": {
+                "depth_levels": c.depth_levels,
+                "trade_side": c.trade_side,
+                "snapshots": c.snapshots,
+                "note": c.note,
+            },
+            "rate": engine.feed_rate.snapshot(),
+        }
+
     @api.get("/fidelity")
     async def fidelity() -> dict[str, Any]:
         """How often the live bar build disagrees with the exchange's own candle, by timeframe."""

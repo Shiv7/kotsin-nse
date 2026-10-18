@@ -3,10 +3,13 @@
 Option and future OI exists only on the socket; the REST history has none of it, so a session
 that is not archived is a session that can never be replayed.
 
-Per IST day, two Parquet files under ``data/archive/<kind>/<day>.parquet``:
+Per IST day, Parquet files under ``data/archive/<kind>/<day>.parquet``:
 
 * ``bars`` — every closed 1m bar of every tracked underlying (symbol, ts, o/h/l/c/v, source, oi)
 * ``oi`` — every OI frame for every subscribed code (futures and option strikes)
+* ``ticks`` — every quote frame of the underlyings and their futures (``archive_ticks``), with the
+  data source that sent it: the raw material for volume-at-price, and for judging a source's
+  resolution after the fact
 
 Compact (tens of MB a day), append-safe (a flush re-reads the day's file and de-duplicates on
 the key), readable by the same pandas the research code uses. Raw frames are not kept: at ~19k
@@ -17,6 +20,7 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +35,7 @@ log = structlog.get_logger(__name__)
 KEYS: dict[str, tuple[str, ...]] = {
     "bars": ("symbol", "ts"),
     "oi": ("scrip_code", "ts"),
+    "ticks": ("source", "scrip_code", "recv_ts"),
 }
 
 
@@ -78,6 +83,25 @@ class DailyArchive:
             "oi",
             ts,
             {"scrip_code": str(scrip_code), "ts": float(ts), "oi": float(oi), "change_pct": change_pct},
+        )
+
+    def tick(self, t: Mapping[str, Any]) -> None:
+        self._add(
+            "ticks",
+            float(t["recv_ts"]),
+            {
+                "source": str(t.get("source", "")),
+                "scrip_code": str(t["scrip_code"]),
+                "ts": float(t["ts"]),
+                "recv_ts": float(t["recv_ts"]),
+                "ltp": float(t["ltp"]),
+                "total_qty": int(t["total_qty"]),
+                "last_qty": int(t["last_qty"]),
+                "bid": float(t["bid"]),
+                "ask": float(t["ask"]),
+                "bid_qty": int(t["bid_qty"]),
+                "ask_qty": int(t["ask_qty"]),
+            },
         )
 
     # -- persist ---------------------------------------------------------------------------------

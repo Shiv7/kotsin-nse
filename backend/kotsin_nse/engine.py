@@ -38,6 +38,9 @@ from .domain import Instrument
 from .exec.gateway import Gateway, LiveCaps, Mode
 from .exec.live import LiveExecutor
 from .exec.paper import BookSnapshot, PaperMatcher
+from .feed import build_source
+from .feed.base import Channel, DepthMsg, OIMsg, TickMsg
+from .feed.rate import FeedRateMeter
 from .instrument.catalogue import CatalogueLoader
 from .instrument.quote import Quote
 from .instrument.universe import ScripGroup, UniverseBuilder, UniversePolicy
@@ -58,7 +61,6 @@ from .ops.telegram import Telegram
 from .risk.costs import CostModel
 from .venue.fivepaisa.auth import Authenticator
 from .venue.fivepaisa.rest import FivePaisaREST
-from .venue.fivepaisa.ws import FivePaisaFeed
 
 log = structlog.get_logger(__name__)
 
@@ -85,7 +87,7 @@ class Engine:
         self.auth = Authenticator(settings, self.http)
         self.rest = FivePaisaREST(settings, self.http, self.auth)
         self.catalogue_loader = CatalogueLoader(settings, self.rest.scrip_master_csv)
-        self.feed = FivePaisaFeed(
+        self.feed = build_source(
             settings,
             self.auth,
             on_tick=self._on_tick,
@@ -94,6 +96,11 @@ class Engine:
         )
         self.aggregator = Aggregator(self.store, on_bar_close=self._on_bar_close)
         self._segment_by_code: dict[str, Segment] = {}
+        #: every subscribed contract by key — what the rate meter groups by
+        self._inst_by_code: dict[str, Instrument] = {}
+        #: quote frames worth archiving raw: the underlyings and their futures, never options
+        self._tick_archive_codes: set[str] = set()
+        self.feed_rate = FeedRateMeter()
         self.reconciler = BarReconciler(self.rest, self.store, lambda sym: self.underlyings.get(sym))
         self.groups: dict[str, ScripGroup] = {}
         self.universe_builder: UniverseBuilder | None = None
@@ -241,12 +248,17 @@ class Engine:
         # symbol, and tracking it wrote futures ticks into the equity's bars (found 2026-09-21).
         # `subscriptions()` puts them on mf+oi only; the aggregator ignores untracked codes.
         subs = UniverseBuilder.subscriptions(groups.values())
-        await self.feed.subscribe("mf", subs["mf"])
-        await self.feed.subscribe("md", subs["md"])
-        await self.feed.subscribe("oi", subs["oi"])
+        for g in groups.values():
+            for inst in (g.underlying, *g.futures, *g.options):
+                self._inst_by_code[inst.scrip_code] = inst
+            self._tick_archive_codes.update(i.scrip_code for i in (g.underlying, *g.futures))
+        await self.feed.subscribe(Channel.QUOTES, subs["quotes"])
+        await self.feed.subscribe(Channel.DEPTH, subs["depth"])
+        await self.feed.subscribe(Channel.OI, subs["oi"])
         log.info(
             "engine.subscribed",
-            mf=len(subs["mf"]), md=len(subs["md"]), oi=len(subs["oi"]),
+            source=self.feed.capabilities.name,
+            quotes=len(subs["quotes"]), depth=len(subs["depth"]), oi=len(subs["oi"]),
             options=n_opts, underlyings=len(universe),
         )
 
@@ -378,8 +390,19 @@ class Engine:
 
     # -- market data --------------------------------------------------------------------------------
 
-    async def _on_tick(self, tick: dict[str, Any]) -> None:
+    async def _on_tick(self, tick: TickMsg) -> None:
         code = str(tick["scrip_code"])
+        recv = float(tick.get("recv_ts") or time.time())
+        inst = self._inst_by_code.get(code)
+        self.feed_rate.on_quote(
+            tick["source"],
+            code,
+            f"{inst.segment.value} {inst.kind.value.lower()}" if inst else "unmapped",
+            recv,
+            int(tick.get("total_qty") or 0),
+        )
+        if code in self._tick_archive_codes and self.s.archive_ticks:
+            self.archive.tick(tick)
         ltp = float(tick.get("ltp") or 0)
         if ltp > 0:
             self.ltps[code] = ltp
@@ -387,17 +410,17 @@ class Engine:
                 ltp=ltp,
                 bid=float(tick.get("bid") or 0),
                 ask=float(tick.get("ask") or 0),
-                ts=float(tick.get("recv_ts") or time.time()),
+                ts=recv,
             )
         await self.aggregator.on_tick(tick)
         await self.bus.publish(Topic.TICK, tick)
 
-    async def _on_depth(self, depth: dict[str, Any]) -> None:
+    async def _on_depth(self, depth: DepthMsg) -> None:
         code = str(depth["scrip_code"])
         ts = float(depth.get("recv_ts") or time.time())
         self.books[code] = BookSnapshot(scrip_code=code, bids=depth["bids"], asks=depth["asks"], ts=ts)
 
-    async def _on_oi(self, oi: dict[str, Any]) -> None:
+    async def _on_oi(self, oi: OIMsg) -> None:
         fut_code = str(oi["scrip_code"])
         self.archive.oi(
             fut_code,
@@ -486,10 +509,11 @@ class Engine:
             fresh = [o for g in self.groups.values() for o in g.options if o.scrip_code not in before]
             for o in fresh:
                 self._segment_by_code[o.scrip_code] = o.segment
+                self._inst_by_code[o.scrip_code] = o
             if fresh:
-                await self.feed.subscribe("mf", fresh)
-                await self.feed.subscribe("md", fresh)
-                await self.feed.subscribe("oi", fresh)
+                await self.feed.subscribe(Channel.QUOTES, fresh)
+                await self.feed.subscribe(Channel.DEPTH, fresh)
+                await self.feed.subscribe(Channel.OI, fresh)
             log.info("universe.intraday_rebuild", new_strikes=len(fresh))
         except Exception as exc:  # noqa: BLE001 - a failed rebuild keeps the overnight universe
             log.warning("universe.intraday_rebuild_failed", error=str(exc))
@@ -518,6 +542,7 @@ class Engine:
 
                 if day != last_day:
                     last_day = day
+                    self.feed_rate.reset()
                     if self.s.has_credentials and self.s.engine_enabled:
                         await self.catalogue_loader.ensure()
 
@@ -613,6 +638,7 @@ class Engine:
             "armed_until": self._armed_until,
             "halted": self.halted()[0],
             "feed": {
+                "source": self.feed.capabilities.name,
                 "connected": fh.connected,
                 "messages": fh.messages,
                 "ticks": fh.ticks,
@@ -622,6 +648,7 @@ class Engine:
                 "silence_s": fh.silence_s,
                 "subscriptions": fh.subscriptions,
             },
+            "feed_rate": self.feed_rate.snapshot(),
             "bars": self.aggregator.stats() | self.store.stats(),
             "gateway": self.gateway.stats(),
             "rest": self.rest.stats(),

@@ -243,8 +243,8 @@ def test_subscriptions_never_put_cash_equity_on_the_oi_channel():
     b.select_all(groups, lambda s: 1500.0, TODAY)
     subs = UniverseBuilder.subscriptions(groups.values())
     codes = lambda ch: {i.scrip_code for i in subs[ch]}  # noqa: E731
-    assert "2885" in codes("mf") and "2885" in codes("md") and "2885" not in codes("oi")
-    assert {"1", "2"} <= codes("oi") and {"1", "2"} <= codes("mf")
+    assert "2885" in codes("quotes") and "2885" in codes("depth") and "2885" not in codes("oi")
+    assert {"1", "2"} <= codes("oi") and {"1", "2"} <= codes("quotes")
     assert any(i.kind is InstrumentKind.OPTION for i in subs["oi"])
     assert UniverseBuilder.summary(groups)["subscriptions"] == {k: len(v) for k, v in subs.items()}
 

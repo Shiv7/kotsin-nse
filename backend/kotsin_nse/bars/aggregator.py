@@ -20,7 +20,7 @@ has closed — which is exactly when FUDKII's boundary should fire.
 from __future__ import annotations
 
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
@@ -130,7 +130,7 @@ class Aggregator:
 
     # -- tick path ----------------------------------------------------------------------------------
 
-    async def on_tick(self, tick: dict[str, Any]) -> None:
+    async def on_tick(self, tick: Mapping[str, Any]) -> None:
         code = str(tick.get("scrip_code"))
         st = self.state.get(code)
         if st is None:
@@ -159,7 +159,7 @@ class Aggregator:
         new_high, new_low = self._day_extreme_moves(st, tick)
         await self._apply(st, segment, ts, price, qty, new_high, new_low)
 
-    def _roll_day(self, st: SymbolState, day: str, tick: dict[str, Any]) -> None:
+    def _roll_day(self, st: SymbolState, day: str, tick: Mapping[str, Any]) -> None:
         prev = float(tick.get("prev_close") or 0)
         st.day = day
         st.session_pv = st.session_v = 0.0
@@ -173,7 +173,7 @@ class Aggregator:
         st.prev_close = prev if prev > 0 else st.prev_close
 
     @staticmethod
-    def _day_extreme_moves(st: SymbolState, tick: dict[str, Any]) -> tuple[float | None, float | None]:
+    def _day_extreme_moves(st: SymbolState, tick: Mapping[str, Any]) -> tuple[float | None, float | None]:
         """Return (new_high, new_low) when the frame's day High/Low moved past the last seen."""
         dh = float(tick.get("high") or 0)
         dl = float(tick.get("low") or 0)
@@ -189,7 +189,7 @@ class Aggregator:
         return new_high, new_low
 
     @staticmethod
-    def _volume_delta(st: SymbolState, tick: dict[str, Any]) -> float:
+    def _volume_delta(st: SymbolState, tick: Mapping[str, Any]) -> float:
         total = int(tick.get("total_qty") or 0)
         if total <= 0:
             return float(tick.get("last_qty") or 0)

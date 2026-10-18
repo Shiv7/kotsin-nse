@@ -53,6 +53,7 @@ All of it is **one asyncio process**, connected by bounded in-process queues (`b
 | `venue/fivepaisa/auth.py` | TOTP → RequestToken → AccessToken, one login per 30 s window, public-IP detection |
 | `venue/fivepaisa/rest.py` | historical candles, snapshot quotes, orders, positions, option chain, scrip master |
 | `venue/fivepaisa/ws.py` | the openfeed socket; byte-exact control frames; reconnect + resubscribe |
+| `feed/` | the market-data seam: generic channels (quotes, depth, OI), normalised messages stamped with their source, `build_source` picks the source from `KN_DATA_SOURCE`; `feed/fivepaisa.py` adapts the 5paisa socket; `feed/rate.py` measures how often each source really updates each kind of contract |
 | `instrument/catalogue.py` | the scrip master, parsed daily; the only symbol ↔ scrip-code mapping |
 | `instrument/quote.py` | the last price, bid and ask seen for a contract |
 | `bars/aggregator.py` | ticks → bars on the session grid, **inside the session only**; volume from the cumulative delta; day-extreme recovery; partial tagging; a live 1d bar |
@@ -84,8 +85,19 @@ gateway (halt → idempotency → caps → place, an order row written whatever 
 
 ## Live archive (`ops/archive.py`)
 
-Per-IST-day Parquet of every 1m bar and every OI frame. The only record of what the socket
-delivered — the REST history has no OI. Flushed every 5
+Per-IST-day Parquet of every 1m bar, every OI frame and (`KN_ARCHIVE_TICKS`) every quote frame of
+the underlyings and their futures, with its source. The only record of what the socket delivered —
+the REST history has no OI and no ticks.
+
+## Adding a market-data source
+
+Orders always go to 5paisa; market data may come from a vendor (Accelpix and GFDL are in review).
+A source is a class satisfying `feed.base.MarketDataSource`: it maps an `Instrument` to its own
+ticker on subscribe, turns its frames into `TickMsg` / `DepthMsg` / `OIMsg` keyed by the 5paisa
+scrip code, stamps `source`, and declares its `Capabilities` honestly (snapshots or every trade,
+depth levels, whether the trade side is known). Register it in `feed/__init__.py` and in the
+`data_source` literal in `config.py`. Before trusting it, run a session and read `/api/feed`: the
+rate meter shows its real update rate next to 5paisa's. Flushed every 5
 minutes and at shutdown, in a worker thread.
 
 ## What is deliberately absent

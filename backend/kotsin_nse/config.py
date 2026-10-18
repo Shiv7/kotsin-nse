@@ -23,6 +23,7 @@ import os
 from collections.abc import Mapping
 from enum import StrEnum
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -113,6 +114,9 @@ class Settings(BaseSettings):
     #: keep the live session: per-IST-day Parquet of 1m bars and OI for every subscribed code
     #: (``ops/archive.py``). The REST history has no OI, so what is not archived is gone.
     archive_enabled: bool = True
+    #: also keep every quote frame of the underlyings and their futures (not options): the raw
+    #: material for volume-at-price and for judging a source's resolution after the fact
+    archive_ticks: bool = True
     archive_flush_s: float = 300.0
 
     # ---- service ------------------------------------------------------------------------------
@@ -120,6 +124,9 @@ class Settings(BaseSettings):
     api_port: int = 8500
     engine_enabled: bool = True  # false → API only (tests and UI work with no broker session)
     feed_enabled: bool = True  # false → REST-polled bars only, no WebSocket
+    #: who streams market data (``feed/``). Orders always go to 5paisa; data may later come from a
+    #: vendor. Only sources with a tested adapter are accepted.
+    data_source: Literal["fivepaisa"] = "fivepaisa"
 
     telegram_bot_token: SecretStr | None = None
     telegram_chat_id: str | None = None
