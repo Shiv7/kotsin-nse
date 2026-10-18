@@ -160,6 +160,18 @@ def run_playbook(settings: Settings, args: argparse.Namespace) -> None:
     print(f"  setups {sm['by_setup']}\n  exits {sm['by_exit']}")
 
 
+async def fetch_oi(settings: Settings, args: argparse.Namespace) -> None:
+    """NSE's F&O bhavcopy for every weekday in range: the official closing OI of every contract."""
+    import httpx
+
+    from .market.fo_bhavcopy import OiDailyStore, backfill
+
+    store = OiDailyStore(settings.data_dir / "oi_daily")
+    async with httpx.AsyncClient(timeout=60, follow_redirects=True) as http:
+        out = await backfill(http, store, date.fromisoformat(args.start), date.fromisoformat(args.end))
+    print(f"bhavcopy: {out}  ({len(store.days())} sessions held)")
+
+
 def run_mtf(settings: Settings, args: argparse.Namespace) -> None:
     """Higher-timeframe sweeps timed on a lower timeframe (research/mtf.py), one stock at a time."""
     from dataclasses import fields
@@ -248,6 +260,10 @@ def build_parser() -> argparse.ArgumentParser:
     pb.add_argument("--end", default="")
     pb.add_argument("--label", default="")
     pb.add_argument("--set", action="append", help="e.g. --set strategy=VA_REENTRY --set min_stop_adr=0.2")
+    oi = sub.add_parser("fetch-oi", help="NSE's daily F&O bhavcopy (official OI of every contract)")
+    oi.add_argument("--start", required=True)
+    oi.add_argument("--end", default=today.isoformat())
+
     m = sub.add_parser("mtf-backtest", help="1h/4h sweeps timed on 15m/5m, over the 5m cache")
     m.add_argument("--start", required=True)
     m.add_argument("--end", required=True)
@@ -276,6 +292,8 @@ def cli() -> None:
         run_obtest(settings, args)
     elif command == "pb-backtest":
         run_playbook(settings, args)
+    elif command == "fetch-oi":
+        asyncio.run(fetch_oi(settings, args))
     elif command == "mtf-backtest":
         run_mtf(settings, args)
     else:  # pragma: no cover - argparse rejects anything else

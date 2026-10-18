@@ -7,6 +7,9 @@ Per IST day, Parquet files under ``data/archive/<kind>/<day>.parquet``:
 
 * ``bars`` — every closed 1m bar of every tracked underlying (symbol, ts, o/h/l/c/v, source, oi)
 * ``oi`` — every OI frame for every subscribed code (futures and option strikes)
+* ``depth`` — the top 5 bid/ask levels of the underlyings and their front futures, at most one
+  snapshot per ``archive_depth_every_s`` per contract
+* ``flow`` — the per-minute order-flow estimate (``orderflow/meter.py``)
 * ``ticks`` — every quote frame of the underlyings and their futures (``archive_ticks``), with the
   data source that sent it: the raw material for volume-at-price, and for judging a source's
   resolution after the fact
@@ -36,6 +39,8 @@ KEYS: dict[str, tuple[str, ...]] = {
     "bars": ("symbol", "ts"),
     "oi": ("scrip_code", "ts"),
     "ticks": ("source", "scrip_code", "recv_ts"),
+    "depth": ("scrip_code", "ts"),
+    "flow": ("code", "ts"),
 }
 
 
@@ -103,6 +108,18 @@ class DailyArchive:
                 "ask_qty": int(t["ask_qty"]),
             },
         )
+
+    def depth(self, scrip_code: str, ts: float, bids: Any, asks: Any) -> None:
+        row: dict[str, Any] = {"scrip_code": str(scrip_code), "ts": float(ts)}
+        for side, book in (("b", bids), ("a", asks)):
+            for i in range(5):
+                p, q = book[i] if i < len(book) else (None, None)
+                row[f"{side}{i + 1}p"] = float(p) if p is not None else None
+                row[f"{side}{i + 1}q"] = float(q) if q is not None else None
+        self._add("depth", ts, row)
+
+    def flow(self, row: Mapping[str, Any]) -> None:
+        self._add("flow", float(row["ts"]), dict(row))
 
     # -- persist ---------------------------------------------------------------------------------
 

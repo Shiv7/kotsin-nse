@@ -54,6 +54,12 @@ All of it is **one asyncio process**, connected by bounded in-process queues (`b
 | `venue/fivepaisa/rest.py` | historical candles, snapshot quotes, orders, positions, option chain, scrip master |
 | `venue/fivepaisa/ws.py` | the openfeed socket; byte-exact control frames; reconnect + resubscribe |
 | `feed/` | the market-data seam: generic channels (quotes, depth, OI), normalised messages stamped with their source, `build_source` picks the source from `KN_DATA_SOURCE`; `feed/fivepaisa.py` adapts the 5paisa socket; `feed/rate.py` measures how often each source really updates each kind of contract |
+| `scan/` | the minute board: strength (one-sided move from the open ÷ 50-session average range), ranks, picks, breadth, sectors, VWAP side, OI build-up; `DayReplay` rebuilds any cached day minute by minute with the same code |
+| `structure/` | 5-minute price structure: swings, breaks of structure by a close, order blocks with a life cycle, fair value gaps, liquidity, sweeps, Z/S1/R1/R2 |
+| `profile/` | volume profile (POC, value area, HVN/LVN) and market profile (TPO letters, first hour, single prints, day type) from 1m bars |
+| `orderflow/` | per-minute estimated order flow from quote snapshots (quote rule on each snapshot's new volume), cumulative delta, top-5 book imbalance, the future's OI |
+| `market/fo_bhavcopy.py` · `research/oi_daily.py` | NSE's daily F&O bhavcopy: the official OI every OI change is measured from, and the daily futures build-up per stock |
+| `research/obtest.py` · `playbooks.py` · `mtf.py` | backtests on the cache: the order-block playbook (1m), sweep / value-area strategies (1m), and 1h/4h sweeps timed on 15m/5m (5m cache, 2.5 years), tagged with the previous session's OI build-up |
 | `instrument/catalogue.py` | the scrip master, parsed daily; the only symbol ↔ scrip-code mapping |
 | `instrument/quote.py` | the last price, bid and ask seen for a contract |
 | `bars/aggregator.py` | ticks → bars on the session grid, **inside the session only**; volume from the cumulative delta; day-extreme recovery; partial tagging; a live 1d bar |

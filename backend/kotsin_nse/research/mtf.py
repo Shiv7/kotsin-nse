@@ -71,6 +71,8 @@ class MTFParams:
     first_entry: str = "09:30"
     last_entry: str = "15:00"
     breakeven_after_t1: bool = True
+    #: only trades whose previous-session OI build-up points their way (WITH) or the other (AGAINST)
+    oi_filter: str = ""  # "" | WITH | AGAINST
 
 
 @dataclass(slots=True)
@@ -99,6 +101,10 @@ class MTFTrade:
     mfe_r: float = 0.0
     mae_r: float = 0.0
     sessions_held: int = 0
+    #: the previous session's futures OI build-up (NSE bhavcopy), and whether it points the trade's way
+    oi_state: str = ""
+    oi_chg_pct: float | None = None
+    oi_align: str = ""  # WITH | AGAINST | ""
 
 
 # -- bars -------------------------------------------------------------------------------------------
@@ -169,7 +175,17 @@ def _daily_levels(d1: pd.DataFrame) -> pd.DataFrame:
     return d.set_index("day")
 
 
-def trades_for(symbol: str, df5: pd.DataFrame, d1: pd.DataFrame, p: MTFParams, start: date, end: date, costs: CostModel) -> list[MTFTrade]:
+def oi_alignment(side: str, state: str) -> str:
+    if not state:
+        return ""
+    up = state in ("LONG BUILD-UP", "SHORT COVERING")
+    return "WITH" if (side == "BULLISH") == up else "AGAINST"
+
+
+def trades_for(
+    symbol: str, df5: pd.DataFrame, d1: pd.DataFrame, p: MTFParams, start: date, end: date, costs: CostModel,
+    oi: pd.DataFrame | None = None,
+) -> list[MTFTrade]:
     df5 = clean_5m(df5)
     if df5.empty or d1.empty:
         return []
@@ -276,10 +292,19 @@ def trades_for(symbol: str, df5: pd.DataFrame, d1: pd.DataFrame, p: MTFParams, s
         qty = int(p.risk_inr / risk)
         if qty <= 0:
             continue
+        oi_state, oi_chg = "", None
+        if oi is not None and len(oi):
+            prev = oi[oi["day"] < ist_day(int(L[trig, 5])).isoformat()]
+            if len(prev):
+                oi_state, oi_chg = str(prev["label"].iloc[-1]), float(prev["oi_chg_pct"].iloc[-1])
+        align = oi_alignment(side, oi_state)
+        if p.oi_filter and align != p.oi_filter:
+            continue
         t = MTFTrade(
             symbol, side, f"{p.htf} SWEEP {name} → {p.ltf} BOS", int(close_ts), round(level, 4), round(wick, 4),
             int(L[trig, 5]), round(entry, 4), round(stop, 4), round(t1, 4), round(t2, 4), round(rr, 2), qty,
             day=ist_day(int(L[trig, 5])).isoformat(),
+            oi_state=oi_state, oi_chg_pct=round(oi_chg, 2) if oi_chg is not None else None, oi_align=align,
         )
         _simulate(t, F, p, costs)
         out.append(t)
@@ -378,6 +403,8 @@ def summarize(trades: list[MTFTrade]) -> dict[str, Any]:
         "by_exit": group(lambda t: t.exit_reason),
         "by_setup": group(lambda t: t.setup.split(" → ")[0]),
         "by_side": group(lambda t: t.side),
+        "by_oi_state": group(lambda t: t.oi_state or "no OI data"),
+        "by_oi_align": group(lambda t: t.oi_align or "no OI data"),
     }
 
 
@@ -385,10 +412,16 @@ def run(settings: Settings, start: date, end: date, p: MTFParams, *, symbols: li
     store = HistoryStore(settings.data_dir / "history")
     costs = CostModel(settings)
     names = symbols or store.symbols("5m")
+    from ..market.fo_bhavcopy import OiDailyStore
+    from .oi_daily import futures_table
+
+    oi_store = OiDailyStore(settings.data_dir / "oi_daily")
+    oi_all = futures_table(oi_store, settings.data_dir / "oi_daily" / "_futures.parquet") if oi_store.days() else None
     t0 = _time.time()
     all_trades: list[MTFTrade] = []
     for n, sym in enumerate(names, 1):
-        got = trades_for(sym, store.load(sym, "5m"), store.load(sym, "1d"), p, start, end, costs)
+        oi = oi_all[oi_all["symbol"] == sym] if oi_all is not None else None
+        got = trades_for(sym, store.load(sym, "5m"), store.load(sym, "1d"), p, start, end, costs, oi)
         all_trades += got
         if on_symbol:
             on_symbol(sym, got, n, len(names))

@@ -1,5 +1,6 @@
 import { createChart, LineStyle, type UTCTimestamp } from 'lightweight-charts'
 import { useEffect, useRef } from 'react'
+import { FlowPanel } from './FlowPanel'
 import { cls, fmt, istChartOptions } from '../lib/api'
 import { usePoll } from '../lib/usePoll'
 import type { BoardRow, OHLCV, ProfileData, StructureData, VolumeProfileData } from '../types'
@@ -184,6 +185,7 @@ export function StockPopup({ row, day, at, trade, onClose }: Props) {
           <div ref={box} className="min-w-0 flex-1" />
           {profile.data?.volume && <ProfileBars vp={profile.data.volume} composite={profile.data.composite ?? null} />}
         </div>
+        {!day && <FlowPanel symbol={row.symbol} />}
         {profile.data?.market && (
           <div className="mt-2 flex flex-wrap gap-3 font-mono text-[11px] text-slate-400">
             <span>

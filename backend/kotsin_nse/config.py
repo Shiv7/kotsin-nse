@@ -117,6 +117,8 @@ class Settings(BaseSettings):
     #: also keep every quote frame of the underlyings and their futures (not options): the raw
     #: material for volume-at-price and for judging a source's resolution after the fact
     archive_ticks: bool = True
+    #: one top-5 depth snapshot per contract at most this often (underlyings + front futures)
+    archive_depth_every_s: float = 5.0
     archive_flush_s: float = 300.0
 
     # ---- service ------------------------------------------------------------------------------

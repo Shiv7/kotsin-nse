@@ -154,6 +154,48 @@ def build_app(engine: Engine) -> FastAPI:
             "rate": engine.feed_rate.snapshot(),
         }
 
+    @api.get("/flow/{symbol}")
+    async def flow(symbol: str, tf: int = Query(1, ge=1, le=30)) -> dict[str, Any]:
+        """Today's estimated order flow per ``tf`` minutes for the stock and its front future:
+        buy / sell volume (each snapshot's new volume by the quote rule — an estimate, the feed has
+        no trade side), delta, cumulative delta, top-5 book imbalance and the future's OI."""
+        sym = symbol.upper()
+        g = engine.groups.get(sym)
+        if g is None:
+            raise HTTPException(404, f"{sym} is not in the universe")
+
+        def rows(code: str | None) -> list[dict[str, Any]]:
+            if code is None:
+                return []
+            out: dict[int, dict[str, Any]] = {}
+            for m in engine.flow.minutes(code):
+                k = m.ts - (m.ts % (tf * 60))
+                r = out.setdefault(k, {"ts": k, "buy": 0.0, "sell": 0.0, "unknown": 0.0, "frames": 0, "imb": [], "oi": None})
+                r["buy"] += m.buy
+                r["sell"] += m.sell
+                r["unknown"] += m.unknown
+                r["frames"] += m.frames
+                r["cum_delta"] = m.cum_delta
+                if m.imbalance is not None:
+                    r["imb"].append(m.imbalance)
+                if m.oi is not None:
+                    r["oi"] = m.oi
+            for r in out.values():
+                r["delta"] = r["buy"] - r["sell"]
+                r["imbalance"] = round(sum(r["imb"]) / len(r["imb"]), 4) if r["imb"] else None
+                del r["imb"]
+            return [out[k] for k in sorted(out)]
+
+        fut = g.futures[0].scrip_code if g.futures else None
+        return {
+            "symbol": sym,
+            "tf_minutes": tf,
+            "estimate": "snapshot quote rule — no trade side on this feed",
+            "equity": rows(g.underlying.scrip_code),
+            "future": rows(fut),
+            "future_code": fut,
+        }
+
     @api.get("/fidelity")
     async def fidelity() -> dict[str, Any]:
         """How often the live bar build disagrees with the exchange's own candle, by timeframe."""

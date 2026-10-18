@@ -60,6 +60,7 @@ from .market.session import (
 from .ops.archive import DailyArchive
 from .ops.health import Check, HealthMonitor
 from .ops.telegram import Telegram
+from .orderflow.meter import FlowMeter
 from .risk.costs import CostModel
 from .scan.board import OIRead, attach_setups
 from .scan.live import LiveScanner
@@ -106,6 +107,9 @@ class Engine:
         #: quote frames worth archiving raw: the underlyings and their futures, never options
         self._tick_archive_codes: set[str] = set()
         self.feed_rate = FeedRateMeter()
+        #: estimated order flow per minute for the underlyings and their front futures
+        self.flow = FlowMeter()
+        self._depth_last: dict[str, float] = {}
         self.scanner = LiveScanner(self.store)
         self._scanned_minute = 0
         #: near-future OI change % by underlying symbol, for the board's build-up label
@@ -270,7 +274,9 @@ class Engine:
                 self._inst_by_code[inst.scrip_code] = inst
             self._tick_archive_codes.update(i.scrip_code for i in (g.underlying, *g.futures))
         await self.feed.subscribe(Channel.QUOTES, subs["quotes"])
-        await self.feed.subscribe(Channel.DEPTH, subs["depth"])
+        # the front future's book too: F&O order flow lives in the future as much as the cash
+        fronts = [g.futures[0] for g in groups.values() if g.futures]
+        await self.feed.subscribe(Channel.DEPTH, [*subs["depth"], *fronts])
         await self.feed.subscribe(Channel.OI, subs["oi"])
         log.info(
             "engine.subscribed",
@@ -425,8 +431,18 @@ class Engine:
             recv,
             int(tick.get("total_qty") or 0),
         )
-        if code in self._tick_archive_codes and self.s.archive_ticks:
-            self.archive.tick(tick)
+        if code in self._tick_archive_codes:
+            if self.s.archive_ticks:
+                self.archive.tick(tick)
+            ts = float(tick.get("ts") or recv)
+            self.flow.on_tick(
+                code,
+                ts if abs(ts - recv) < 120 else recv,
+                float(tick.get("ltp") or 0),
+                int(tick.get("total_qty") or 0),
+                float(tick.get("bid") or 0),
+                float(tick.get("ask") or 0),
+            )
         ltp = float(tick.get("ltp") or 0)
         if ltp > 0:
             self.ltps[code] = ltp
@@ -443,6 +459,11 @@ class Engine:
         code = str(depth["scrip_code"])
         ts = float(depth.get("recv_ts") or time.time())
         self.books[code] = BookSnapshot(scrip_code=code, bids=depth["bids"], asks=depth["asks"], ts=ts)
+        if code in self._tick_archive_codes:
+            self.flow.on_depth(code, ts, depth["bids"], depth["asks"])
+            if ts - self._depth_last.get(code, 0.0) >= self.s.archive_depth_every_s:
+                self._depth_last[code] = ts
+                self.archive.depth(code, ts, depth["bids"], depth["asks"])
 
     async def _on_oi(self, oi: OIMsg) -> None:
         fut_code = str(oi["scrip_code"])
@@ -452,6 +473,8 @@ class Engine:
             float(oi["open_interest"]),
             float(oi["oi_change_pct"]) if oi.get("oi_change_pct") is not None else None,
         )
+        if fut_code in self._front_future:
+            self.flow.on_oi(fut_code, float(oi.get("recv_ts") or time.time()), float(oi["open_interest"]))
         symbol = self._future_to_underlying.get(fut_code)
         if symbol is None:
             # Not a future we map to an underlying → an option strike. Keep its OI; the Options
@@ -615,6 +638,8 @@ class Engine:
             now = time.time()
             try:
                 day = ist_day(now).isoformat()
+                for fm in self.flow.drain():
+                    self.archive.flow(fm.to_json())
                 if now - last_archive > self.s.archive_flush_s:
                     last_archive = now
                     await asyncio.to_thread(self.archive.flush)
@@ -743,6 +768,7 @@ class Engine:
             "universe": self.universe_builder.summary(self.groups) if self.universe_builder else {},
             "fidelity": self.reconciler.snapshot() if self.reconciler_ready else {},
             "option_oi_tracked": len(self.option_oi),
+            "orderflow": self.flow.stats(),
             "oi_reference": {
                 "day": self.oi_ref_day.isoformat() if self.oi_ref_day else None,
                 "futures": len(self.oi_ref),
