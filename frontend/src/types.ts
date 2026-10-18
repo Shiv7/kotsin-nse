@@ -104,6 +104,8 @@ export interface BoardRow {
   oi_change_pct: number | null
   pick: boolean
   rule: string
+  align: number | null
+  setup: { z: number; s1: number; r1: number | null; r2: number | null; rr: number | null; state: string; distance_pct: number | null } | null
 }
 
 export interface SectorRow {
@@ -138,4 +140,39 @@ export interface OHLCV {
   l: number
   c: number
   v: number
+}
+
+export interface StructZone {
+  side: 'BULLISH' | 'BEARISH'
+  ob_ts: number
+  bos_ts: number
+  bos_kind: string
+  low: number
+  high: number
+  z: number
+  s1: number
+  impulse: string
+  state: string
+  retests: number
+  broken_ts: number | null
+  swept_before: boolean
+}
+
+export interface StructureData {
+  zones: StructZone[]
+  liquidity: { price: number; kind: string; ts: number | null }[]
+  sweeps: { ts: number; level: number; kind: string; side: string }[]
+  gaps: { ts: number; low: number; high: number; side: string; filled_at: number | null }[]
+  setup: {
+    side: string
+    zone_index: number
+    z: number
+    s1: number
+    r1: number | null
+    r2: number | null
+    rr: number | null
+    extra: { price: number; kind: string }[]
+    state: string
+  } | null
+  opening_range: [number, number] | null
 }

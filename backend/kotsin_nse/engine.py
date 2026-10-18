@@ -61,8 +61,9 @@ from .ops.archive import DailyArchive
 from .ops.health import Check, HealthMonitor
 from .ops.telegram import Telegram
 from .risk.costs import CostModel
-from .scan.board import OIRead
+from .scan.board import OIRead, attach_setups
 from .scan.live import LiveScanner
+from .structure.service import from_store as structure_from_store
 from .venue.fivepaisa.auth import Authenticator
 from .venue.fivepaisa.rest import FivePaisaREST
 
@@ -544,7 +545,18 @@ class Engine:
                 st = self.scanner.state(sym, time.time())
                 if st is not None and st.prev_close > 0:
                     oi[sym] = OIRead(oi_change_pct=chg, price_change_pct=(st.last / st.prev_close - 1) * 100)
-            await asyncio.to_thread(self.scanner.scan, self.scan_symbols(), time.time(), oi)
+            now = time.time()
+
+            def _run() -> None:
+                board = self.scanner.scan(self.scan_symbols(), now, oi)
+
+                def setup_of(sym: str) -> Any:
+                    st = structure_from_store(self.store, sym, now)
+                    return st.setup if st else None
+
+                attach_setups(board, setup_of)
+
+            await asyncio.to_thread(_run)
         except Exception as exc:  # noqa: BLE001 - a failed scan waits for the next minute
             log.warning("scan.failed", error=str(exc))
 

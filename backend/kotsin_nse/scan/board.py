@@ -59,6 +59,10 @@ class Row:
     oi_change_pct: float | None = None
     pick: bool = False
     rule: str = ""
+    #: the four-point check for a contender: in the top 20, its sector leans its way, breadth
+    #: leans its way, price on its side of VWAP
+    align: int | None = None
+    setup: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -165,6 +169,14 @@ def build_board(
         )
     sector_rows.sort(key=lambda s: -(s["avg_score"]))
 
+    sector_lean = {s["sector"]: s["avg_score"] for s in sector_rows}
+    for side, rows_of in (("BULLISH", bull[:contenders]), ("BEARISH", bear[:contenders])):
+        sign = 1 if side == "BULLISH" else -1
+        breadth_ok = (len(bull) - len(bear)) * sign > 0
+        for r in rows_of:
+            vwap_ok = r.above_vwap is not None and r.above_vwap == (side == "BULLISH")
+            r.align = 1 + int(sector_lean.get(r.sector, 0) * sign > 0) + int(breadth_ok) + int(vwap_ok)
+
     return Board(
         ts=ts,
         rows=sorted(rows, key=lambda r: -r.score),
@@ -181,3 +193,19 @@ def build_board(
         },
         sectors=sector_rows,
     )
+
+
+def attach_setups(board: Board, setup_of: Any) -> Board:
+    """Give every contender its structure setup, when the setup points the contender's way.
+    ``setup_of(symbol)`` → a ``structure.engine.Setup`` or None."""
+    for r in board.rows:
+        if r.align is None:
+            continue
+        su = setup_of(r.symbol)
+        if su is not None and su.side == r.side:
+            r.setup = {
+                "z": su.z, "s1": round(su.s1, 4), "r1": su.r1, "r2": su.r2, "rr": su.rr, "state": su.state,
+                "distance_pct": round((r.last / su.z - 1) * 100, 3) if su.z else None,
+            }
+    return board
+

@@ -233,7 +233,7 @@ function Strip({ rows, onPick }: { rows: BoardRow[]; onPick: (r: BoardRow) => vo
 function Side({ title, rows, tone, onOpen }: { title: string; rows: BoardRow[]; tone: 'green' | 'red'; onOpen: (r: BoardRow) => void }) {
   return (
     <Card title={<span className={tone === 'green' ? 'text-emerald-400' : 'text-rose-400'}>{title} — top {rows.length}</span>} right="click a row for its chart">
-      <Table head={['#', 'Stock', 'Strength', '%', 'VWAP', 'OI', 'Sector', 'Rule']} empty="none yet">
+      <Table head={['#', 'Stock', 'Strength', '%', 'Align', 'Zone (Z · from price)', 'R:R', 'VWAP', 'OI', 'Rule']} empty="none yet">
         {rows.map((r) => (
           <tr key={r.symbol} onClick={() => onOpen(r)} className={cls('cursor-pointer border-b border-slate-900 hover:bg-slate-900', r.pick && 'bg-slate-900/60')}>
             <td className="px-2 py-1 text-slate-500">{r.rank}</td>
@@ -246,9 +246,24 @@ function Side({ title, rows, tone, onOpen }: { title: string; rows: BoardRow[]; 
               <span className="ml-1 text-[10px] text-slate-600">p{r.percentile}</span>
             </td>
             <td className={cls('px-2 py-1 font-mono', (r.pct ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400')}>{fmt.pct(r.pct)}</td>
+            <td className={cls('px-2 py-1 font-mono', (r.align ?? 0) >= 4 ? 'text-emerald-300' : (r.align ?? 0) === 3 ? 'text-slate-200' : 'text-slate-600')}>
+              {r.align != null ? `${r.align}/4` : '—'}
+            </td>
+            <td className="px-2 py-1 font-mono text-[11px]">
+              {r.setup ? (
+                <span>
+                  {fmt.n(r.setup.z)} <span className="text-slate-500">· {fmt.pct(r.setup.distance_pct)}</span>{' '}
+                  <span className="text-[9px] text-slate-500">{r.setup.state.toLowerCase()}</span>
+                </span>
+              ) : (
+                <span className="text-slate-700">no zone</span>
+              )}
+            </td>
+            <td className={cls('px-2 py-1 font-mono', r.setup?.rr != null && r.setup.rr >= 1.5 ? 'text-emerald-300' : 'text-slate-500')}>
+              {r.setup?.rr != null ? `1:${r.setup.rr}` : '—'}
+            </td>
             <td className="px-2 py-1">{r.above_vwap == null ? '—' : r.above_vwap ? '▲' : '▼'}</td>
             <td className="px-2 py-1 text-[10px] text-slate-400">{r.oi_build_up ?? '—'}</td>
-            <td className="max-w-[9rem] truncate px-2 py-1 text-[10px] text-slate-500">{r.sector}</td>
             <td className="px-2 py-1 text-[10px] text-slate-400">{r.rule}</td>
           </tr>
         ))}

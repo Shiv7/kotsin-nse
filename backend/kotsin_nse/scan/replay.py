@@ -20,7 +20,8 @@ import pandas as pd
 
 from ..market.session import IST
 from ..research.history import HistoryStore
-from .board import Board, build_board
+from ..structure.engine import Structure, analyze, resample_5m
+from .board import Board, attach_setups, build_board
 from .sectors import sectors
 from .strength import ADR_SESSIONS, SCORE_FROM_IST, DayState, average_daily_range
 
@@ -39,6 +40,8 @@ class _Day:
     cum_vol: np.ndarray
     prev_close: float
     adr: float | None
+    raw: np.ndarray  # (n, 6): ts, o, h, l, c, v — for the structure engine
+    prev_day: tuple[float, float, float]
 
 
 def guarded_adr(highs: list[float], lows: list[float], closes: list[float]) -> float | None:
@@ -89,6 +92,8 @@ def load_day(store: HistoryStore, symbol: str, day: date) -> _Day | None:
         cum_vol=cum_v,
         prev_close=float(closes[-1]),
         adr=adr,
+        raw=bars[["ts", "o", "h", "l", "c", "v"]].to_numpy(dtype=float),
+        prev_day=(float(before["h"].iloc[-1]), float(before["l"].iloc[-1]), float(closes[-1])),
     )
 
 
@@ -126,9 +131,19 @@ class DayReplay:
         start, end = _ist_ts(self.day, SCORE_FROM_IST), _ist_ts(self.day, "15:30")
         return list(range(start, end + 1, 60))
 
-    def board_at(self, ts: int) -> Board:
+    def board_at(self, ts: int, *, setups: bool = True) -> Board:
         states = [st for d in self.days.values() if (st := state_at(d, ts)) is not None]
-        return build_board(ts, states, self.sectors)
+        board = build_board(ts, states, self.sectors)
+        return attach_setups(board, lambda s: self.structure_at(s, ts).setup) if setups else board
+
+    def structure_at(self, symbol: str, ts: int) -> Structure:
+        """The 5m structure of ``symbol`` from the 5m bars fully closed by ``ts``."""
+        d = self.days[symbol]
+        open_ts = _ist_ts(self.day, "09:15")
+        last_5m = open_ts + ((ts - open_ts) // 300) * 300
+        rows = d.raw[d.raw[:, 0] < last_5m]
+        bars = resample_5m([(int(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[5])) for r in rows], open_ts)
+        return analyze(bars, prev_day=d.prev_day, adr=d.adr)
 
     def summary(self) -> dict[str, Any]:
         return {

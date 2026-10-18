@@ -283,6 +283,26 @@ def build_app(engine: Engine) -> FastAPI:
 
     # -- history ---------------------------------------------------------------------------------------
 
+    @api.get("/structure/{symbol}")
+    async def structure(symbol: str, day: str | None = None, at: str = "15:30") -> dict[str, Any]:
+        """Order blocks, gaps, liquidity, sweeps and the current setup on 5-minute candles — for a
+        past ``day`` as it stood at ``at`` (only bars closed by then), or live when ``day`` is omitted."""
+        from ..research.history import HistoryStore
+        from ..scan.replay import _ist_ts
+        from ..structure.service import from_history, from_store
+
+        sym = symbol.upper()
+        if day:
+            d = date.fromisoformat(day)
+            st = await asyncio.to_thread(
+                from_history, HistoryStore(engine.s.data_dir / "history"), sym, d, _ist_ts(d, at)
+            )
+        else:
+            st = from_store(engine.store, sym, time.time())
+        if st is None:
+            raise HTTPException(404, f"no 5-minute bars for {sym}{' on ' + day if day else ' today'}")
+        return {"symbol": sym, "day": day, "at": at if day else None, **st.to_json()}
+
     @api.get("/history/bars/{symbol}")
     async def history_bars(symbol: str, day: str, tf: str = "5m", until: str | None = None) -> dict[str, Any]:
         """A past session's candles from the 1m cache, rolled up to ``tf`` on the 09:15 grid —

@@ -2,7 +2,7 @@ import { createChart, LineStyle, type UTCTimestamp } from 'lightweight-charts'
 import { useEffect, useRef } from 'react'
 import { cls, fmt } from '../lib/api'
 import { usePoll } from '../lib/usePoll'
-import type { BoardRow, OHLCV } from '../types'
+import type { BoardRow, OHLCV, StructureData } from '../types'
 
 interface Props {
   row: BoardRow
@@ -22,6 +22,10 @@ export function StockPopup({ row, day, at, onClose }: Props) {
     ? `/api/history/bars/${row.symbol}?day=${day}&tf=5m${at ? `&until=${at}` : ''}`
     : `/api/bars/${row.symbol}?tf=5m&n=80`
   const { data, error } = usePoll<{ bars: OHLCV[] } | LiveBars>(path, day ? 600000 : 10000)
+  const structure = usePoll<StructureData>(
+    day ? `/api/structure/${encodeURIComponent(row.symbol)}?day=${day}${at ? `&at=${at}` : ''}` : `/api/structure/${encodeURIComponent(row.symbol)}`,
+    day ? 600000 : 30000,
+  )
   const box = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -53,9 +57,47 @@ export function StockPopup({ row, day, at, onClose }: Props) {
         return vv > 0 ? { time: b.ts as UTCTimestamp, value: pv / vv } : { time: b.ts as UTCTimestamp }
       }),
     )
+    // structure: the current setup's lines, its zone's edges, the liquidity met on the way, and
+    // a marker at every break of structure and every sweep
+    const st = structure.data
+    if (st) {
+      const line = (price: number, color: string, title: string, style = LineStyle.Solid, width: 1 | 2 = 1) =>
+        candles.createPriceLine({ price, color, lineWidth: width, lineStyle: style, axisLabelVisible: true, title })
+      const su = st.setup
+      if (su) {
+        const zn = st.zones[su.zone_index]
+        const tone = su.side === 'BULLISH' ? '#10b981' : '#f43f5e'
+        if (zn) {
+          line(zn.high, tone, '', LineStyle.Dotted)
+          line(zn.low, tone, '', LineStyle.Dotted)
+        }
+        line(su.z, tone, `Z ${su.state.toLowerCase()}`, LineStyle.Solid, 2)
+        line(su.s1, '#f59e0b', 'S1 (wrong)')
+        if (su.r1 != null) line(su.r1, '#e2e8f0', 'R1', LineStyle.Dashed)
+        if (su.r2 != null) line(su.r2, '#e2e8f0', 'R2', LineStyle.Dashed)
+        for (const x of su.extra) line(x.price, 'rgba(245,158,11,0.6)', x.kind.toLowerCase(), LineStyle.SparseDotted)
+      }
+      const marks = [
+        ...st.zones.map((z) => ({
+          time: z.bos_ts as UTCTimestamp,
+          position: (z.side === 'BULLISH' ? 'belowBar' : 'aboveBar') as 'belowBar' | 'aboveBar',
+          color: z.state === 'BROKEN' ? '#64748b' : z.side === 'BULLISH' ? '#10b981' : '#f43f5e',
+          shape: (z.side === 'BULLISH' ? 'arrowUp' : 'arrowDown') as 'arrowUp' | 'arrowDown',
+          text: `BOS${z.bos_kind === 'OPENING_RANGE' ? ' OR' : ''}${z.state === 'BROKEN' ? ' ✕' : ''}`,
+        })),
+        ...st.sweeps.map((w) => ({
+          time: (Math.floor(w.ts / 300) * 300) as UTCTimestamp,
+          position: (w.side === 'BULLISH' ? 'belowBar' : 'aboveBar') as 'belowBar' | 'aboveBar',
+          color: '#a78bfa',
+          shape: 'circle' as const,
+          text: `sweep ${w.kind.toLowerCase()}`,
+        })),
+      ].sort((a, b) => (a.time as number) - (b.time as number))
+      candles.setMarkers(marks)
+    }
     c.timeScale().fitContent()
     return () => c.remove()
-  }, [data])
+  }, [data, structure.data])
 
   const bull = row.side === 'BULLISH'
   return (
@@ -77,6 +119,14 @@ export function StockPopup({ row, day, at, onClose }: Props) {
           </button>
         </div>
         <div className="mb-3 grid grid-cols-2 gap-2 font-mono text-[11px] md:grid-cols-4">
+          {structure.data?.setup && (
+            <>
+              <Cell k="SETUP" v={`${structure.data.setup.side} · ${structure.data.setup.state.toLowerCase()}`} />
+              <Cell k="Z / S1" v={`${fmt.n(structure.data.setup.z)} / ${fmt.n(structure.data.setup.s1)}`} />
+              <Cell k="R1 / R2" v={`${fmt.n(structure.data.setup.r1)} / ${fmt.n(structure.data.setup.r2)}`} />
+              <Cell k="R:R" v={structure.data.setup.rr != null ? `1 : ${structure.data.setup.rr}` : '—'} />
+            </>
+          )}
           <Cell k="STRENGTH" v={`${row.score >= 0 ? '+' : ''}${row.score.toFixed(2)}× day`} />
           <Cell k="PERCENTILE" v={row.percentile != null ? `p${row.percentile}` : '—'} />
           <Cell k="VWAP" v={row.above_vwap == null ? '—' : row.above_vwap ? '▲ above' : '▼ below'} />
@@ -86,7 +136,8 @@ export function StockPopup({ row, day, at, onClose }: Props) {
         {error && <div className="text-xs text-rose-400">{error}</div>}
         <div ref={box} />
         <p className="mt-2 text-[10px] text-slate-600">
-          5-minute candles{day ? ` up to ${at ?? 'the close'} on ${day}` : ''} · dashed = VWAP · zones and levels arrive with the structure engine
+          5-minute candles{day ? ` up to ${at ?? 'the close'} on ${day}` : ''} · blue dashed = VWAP · Z = where the setup acts, S1 = where it is wrong, R1/R2 =
+          liquidity ahead · ▲▼ = break of structure (✕ = zone since broken) · ● = sweep
         </p>
       </div>
     </div>
