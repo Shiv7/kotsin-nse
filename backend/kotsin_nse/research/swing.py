@@ -74,6 +74,15 @@ class SwingParams:
     slip_bps: float = 5.0
     max_open: int = 8
     sides: str = "both"  # both | long | short
+    #: once the trade is this many R in profit, trail on the previous day's low (longs) / high
+    #: (shorts) instead of waiting for a confirmed daily swing — falls are fast (0 = off).
+    #: Applied to ``fast_trail_sides`` only.
+    fast_trail_after_r: float = 0.0
+    fast_trail_sides: str = "short"  # short | long | both
+    #: shorts only in weak stocks (close below the 50-day, 20-day below the 50-day) and longs
+    #: only in strong ones, read on the confirmation day
+    trend_filter: bool = False
+    trend_filter_sides: str = "both"  # both | short | long
 
 
 @dataclass(slots=True)
@@ -147,6 +156,8 @@ def setups(d: pd.DataFrame, p: SwingParams, bias: dict[str, str] | None) -> list
     """Every confirmed reversal: the rejection day, the level, the confirmation day, the plan."""
     o, h, lo, c, v = (d[x].to_numpy(dtype=float) for x in ("o", "h", "l", "c", "v"))
     adr, vavg = d["adr"].to_numpy(dtype=float), d["vavg"].to_numpy(dtype=float)
+    sma20 = d["c"].rolling(20).mean().to_numpy(dtype=float)
+    sma50 = d["c"].rolling(50).mean().to_numpy(dtype=float)
     sh, sl = swings(h, lo, 2)
     sh_a, sl_a = np.array(sh, dtype=int), np.array(sl, dtype=int)
     out: list[dict[str, Any]] = []
@@ -209,6 +220,12 @@ def setups(d: pd.DataFrame, p: SwingParams, bias: dict[str, str] | None) -> list
             if conf is None:
                 continue
             _f("3 new momentum (broke the last lower high)")
+            if p.trend_filter and (p.trend_filter_sides == "both" or (p.trend_filter_sides == "short") == (sign < 0)):
+                strong = c[conf] > sma50[conf] and sma20[conf] > sma50[conf]
+                weak = c[conf] < sma50[conf] and sma20[conf] < sma50[conf]
+                if not (strong if sign > 0 else weak):
+                    continue
+                _f("3b trend agrees (strong for longs, weak for shorts)")
             side = "BULLISH" if sign > 0 else "BEARISH"
             b = (bias or {}).get(d["day"].iloc[conf].isoformat(), "")
             if p.use_bias and bias is not None:
@@ -275,7 +292,15 @@ def simulate(t: SwingTrade, d: pd.DataFrame, start_i: int, F: np.ndarray | None,
             exit_ts = ist_at(day, "15:30")
             why = "STOP" if abs(stop - t.stop) < 1e-9 else "TRAIL"
             break
-        # the day closed: any daily swing confirmed now (2 bars after it) above the stop raises it
+        # the day closed. Fast trail: once in profit by fast_trail_after_r, the stop follows this
+        # day's low (longs) / high (shorts) — the previous day's, from tomorrow's point of view
+        fast_on = p.fast_trail_after_r > 0 and (p.fast_trail_sides == "both" or (p.fast_trail_sides == "short") == (sign < 0))
+        if fast_on and t.mfe_r >= p.fast_trail_after_r:
+            cand = (lo[i] if sign > 0 else h[i]) - sign * p.stop_buffer_adr * adr
+            if (cand - stop) * sign > 0:
+                stop = cand
+                t.stop_path.append({"ts": ist_at(day, "15:30"), "stop": round(float(stop), 4), "why": "fast"})
+        # any daily swing confirmed now (2 bars after it) beyond the stop moves it
         if i >= 4:
             m = i - 2
             is_sw = (lo[m] < lo[m - 2 : m].min() and lo[m] < lo[m + 1 : m + 3].min()) if sign > 0 else (h[m] > h[m - 2 : m].max() and h[m] > h[m + 1 : m + 3].max())
