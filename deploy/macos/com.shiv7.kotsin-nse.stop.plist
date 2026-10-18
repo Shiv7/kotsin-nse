@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.shiv7.kotsin-nse.stop</string>
+  <key>ProgramArguments</key>
+  <array><string>/bin/zsh</string><string>/Users/shivendrapratap/Downloads/kotsin/kotsin-nse/deploy/macos/kotsin-stop.sh</string></array>
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>16</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>16</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>16</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>16</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>16</integer><key>Minute</key><integer>0</integer></dict>
+  </array>
+  <key>StandardOutPath</key><string>/Users/shivendrapratap/Downloads/kotsin/kotsin-nse/backend/data-live/logs/launchd-stop.out</string>
+  <key>StandardErrorPath</key><string>/Users/shivendrapratap/Downloads/kotsin/kotsin-nse/backend/data-live/logs/launchd-stop.err</string>
+</dict>
+</plist>
