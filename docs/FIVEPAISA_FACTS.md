@@ -171,3 +171,19 @@ holds the day's extreme.
 There is no exchange-holiday endpoint in this API. `data/holidays.txt` holds one `YYYY-MM-DD` per
 line and the engine warns at boot when it is empty. Never guess one: a wrong entry skips a real
 trading day, and a missing one produces a session of empty bars that looks like a feed outage.
+
+## Historical 1-minute candles (measured 2026-10-18)
+
+* 1m history reaches back at least to April 2025 for cash equity (375-ish bars a day).
+* **The latest session is not returned unless the request's end runs past it**: `from=2026-10-16
+  &end=2026-10-17` (Fri→Sat) came back empty, `end=2026-10-18` returned 371 candles; an older
+  Friday→Saturday window was fine. `research/history.py` pads every request's end by two days.
+* **A finished session's 1m history stops at 15:14**: 361 bars from 09:15, a near-empty 15:15 print,
+  and nothing for 15:15–15:30 — the official close never appears as a minute bar (RELIANCE 8 Oct:
+  last 1m close 1177.4, official close 1178.0).
+* **The latest session is provisional**: after 15:14 it is a few lumped bars — RELIANCE 16 Oct had
+  15:14 = 8.3M shares and 15:28 = 16.8M flat at the close (40 % of the day), then 15:50–15:59
+  closing-session prints; the minute volumes summed to ~70 % of the daily volume.
+* So every reader of cached 1m bars uses 09:15 ≤ start < 15:14 (`research/history.session_rows`).
+  The live engine builds 15:15–15:30 from the feed itself, and the archive keeps it.
+* Futures and options 1m history exist too (an illiquid strike returns only the minutes it traded).

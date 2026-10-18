@@ -7,9 +7,10 @@ from datetime import date
 import pandas as pd
 import pytest
 
+from kotsin_nse.market.session import ist_at
 from kotsin_nse.research.history import HistoryStore
 from kotsin_nse.scan.board import OIRead, build_board
-from kotsin_nse.scan.replay import DayReplay, _ist_ts
+from kotsin_nse.scan.replay import DayReplay
 from kotsin_nse.scan.strength import DayState, average_daily_range, strength, vwap
 
 
@@ -93,11 +94,11 @@ def _store(tmp_path, day: date) -> HistoryStore:
     store = HistoryStore(tmp_path)
     daily = []
     for i in range(60):
-        ts = _ist_ts(day, "09:15") - (60 - i) * 86400
+        ts = ist_at(day, "09:15") - (60 - i) * 86400
         daily.append({"ts": ts, "o": 100.0, "h": 101.0, "l": 99.0, "c": 100.0, "v": 1e6})
     store.save("UP", "1d", pd.DataFrame(daily))
     store.save("FLAT", "1d", pd.DataFrame(daily))
-    t0 = _ist_ts(day, "09:15")
+    t0 = ist_at(day, "09:15")
     up = [{"ts": t0 + 60 * k, "o": 100 + 0.1 * k, "h": 100.1 + 0.1 * k, "l": 99.95 + 0.1 * k, "c": 100.1 + 0.1 * k, "v": 1000} for k in range(60)]
     flat = [{"ts": t0 + 60 * k, "o": 100, "h": 100.5, "l": 99.5, "c": 100, "v": 1000} for k in range(60)]
     store.save("UP", "1m", pd.DataFrame(up))
@@ -108,12 +109,12 @@ def _store(tmp_path, day: date) -> HistoryStore:
 def test_replay_reads_only_bars_closed_by_the_minute_and_scores_from_0920(tmp_path):
     day = date(2026, 10, 16)
     r = DayReplay(_store(tmp_path, day), day)
-    assert r.minutes()[0] == _ist_ts(day, "09:20")
-    b = r.board_at(_ist_ts(day, "09:20"))
+    assert r.minutes()[0] == ist_at(day, "09:20")
+    b = r.board_at(ist_at(day, "09:20"))
     up = next(x for x in b.rows if x.symbol == "UP")
     # bars 09:15..09:19 closed by 09:20 → last close = 100.1 + 0.4 = 100.5, ADR = 2
     assert up.last == pytest.approx(100.5) and up.score == pytest.approx(0.25)
-    later = next(x for x in r.board_at(_ist_ts(day, "10:00")).rows if x.symbol == "UP")
+    later = next(x for x in r.board_at(ist_at(day, "10:00")).rows if x.symbol == "UP")
     assert later.score > up.score and later.side == "BULLISH"
     assert next(x for x in b.rows if x.symbol == "FLAT").side == "NONE"
 
@@ -133,7 +134,7 @@ def test_the_days_own_daily_candle_is_never_its_previous_close(tmp_path):
     day = date(2026, 10, 16)
     store = _store(tmp_path, day)
     d1 = store.load("UP", "1d")
-    today = pd.DataFrame([{"ts": _ist_ts(day, "00:00"), "o": 100.0, "h": 120.0, "l": 90.0, "c": 115.0, "v": 1e6}])
+    today = pd.DataFrame([{"ts": ist_at(day, "00:00"), "o": 100.0, "h": 120.0, "l": 90.0, "c": 115.0, "v": 1e6}])
     store.save("UP", "1d", pd.concat([d1, today], ignore_index=True))
     r = DayReplay(store, day)
     assert r.days["UP"].prev_close == 100.0 and r.days["UP"].adr == pytest.approx(2.0)

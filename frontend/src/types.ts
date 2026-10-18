@@ -176,3 +176,38 @@ export interface StructureData {
   } | null
   opening_range: [number, number] | null
 }
+
+export interface VolumeProfileData {
+  step: number
+  prices: number[]
+  volumes: number[]
+  poc: number
+  vah: number
+  val: number
+  hvn: number[]
+  lvn: number[]
+  total: number
+}
+
+export interface MarketProfileData {
+  step: number
+  prices: number[]
+  letters: string[]
+  poc: number
+  vah: number
+  val: number
+  ib_high: number | null
+  ib_low: number | null
+  single_prints: number[]
+  poor_high: boolean
+  poor_low: boolean
+  day_type: string
+  periods: number
+}
+
+export interface ProfileData {
+  volume: VolumeProfileData | null
+  market: MarketProfileData | null
+  composite?: VolumeProfileData | null
+  composite_sessions?: number
+}

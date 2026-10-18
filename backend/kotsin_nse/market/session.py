@@ -217,3 +217,10 @@ def session_phase(segment: Segment, ts: float) -> str:
     if hm <= sp.open.strftime("%H:%M"):
         return "OPEN"
     return "MID"
+
+
+def ist_at(d: date, hm: str) -> int:
+    """Epoch seconds of ``HH:MM`` IST on calendar day ``d``."""
+    h, m = (int(x) for x in hm.split(":"))
+    return int(datetime.combine(d, time(h, m), tzinfo=IST).timestamp())
+

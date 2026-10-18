@@ -2,7 +2,7 @@ import { createChart, LineStyle, type UTCTimestamp } from 'lightweight-charts'
 import { useEffect, useRef } from 'react'
 import { cls, fmt } from '../lib/api'
 import { usePoll } from '../lib/usePoll'
-import type { BoardRow, OHLCV, StructureData } from '../types'
+import type { BoardRow, OHLCV, ProfileData, StructureData, VolumeProfileData } from '../types'
 
 interface Props {
   row: BoardRow
@@ -24,6 +24,10 @@ export function StockPopup({ row, day, at, onClose }: Props) {
   const { data, error } = usePoll<{ bars: OHLCV[] } | LiveBars>(path, day ? 600000 : 10000)
   const structure = usePoll<StructureData>(
     day ? `/api/structure/${encodeURIComponent(row.symbol)}?day=${day}${at ? `&at=${at}` : ''}` : `/api/structure/${encodeURIComponent(row.symbol)}`,
+    day ? 600000 : 30000,
+  )
+  const profile = usePoll<ProfileData>(
+    day ? `/api/profile/${encodeURIComponent(row.symbol)}?day=${day}${at ? `&at=${at}` : ''}&days=5` : `/api/profile/${encodeURIComponent(row.symbol)}`,
     day ? 600000 : 30000,
   )
   const box = useRef<HTMLDivElement>(null)
@@ -95,9 +99,15 @@ export function StockPopup({ row, day, at, onClose }: Props) {
       ].sort((a, b) => (a.time as number) - (b.time as number))
       candles.setMarkers(marks)
     }
+    const vp = profile.data?.volume
+    if (vp) {
+      candles.createPriceLine({ price: vp.poc, color: '#c084fc', lineWidth: 2, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: 'POC' })
+      candles.createPriceLine({ price: vp.vah, color: 'rgba(192,132,252,0.6)', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: false, title: 'VAH' })
+      candles.createPriceLine({ price: vp.val, color: 'rgba(192,132,252,0.6)', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: false, title: 'VAL' })
+    }
     c.timeScale().fitContent()
     return () => c.remove()
-  }, [data, structure.data])
+  }, [data, structure.data, profile.data])
 
   const bull = row.side === 'BULLISH'
   return (
@@ -134,13 +144,70 @@ export function StockPopup({ row, day, at, onClose }: Props) {
           <Cell k="RULE" v={row.rule || '—'} wide />
         </div>
         {error && <div className="text-xs text-rose-400">{error}</div>}
-        <div ref={box} />
+        <div className="flex gap-2">
+          <div ref={box} className="min-w-0 flex-1" />
+          {profile.data?.volume && <ProfileBars vp={profile.data.volume} composite={profile.data.composite ?? null} />}
+        </div>
+        {profile.data?.market && (
+          <div className="mt-2 flex flex-wrap gap-3 font-mono text-[11px] text-slate-400">
+            <span>
+              market profile: <span className="text-slate-200">{profile.data.market.day_type.replace('_', ' ').toLowerCase()}</span>
+            </span>
+            <span>
+              first hour {fmt.n(profile.data.market.ib_low)}–{fmt.n(profile.data.market.ib_high)}
+            </span>
+            <span>
+              TPO value {fmt.n(profile.data.market.val)}–{fmt.n(profile.data.market.vah)} · POC {fmt.n(profile.data.market.poc)}
+            </span>
+            <span>{profile.data.market.single_prints.length} single prints</span>
+            {profile.data.market.poor_high && <span className="text-amber-400">poor high</span>}
+            {profile.data.market.poor_low && <span className="text-amber-400">poor low</span>}
+            {profile.data.volume && (
+              <span>
+                volume POC {fmt.n(profile.data.volume.poc)} · value {fmt.n(profile.data.volume.val)}–{fmt.n(profile.data.volume.vah)}
+              </span>
+            )}
+          </div>
+        )}
         <p className="mt-2 text-[10px] text-slate-600">
           5-minute candles{day ? ` up to ${at ?? 'the close'} on ${day}` : ''} · blue dashed = VWAP · Z = where the setup acts, S1 = where it is wrong, R1/R2 =
           liquidity ahead · ▲▼ = break of structure (✕ = zone since broken) · ● = sweep
         </p>
       </div>
     </div>
+  )
+}
+
+/** Volume at price, top = high: today's bars, and the multi-day composite as a faint outline. */
+function ProfileBars({ vp, composite }: { vp: VolumeProfileData; composite: VolumeProfileData | null }) {
+  const H = 340
+  const W = 110
+  const lo = Math.min(vp.prices[0], composite?.prices[0] ?? Infinity)
+  const hi = Math.max(vp.prices[vp.prices.length - 1], composite?.prices[composite.prices.length - 1] ?? -Infinity)
+  const span = Math.max(hi - lo, vp.step)
+  const y = (p: number) => H - 8 - ((p - lo) / span) * (H - 16)
+  const max = Math.max(...vp.volumes, 1)
+  const cmax = composite ? Math.max(...composite.volumes, 1) : 1
+  const h = Math.max(1, ((H - 16) / span) * vp.step - 0.5)
+  return (
+    <svg width={W} height={H} className="shrink-0">
+      {composite?.prices.map((p, i) => (
+        <rect key={`c${p}`} x={0} y={y(p) - h / 2} width={(composite.volumes[i] / cmax) * (W - 10)} height={h} fill="rgba(148,163,184,0.12)" />
+      ))}
+      {vp.prices.map((p, i) => (
+        <rect
+          key={p}
+          x={0}
+          y={y(p) - h / 2}
+          width={(vp.volumes[i] / max) * (W - 10)}
+          height={h}
+          fill={p === vp.poc ? '#c084fc' : p >= vp.val && p <= vp.vah ? 'rgba(192,132,252,0.55)' : 'rgba(100,116,139,0.5)'}
+        />
+      ))}
+      <text x={2} y={10} fontSize="9" fill="#64748b">
+        volume at price
+      </text>
+    </svg>
   )
 }
 

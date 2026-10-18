@@ -12,14 +12,14 @@ score inflated by a pre-split range — the bug order-block.com reported living 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
-from ..market.session import IST
-from ..research.history import HistoryStore
+from ..market.session import ist_at
+from ..research.history import HistoryStore, session_rows
 from ..structure.engine import Structure, analyze, resample_5m
 from .board import Board, attach_setups, build_board
 from .sectors import sectors
@@ -52,9 +52,6 @@ def guarded_adr(highs: list[float], lows: list[float], closes: list[float]) -> f
     return average_daily_range(highs, lows)
 
 
-def _ist_ts(d: date, hm: str) -> int:
-    h, m = (int(x) for x in hm.split(":"))
-    return int(datetime.combine(d, time(h, m), tzinfo=IST).timestamp())
 
 
 def load_day(store: HistoryStore, symbol: str, day: date) -> _Day | None:
@@ -62,13 +59,12 @@ def load_day(store: HistoryStore, symbol: str, day: date) -> _Day | None:
     d1 = store.load(symbol, "1d")
     if m1.empty or d1.empty:
         return None
-    lo, hi = _ist_ts(day, "09:15"), _ist_ts(day, "15:30")
-    bars = m1[(m1["ts"] >= lo) & (m1["ts"] < hi)].sort_values("ts")
+    bars = session_rows(m1, day)
     if bars.empty:
         return None
     # Sessions strictly BEFORE the day, by IST date: NSE stamps a final daily candle 00:00, so
     # "before 09:15" would let the day's own candle in as its previous close (found 2026-10-18).
-    before = d1[d1["ts"] < _ist_ts(day, "00:00")].sort_values("ts")
+    before = d1[d1["ts"] < ist_at(day, "00:00")].sort_values("ts")
     if before.empty:
         return None
     closes = before["c"].to_numpy(dtype=float)
@@ -128,7 +124,7 @@ class DayReplay:
     def minutes(self) -> list[int]:
         """Every minute the board is published: from 09:20 to the close, on the minute + 60 s
         (the scan reads closed bars)."""
-        start, end = _ist_ts(self.day, SCORE_FROM_IST), _ist_ts(self.day, "15:30")
+        start, end = ist_at(self.day, SCORE_FROM_IST), ist_at(self.day, "15:30")
         return list(range(start, end + 1, 60))
 
     def board_at(self, ts: int, *, setups: bool = True) -> Board:
@@ -139,7 +135,7 @@ class DayReplay:
     def structure_at(self, symbol: str, ts: int) -> Structure:
         """The 5m structure of ``symbol`` from the 5m bars fully closed by ``ts``."""
         d = self.days[symbol]
-        open_ts = _ist_ts(self.day, "09:15")
+        open_ts = ist_at(self.day, "09:15")
         last_5m = open_ts + ((ts - open_ts) // 300) * 300
         rows = d.raw[d.raw[:, 0] < last_5m]
         bars = resample_5m([(int(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[5])) for r in rows], open_ts)

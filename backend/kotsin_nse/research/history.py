@@ -22,11 +22,25 @@ import pandas as pd
 import structlog
 
 from ..domain import Instrument
-from ..market.session import ist_naive_to_ts
+from ..market.session import ist_at, ist_naive_to_ts
 
 log = structlog.get_logger(__name__)
 
 COLUMNS = ["ts", "o", "h", "l", "c", "v"]
+
+#: The broker's 1m history covers 09:15 to 15:14 IST only (measured 2026-10-18 on 5 stocks × 3
+#: days: 361 bars ending 15:15 with a near-empty 15:15 print, the last 15 minutes of trading absent).
+#: The LATEST session is served provisional — after 15:14 it is a few lumped bars (RELIANCE 16 Oct:
+#: 15:14 = 8.3M shares, 15:28 = 16.8M at the close, 40 % of the day) until it is final. So every
+#: reader of cached 1m bars uses 09:15 ≤ start < 15:14 and nothing later.
+SESSION_FIRST_1M = "09:15"
+SESSION_LAST_1M_EXCL = "15:14"
+
+
+def session_rows(m1: pd.DataFrame, day: Any) -> pd.DataFrame:
+    """The day's trustworthy cached 1m rows (see ``SESSION_LAST_1M_EXCL``), oldest first."""
+    lo, hi = ist_at(day, SESSION_FIRST_1M), ist_at(day, SESSION_LAST_1M_EXCL)
+    return m1[(m1["ts"] >= lo) & (m1["ts"] < hi)].sort_values("ts")
 
 
 @dataclass(slots=True)

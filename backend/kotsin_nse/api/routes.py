@@ -271,11 +271,11 @@ def build_app(engine: Engine) -> FastAPI:
     async def scan_replay(day: str, at: str = "15:30") -> dict[str, Any]:
         """The board as it stood at ``at`` (HH:MM IST) on a past ``day`` — the live code, fed from
         the history cache, reading only bars that had closed by then."""
-        from ..scan.replay import _ist_ts
+        from ..market.session import ist_at
 
         r = await _replay(day)
         try:
-            ts = _ist_ts(r.day, at)
+            ts = ist_at(r.day, at)
         except ValueError as exc:
             raise HTTPException(400, f"at must be HH:MM, got {at!r}") from exc
         board = await asyncio.to_thread(r.board_at, ts)
@@ -287,15 +287,15 @@ def build_app(engine: Engine) -> FastAPI:
     async def structure(symbol: str, day: str | None = None, at: str = "15:30") -> dict[str, Any]:
         """Order blocks, gaps, liquidity, sweeps and the current setup on 5-minute candles — for a
         past ``day`` as it stood at ``at`` (only bars closed by then), or live when ``day`` is omitted."""
+        from ..market.session import ist_at
         from ..research.history import HistoryStore
-        from ..scan.replay import _ist_ts
         from ..structure.service import from_history, from_store
 
         sym = symbol.upper()
         if day:
             d = date.fromisoformat(day)
             st = await asyncio.to_thread(
-                from_history, HistoryStore(engine.s.data_dir / "history"), sym, d, _ist_ts(d, at)
+                from_history, HistoryStore(engine.s.data_dir / "history"), sym, d, ist_at(d, at)
             )
         else:
             st = from_store(engine.store, sym, time.time())
@@ -303,20 +303,43 @@ def build_app(engine: Engine) -> FastAPI:
             raise HTTPException(404, f"no 5-minute bars for {sym}{' on ' + day if day else ' today'}")
         return {"symbol": sym, "day": day, "at": at if day else None, **st.to_json()}
 
+    @api.get("/profile/{symbol}")
+    async def profile(symbol: str, day: str | None = None, at: str = "15:30", days: int = Query(1, ge=1, le=20)) -> dict[str, Any]:
+        """Volume profile (POC, value area, HVN/LVN) and market profile (TPO letters, initial
+        balance, single prints, day type) — for a past ``day`` up to ``at``, or live. ``days`` > 1
+        adds a composite volume profile over that many sessions ending on ``day``."""
+        from ..market.session import ist_at
+        from ..profile.service import from_history, from_store
+        from ..research.history import HistoryStore
+
+        sym = symbol.upper()
+        if day:
+            d = date.fromisoformat(day)
+            out = await asyncio.to_thread(
+                from_history, HistoryStore(engine.s.data_dir / "history"), sym, d, ist_at(d, at), days
+            )
+        else:
+            out = from_store(engine.store, sym, time.time())
+        if out is None:
+            raise HTTPException(404, f"no 1m bars for {sym}{' on ' + day if day else ' today'}")
+        return {"symbol": sym, "day": day, "at": at if day else None, **out}
+
     @api.get("/history/bars/{symbol}")
     async def history_bars(symbol: str, day: str, tf: str = "5m", until: str | None = None) -> dict[str, Any]:
         """A past session's candles from the 1m cache, rolled up to ``tf`` on the 09:15 grid —
         ``until`` (HH:MM IST) cuts them where a replay stands, so the chart never shows the future."""
+        from ..market.session import ist_at
         from ..research.history import HistoryStore
-        from ..scan.replay import _ist_ts
 
         minutes = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30}.get(tf)
         if minutes is None:
             raise HTTPException(400, "tf must be one of 1m 3m 5m 15m 30m")
+        from ..research.history import session_rows
+
         d = date.fromisoformat(day)
-        lo, hi = _ist_ts(d, "09:15"), _ist_ts(d, until or "15:30")
-        df = HistoryStore(engine.s.data_dir / "history").load(symbol.upper(), "1m")
-        df = df[(df["ts"] >= lo) & (df["ts"] + 60 <= hi)]
+        lo, hi = ist_at(d, "09:15"), ist_at(d, until or "15:30")
+        df = session_rows(HistoryStore(engine.s.data_dir / "history").load(symbol.upper(), "1m"), d)
+        df = df[df["ts"] + 60 <= hi]
         if df.empty:
             raise HTTPException(404, f"no 1m history for {symbol} on {day}")
         step = minutes * 60
