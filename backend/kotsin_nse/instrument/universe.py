@@ -95,6 +95,28 @@ class ScripGroup:
         }
 
 
+@dataclass(slots=True)
+class ContractRoll:
+    """One group's futures as held against today's pick (``UniverseBuilder.roll_plan``)."""
+
+    root: str
+    segment: Segment
+    old: list[Instrument]
+    new: list[Instrument]
+    old_underlying: Instrument
+    #: set when the underlying itself is a future and changes (MCX, an index with no cash leg): its
+    #: bars, levels and the contract a book trades all move to it. None for a cash-led group.
+    new_underlying: Instrument | None = None
+
+    def describe(self) -> str:
+        def one(i: Instrument) -> str:
+            return f"{i.scrip_code} ({i.expiry[:10]})"
+
+        if self.new_underlying is not None:
+            return f"{self.root}: {one(self.old_underlying)} → {one(self.new_underlying)}"
+        return f"{self.root}: futures {', '.join(one(f) for f in self.old)} → {', '.join(one(f) for f in self.new)}"
+
+
 class UniverseBuilder:
     def __init__(self, catalogue: Catalogue, policy: UniversePolicy | None = None) -> None:
         self.cat = catalogue
@@ -127,6 +149,29 @@ class UniverseBuilder:
             if later:
                 rows = later
         return sorted(rows, key=lambda f: f.expiry)[: self.policy.futures_count]
+
+    def futures_for(self, root: str, segment: Segment, today: date) -> list[Instrument]:
+        """The futures a boot on ``today`` would hold for ``root`` — the same rule, so the daily roll
+        and the boot can never disagree (MCX: the roll window; NSE: unexpired, front + next)."""
+        return self._unexpired_futures(root, segment, today)
+
+    def roll_plan(self, groups: dict[str, ScripGroup], today: date) -> list[ContractRoll]:
+        """Every group whose held futures are not the ones a boot on ``today`` would pick.
+
+        The pick was made once, at boot: a process that runs across an expiry kept the expired month
+        (engine A ran 10–19 Oct on CRUDEOIL 19 Oct while the rule had moved it to November on 14 Oct).
+        A group with no pick today keeps what it holds — never left without a contract."""
+        out: list[ContractRoll] = []
+        for root, g in groups.items():
+            want = self.futures_for(root, g.segment, today)
+            if not want or [f.scrip_code for f in want] == [f.scrip_code for f in g.futures]:
+                continue
+            new_underlying = want[0] if g.equity is None else None
+            if new_underlying is not None and new_underlying.scrip_code == g.underlying.scrip_code:
+                new_underlying = None
+            out.append(ContractRoll(root=root, segment=g.segment, old=list(g.futures), new=want,
+                                    old_underlying=g.underlying, new_underlying=new_underlying))
+        return out
 
     def build_underlyings(self, segments: Iterable[Segment], today: date) -> dict[str, ScripGroup]:
         groups: dict[str, ScripGroup] = {}

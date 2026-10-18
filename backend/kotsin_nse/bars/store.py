@@ -81,6 +81,16 @@ class BarStore:
         self._closed[key] = series[-self.max_bars :]
         return len(self._closed[key])
 
+    def drop_symbol(self, symbol: str) -> int:
+        """Forget every series of ``symbol``, closed and forming — a contract roll: the old month's
+        bars are not the new month's, and :meth:`seed` would keep them wherever the new set is
+        silent. Returns the closed bars dropped."""
+        keys = [k for k in self._closed if k[0] == symbol]
+        n = sum(len(self._closed.pop(k)) for k in keys)
+        for k in [k for k in self._forming if k[0] == symbol]:
+            del self._forming[k]
+        return n
+
     # -- reads ------------------------------------------------------------------------------------
 
     def bars(self, symbol: str, tf: str, n: int | None = None) -> list[UnifiedBar]:
