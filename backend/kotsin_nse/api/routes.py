@@ -217,7 +217,97 @@ def build_app(engine: Engine) -> FastAPI:
             "rows": [by_strike[k] for k in sorted(by_strike)],
         }
 
-    # -- research -----------------------------------------------------------------------------------
+    # -- the board ------------------------------------------------------------------------------------
+
+    @api.get("/scan")
+    async def scan() -> dict[str, Any]:
+        """The live board, rebuilt two seconds after every minute's 1m bars close."""
+        b = engine.scanner.board
+        if b is None:
+            raise HTTPException(404, "no scan yet — the board starts at 09:20 IST on a session with a feed")
+        return {"mode": "live", **b.to_json()}
+
+    replays: dict[str, Any] = {}
+
+    async def _replay(day_s: str) -> Any:
+        from ..research.history import HistoryStore
+        from ..scan.replay import DayReplay
+
+        try:
+            day = date.fromisoformat(day_s)
+        except ValueError as exc:
+            raise HTTPException(400, f"day must be YYYY-MM-DD, got {day_s!r}") from exc
+        if day_s not in replays:
+            store = HistoryStore(engine.s.data_dir / "history")
+            r = await asyncio.to_thread(DayReplay, store, day)
+            if not r.days:
+                raise HTTPException(404, f"no 1m history cached for {day_s} — run fetch-history --tf 1m")
+            if len(replays) >= 3:
+                replays.pop(next(iter(replays)))
+            replays[day_s] = r
+        return replays[day_s]
+
+    @api.get("/scan/days")
+    async def scan_days() -> list[str]:
+        """Sessions a board can be replayed for: the days in the 1m cache of its best-covered stock."""
+        from ..research.history import HistoryStore
+
+        store = HistoryStore(engine.s.data_dir / "history")
+        names = store.symbols("1m")
+        if not names:
+            return []
+
+        def _days() -> list[str]:
+            best: set[str] = set()
+            for sym in names[:5]:
+                ts = store.load(sym, "1m")["ts"]
+                days = {to_ist(int(t)).date().isoformat() for t in ts[::60]}
+                best = best if len(best) >= len(days) else days
+            return sorted(best, reverse=True)
+
+        return await asyncio.to_thread(_days)
+
+    @api.get("/scan/replay")
+    async def scan_replay(day: str, at: str = "15:30") -> dict[str, Any]:
+        """The board as it stood at ``at`` (HH:MM IST) on a past ``day`` — the live code, fed from
+        the history cache, reading only bars that had closed by then."""
+        from ..scan.replay import _ist_ts
+
+        r = await _replay(day)
+        try:
+            ts = _ist_ts(r.day, at)
+        except ValueError as exc:
+            raise HTTPException(400, f"at must be HH:MM, got {at!r}") from exc
+        board = await asyncio.to_thread(r.board_at, ts)
+        return {"mode": "replay", "day": day, "at": at, **r.summary(), **board.to_json()}
+
+    # -- history ---------------------------------------------------------------------------------------
+
+    @api.get("/history/bars/{symbol}")
+    async def history_bars(symbol: str, day: str, tf: str = "5m", until: str | None = None) -> dict[str, Any]:
+        """A past session's candles from the 1m cache, rolled up to ``tf`` on the 09:15 grid —
+        ``until`` (HH:MM IST) cuts them where a replay stands, so the chart never shows the future."""
+        from ..research.history import HistoryStore
+        from ..scan.replay import _ist_ts
+
+        minutes = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30}.get(tf)
+        if minutes is None:
+            raise HTTPException(400, "tf must be one of 1m 3m 5m 15m 30m")
+        d = date.fromisoformat(day)
+        lo, hi = _ist_ts(d, "09:15"), _ist_ts(d, until or "15:30")
+        df = HistoryStore(engine.s.data_dir / "history").load(symbol.upper(), "1m")
+        df = df[(df["ts"] >= lo) & (df["ts"] + 60 <= hi)]
+        if df.empty:
+            raise HTTPException(404, f"no 1m history for {symbol} on {day}")
+        step = minutes * 60
+        df = df.assign(bucket=lo + ((df["ts"] - lo) // step) * step)
+        g = df.groupby("bucket", sort=True)
+        out = g.agg(o=("o", "first"), h=("h", "max"), l=("l", "min"), c=("c", "last"), v=("v", "sum")).reset_index()
+        bars = [
+            {"ts": int(r.bucket), "o": float(r.o), "h": float(r.h), "l": float(r.l), "c": float(r.c), "v": float(r.v)}
+            for r in out.itertuples()
+        ]
+        return {"symbol": symbol.upper(), "day": day, "tf": tf, "bars": bars}
 
     @api.get("/history")
     async def history_coverage() -> list[dict[str, Any]]:

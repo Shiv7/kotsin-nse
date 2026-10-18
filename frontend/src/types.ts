@@ -88,3 +88,54 @@ export interface FeedRateRow {
   gap_median_s: number | null
   gap_p90_s: number | null
 }
+
+export interface BoardRow {
+  symbol: string
+  sector: string
+  last: number
+  pct: number | null
+  score: number
+  side: 'BULLISH' | 'BEARISH' | 'NONE'
+  rank: number | null
+  percentile: number | null
+  event_risk: boolean
+  above_vwap: boolean | null
+  oi_build_up: string | null
+  oi_change_pct: number | null
+  pick: boolean
+  rule: string
+}
+
+export interface SectorRow {
+  sector: string
+  stocks: number
+  avg_pct: number | null
+  avg_score: number
+  up: number
+  down: number
+  cells: { symbol: string; pct: number | null }[]
+}
+
+export interface BoardData {
+  mode: 'live' | 'replay'
+  ts: number
+  day?: string
+  at?: string
+  symbols?: number
+  without_adr?: string[]
+  rows: BoardRow[]
+  bullish: string[]
+  bearish: string[]
+  picks: string[]
+  breadth: { bullish: number; bearish: number; neutral: number; up: number; down: number; total: number }
+  sectors: SectorRow[]
+}
+
+export interface OHLCV {
+  ts: number
+  o: number
+  h: number
+  l: number
+  c: number
+  v: number
+}

@@ -101,7 +101,16 @@ async def fetch_history(settings: Settings, args: argparse.Namespace) -> None:
         auth = Authenticator(settings, http)
         rest = FivePaisaREST(settings, http, auth)
         catalogue = await CatalogueLoader(settings, rest.scrip_master_csv).ensure()
-        wanted = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+        if args.all_fo:
+            from .config import Segment
+            from .instrument.universe import UniverseBuilder, UniversePolicy
+
+            groups = UniverseBuilder(catalogue, UniversePolicy(include_indices=False)).build_underlyings(
+                [Segment.NSE_FO], date.today()
+            )
+            wanted = sorted(r for r, g in groups.items() if g.equity is not None)
+        else:
+            wanted = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
         instruments: list[Instrument] = []
         for sym in wanted:
             inst = catalogue.equity(sym) or catalogue.front_future(sym)
@@ -117,6 +126,7 @@ async def fetch_history(settings: Settings, args: argparse.Namespace) -> None:
             rest,
             store,
             instruments,
+            tfs=tuple(t.strip() for t in args.tf.split(",") if t.strip()),
             start=date.fromisoformat(args.start),
             end=date.fromisoformat(args.end),
         )
@@ -133,7 +143,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     today = date.today()
     f = sub.add_parser("fetch-history", help="fill the Parquet history cache from the broker")
-    f.add_argument("--symbols", required=True, help="comma-separated underlying symbols")
+    f.add_argument("--symbols", default="", help="comma-separated underlying symbols")
+    f.add_argument("--all-fo", dest="all_fo", action="store_true", help="every NSE stock with F&O (no indices)")
+    f.add_argument("--tf", default="30m,1d", help="comma-separated: 1m 3m 5m 10m 15m 30m 60m 1d")
     f.add_argument("--start", default=(today - timedelta(days=365)).isoformat())
     f.add_argument("--end", default=today.isoformat())
 

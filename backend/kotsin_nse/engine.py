@@ -34,7 +34,7 @@ from .bars.unified import BarSource, UnifiedBar
 from .bars.verify import BarReconciler
 from .bus import Bus, Topic
 from .config import Segment, Settings
-from .domain import Instrument
+from .domain import Instrument, InstrumentKind
 from .exec.gateway import Gateway, LiveCaps, Mode
 from .exec.live import LiveExecutor
 from .exec.paper import BookSnapshot, PaperMatcher
@@ -45,6 +45,8 @@ from .instrument.catalogue import CatalogueLoader
 from .instrument.quote import Quote
 from .instrument.universe import ScripGroup, UniverseBuilder, UniversePolicy
 from .ledger.db import Ledger
+from .market.fo_bhavcopy import OiDailyStore
+from .market.fo_bhavcopy import fetch_day as fetch_fo_bhavcopy
 from .market.session import (
     TradingCalendar,
     is_open,
@@ -59,6 +61,8 @@ from .ops.archive import DailyArchive
 from .ops.health import Check, HealthMonitor
 from .ops.telegram import Telegram
 from .risk.costs import CostModel
+from .scan.board import OIRead
+from .scan.live import LiveScanner
 from .venue.fivepaisa.auth import Authenticator
 from .venue.fivepaisa.rest import FivePaisaREST
 
@@ -101,6 +105,17 @@ class Engine:
         #: quote frames worth archiving raw: the underlyings and their futures, never options
         self._tick_archive_codes: set[str] = set()
         self.feed_rate = FeedRateMeter()
+        self.scanner = LiveScanner(self.store)
+        self._scanned_minute = 0
+        #: near-future OI change % by underlying symbol, for the board's build-up label
+        self.fut_oi_change: dict[str, float] = {}
+        #: NSE's official closing OI (F&O bhavcopy) — the reference an OI change is measured from,
+        #: because 5paisa's own change field is 0.0 on every frame
+        self.oi_daily = OiDailyStore(settings.data_dir / "oi_daily")
+        self.oi_ref: dict[str, float] = {}
+        self.oi_ref_day: date | None = None
+        self._front_future: dict[str, str] = {}  # front future code → underlying symbol
+        self._oi_ref_checked = 0.0
         self.reconciler = BarReconciler(self.rest, self.store, lambda sym: self.underlyings.get(sym))
         self.groups: dict[str, ScripGroup] = {}
         self.universe_builder: UniverseBuilder | None = None
@@ -243,6 +258,7 @@ class Engine:
             for o in g.options:
                 self._segment_by_code[o.scrip_code] = o.segment
         self._future_to_underlying = {f.scrip_code: g.root for g in groups.values() for f in g.futures}
+        self._front_future = {g.futures[0].scrip_code: g.root for g in groups.values() if g.futures}
 
         # Futures are OI sources, not bar sources: on NSE the front future's `symbol` is the cash
         # symbol, and tracking it wrote futures ticks into the equity's bars (found 2026-09-21).
@@ -296,12 +312,19 @@ class Engine:
         start_intraday = end - timedelta(days=max(7, self.s.backfill_days // 2))
         start_daily = end - timedelta(days=400)
         ok = failed = 0
+        # Started mid-session: today's 1m bars so far, so the board is right from the first scan
+        # and not only from the moment the socket joined.
+        today_open = self.calendar.is_trading_day(end) and ist_hm(time.time()) >= "09:15"
+        # The historical endpoint drops the LATEST session unless the end runs past it
+        # (research/history.py, measured 2026-10-18), so every request asks two days further.
+        ask_to = (end + timedelta(days=2)).isoformat()
         for inst in universe:
-            for tf, start in ((PRIMARY_TF, start_intraday), ("1d", start_daily)):
+            frames: list[tuple[str, date]] = [(PRIMARY_TF, start_intraday), ("1d", start_daily)]
+            if today_open and inst.kind is InstrumentKind.EQUITY:
+                frames.append(("1m", end))
+            for tf, start in frames:
                 try:
-                    rows = await self.rest.candles(
-                        inst, tf, start.isoformat(), end.isoformat()
-                    )
+                    rows = await self.rest.candles(inst, tf, start.isoformat(), ask_to)
                 except Exception as exc:  # noqa: BLE001
                     failed += 1
                     log.warning("backfill.failed", symbol=inst.symbol, tf=tf, error=str(exc))
@@ -311,7 +334,7 @@ class Engine:
                 if tf == "1d":
                     self._seed_daily(inst, rows)
                 else:
-                    # lower frames rebuild from live ticks; no extra REST calls
+                    # the other frames (2m … 15m) rebuild from live ticks; no extra REST calls
                     self.aggregator.seed(inst, tf, rows, ts_of=ist_naive_to_ts)
                 ok += 1
                 await asyncio.sleep(0.15)
@@ -441,6 +464,9 @@ class Engine:
         inst = self.underlyings.get(symbol)
         if inst is None:
             return
+        ref = self.oi_ref.get(fut_code)
+        if fut_code in self._front_future and ref:
+            self.fut_oi_change[symbol] = (float(oi["open_interest"]) / ref - 1) * 100
         self.aggregator.set_oi(
             inst.scrip_code,
             oi=int(oi["open_interest"]),
@@ -464,6 +490,12 @@ class Engine:
         await self.bus.publish(Topic.BAR, bar)
         if bar.tf == "1m":
             self.archive.bar(bar)
+            minute = int(bar.ts) + 60
+            if minute > self._scanned_minute:
+                self._scanned_minute = minute
+                task = asyncio.create_task(self._scan(minute))
+                self._bg_tasks.add(task)
+                task.add_done_callback(self._bg_tasks.discard)
         if bar.tf != PRIMARY_TF:
             return
         # Off the tick path: at 15:15 IST two hundred 30m bars close in the same second and each
@@ -497,6 +529,45 @@ class Engine:
                     )
         except Exception as exc:  # noqa: BLE001 - a failed check keeps the live build
             log.warning("bar.reconcile_failed", symbol=bar.symbol, error=str(exc))
+
+    def scan_symbols(self) -> list[str]:
+        """The board's universe: NSE stocks with F&O — not indices, not MCX."""
+        return sorted(r for r, g in self.groups.items() if g.equity is not None)
+
+    async def _scan(self, minute: int) -> None:
+        """Two seconds after the minute's bars close — late enough for the whole universe's 1m
+        bars to have closed (by tick or by the 1 Hz flush), early enough to be useful."""
+        await asyncio.sleep(max(0.0, minute + 2 - time.time()))
+        try:
+            oi = {}
+            for sym, chg in self.fut_oi_change.items():
+                st = self.scanner.state(sym, time.time())
+                if st is not None and st.prev_close > 0:
+                    oi[sym] = OIRead(oi_change_pct=chg, price_change_pct=(st.last / st.prev_close - 1) * 100)
+            await asyncio.to_thread(self.scanner.scan, self.scan_symbols(), time.time(), oi)
+        except Exception as exc:  # noqa: BLE001 - a failed scan waits for the next minute
+            log.warning("scan.failed", error=str(exc))
+
+    async def _ensure_oi_reference(self, today: date | None = None) -> bool:
+        """Load the latest official closing OI before today: the store's copy, else NSE's file.
+        NSE's own calendar decides which weekday was a session — a holiday simply has no file."""
+        today = today or date.today()
+        d = today - timedelta(days=1)
+        for _ in range(10):
+            if d.weekday() < 5:
+                if not self.oi_daily.has(d):
+                    df = await fetch_fo_bhavcopy(self.http, d)
+                    if df is not None and not df.empty:
+                        await asyncio.to_thread(self.oi_daily.write, d, df)
+                if self.oi_daily.has(d):
+                    codes = list(self._front_future)
+                    self.oi_ref = await asyncio.to_thread(self.oi_daily.closes, d, codes)
+                    self.oi_ref_day = d
+                    log.info("oi.reference", day=d.isoformat(), futures=len(self.oi_ref), of=len(codes))
+                    return True
+            d -= timedelta(days=1)
+        log.warning("oi.no_reference", today=today.isoformat())
+        return False
 
     async def _intraday_universe_rebuild(self) -> None:
         if self.universe_builder is None:
@@ -543,6 +614,14 @@ class Engine:
                 if day != last_day:
                     last_day = day
                     self.feed_rate.reset()
+                    self.oi_ref, self.oi_ref_day, self.fut_oi_change = {}, None, {}
+                if (
+                    self._front_future
+                    and self.oi_ref_day is None
+                    and now - self._oi_ref_checked > 1800
+                ):
+                    self._oi_ref_checked = now
+                    self._bg_tasks.add(asyncio.create_task(self._ensure_oi_reference()))
                     if self.s.has_credentials and self.s.engine_enabled:
                         await self.catalogue_loader.ensure()
 
@@ -656,6 +735,15 @@ class Engine:
             "universe": self.universe_builder.summary(self.groups) if self.universe_builder else {},
             "fidelity": self.reconciler.snapshot() if self.reconciler_ready else {},
             "option_oi_tracked": len(self.option_oi),
+            "oi_reference": {
+                "day": self.oi_ref_day.isoformat() if self.oi_ref_day else None,
+                "futures": len(self.oi_ref),
+                "with_change": len(self.fut_oi_change),
+            },
+            "scanner": {
+                "scans": self.scanner.scans,
+                "last_ts": self.scanner.board.ts if self.scanner.board else None,
+            },
             "archive": self.archive.stats(),
             "telegram": self.telegram.stats(),
             "boot_notes": self.boot_notes,

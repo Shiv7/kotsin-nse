@@ -81,6 +81,17 @@ class HistoryStore:
         return sorted(p.stem for p in d.glob("*.parquet")) if d.exists() else []
 
 
+#: calendar days per request, by timeframe. 1m returns ~375 rows a session, so a window is kept
+#: to a few thousand rows; daily asks for a year at a time.
+CHUNK_DAYS = {"1m": 20, "3m": 40, "5m": 60, "1d": 365}
+
+#: Measured 2026-10-18: the historical endpoint does not return the LATEST session unless the
+#: requested end runs past it — ``from=2026-10-16&end=2026-10-17`` (Fri→Sat) came back empty,
+#: ``end=2026-10-18`` returned all 371 candles, while an older Friday→Saturday window was fine.
+#: So every request's end is padded; the overlap is de-duplicated by ``merge``.
+END_PAD_DAYS = 2
+
+
 async def fetch(
     rest: Any,
     store: HistoryStore,
@@ -89,21 +100,22 @@ async def fetch(
     tfs: tuple[str, ...] = ("30m", "1d"),
     start: date,
     end: date,
-    chunk_days: int = 60,
     pause_s: float = 0.2,
+    on_done: Any = None,
 ) -> dict[str, int]:
     """Fill the cache. Requests are chunked and paced — the historical endpoint is the one place
     where hammering the broker reliably earns a retry storm."""
     out: dict[str, int] = {}
-    for inst in instruments:
+    for n, inst in enumerate(instruments, 1):
         for tf in tfs:
             total = 0
             cursor = start
-            span = timedelta(days=chunk_days if tf != "1d" else 365)
+            span = timedelta(days=CHUNK_DAYS.get(tf, 60))
             while cursor <= end:
                 stop = min(cursor + span, end)
+                ask_to = stop + timedelta(days=END_PAD_DAYS)
                 try:
-                    rows = await rest.candles(inst, tf, cursor.isoformat(), stop.isoformat())
+                    rows = await rest.candles(inst, tf, cursor.isoformat(), ask_to.isoformat())
                     total = store.merge(inst.symbol, tf, rows)
                 except Exception as exc:  # noqa: BLE001 - one bad window must not stop the sweep
                     log.warning(
@@ -116,5 +128,7 @@ async def fetch(
                 cursor = stop + timedelta(days=1)
                 await asyncio.sleep(pause_s)
             out[f"{inst.symbol}:{tf}"] = total
-            log.info("history.cached", symbol=inst.symbol, tf=tf, bars=total)
+            log.info("history.cached", symbol=inst.symbol, tf=tf, bars=total, n=n, of=len(instruments))
+        if on_done is not None:
+            on_done(inst, n, len(instruments))
     return out
