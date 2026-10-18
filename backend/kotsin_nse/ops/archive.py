@@ -1,15 +1,12 @@
 """The live archive: what the socket delivered, kept.
 
-Nothing kept the live session until 2026-09-22 — ``archive_enabled`` was a config key nothing
-read (R1). Everything FUKAA needs to be tested (option and future OI at bar resolution, the
-depth-derived microstructure) exists only on the socket; the REST history has none of it, so a
-session that is not archived is a session that can never be replayed.
+Option and future OI exists only on the socket; the REST history has none of it, so a session
+that is not archived is a session that can never be replayed.
 
-Per IST day, three Parquet files under ``data/archive/<kind>/<day>.parquet``:
+Per IST day, two Parquet files under ``data/archive/<kind>/<day>.parquet``:
 
 * ``bars`` — every closed 1m bar of every tracked underlying (symbol, ts, o/h/l/c/v, source, oi)
 * ``oi`` — every OI frame for every subscribed code (futures and option strikes)
-* ``micro`` — the decision-frame microstructure metrics the engine stamps on 30m bars
 
 Compact (tens of MB a day), append-safe (a flush re-reads the day's file and de-duplicates on
 the key), readable by the same pandas the research code uses. Raw frames are not kept: at ~19k
@@ -20,7 +17,6 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
-from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +31,6 @@ log = structlog.get_logger(__name__)
 KEYS: dict[str, tuple[str, ...]] = {
     "bars": ("symbol", "ts"),
     "oi": ("scrip_code", "ts"),
-    "micro": ("scrip_code", "bucket_ts"),
 }
 
 
@@ -84,13 +79,6 @@ class DailyArchive:
             ts,
             {"scrip_code": str(scrip_code), "ts": float(ts), "oi": float(oi), "change_pct": change_pct},
         )
-
-    def micro(self, scrip_code: str, bucket_ts: int, metrics: Mapping[str, Any]) -> None:
-        row: dict[str, Any] = {"scrip_code": str(scrip_code), "bucket_ts": int(bucket_ts)}
-        for k, v in metrics.items():
-            if isinstance(v, (int, float)) and not isinstance(v, bool):
-                row[k] = float(v)
-        self._add("micro", bucket_ts, row)
 
     # -- persist ---------------------------------------------------------------------------------
 

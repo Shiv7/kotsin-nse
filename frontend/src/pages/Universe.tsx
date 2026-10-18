@@ -21,7 +21,7 @@ export function Universe() {
           className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs"
         />
         <span className="text-xs text-slate-500">
-          {rows.length} underlyings · {warm} warm enough to decide (21+ bars of 30m) ·{' '}
+          {rows.length} underlyings · {warm} warm (21+ bars of 30m) ·{' '}
           {rows.reduce((a, r) => a + r.options, 0)} strikes shortlisted ·{' '}
           {rows.filter((r) => r.note.startsWith('index')).length} indices
         </span>
@@ -30,7 +30,7 @@ export function Universe() {
         title="Universe"
         right="every root with a derivative, joined to its cash equity (indices ride their front future) — the scripFinder rule"
       >
-        <Table head={['Symbol', 'Kind', 'Scrip', 'Segment', 'LTP', 'Prev close', 'Futures', 'Strikes', 'Expiry', '30m', '1d', 'Zones', '']}>
+        <Table head={['Symbol', 'Kind', 'Scrip', 'Segment', 'LTP', 'Prev close', 'Futures', 'Strikes', 'Expiry', '30m', '1d', '']}>
           {rows.map((r) => (
             <tr key={r.scrip_code} className="border-b border-slate-900">
               <td className="px-2 py-1.5 font-medium">{r.symbol}</td>
@@ -44,7 +44,6 @@ export function Universe() {
               <td className="px-2 py-1.5 text-[11px] text-slate-500">{r.option_expiry ?? '—'}</td>
               <td className={'px-2 py-1.5 ' + (r.bars_30m >= 21 ? 'text-slate-300' : 'text-amber-500')}>{r.bars_30m}</td>
               <td className="px-2 py-1.5 text-slate-400">{r.bars_1d}</td>
-              <td className={'px-2 py-1.5 ' + (r.zones ? 'text-slate-300' : 'text-amber-500')}>{r.zones}</td>
               <td className="px-2 py-1.5 text-[10px] text-amber-500/80">{r.note.replace('index', '').replace(/^;\s*/, '')}</td>
             </tr>
           ))}

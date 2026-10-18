@@ -18,21 +18,13 @@
   bars/          ticks → 1m → 5m/15m/30m on the SESSION grid (09:15 NSE, 09:00 MCX)│
                  ⊕ OI from the front future ⊕ session VWAP → UnifiedBar ◀──────────┘
                      ▼
-  bars/pivots    daily+weekly+monthly pivots → weighted zones → stop, T1–T4, grade
+  (strategy)     nothing here yet — a strategy reads closed bars and submits orders
                      ▼
-  strategy/      pure: FUDKII.on_bar(ctx, bar) → Outcome; FUKAA.on_signal(base)
-                 gates declare on_missing; every rejection names its binding gate
-                     ▼
-  instrument/    OTM strike anchored on confluence T1 (MCX → front future)
-                     ▼
-  risk/          the only owner of sizing and exits: cost model, wallets, sizing
-                 from the stop, exposure by underlying, exits, breakers
-                     ▼
-  exec/          gateway: SHADOW | PAPER (fills vs the live 20-level book)
+  exec/          gateway: SHADOW | PAPER (fills vs the live book)
                  | LIVE_CAPPED | LIVE · halt · idempotency · caps · breaker · reconcile
+                 risk/costs: the measured charge model
                      ▼
-  ledger/        SQLite: control, wallets, signals, rejections, orders, positions,
-                 trades, wallet snapshots, events, health
+  ledger/        SQLite: control, orders, positions, trades, events, health
   api/           REST → frontend/ (mounted on the same port in prod)
   ops/           Telegram alerts (rate-limited), health with consecutive-failure gating
 ```
@@ -62,68 +54,38 @@ All of it is **one asyncio process**, connected by bounded in-process queues (`b
 | `venue/fivepaisa/rest.py` | historical candles, snapshot quotes, orders, positions, option chain, scrip master |
 | `venue/fivepaisa/ws.py` | the openfeed socket; byte-exact control frames; reconnect + resubscribe |
 | `instrument/catalogue.py` | the scrip master, parsed daily; the only symbol ↔ scrip-code mapping |
-| `instrument/select.py` | OTM strike anchored on T1, liquidity checks, level → premium projection |
-| `bars/indicators.py` | Wilder ATR, population-σ Bollinger, SuperTrend with band lock, the two surge forms |
-| `bars/pivots.py` | classic pivots (Kite R3 convention), zone clustering, the confluence ladder and grade |
-| `bars/aggregator.py` | ticks → bars on the session grid, **inside the session only**; volume from the cumulative delta; day-extreme recovery; partial tagging; a live 1d bar so pivots roll overnight |
-| `bars/verify.py` | REST reconciliation: the exchange's candle installed over the live build; the 30m decision waits for it; running fidelity metric |
-| `bars/micro.py` | book-derived microstructure (L1 OFI, depth imbalance, microprice, spread) — and an honest list of what a snapshot feed cannot give |
+| `instrument/quote.py` | the last price, bid and ask seen for a contract |
+| `bars/aggregator.py` | ticks → bars on the session grid, **inside the session only**; volume from the cumulative delta; day-extreme recovery; partial tagging; a live 1d bar |
+| `bars/verify.py` | REST reconciliation: the exchange's candle installed over the live build on every closed 30m bar; running fidelity metric |
 | `instrument/universe.py` | the scripFinder universe model: roots with derivatives → equity join → front/next future → ±12% strike shortlist, rebuilt at 09:20 IST |
-| `strategy/fudkii.py` · `fukaa.py` | the two books |
-| `strategy/conviction.py` | the S1–S6 matrix with its per-exchange thresholds |
-| `risk/costs.py` | the measured NSE/MCX charge model — used by paper, live and research alike |
-| `risk/sizing.py` · `exits.py` · `exposure.py` · `wallet.py` | one owner per rule |
+| `risk/costs.py` | the measured NSE/MCX charge model — used by paper and live alike |
 | `exec/gateway.py` · `paper.py` · `live.py` · `reconcile.py` | modes, book-walking fills, real orders, truth |
-| `ledger/db.py` | SQLite schema and reads, including the binding-gate histogram |
+| `ledger/db.py` | SQLite: control row, orders, positions, trades, events, health |
 | `api/routes.py` | REST; computes nothing, reads engine state and ledger rows |
 | `research/history.py` | Parquet cache of broker history, merged on overlap |
-| `research/backtest.py` | replays the cache through the **live** strategy/exit/cost code |
-| `research/stats.py` | day-clustered means and the within-day permutation test |
 
 Boundaries are enforced by `import-linter` (`backend/pyproject.toml`), not by convention:
 
-* `strategy` may not import `venue`, `exec`, `ledger`, `api`, `ops`, `feed` or `instrument`;
-* `exec` may not import `strategy`;
 * `venue` is a leaf;
-* `strategy`, `risk`, `bars` and `exec` may not import `zoneinfo` directly.
+* `risk`, `bars` and `exec` may not import `zoneinfo` directly.
 
-## The decision path, in order
+## The bar path, in order
 
-1. A tick arrives; the aggregator buckets it by **trade time** into the 30m bucket anchored on the
-   session open (ticks outside the session are counted and dropped), and closes the previous
-   bucket if this tick starts a new one.
-2. The closed 30m bar is handed to the reconciler **off the tick path**: it fetches the exchange's
+1. A tick arrives; the aggregator buckets it by **trade time** into buckets anchored on the session
+   open (ticks outside the session are counted and dropped), and closes the previous bucket if
+   this tick starts a new one.
+2. A closed bar is published on the bus; 1m bars go to the archive.
+3. A closed 30m bar is handed to the reconciler **off the tick path**: it fetches the exchange's
    own candle for that bucket (bounded wait, default 12 s) and installs it over the live build.
-   The strategy then decides on exchange truth; if REST is late the decision proceeds on the live
-   bar and is counted.
-3. On that bar, `Fudkii.on_bar` computes BB(20, 2) and SuperTrend(7, 3) over the trailing
-   window, scores the flip and the band break, and — if both fire — asks the confluence engine for
-   a stop, targets and a grade. Grade `F` is a recorded rejection, not a silent drop.
-4. `Fukaa.on_signal` takes that signal and applies the volume bar, the conviction matrix, the RR
-   floor and the OI floor. A signal that fails only on volume is **parked** for 35 minutes and
-   promoted if the next bar delivers.
-5. `instrument.select` picks the OTM strike nearest the T1 anchor that is actually quotable, and
-   projects the underlying's stop and targets onto the premium via an estimated delta.
-6. `risk.sizing` sizes from the option stop, clamps to the position budget and lot granularity, and
-   **declines** if the round-trip charge would eat more than 35% of the move to T1.
-7. `risk.exposure` checks the aggregate across both books, bucketed by underlying.
-8. `exec.gateway` runs halt → idempotency → caps → place, and writes an order row whatever happens.
-9. Every 1 s, `risk.exits` evaluates each open position: option stop, underlying stop, hard floor,
-   target ladder, trail, then the time stop and force-flat as backstops.
+   A bucket the socket joined mid-way that REST cannot confirm is logged as a fragment.
 
-## Review committee (`committee/`)
-
-See `docs/COMMITTEE.md`. Post-mortems on the algo's own signals and trades by Claude in structured
-roles, over deterministic forensic tables and a per-case evidence pack (blinded: no names, no
-dates); every proposal is a parameter patch graded by running the backtester **out of sample** —
-holdout, cost stress, Bonferroni over hypotheses tried, months won — and vetoed if already graded.
-A nightly autopilot runs the loop. Runs on its own tasks; the decision path never reads it. Off
-until `KN_ANTHROPIC_API_KEY`; forensics and experiments work without it.
+There is no decision step: this is where a strategy would read the bar and submit through the
+gateway (halt → idempotency → caps → place, an order row written whatever happens).
 
 ## Live archive (`ops/archive.py`)
 
-Per-IST-day Parquet of every 1m bar, every OI frame and the 30m microstructure metrics. The only
-record of what the socket delivered; without it FUKAA can never be backtested. Flushed every 5
+Per-IST-day Parquet of every 1m bar and every OI frame. The only record of what the socket
+delivered — the REST history has no OI. Flushed every 5
 minutes and at shutdown, in a worker thread.
 
 ## What is deliberately absent

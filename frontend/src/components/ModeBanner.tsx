@@ -28,8 +28,7 @@ export function ModeBanner({ health, error }: { health: Health | null; error: st
       )}
       {health && (
         <span className="text-slate-500">
-          feed {health.feed.connected ? 'up' : 'down'} · {health.feed.ticks.toLocaleString()} ticks ·{' '}
-          {health.positions_open} open
+          feed {health.feed.connected ? 'up' : 'down'} · {health.feed.ticks.toLocaleString()} ticks
         </span>
       )}
       <span className="ml-auto text-slate-600">{error ? <span className="text-rose-400">{error}</span> : 'kotsin-nse'}</span>

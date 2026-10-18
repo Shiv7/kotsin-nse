@@ -68,15 +68,6 @@ export function Badge({ children, tone = 'slate' }: { children: ReactNode; tone?
   return <span className={cls('rounded px-1.5 py-0.5 text-[10px] font-medium', tones[tone])}>{children}</span>
 }
 
-export function GradeBadge({ grade }: { grade: string }) {
-  const tone = grade === 'A' ? 'green' : grade === 'B' ? 'blue' : grade === 'C' ? 'amber' : grade === 'F' ? 'red' : 'slate'
-  return <Badge tone={tone}>{grade || '—'}</Badge>
-}
-
-export function StrategyBadge({ k }: { k: string }) {
-  return <Badge tone={k === 'FUKAA' ? 'violet' : 'blue'}>{k}</Badge>
-}
-
 export function ErrorLine({ error }: { error: string | null }) {
   if (!error) return null
   return <div className="mb-3 rounded border border-rose-900 bg-rose-950/50 px-3 py-2 text-xs text-rose-300">{error}</div>

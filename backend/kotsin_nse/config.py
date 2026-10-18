@@ -106,15 +106,12 @@ class Settings(BaseSettings):
     segments: str = "NSE_EQ"  # comma-separated Segment names
     universe_file: Path | None = None  # optional explicit symbol list, one per line
     max_universe: int | None = 200  # None = no cap (R4: a cap is None-able, never 999)
-    calibration_file: Path | None = None  # per-scrip CAN2 params; hot-reloaded, not boot-only
 
     # ---- storage ------------------------------------------------------------------------------
     data_dir: Path = Path("./data")
     db_url: str = "sqlite+aiosqlite:///./data/kotsin_nse.db"
-    #: keep the live session: per-IST-day Parquet of 1m bars, OI for every subscribed code and
-    #: the 30m microstructure metrics (``ops/archive.py``). This key was declared and read by
-    #: nothing until 2026-09-22 — a whole live session of option OI, the one input FUKAA cannot
-    #: be tested without, went unrecorded.
+    #: keep the live session: per-IST-day Parquet of 1m bars and OI for every subscribed code
+    #: (``ops/archive.py``). The REST history has no OI, so what is not archived is gone.
     archive_enabled: bool = True
     archive_flush_s: float = 300.0
 
@@ -127,13 +124,12 @@ class Settings(BaseSettings):
     telegram_bot_token: SecretStr | None = None
     telegram_chat_id: str | None = None
 
-    # ---- paper accounting ---------------------------------------------------------------------
-    paper_initial_inr: float = 1_000_000.0  # per-strategy wallet, matching the old 10-lakh default
+    # ---- bars -----------------------------------------------------------------------------------
     backfill_days: int = 30  # daily/intraday history seeded from REST at boot
-    #: The 30m decision waits this long for the exchange's own candle before deciding on the live
-    #: build. Measured: REST serves a bucket while it is still forming, so this is a ceiling, not a
-    #: typical wait. Past it the decision proceeds on the live bar and is counted.
-    decision_reconcile_timeout_s: float = 12.0
+    #: How long a closed 30m bar waits for the exchange's own candle before the live build stands.
+    #: Measured: REST serves a bucket while it is still forming, so this is a ceiling, not a
+    #: typical wait.
+    bar_reconcile_timeout_s: float = 12.0
     #: Periodic REST sweep of the finer frames (fidelity metric + chart accuracy). One call per
     #: symbol per swept timeframe per interval.
     bar_sweep_interval_s: float = 300.0
@@ -141,37 +137,6 @@ class Settings(BaseSettings):
     universe_band_pct: float = 12.0
     universe_strikes_per_side: int = 5
     universe_include_indices: bool = True
-    #: An open position whose contract has not quoted for this long is NOT evaluated for exits —
-    #: a stop checked against a price from minutes ago is worse than one not checked at all. A
-    #: forced exit (force-flat or halt) overrides this and proceeds on the last known price.
-    position_quote_max_age_s: float = 60.0
-
-    # ---- review committee -----------------------------------------------------------------------
-    # Post-mortems on the algo's own signals and trades, by Claude, with an experiment loop that
-    # grades every proposal by running the backtester. Advisory: nothing here reaches the decision
-    # path. Off until a key is present (``ANTHROPIC_API_KEY`` in the environment also works).
-    anthropic_api_key: SecretStr | None = None
-    committee_model: str = "claude-opus-5"
-    #: review every closed trade automatically (five Claude calls each), within the daily cap
-    committee_auto_review: bool = False
-    #: cost guard: a run is one case (5 calls) or one cohort (4)
-    committee_max_runs_per_day: int = 30
-    #: decision-frame bars after the signal shown to a case review ("what happened next")
-    committee_path_bars: int = 16
-    #: cap the symbols an experiment backtests (None = every symbol in the history cache)
-    committee_experiment_symbols: int | None = None
-    #: replace symbol names and dates with tokens in what the model reads. Look-Ahead-Bench
-    #: (2026): standard LLMs carry future knowledge of named tickers on dated history. The log
-    #: and the UI keep the real names; only the prompt is blind.
-    committee_blind: bool = True
-    #: share of the cached history, by time, that hypotheses are graded on and the committee
-    #: never sees. The verdict is read there and nowhere else.
-    committee_holdout_frac: float = 0.3
-    #: the nightly loop: cohort review → veto known results → experiments → memory. Needs a key;
-    #: runs once a day after this IST time, only with every segment closed.
-    committee_autopilot: bool = False
-    committee_autopilot_ist: str = "02:00"
-    committee_autopilot_experiments: int = 2
 
     # ---- LIVE_CAPPED caps ----------------------------------------------------------------------
     # Mode is state (R9); these only bound what an *armed* engine may do.
@@ -185,8 +150,8 @@ class Settings(BaseSettings):
     # ---- cost model ----------------------------------------------------------------------------
     # Measured on this book, not assumed: at ₹33,000/position the NSE cash round trip was 0.299%,
     # of which 81% was flat brokerage (₹40/order × 2) — see kotsin-box/SESSION-PRIMER.md. These are
-    # the numbers the backtester and the paper filler both use, so a strategy cannot look profitable
-    # in research and unprofitable live because two cost models disagreed.
+    # the numbers the paper filler uses, so a strategy cannot look profitable on paper and
+    # unprofitable live because two cost models disagreed.
     #: Flat charge per order. **This is the measured value on this account**, not a published
     #: tariff: ₹40/order × 2 accounted for 81% of a 0.299% round trip at ₹33,000.
     cost_brokerage_per_order_inr: float = 40.0
@@ -196,7 +161,7 @@ class Settings(BaseSettings):
     cost_brokerage_pct: float = 0.0
     cost_stt_pct_sell_equity: float = 0.025
     #: overnight (delivery) cash equity pays STT on BOTH legs at this rate; the intraday rate
-    #: above applies to the sell leg only. The daily-bar backtest is the reader.
+    #: above applies to the sell leg only.
     cost_stt_pct_delivery_equity: float = 0.1
     cost_stt_pct_sell_option_premium: float = 0.0625
     cost_stt_pct_sell_future: float = 0.02
@@ -208,7 +173,7 @@ class Settings(BaseSettings):
     cost_gst_pct: float = 18.0
     slippage_bps_default: float = 5.0
 
-    @field_validator("max_universe", "committee_experiment_symbols", mode="before")
+    @field_validator("max_universe", mode="before")
     @classmethod
     def _uncapped_is_blank(cls, v: object) -> object:
         """``KN_MAX_UNIVERSE=`` means no cap.
@@ -230,7 +195,7 @@ class Settings(BaseSettings):
                 raise ValueError(f"unknown segment {n!r} — known: {', '.join(Segment.__members__)}")
         return ",".join(names)
 
-    @field_validator("live_entry_cutoff_ist", "committee_autopilot_ist")
+    @field_validator("live_entry_cutoff_ist")
     @classmethod
     def _hhmm(cls, v: str) -> str:
         hh, _, mm = v.partition(":")

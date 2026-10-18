@@ -5,7 +5,6 @@ from __future__ import annotations
 import time
 
 from kotsin_nse.bars.aggregator import Aggregator
-from kotsin_nse.bars.periods import monthly, previous_complete, weekly
 from kotsin_nse.bars.store import BarStore
 from kotsin_nse.bars.unified import BarSource
 from kotsin_nse.config import Segment
@@ -201,35 +200,6 @@ def test_store_seed_merges_rather_than_discarding_live_bars(equity):
     store.close(bar(t + 1800, 10, 11, 9, 10))
     store.seed("RELIANCE", "30m", [bar(t, 9, 10, 8, 9)])
     assert store.count("RELIANCE", "30m") == 2
-
-
-# -- periods ---------------------------------------------------------------------------------------------
-
-
-def test_weekly_and_monthly_aggregate_from_dailies():
-    days = [
-        bar(ist_ts(f"2026-09-{d:02d}", "09:15"), 100 + d, 110 + d, 90 + d, 105 + d, tf="1d")
-        for d in (14, 15, 16, 17, 18, 21, 22)
-    ]
-    wks = weekly(days)
-    assert len(wks) == 2
-    assert wks[0].high == max(b.high for b in days[:5])
-    assert wks[0].close == days[4].close
-    mons = monthly(days)
-    assert len(mons) == 1
-
-
-def test_previous_complete_excludes_the_running_period():
-    """This week's pivot comes from last week's OHLC and must be fixed for the whole week."""
-    days = [
-        bar(ist_ts(f"2026-09-{d:02d}", "09:15"), 100, 110, 90, 105, tf="1d")
-        for d in (14, 15, 16, 17, 18, 21, 22)
-    ]
-    from datetime import date
-
-    prev = previous_complete(weekly(days), date(2026, 9, 22))
-    assert prev is not None
-    assert prev.end == date(2026, 9, 18)
 
 
 def test_ist_day_is_used_for_grouping():

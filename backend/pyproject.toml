@@ -17,7 +17,6 @@ dependencies = [
     "numpy>=2.0",
     "structlog>=24",
     "pyotp>=2.9",
-    "anthropic>=1,<2",
 ]
 
 [dependency-groups]
@@ -65,31 +64,10 @@ root_package = "kotsin_nse"
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
-name = "strategy is pure: no venue / exec / ledger / api / ops / feed imports"
-type = "forbidden"
-source_modules = ["kotsin_nse.strategy"]
-forbidden_modules = [
-    "kotsin_nse.venue",
-    "kotsin_nse.exec",
-    "kotsin_nse.ledger",
-    "kotsin_nse.api",
-    "kotsin_nse.ops",
-    "kotsin_nse.feed",
-    "kotsin_nse.instrument",
-]
-
-[[tool.importlinter.contracts]]
-name = "exec does not import strategy"
-type = "forbidden"
-source_modules = ["kotsin_nse.exec"]
-forbidden_modules = ["kotsin_nse.strategy"]
-
-[[tool.importlinter.contracts]]
 name = "venue is a leaf"
 type = "forbidden"
 source_modules = ["kotsin_nse.venue"]
 forbidden_modules = [
-    "kotsin_nse.strategy",
     "kotsin_nse.risk",
     "kotsin_nse.exec",
     "kotsin_nse.ledger",
@@ -102,7 +80,7 @@ forbidden_modules = [
 [[tool.importlinter.contracts]]
 name = "only market.session knows about IST"
 type = "forbidden"
-source_modules = ["kotsin_nse.strategy", "kotsin_nse.risk", "kotsin_nse.bars", "kotsin_nse.exec"]
+source_modules = ["kotsin_nse.risk", "kotsin_nse.bars", "kotsin_nse.exec"]
 forbidden_modules = ["zoneinfo"]
 # Direct imports only: these layers may go through market.session (that is the point), they just
 # may not reach for a timezone themselves.

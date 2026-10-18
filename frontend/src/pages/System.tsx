@@ -32,7 +32,7 @@ export function System() {
         <Stat label="Uptime" value={fmt.dur(data.uptime_s)} />
         <Stat label="Feed" value={data.feed.connected ? 'connected' : 'down'} tone={data.feed.connected ? 'text-emerald-400' : 'text-rose-400'} sub={`${data.feed.reconnects} reconnects`} />
         <Stat label="Silence" value={data.feed.silence_s != null ? `${data.feed.silence_s.toFixed(0)}s` : 'DM'} sub="since the last message" />
-        <Stat label="Open positions" value={data.positions_open} />
+        <Stat label="OI frames" value={data.feed.oi.toLocaleString()} sub={`${data.feed.depth.toLocaleString()} depth frames`} />
       </div>
 
       <Card title="Checks" right="a degraded check needs 3 consecutive failures — slow is not dead">

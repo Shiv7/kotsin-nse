@@ -1,4 +1,4 @@
-"""The reconciler, the scripFinder-style universe, book microstructure, and the session-bound bar
+"""The reconciler, the scripFinder-style universe, and the session-bound bar
 builder — every one of them exists because of something measured on the first live session."""
 
 from __future__ import annotations
@@ -7,17 +7,7 @@ import asyncio
 import time
 from datetime import date
 
-import pytest
-
 from kotsin_nse.bars.aggregator import Aggregator
-from kotsin_nse.bars.micro import (
-    BookState,
-    MicroAggregator,
-    depth_imbalance,
-    l1_ofi,
-    microprice,
-    spread_bps,
-)
 from kotsin_nse.bars.store import BarStore
 from kotsin_nse.bars.unified import BarSource
 from kotsin_nse.bars.verify import BarReconciler
@@ -257,45 +247,6 @@ def test_subscriptions_never_put_cash_equity_on_the_oi_channel():
     assert {"1", "2"} <= codes("oi") and {"1", "2"} <= codes("mf")
     assert any(i.kind is InstrumentKind.OPTION for i in subs["oi"])
     assert UniverseBuilder.summary(groups)["subscriptions"] == {k: len(v) for k, v in subs.items()}
-
-
-# ---------------------------------------------------------------------------------------------------
-# microstructure
-# ---------------------------------------------------------------------------------------------------
-
-
-def _book(bp, bq, ap, aq, ts=0.0):
-    return BookState([(bp, bq), (bp - 1, 50)], [(ap, aq), (ap + 1, 50)], ts)
-
-
-def test_l1_ofi_signs_and_magnitudes():
-    base = _book(100, 10, 101, 10)
-    assert l1_ofi(base, _book(100, 15, 101, 10)) == 5  # bid size up at same price → buying
-    assert l1_ofi(base, _book(100, 10, 101, 15)) == -5  # ask size up → selling
-    assert l1_ofi(base, _book(101, 5, 102, 5)) == 5 + 10  # bid lifts a level: +Qb −(nothing), ask lifts: +Qa'
-    assert l1_ofi(base, base) == 0
-    assert l1_ofi(BookState([], [], 0), base) is None
-
-
-def test_book_derived_metrics():
-    b = _book(100, 30, 101, 10)
-    assert depth_imbalance(b, 1) == (30 - 10) / 40
-    assert microprice(b) == (101 * 30 + 100 * 10) / 40
-    assert spread_bps(b) == pytest.approx(1 / 100.5 * 1e4)
-    assert depth_imbalance(BookState([], [], 0)) is None
-
-
-def test_micro_aggregator_buckets_and_stamps():
-    m = MicroAggregator(tf_seconds=1800, bucket_of=lambda _c, ts: int(ts // 1800) * 1800)
-    m.on_depth("X", [(100, 10)], [(101, 10)], ts=1000.0)
-    m.on_depth("X", [(100, 20)], [(101, 10)], ts=1100.0)
-    live = m.live("X")
-    assert live["updates"] == 2 and live["ofi"] == 10 and live["ofi_buy"] == 10
-    m.on_depth("X", [(100, 20)], [(101, 10)], ts=1900.0)  # new bucket
-    prev = m.for_bar("X", 0)
-    assert prev is not None and prev["updates"] == 2
-    assert m.for_bar("X", 1800)["updates"] == 1
-    assert "kyle_lambda" in m.stats()["not_computable_without_tape"] and m.stats()["tape_available"] is False
 
 
 # ---------------------------------------------------------------------------------------------------

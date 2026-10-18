@@ -174,8 +174,8 @@ class BarReconciler:
         self._sem = asyncio.Semaphore(max_concurrent)
         self.stats: dict[str, TfStats] = {}
         self.recent: deque[BarCheck] = deque(maxlen=keep_checks)
-        self.decisions_on_live_bar = 0  # times the decision proceeded without REST truth
-        self.decisions_skipped_partial = 0  # unconfirmed fragments that were NOT decided on
+        self.live_bar_kept = 0  # closed 30m bars REST could not confirm in time
+        self.partial_unconfirmed = 0  # of those, fragments the socket joined mid-way
         self.last_sweep_ts: float | None = None
         self.sweeps = 0
 
@@ -302,8 +302,8 @@ class BarReconciler:
     def snapshot(self) -> dict[str, Any]:
         return {
             "by_tf": {tf: s.to_json() for tf, s in sorted(self.stats.items())},
-            "decisions_on_live_bar": self.decisions_on_live_bar,
-            "decisions_skipped_partial": self.decisions_skipped_partial,
+            "live_bar_kept": self.live_bar_kept,
+            "partial_unconfirmed": self.partial_unconfirmed,
             "sweeps": self.sweeps,
             "last_sweep_ts": self.last_sweep_ts,
             "recent_diffs": [c.to_json() for c in list(self.recent)[-25:] if c.found and not c.exact],

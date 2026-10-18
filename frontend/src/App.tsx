@@ -2,30 +2,18 @@ import { BrowserRouter, NavLink, Route, Routes, useLocation } from 'react-router
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { ModeBanner } from './components/ModeBanner'
 import { usePoll } from './lib/usePoll'
-import { Backtest } from './pages/Backtest'
 import { Chart } from './pages/Chart'
-import { Committee } from './pages/Committee'
 import { Options } from './pages/Options'
 import { Overview } from './pages/Overview'
-import { Risk } from './pages/Risk'
-import { Signals } from './pages/Signals'
-import { Strategies } from './pages/Strategies'
 import { System } from './pages/System'
-import { Trades } from './pages/Trades'
 import { Universe } from './pages/Universe'
 import type { Health } from './types'
 
 const PAGES = [
   ['/', 'Overview'],
-  ['/signals', 'Signals'],
-  ['/trades', 'Trades'],
-  ['/strategies', 'Strategies'],
   ['/chart', 'Chart'],
   ['/options', 'Options'],
-  ['/backtest', 'Backtest'],
-  ['/committee', 'Committee'],
   ['/universe', 'Universe'],
-  ['/risk', 'Risk'],
   ['/system', 'System'],
 ] as const
 
@@ -35,15 +23,9 @@ function Pages() {
     <ErrorBoundary page={pathname}>
       <Routes>
         <Route path="/" element={<Overview />} />
-        <Route path="/signals" element={<Signals />} />
-        <Route path="/trades" element={<Trades />} />
-        <Route path="/strategies" element={<Strategies />} />
         <Route path="/chart" element={<Chart />} />
         <Route path="/options" element={<Options />} />
-        <Route path="/backtest" element={<Backtest />} />
-        <Route path="/committee" element={<Committee />} />
         <Route path="/universe" element={<Universe />} />
-        <Route path="/risk" element={<Risk />} />
         <Route path="/system" element={<System />} />
       </Routes>
     </ErrorBoundary>
@@ -71,9 +53,9 @@ export default function App() {
             </NavLink>
           ))}
           <div className="px-2 pt-4 text-[10px] leading-relaxed text-slate-600">
-            FUDKII · FUKAA
+            base · no strategy
             <br />
-            NSE + MCX
+            NSE + MCX on 5paisa
           </div>
         </nav>
         <main className="min-w-0 flex-1">

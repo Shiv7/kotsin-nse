@@ -1,14 +1,10 @@
 """SQLite ledger (WAL) over SQLAlchemy async. One writer — the engine.
 
-Columns exist for what we query on; the full record is kept as JSON alongside, so a field added to
-a strategy's evidence does not need a migration and nothing is ever silently dropped.
+Columns exist for what we query on; the full record is kept as JSON alongside, so a new field does
+not need a migration and nothing is ever silently dropped.
 
-Two tables earn their place beyond the obvious:
+One table earns its place beyond the obvious:
 
-* ``rejections`` — every candidate that did **not** become a signal, with the gate that killed it.
-  "What did the filter reject, and would it have won?" was unanswerable for most of the old stack;
-  the one book that kept a pass-and-fail audit is the one whose config bug was provable in a single
-  query.
 * ``control`` — the mode row. Mode is state, not an environment variable, and ``LIVE*`` carries an
   ``armed_until``: a restart after expiry boots into PAPER rather than silently staying live.
 """
@@ -34,41 +30,6 @@ control = sa.Table(
     sa.Column("halted", sa.Boolean, nullable=False, default=False),
     sa.Column("halt_reason", sa.String, default=""),
     sa.Column("updated_ts", sa.Float, nullable=False),
-)
-wallets = sa.Table(
-    "wallets",
-    meta,
-    sa.Column("strategy", sa.String, primary_key=True),
-    sa.Column("json", sa.Text, nullable=False),
-    sa.Column("updated_ts", sa.Float, nullable=False),
-)
-signals = sa.Table(
-    "signals",
-    meta,
-    sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
-    sa.Column("signal_id", sa.String, unique=True, nullable=False),
-    sa.Column("strategy", sa.String, nullable=False),
-    sa.Column("symbol", sa.String, nullable=False),
-    sa.Column("direction", sa.String, nullable=False),
-    sa.Column("ts", sa.Integer, nullable=False),
-    sa.Column("grade", sa.String, default=""),
-    sa.Column("decision", sa.String, nullable=False),
-    sa.Column("decision_reason", sa.String, default=""),
-    sa.Column("json", sa.Text, nullable=False),
-    sa.Column("created_ts", sa.Float, nullable=False),
-    sa.Index("ix_signals_ts", "ts"),
-)
-rejections = sa.Table(
-    "rejections",
-    meta,
-    sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
-    sa.Column("strategy", sa.String, nullable=False),
-    sa.Column("symbol", sa.String, nullable=False),
-    sa.Column("ts", sa.Integer, nullable=False),
-    sa.Column("binding_gate", sa.String, nullable=False),
-    sa.Column("json", sa.Text, nullable=False),
-    sa.Column("created_ts", sa.Float, nullable=False),
-    sa.Index("ix_rejections_gate", "strategy", "binding_gate"),
 )
 orders = sa.Table(
     "orders",
@@ -112,14 +73,6 @@ trades = sa.Table(
     sa.Column("exit_reason", sa.String, nullable=False),
     sa.Column("json", sa.Text, nullable=False),
     sa.Index("ix_trades_closed", "closed_ts"),
-)
-wallet_snapshots = sa.Table(
-    "wallet_snapshots",
-    meta,
-    sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
-    sa.Column("ts", sa.Float, nullable=False),
-    sa.Column("strategy", sa.String, nullable=False),
-    sa.Column("json", sa.Text, nullable=False),
 )
 events = sa.Table(
     "events",
@@ -186,70 +139,6 @@ class Ledger:
                 control.update()
                 .where(control.c.id == 1)
                 .values(halted=halted, halt_reason=reason, updated_ts=time.time())
-            )
-
-    # -- wallets ----------------------------------------------------------------------------------
-
-    async def upsert_wallet(self, strategy: str, data: dict[str, Any]) -> None:
-        now = time.time()
-        async with self.engine.begin() as conn:
-            existing = (
-                await conn.execute(sa.select(wallets.c.strategy).where(wallets.c.strategy == strategy))
-            ).first()
-            if existing:
-                await conn.execute(
-                    wallets.update()
-                    .where(wallets.c.strategy == strategy)
-                    .values(json=_j(data), updated_ts=now)
-                )
-            else:
-                await conn.execute(
-                    wallets.insert().values(strategy=strategy, json=_j(data), updated_ts=now)
-                )
-
-    async def load_wallets(self) -> dict[str, dict[str, Any]]:
-        async with self.engine.begin() as conn:
-            rows = (await conn.execute(sa.select(wallets))).mappings().all()
-        return {r["strategy"]: json.loads(r["json"]) for r in rows}
-
-    async def snapshot_wallet(self, strategy: str, data: dict[str, Any]) -> None:
-        async with self.engine.begin() as conn:
-            await conn.execute(
-                wallet_snapshots.insert().values(ts=time.time(), strategy=strategy, json=_j(data))
-            )
-
-    # -- signals ------------------------------------------------------------------------------------
-
-    async def insert_signal(self, sig: dict[str, Any], decision: str, reason: str = "") -> None:
-        async with self.engine.begin() as conn:
-            await conn.execute(
-                sqlite_insert(signals)
-                .values(
-                    signal_id=sig["signal_id"],
-                    strategy=sig["strategy"],
-                    symbol=sig["symbol"],
-                    direction=sig["direction"],
-                    ts=sig["ts"],
-                    grade=sig.get("grade", ""),
-                    decision=decision,
-                    decision_reason=reason,
-                    json=_j({**sig, "decision": decision, "decision_reason": reason}),
-                    created_ts=time.time(),
-                )
-                .on_conflict_do_nothing(index_elements=[signals.c.signal_id])
-            )
-
-    async def insert_rejection(self, rej: dict[str, Any]) -> None:
-        async with self.engine.begin() as conn:
-            await conn.execute(
-                rejections.insert().values(
-                    strategy=rej["strategy"],
-                    symbol=rej["symbol"],
-                    ts=rej["ts"],
-                    binding_gate=rej["binding_gate"],
-                    json=_j(rej),
-                    created_ts=time.time(),
-                )
             )
 
     # -- orders / positions / trades -------------------------------------------------------------------
@@ -329,7 +218,10 @@ class Ledger:
 
     async def event(self, kind: str, data: dict[str, Any]) -> None:
         async with self.engine.begin() as conn:
-            await conn.execute(events.insert().values(ts=time.time(), kind=kind, json=_j(data)))
+            now = time.time()
+            await conn.execute(
+                events.insert().values(ts=now, kind=kind, json=_j({"kind": kind, "ts": now, **data}))
+            )
 
     async def insert_health(self, data: dict[str, Any]) -> None:
         async with self.engine.begin() as conn:
@@ -347,53 +239,10 @@ class Ledger:
             rows = (await conn.execute(stmt)).all()
         return [json.loads(r[0]) for r in rows]
 
-    async def gate_histogram(self, strategy: str | None = None) -> list[dict[str, Any]]:
-        """Which gate is binding, as a number. The question ``NSE_BB_30`` could never answer."""
-        stmt = sa.select(
-            rejections.c.strategy,
-            rejections.c.binding_gate,
-            sa.func.count().label("n"),
-        ).group_by(rejections.c.strategy, rejections.c.binding_gate)
-        if strategy:
-            stmt = stmt.where(rejections.c.strategy == strategy)
-        async with self.engine.begin() as conn:
-            rows = (await conn.execute(stmt.order_by(sa.desc("n")))).mappings().all()
-        return [dict(r) for r in rows]
-
-    async def pnl_by_strategy(self) -> dict[str, dict[str, Any]]:
-        """Trades, net, and the last close per book — the 'when did it last fire and what did it
-        make' a reviewer asks first."""
-        stmt = sa.select(
-            trades.c.strategy,
-            sa.func.count().label("n"),
-            sa.func.sum(trades.c.net).label("net"),
-            sa.func.sum(trades.c.charges).label("charges"),
-            sa.func.max(trades.c.closed_ts).label("last_closed_ts"),
-        ).group_by(trades.c.strategy)
-        async with self.engine.begin() as conn:
-            rows = (await conn.execute(stmt)).mappings().all()
-        return {r["strategy"]: dict(r) for r in rows}
-
-    async def last_signal(self, strategy: str) -> dict[str, Any] | None:
-        rows = await self.recent(signals, 1, order_col="ts", where=signals.c.strategy == strategy)
-        return rows[0] if rows else None
-
-    async def signal(self, signal_id: str) -> dict[str, Any] | None:
-        rows = await self.recent(signals, 1, where=signals.c.signal_id == signal_id)
-        return rows[0] if rows else None
-
-    async def trade_for_signal(self, signal_id: str) -> dict[str, Any] | None:
-        """The closed trade a signal produced, if any. Columns exist for what is queried in bulk;
-        the signal id lives in the JSON, and a personal ledger is small enough to scan."""
-        for row in await self.recent(trades, 2000):
-            if row.get("signal_id") == signal_id:
-                return row
-        return None
-
     async def counts(self) -> dict[str, int]:
         out: dict[str, int] = {}
         async with self.engine.begin() as conn:
-            for t in (signals, rejections, orders, positions, trades, events):
+            for t in (orders, positions, trades, events):
                 out[t.name] = int(
                     (await conn.execute(sa.select(sa.func.count()).select_from(t))).scalar() or 0
                 )
