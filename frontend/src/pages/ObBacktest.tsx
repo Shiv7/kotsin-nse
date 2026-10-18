@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { MtfRun, type MtfRunData } from '../components/MtfRun'
 import { StockPopup } from '../components/StockPopup'
 import { Card, ErrorLine, Stat, Table } from '../components/Ui'
 import { cls, fmt, ist } from '../lib/api'
@@ -70,7 +71,7 @@ export function ObBacktest() {
   const runs = usePoll<RunHead[]>('/api/obtests', 30000)
   const [sel, setSel] = useState('')
   const active = sel || runs.data?.[0]?.id || ''
-  const run = usePoll<RunHead & { trades: ObTrade[] }>(active ? `/api/obtests/${active}` : null, 600000)
+  const run = usePoll<RunHead & { trades: ObTrade[]; kind?: string }>(active ? `/api/obtests/${active}` : null, 600000)
   const [filter, setFilter] = useState('')
   const [open, setOpen] = useState<ObTrade | null>(null)
 
@@ -78,7 +79,8 @@ export function ObBacktest() {
     () => (run.data?.trades ?? []).filter((t) => !filter || t.symbol.includes(filter.toUpperCase()) || t.exit_reason === filter.toUpperCase()),
     [run.data, filter],
   )
-  const sm = run.data?.summary
+  const isMtf = run.data?.kind === 'mtf'
+  const sm = isMtf ? undefined : run.data?.summary
 
   return (
     <div className="space-y-4 p-4">
@@ -113,6 +115,7 @@ export function ObBacktest() {
           </div>
         </Card>
 
+        {isMtf && run.data && <MtfRun run={run.data as unknown as MtfRunData} />}
         {sm && run.data && (
           <div className="space-y-4">
             <div className="grid grid-cols-2 gap-3 md:grid-cols-6">

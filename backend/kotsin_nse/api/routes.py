@@ -339,6 +339,33 @@ def build_app(engine: Engine) -> FastAPI:
             raise HTTPException(404, f"no run {run_id}")
         return json.loads(await asyncio.to_thread(path.read_text))
 
+    @api.get("/history/range/{symbol}")
+    async def history_range(symbol: str, start: int, end: int, tf: str = "60m") -> dict[str, Any]:
+        """Candles across days from the 5-minute cache, cleaned and rolled up to ``tf`` (5m, 15m,
+        60m, 240m) on the session grid — the chart behind a multi-day trade."""
+        from ..research.history import HistoryStore
+        from ..research.mtf import TF_MIN, clean_5m, resample
+
+        if tf not in TF_MIN:
+            raise HTTPException(400, f"tf must be one of {', '.join(TF_MIN)}")
+
+        def _bars() -> list[dict[str, Any]]:
+            df = HistoryStore(engine.s.data_dir / "history").load(symbol.upper(), "5m")
+            df = df[(df["ts"] >= start) & (df["ts"] < end)]
+            df = clean_5m(df)
+            if df.empty:
+                return []
+            out = df if tf == "5m" else resample(df, tf)
+            return [
+                {"ts": int(r.ts), "o": float(r.o), "h": float(r.h), "l": float(r.l), "c": float(r.c), "v": float(r.v)}
+                for r in out.itertuples()
+            ]
+
+        bars = await asyncio.to_thread(_bars)
+        if not bars:
+            raise HTTPException(404, f"no 5m history for {symbol} in that range — run fetch-history --tf 5m")
+        return {"symbol": symbol.upper(), "tf": tf, "bars": bars}
+
     @api.get("/history/bars/{symbol}")
     async def history_bars(symbol: str, day: str, tf: str = "5m", until: str | None = None) -> dict[str, Any]:
         """A past session's candles from the 1m cache, rolled up to ``tf`` on the 09:15 grid —

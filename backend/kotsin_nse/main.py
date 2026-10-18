@@ -160,6 +160,35 @@ def run_playbook(settings: Settings, args: argparse.Namespace) -> None:
     print(f"  setups {sm['by_setup']}\n  exits {sm['by_exit']}")
 
 
+def run_mtf(settings: Settings, args: argparse.Namespace) -> None:
+    """Higher-timeframe sweeps timed on a lower timeframe (research/mtf.py), one stock at a time."""
+    from dataclasses import fields
+
+    from .research.mtf import MTFParams, run
+
+    known = {f.name for f in fields(MTFParams)}
+    over: dict[str, object] = {}
+    for kv in args.set or []:
+        k, _, v = kv.partition("=")
+        if k not in known:
+            raise SystemExit(f"unknown parameter {k!r}; known: {', '.join(sorted(known))}")
+        cur = getattr(MTFParams(), k)
+        over[k] = v if isinstance(cur, str) else (v.lower() == "true") if isinstance(cur, bool) else type(cur)(v)
+    syms = [x.strip().upper() for x in args.symbols.split(",") if x.strip()] or None
+
+    def on_symbol(sym: str, got: list, n: int, of: int) -> None:
+        if n % 25 == 0 or n == of:
+            print(f"  {n}/{of} stocks", flush=True)
+
+    out = run(settings, date.fromisoformat(args.start), date.fromisoformat(args.end), MTFParams(**over),  # type: ignore[arg-type]
+              symbols=syms, label=args.label, on_symbol=on_symbol)
+    sm = out["summary"]
+    print(f"{out['id']}  {sm['trades']} trades ({out['candidates']} candidates)  win {sm['win_rate']}%  avg {sm['avg_r']} R  "
+          f"total {sm['total_r']} R  net ₹{sm['net_inr']:,}  costs {sm['costs_r_per_trade']} R/trade  t(by week) {sm['t_by_week']}  "
+          f"months +{sm['months_positive']}/-{sm['months_negative']}  held {sm['avg_sessions_held']} sessions")
+    print(f"  setups {sm['by_setup']}\n  exits {sm['by_exit']}\n  sides {sm['by_side']}")
+
+
 def run_obtest(settings: Settings, args: argparse.Namespace) -> None:
     """The order-block playbook over cached days, one day at a time (light on the CPU)."""
     from dataclasses import fields
@@ -219,6 +248,12 @@ def build_parser() -> argparse.ArgumentParser:
     pb.add_argument("--end", default="")
     pb.add_argument("--label", default="")
     pb.add_argument("--set", action="append", help="e.g. --set strategy=VA_REENTRY --set min_stop_adr=0.2")
+    m = sub.add_parser("mtf-backtest", help="1h/4h sweeps timed on 15m/5m, over the 5m cache")
+    m.add_argument("--start", required=True)
+    m.add_argument("--end", required=True)
+    m.add_argument("--symbols", default="")
+    m.add_argument("--label", default="")
+    m.add_argument("--set", action="append", help="e.g. --set htf=240m --set ltf=5m --set daily_filter=true")
     return p
 
 
@@ -241,6 +276,8 @@ def cli() -> None:
         run_obtest(settings, args)
     elif command == "pb-backtest":
         run_playbook(settings, args)
+    elif command == "mtf-backtest":
+        run_mtf(settings, args)
     else:  # pragma: no cover - argparse rejects anything else
         raise SystemExit(f"unknown command {command}")
 
