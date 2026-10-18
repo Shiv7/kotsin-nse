@@ -316,7 +316,7 @@ def cached_days(store: HistoryStore, probe: str = "RELIANCE") -> list[date]:
 
 def list_runs(root: Path, limit: int = 30) -> list[dict[str, Any]]:
     out = []
-    for f in sorted([*root.glob("ob-*.json"), *root.glob("pb-*.json"), *root.glob("mtf-*.json"), *root.glob("fib-*.json")], key=lambda x: x.stat().st_mtime, reverse=True)[:limit]:
+    for f in sorted([*root.glob("ob-*.json"), *root.glob("pb-*.json"), *root.glob("mtf-*.json"), *root.glob("fib-*.json"), *root.glob("swing-*.json")], key=lambda x: x.stat().st_mtime, reverse=True)[:limit]:
         d = json.loads(f.read_text())
         out.append({k: d[k] for k in ("id", "label", "created_ts", "seconds", "params", "range", "summary")})
     return out

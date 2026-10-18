@@ -226,6 +226,31 @@ def run_fib(settings: Settings, args: argparse.Namespace) -> None:
     print(f"  confluence {sm['by_confluence']}\n  exits {sm['by_exit']}\n  sides {sm['by_side']}\n  OI {sm['by_oi_align']}")
 
 
+def run_swing(settings: Settings, args: argparse.Namespace) -> None:
+    """Higher-timeframe reversals with a structure trail (research/swing.py)."""
+    from dataclasses import fields
+
+    from .research.swing import SwingParams, run
+
+    known = {f.name for f in fields(SwingParams)}
+    over: dict[str, object] = {}
+    for kv in args.set or []:
+        k, _, v = kv.partition("=")
+        if k not in known:
+            raise SystemExit(f"unknown parameter {k!r}; known: {', '.join(sorted(known))}")
+        cur = getattr(SwingParams(), k)
+        over[k] = v if isinstance(cur, str) else (v.lower() == "true") if isinstance(cur, bool) else type(cur)(v)
+    syms = [x.strip().upper() for x in args.symbols.split(",") if x.strip()] or None
+    out = run(settings, date.fromisoformat(args.start), date.fromisoformat(args.end), SwingParams(**over),  # type: ignore[arg-type]
+              symbols=syms, label=args.label)
+    sm = out["summary"]
+    print(f"{out['id']}  {sm['trades']} trades ({out['candidates']} candidates)  win {sm['win_rate']}%  avg {sm['avg_r']} R  "
+          f"median {sm.get('median_r')} R  5R+ {sm.get('five_r_plus')}  best {sm.get('best_r')} R  total {sm['total_r']} R  "
+          f"net ₹{sm['net_inr']:,}  t(by week) {sm['t_by_week']}  months +{sm['months_positive']}/-{sm['months_negative']}  "
+          f"held {sm['avg_sessions_held']} sessions")
+    print(f"  funnel {out['funnel']}\n  setups {sm['by_setup']}\n  exits {sm['by_exit']}\n  sides {sm['by_side']}")
+
+
 def run_obtest(settings: Settings, args: argparse.Namespace) -> None:
     """The order-block playbook over cached days, one day at a time (light on the CPU)."""
     from dataclasses import fields
@@ -292,6 +317,13 @@ def build_parser() -> argparse.ArgumentParser:
     fb.add_argument("--label", default="")
     fb.add_argument("--set", action="append", help="e.g. --set zone=ote --set cpr_narrow=true --set oi_filter=WITH")
 
+    sw = sub.add_parser("swing-backtest", help="higher-timeframe reversals with a structure trail")
+    sw.add_argument("--start", required=True)
+    sw.add_argument("--end", required=True)
+    sw.add_argument("--symbols", default="")
+    sw.add_argument("--label", default="")
+    sw.add_argument("--set", action="append", help="e.g. --set entry=1h --set use_bias=false --set sides=long")
+
     oi = sub.add_parser("fetch-oi", help="NSE's daily F&O bhavcopy (official OI of every contract)")
     oi.add_argument("--start", required=True)
     oi.add_argument("--end", default=today.isoformat())
@@ -324,6 +356,8 @@ def cli() -> None:
         run_obtest(settings, args)
     elif command == "pb-backtest":
         run_playbook(settings, args)
+    elif command == "swing-backtest":
+        run_swing(settings, args)
     elif command == "fib-backtest":
         run_fib(settings, args)
     elif command == "fetch-oi":

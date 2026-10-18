@@ -105,3 +105,99 @@ def state_table(store: OiDailyStore, cache_dir: Path | None = None) -> pd.DataFr
 def previous_state(table: pd.DataFrame, symbol: str, day: date) -> int | None:
     rows = table[(table["symbol"] == symbol) & (table["day"] < day.isoformat())]
     return int(rows["state"].iloc[-1]) if len(rows) else None
+
+
+# -- the 64-state table (operator, 2026-10-18) ------------------------------------------------------
+# Each instrument gets its OWN build-up state from its own price and OI: futures, the calls and the
+# puts near the money. Score: futures LB +2 / SC +1 / SB −2 / LU −1; calls LB +1 / SC +0.5 / SB −1 /
+# LU −0.5 (calls bullish when bought); puts the reverse (SB +1 / LU +0.5 / LB −1 / SC −0.5).
+
+FUT_SCORE = {"LONG BUILD-UP": 2.0, "SHORT COVERING": 1.0, "SHORT BUILD-UP": -2.0, "LONG UNWINDING": -1.0}
+CALL_SCORE = {"LB": 1.0, "SC": 0.5, "SB": -1.0, "LU": -0.5}
+PUT_SCORE = {"LB": -1.0, "SC": -0.5, "SB": 1.0, "LU": 0.5}
+SHORT = {"LONG BUILD-UP": "LB", "SHORT COVERING": "SC", "SHORT BUILD-UP": "SB", "LONG UNWINDING": "LU"}
+
+
+def _state(price_up: bool, oi_up: bool) -> str:
+    return ("LB" if oi_up else "SC") if price_up else ("SB" if oi_up else "LU")
+
+
+def bias(score: float) -> str:
+    if score >= 3:
+        return "Strong Bull"
+    if score >= 1.5:
+        return "Bull"
+    if score > 0:
+        return "Mild Bull"
+    if score == 0:
+        return "Neutral"
+    if score > -1.5:
+        return "Mild Bear"
+    if score > -3:
+        return "Bear"
+    return "Strong Bear"
+
+
+def premium_signal(fut_up: bool, call_up: bool, put_up: bool) -> str:
+    if call_up and put_up:
+        return "IV↑ big move"
+    if not call_up and not put_up:
+        return "IV↓ range"
+    return "Normal" if call_up == fut_up else "Divergence"
+
+
+def options64_table(store: OiDailyStore, fut: pd.DataFrame, cache: Path | None = None) -> pd.DataFrame:
+    """Per (symbol, day): the calls' and the puts' own state — OI-weighted premium change against
+    each contract's own previous close, and the summed OI change — over the near-the-money strikes."""
+    if cache is not None and cache.exists():
+        held = pd.read_parquet(cache)
+        if len(held) and held["day"].max() >= fut["day"].max():
+            return held
+    ref = fut.set_index(["symbol", "day"])["near_close"]
+    key = ["symbol", "expiry", "strike", "option_type"]
+    prev: pd.DataFrame | None = None
+    rows = []
+    for d in store.days():
+        ds = d.isoformat()
+        df = store.load(d, columns=("symbol", "kind", "expiry", "strike", "option_type", "close", "oi", "oi_change"))
+        o = df[df["kind"] == "OPTSTK"][[*key, "close", "oi", "oi_change"]]
+        today_all = o
+        if prev is not None and ds in ref.index.get_level_values("day"):
+            px = ref.xs(ds, level="day")
+            o = o[o["symbol"].isin(px.index)]
+            o = o.assign(px=o["symbol"].map(px))
+            o = o[(o["strike"] - o["px"]).abs() <= BAND * o["px"]]
+            exp = pd.to_datetime(o["expiry"])
+            near = exp.groupby(o["symbol"]).transform("min")
+            days_left = (near - pd.Timestamp(d)).dt.days
+            nxt = exp[exp > near].groupby(o["symbol"][exp > near]).min()
+            o = o[(exp == near) | ((days_left <= ROLL_DAYS) & (exp == o["symbol"].map(nxt)))]
+            o = o.merge(prev.rename(columns={"close": "prev_close"})[[*key, "prev_close"]], on=key, how="left")
+            o = o[(o["prev_close"] > 0) & (o["close"] > 0)]
+            o = o.assign(chg=o["close"] / o["prev_close"] - 1, w=o["oi"].clip(lower=1))
+            g = o.groupby(["symbol", "option_type"]).apply(
+                lambda x: pd.Series({"px_chg": float(np.average(x["chg"], weights=x["w"])), "oi_chg": float(x["oi_change"].sum())}),
+                include_groups=False,
+            ).unstack("option_type")
+            g.columns = [f"{a}_{b}" for a, b in g.columns]
+            rows.append(g.reset_index().assign(day=ds))
+        prev = today_all
+    t = pd.concat(rows, ignore_index=True).dropna()
+    if cache is not None:
+        t.to_parquet(cache, index=False)
+    return t
+
+
+def state64_table(store: OiDailyStore, cache_dir: Path | None = None) -> pd.DataFrame:
+    fut = futures_table(store, cache_dir / "_futures.parquet" if cache_dir else None)
+    opt = options64_table(store, fut, cache_dir / "_options64.parquet" if cache_dir else None)
+    t = fut.merge(opt, on=["symbol", "day"], how="inner")
+    t["fut"] = [SHORT[x] for x in t["label"]]
+    t["call"] = [_state(p > 0, o > 0) for p, o in zip(t["px_chg_CE"], t["oi_chg_CE"], strict=True)]
+    t["put"] = [_state(p > 0, o > 0) for p, o in zip(t["px_chg_PE"], t["oi_chg_PE"], strict=True)]
+    t["score"] = [FUT_SCORE[a] + CALL_SCORE[b] + PUT_SCORE[c] for a, b, c in zip(t["label"], t["call"], t["put"], strict=True)]
+    t["bias"] = [bias(s) for s in t["score"]]
+    t["premium"] = [
+        premium_signal(f > 0, c > 0, p > 0) for f, c, p in zip(t["price_chg_pct"], t["px_chg_CE"], t["px_chg_PE"], strict=True)
+    ]
+    return t
