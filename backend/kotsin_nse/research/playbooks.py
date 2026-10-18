@@ -56,6 +56,9 @@ class PBParams:
     sweep_min_adr: float = 0.02  # the wick must go at least this far through the level
     breakeven_after_t1: bool = True
     max_trades_per_day: int = 6  # across all stocks, first come first served
+    #: trade the MIRROR of each plan: the other side, the same risk and target distances. A test of
+    #: "the failed break was not a failure" (value-edge sweeps lost at t −4.0 on 3 Aug – 22 Sep).
+    invert: bool = False
 
 
 @dataclass(slots=True)
@@ -240,6 +243,9 @@ def _plan(
     rr = abs(t2 - entry) / risk
     if rr < p.min_rr:
         return None
+    if p.invert:
+        side, setup = ("BEARISH" if side == "BULLISH" else "BULLISH"), f"{setup} (inverted)"
+        stop, t1, t2 = 2 * entry - stop, 2 * entry - t1, 2 * entry - t2
     return {"side": side, "setup": setup, "ts": ts, "entry": entry, "stop": stop, "t1": t1, "t2": t2, "rr": round(rr, 2), "level": lvl}
 
 
