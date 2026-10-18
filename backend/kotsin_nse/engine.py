@@ -121,7 +121,7 @@ from .instrument.select import (
     select_option,
     strike_candidates,
 )
-from .instrument.universe import ScripGroup, UniverseBuilder, UniversePolicy
+from .instrument.universe import ContractRoll, ScripGroup, UniverseBuilder, UniversePolicy
 from .ledger.db import Ledger, events
 from .market.candles import snap_candles
 from .market.fo_bhavcopy import OiDailyStore
@@ -278,6 +278,15 @@ OPEN_SETTLE_S = 60.0
 FUT_GAP_SLOTS = 15
 #: the after-close audit of the day's 30m bars (``_audit_bars``), IST — NSE closes 15:30
 BAR_AUDIT_HM = "15:40"
+#: The daily contract roll (``_roll_contracts``), IST. The futures a group holds were picked once, at
+#: boot, so a process that ran across an expiry kept the dead month: engine A, up from 10 Oct, read and
+#: traded CRUDEOIL 19 Oct to its last day although the MCX roll had moved it to November on 14 Oct (this
+#: engine too, until its 19 Oct 00:51 restart), and from 20 Oct it would have had no feed for the name.
+#: 01:00 is past the 5paisa login window (REST answers again ~00:20-00:50) and outside every session's
+#: hours — no bar is forming, and a snapshot frame for a newly subscribed code lands outside the session
+#: clock. A failed or deferred roll is retried every CONTRACT_ROLL_RETRY_S.
+CONTRACT_ROLL_HM = "01:00"
+CONTRACT_ROLL_RETRY_S = 600.0
 #: a name whose previous session is still 5paisa's provisional 09:15 daily candle is re-asked this
 #: often (not once a session: the broker's answer changes during the morning), and the ``zones``
 #: health line fails from this IST minute while any is left — it has no levels, so every trigger on
@@ -693,6 +702,14 @@ class Engine:
         self._carry_pending: list[dict[str, Any]] = []
         self._sweep_task: asyncio.Task[Any] | None = None
         self._intraday_rebuild_day: str = ""
+        #: the IST day whose contracts the groups hold (boot picks the day it boots on; ``_roll_contracts``
+        #: every day after); the last try, its task, the rolls made and what is still owed, and the day alarmed
+        self._contract_roll_day: str = ""
+        self._contract_roll_last_try = 0.0
+        self._contract_roll_task: asyncio.Task[Any] | None = None
+        self.contract_rolls: list[dict[str, Any]] = []
+        self._contract_roll_pending: dict[str, str] = {}
+        self._contract_roll_alarmed: str = ""
         #: PAPER limit orders (exec/resting.py) and the ones working right now, by client order id
         self.limit_policy = LimitPolicy(
             enabled=settings.paper_limit_orders,
@@ -1322,6 +1339,7 @@ class Engine:
         )
         self.groups = groups
         self.underlyings = {g.root: g.underlying for g in groups.values()}
+        self._contract_roll_day = ist_today().isoformat()  # a boot holds the contracts of the day it boots on
         for g in groups.values():
             for inst in (g.underlying, *g.futures):
                 self._segment_by_code[inst.scrip_code] = inst.segment
@@ -1615,6 +1633,12 @@ class Engine:
         return n
 
     def _seed_daily(self, inst: Instrument, rows: list[dict[str, Any]]) -> None:
+        held = self.underlyings.get(inst.symbol)
+        if held is not None and held.scrip_code != inst.scrip_code:
+            # asked for a contract the name has since rolled off (a refetch in flight across
+            # ``_roll_contracts``): the old month's candles are not this series'
+            log.info("daily.rolled_contract_dropped", symbol=inst.symbol, scrip=inst.scrip_code, held=held.scrip_code)
+            return
         bars = [
             UnifiedBar(
                 symbol=inst.symbol,
@@ -2484,6 +2508,203 @@ class Engine:
             log.info("universe.intraday_rebuild", new_strikes=len(fresh))
         except Exception as exc:  # noqa: BLE001 - a failed rebuild keeps the overnight universe
             log.warning("universe.intraday_rebuild_failed", error=str(exc))
+
+    # -- the daily contract roll ---------------------------------------------------------------------
+
+    def _contract_roll_due(self, now: float) -> bool:
+        """Once a day from CONTRACT_ROLL_HM, retried every CONTRACT_ROLL_RETRY_S until nothing is owed. A
+        boot picks the contracts of the day it boots on, so the day it booted is never rolled again."""
+        return (
+            self.universe_builder is not None
+            and bool(self.groups)
+            and self.reconciler_ready
+            and not self.booting
+            and ist_day(now).isoformat() != self._contract_roll_day
+            and ist_hm(now) >= CONTRACT_ROLL_HM
+            and (self._contract_roll_task is None or self._contract_roll_task.done())
+            and now - self._contract_roll_last_try >= CONTRACT_ROLL_RETRY_S
+        )
+
+    def contract_drift(self, today: date | None = None) -> list[ContractRoll]:
+        """Every group not on the futures a boot today would hold (``UniverseBuilder.roll_plan``)."""
+        if self.universe_builder is None or not self.groups:
+            return []
+        return self.universe_builder.roll_plan(self.groups, today or ist_today())
+
+    def _contract_not_current(self, root: str, inst: Instrument | None) -> str | None:
+        """Why ``inst`` is not the contract a book may trade for ``root`` today, or None. The MCX roll
+        (operator, 2026-09-30) reads the next month from five days before expiry; a process that has not
+        rolled yet must not keep trading the expiring month in the meantime."""
+        if inst is None or self.universe_builder is None or inst.kind is not InstrumentKind.FUTURE:
+            return None
+        want = self.universe_builder.futures_for(root, inst.segment, ist_today())
+        if not want or want[0].scrip_code == inst.scrip_code:
+            return None
+        return (f"{inst.name or inst.scrip_code} (expires {inst.expiry[:10]}) is not today's contract — "
+                f"{want[0].name or want[0].scrip_code} is; no entry until the contract roll")
+
+    def _roll_blocked(self, roll: ContractRoll, now: float) -> str | None:
+        """Why a group's underlying cannot be swapped right now, or None."""
+        old = roll.old_underlying.scrip_code
+        if in_session(roll.segment, now):
+            return f"{roll.segment.value} session hours — a forming session's bars are never swapped"
+        for p in self.positions.values():
+            if p.status == "OPEN" and p.qty_remaining > 0 and old in (p.instrument.scrip_code, p.underlying.scrip_code):
+                return f"position {p.id} is open on {old}"
+        return None
+
+    async def _roll_history(self, inst: Instrument, today: date) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """The new month's decision bars and dailies, the windows ``_backfill`` uses. A call that raises
+        fails the roll (the old month stays, retried); an empty answer is an answer (a dormant contract)."""
+        start_intraday = today - timedelta(days=max(7, self.s.backfill_days // 2))
+        first = today
+        for _ in range(BACKFILL_SESSIONS):
+            first = self.calendar.previous_trading_day(first)
+        start_intraday = min(start_intraday, first - timedelta(days=1))
+        start_daily = today - timedelta(days=400)
+        rows30 = await self.rest.candles(inst, DECISION_TF, start_intraday.isoformat(), today.isoformat())
+        await asyncio.sleep(0.15)
+        rows1d = await self.rest.candles(inst, "1d", start_daily.isoformat(), today.isoformat())
+        return list(rows30 or []), list(rows1d or [])
+
+    def _swap_underlying(self, g: ScripGroup, new: Instrument, rows30: list[dict[str, Any]], rows1d: list[dict[str, Any]]) -> None:
+        """Move ``g``'s bar series onto ``new``: the old month's bars, levels and forming bars go, the new
+        month's history comes in — what a boot on the new month would hold."""
+        old = g.underlying
+        # the name points at the new month first: a daily refetch still in flight for the old one
+        # is then refused by ``_seed_daily`` instead of landing on the new month's series
+        g.underlying = new
+        self.underlyings[g.root] = new
+        self._segment_by_code[new.scrip_code] = new.segment
+        self.store.drop_symbol(old.symbol)
+        self.aggregator.untrack(old.scrip_code)
+        self.aggregator.track(new)
+        if rows30:
+            self.aggregator.seed(new, DECISION_TF, rows30, ts_of=ist_naive_to_ts)
+        if rows1d:
+            self._seed_daily(new, rows1d)
+        else:
+            self._daily_failed.add(new.symbol)
+        self._zone_cache.pop(new.symbol, None)
+
+    async def _roll_contracts(self, *, now: float | None = None) -> list[dict[str, Any]]:
+        """Re-pick every group's futures for today with the boot's own rule, and move what changed.
+
+        * NSE (cash-led groups): the futures list only — the OI legs go from [Oct, Nov] to [Nov, Dec] the
+          day after expiry; the equity, its bars and levels are untouched.
+        * MCX, and an index with no cash leg: the underlying itself changes — its bars and dailies are
+          refetched for the new month and replace the old month's (``_swap_underlying``), only outside
+          session hours and never under an open position on the old month; until then the old month
+          stays, is retried, and takes no entry (``_contract_not_current``).
+        Newly held codes are subscribed (price + OI; never depth — the archive sample is cash equities,
+        which never roll, and everything else follows ``_follow_depth``); codes no group or position
+        still wants are unsubscribed (the feed keeps any a twin holds)."""
+        now = time.time() if now is None else now
+        started = time.time()
+        assert self.universe_builder is not None
+        today = ist_day(now)
+        day = today.isoformat()
+        rolled: list[dict[str, Any]] = []
+        pending: dict[str, str] = {}
+        try:
+            self.universe_builder.cat = self.catalogue_loader.catalogue
+            plan = self.universe_builder.roll_plan(self.groups, today)
+            add_mf: dict[str, Instrument] = {}
+            add_oi: dict[str, Instrument] = {}
+            done: list[ContractRoll] = []
+            for r in plan:
+                g = self.groups[r.root]
+                if r.new_underlying is not None:
+                    why = self._roll_blocked(r, now)
+                    if why is None:
+                        try:
+                            rows30, rows1d = await self._roll_history(r.new_underlying, today)
+                        except Exception as exc:  # noqa: BLE001 - the old month stays and the roll is retried
+                            why = f"history for {r.new_underlying.scrip_code} failed: {str(exc)[:80]}"
+                    if why is None:
+                        why = self._roll_blocked(r, now + (time.time() - started))  # the fetch awaited: a session or a position may have opened
+                    if why is not None:
+                        pending[r.root] = why
+                        continue
+                    self._swap_underlying(g, r.new_underlying, rows30, rows1d)
+                    before = {o.scrip_code for o in (*g.options, *g.oi_options)}
+                    self.universe_builder.select_strikes(g, self._prev_close(r.root), today)
+                    for o in (*g.options, *g.oi_options):
+                        self._segment_by_code[o.scrip_code] = o.segment
+                        if o.scrip_code not in before:
+                            add_oi[o.scrip_code] = o
+                    for o in g.options:
+                        self._option_codes.add(o.scrip_code)
+                        if o.scrip_code not in before:
+                            add_mf[o.scrip_code] = o
+                g.futures = list(r.new)
+                for f in r.new:
+                    self._segment_by_code[f.scrip_code] = f.segment
+                    add_mf[f.scrip_code] = f
+                    add_oi[f.scrip_code] = f
+                self._tape_legs_cache.pop(r.root, None)
+                self._fut_cache.pop(r.root, None)
+                done.append(r)
+            self._future_to_underlying = {f.scrip_code: g.root for g in self.groups.values() for f in g.futures}
+            wanted = {i.scrip_code for g in self.groups.values()
+                      for i in (g.underlying, *g.futures, *g.options, *g.oi_options)}
+            held = {c for p in self.positions.values() if p.status == "OPEN" and p.qty_remaining > 0
+                    for c in (p.instrument.scrip_code, p.underlying.scrip_code)}
+            gone = {f.scrip_code: f for r in done for f in (r.old_underlying, *r.old)
+                    if f.scrip_code not in wanted and f.scrip_code not in held}
+            fresh_mf = [i for i in add_mf.values() if not self.feed.is_subscribed("mf", i.scrip_code)]
+            fresh_oi = [i for i in add_oi.values() if not self.feed.is_subscribed("oi", i.scrip_code)]
+            if fresh_mf:
+                await self.feed.subscribe("mf", fresh_mf)
+            if fresh_oi:
+                await self.feed.subscribe("oi", fresh_oi)
+            if gone:
+                await self.feed.unsubscribe("mf", list(gone.values()))
+                await self.feed.unsubscribe("oi", list(gone.values()))
+            rolled = [{"day": day, "root": r.root, "segment": r.segment.value, "what": r.describe(),
+                       "from": [f.scrip_code for f in r.old], "to": [f.scrip_code for f in r.new],
+                       "underlying": r.new_underlying.scrip_code if r.new_underlying is not None else None}
+                      for r in done]
+            if done and any(r.new_underlying is not None for r in done):
+                self._legs_reanchor_due = True  # the rolled groups' new strikes: their leg ladders
+        except Exception as exc:  # a failed roll keeps what is held, and is retried
+            log.exception("contracts.roll_failed", error=str(exc))
+            pending["*"] = f"roll failed: {str(exc)[:120]}"
+        self._contract_roll_pending = pending
+        if not pending:
+            self._contract_roll_day = day
+        if rolled:
+            self.contract_rolls = (self.contract_rolls + rolled)[-60:]
+            log.info("contracts.rolled", n=len(rolled), rolls=[r["what"] for r in rolled][:20])
+            await self.ledger.event("contracts.rolled", {"day": day, "rolls": rolled})
+            moved = [r["what"] for r in rolled if r["underlying"]]
+            if moved:
+                self.telegram.fire_and_forget("🔁 Contract roll: " + "; ".join(moved[:12]))
+        if pending:
+            log.warning("contracts.roll_pending", day=day, pending=pending)
+            if self._contract_roll_alarmed != day:
+                self._contract_roll_alarmed = day
+                await self.ledger.event("contracts.roll_pending", {"day": day, "pending": pending})
+                self.telegram.fire_and_forget(
+                    "⚠️ Contract roll owed: " + "; ".join(f"{k}: {v}" for k, v in list(pending.items())[:8])
+                    + f" — retried every {CONTRACT_ROLL_RETRY_S / 60:.0f} min; no entry on the old month meanwhile")
+        return rolled
+
+    def _contracts_check(self, now: float | None = None) -> Check:
+        """Red when a group is not on today's contract after the roll slot (or with a session open)."""
+        now = time.time() if now is None else now
+        drift = self.contract_drift(ist_day(now))
+        if not drift:
+            last = [r["what"] for r in self.contract_rolls if r["day"] == ist_day(now).isoformat()]
+            return Check("contracts", True, value=0.0,
+                         detail="every group on today's contracts" + (f" · rolled today: {'; '.join(last[:6])}" if last else ""))
+        before_slot = ist_hm(now) < CONTRACT_ROLL_HM and not self.market_open_now()
+        owed = "; ".join(f"{k}: {v}" for k, v in list(self._contract_roll_pending.items())[:4])
+        return Check(
+            "contracts", before_slot, value=float(len(drift)),
+            detail=(f"{len(drift)} not on today's contract: " + "; ".join(r.describe() for r in drift[:6])
+                    + (f" (pending — {owed})" if owed else "") + (f" · the roll runs at {CONTRACT_ROLL_HM}" if before_slot else "")),
+        )
 
     async def _autopilot(self) -> None:
         try:
@@ -5831,6 +6052,9 @@ class Engine:
             # the contract the chart reads and the trigger came from (the universe's roll: 5 days or
             # fewer to expiry reads the next month), never the nearest unexpired one behind its back
             front = underlying if underlying.kind is InstrumentKind.FUTURE else cat.front_future(sig.symbol)
+            stale = self._contract_not_current(sig.symbol, front)
+            if stale is not None:
+                return Selection(None, reason=stale)
             q = self.quotes.get(front.scrip_code) if front else None
             if front is not None and tape:
                 self.tape.follow(sig.symbol, [front.scrip_code], role=ROLE_FUTURE, now=now)
@@ -7204,6 +7428,13 @@ class Engine:
                     self._intraday_rebuild_day = day
                     self._decision_tasks.add(asyncio.create_task(self._intraday_universe_rebuild()))
 
+            async with self.guards.duty("contracts.roll"):
+                # The daily contract roll (CONTRACT_ROLL_HM): the futures were picked at boot, and a
+                # process that runs across an expiry must move to the month a boot today would hold.
+                if self._contract_roll_due(now):
+                    self._contract_roll_last_try = now
+                    self._contract_roll_task = asyncio.create_task(self._roll_contracts(now=now), name="contract-roll")
+
             async with self.guards.duty("volume.market_check"):
                 # The market-wide volume check on every NSE bar, trigger or not — an alarm the minute
                 # the data breaks, not the next time a trigger happens to read it. The bar judged is
@@ -7566,6 +7797,7 @@ class Engine:
                 ),
             ),
             self._volume_check(),
+            self._contracts_check(),
             self._bar_audit_check(),
             self._eod_check(),
             self._duty_check(),

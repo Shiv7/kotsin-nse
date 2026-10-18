@@ -138,6 +138,11 @@ class Aggregator:
                 )
         self.state[instrument.scrip_code] = SymbolState(instrument=instrument)
 
+    def untrack(self, scrip_code: str) -> bool:
+        """Stop building bars from ``scrip_code`` — the old month of a rolled contract, so the new
+        month can claim the symbol's series (``track`` refuses two codes on one series)."""
+        return self.state.pop(scrip_code, None) is not None
+
     def on_reconnect(self, now: float | None = None) -> int:
         """The socket dropped and came back. What was built across the gap is not a bar:
 
