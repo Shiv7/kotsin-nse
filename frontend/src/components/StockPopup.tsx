@@ -10,6 +10,8 @@ export interface TradeMarks {
   exits: { ts: number; price: number; why: string }[]
   /** when the setup was taken — the structure is drawn as it stood then */
   signal_at: string
+  /** the trade's own plan (stop, targets), drawn as lines */
+  lines?: { price: number; title: string; color: string }[]
 }
 
 interface Props {
@@ -129,7 +131,10 @@ export function StockPopup({ row, day, at, trade, onClose }: Props) {
       ].sort((a, b) => (a.time as number) - (b.time as number))
       candles.setMarkers(marks)
     }
-    if (trade) candles.createPriceLine({ price: trade.entry, color: '#facc15', lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: true, title: 'entry' })
+    if (trade) {
+      candles.createPriceLine({ price: trade.entry, color: '#facc15', lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: true, title: 'entry' })
+      for (const l of trade.lines ?? []) candles.createPriceLine({ price: l.price, color: l.color, lineWidth: 2, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: l.title })
+    }
     const vp = profile.data?.volume
     if (vp) {
       candles.createPriceLine({ price: vp.poc, color: '#c084fc', lineWidth: 2, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: 'POC' })

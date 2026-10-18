@@ -135,6 +135,31 @@ async def fetch_history(settings: Settings, args: argparse.Namespace) -> None:
     _ = InstrumentKind  # imported for the type union above
 
 
+def run_playbook(settings: Settings, args: argparse.Namespace) -> None:
+    """Sweep / value-area strategies over cached days (research/playbooks.py)."""
+    from dataclasses import fields
+
+    from .research.history import HistoryStore
+    from .research.obtest import cached_days
+    from .research.playbooks import PBParams, run
+
+    days = cached_days(HistoryStore(settings.data_dir / "history"))
+    days = [d for d in days if (not args.start or d >= date.fromisoformat(args.start)) and (not args.end or d <= date.fromisoformat(args.end))]
+    known = {f.name: f for f in fields(PBParams)}
+    over: dict[str, object] = {}
+    for kv in args.set or []:
+        k, _, v = kv.partition("=")
+        if k not in known:
+            raise SystemExit(f"unknown parameter {k!r}; known: {', '.join(known)}")
+        cur = getattr(PBParams(), k)
+        over[k] = v if isinstance(cur, str) else (v.lower() == "true") if isinstance(cur, bool) else type(cur)(v)
+    out = run(settings, days, PBParams(**over), label=args.label)  # type: ignore[arg-type]
+    sm = out["summary"]
+    print(f"{out['id']}  {sm['trades']} trades / {sm['days']} days  win {sm['win_rate']}%  avg {sm['avg_r']} R  total {sm['total_r']} R  "
+          f"net ₹{sm['net_inr']:,}  costs ₹{sm['costs_inr']:,}  t(by day) {sm['t_by_day']}  days +{sm['days_positive']}/-{sm['days_negative']}")
+    print(f"  setups {sm['by_setup']}\n  exits {sm['by_exit']}")
+
+
 def run_obtest(settings: Settings, args: argparse.Namespace) -> None:
     """The order-block playbook over cached days, one day at a time (light on the CPU)."""
     from dataclasses import fields
@@ -189,6 +214,11 @@ def build_parser() -> argparse.ArgumentParser:
     o.add_argument("--end", default="")
     o.add_argument("--label", default="")
     o.add_argument("--set", action="append", help="a parameter, e.g. --set min_rr=2 --set side_rule=both")
+    pb = sub.add_parser("pb-backtest", help="sweep / value-area strategies over cached 1m days")
+    pb.add_argument("--start", default="")
+    pb.add_argument("--end", default="")
+    pb.add_argument("--label", default="")
+    pb.add_argument("--set", action="append", help="e.g. --set strategy=VA_REENTRY --set min_stop_adr=0.2")
     return p
 
 
@@ -209,6 +239,8 @@ def cli() -> None:
         asyncio.run(fetch_history(settings, args))
     elif command == "ob-backtest":
         run_obtest(settings, args)
+    elif command == "pb-backtest":
+        run_playbook(settings, args)
     else:  # pragma: no cover - argparse rejects anything else
         raise SystemExit(f"unknown command {command}")
 

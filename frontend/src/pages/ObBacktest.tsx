@@ -36,15 +36,22 @@ interface ObTrade {
   symbol: string
   side: 'BULLISH' | 'BEARISH'
   signal_ts: number
-  entry_ts: number
+  entry_ts?: number
   entry: number
-  z: number
-  s1: number
-  r1: number | null
-  r2: number | null
-  rr_planned: number | null
-  align: number | null
-  rank: number | null
+  // order-block runs
+  z?: number
+  s1?: number
+  r1?: number | null
+  r2?: number | null
+  rr_planned?: number | null
+  align?: number | null
+  rank?: number | null
+  // sweep / value-area runs
+  setup?: string
+  stop?: number
+  t1?: number
+  t2?: number
+  rr?: number
   qty: number
   exits: { ts: number; price: number; frac: number; why: string }[]
   exit_reason: string
@@ -156,23 +163,24 @@ export function ObBacktest() {
                 />
               }
             >
-              <Table head={['Day', 'Signal', 'In', 'Stock', 'Side', 'Entry', 'Z / S1', 'R1 / R2', 'Plan R:R', 'Align', 'Exit', 'MFE / MAE', 'R', 'Net']} empty="no trades">
+              <Table head={['Day', 'Signal', 'In', 'Stock', 'Setup', 'Side', 'Entry', 'Z / Stop', 'T1 / T2', 'Plan R:R', 'Align', 'Exit', 'MFE / MAE', 'R', 'Net']} empty="no trades">
                 {trades.map((t, i) => (
                   <tr key={i} onClick={() => setOpen(t)} className="cursor-pointer border-b border-slate-900 hover:bg-slate-900">
                     <td className="px-2 py-1 text-slate-400">{t.day}</td>
                     <td className="px-2 py-1 font-mono text-slate-500">{hhmm(t.signal_ts)}</td>
-                    <td className="px-2 py-1 font-mono">{hhmm(t.entry_ts)}</td>
+                    <td className="px-2 py-1 font-mono">{hhmm(t.entry_ts ?? t.signal_ts)}</td>
                     <td className="px-2 py-1 font-semibold">{t.symbol}</td>
+                    <td className="px-2 py-1 text-[10px] text-sky-300">{t.setup ?? 'ORDER BLOCK'}</td>
                     <td className={cls('px-2 py-1 text-[10px]', t.side === 'BULLISH' ? 'text-emerald-400' : 'text-rose-400')}>{t.side === 'BULLISH' ? 'LONG' : 'SHORT'}</td>
                     <td className="px-2 py-1 font-mono">{fmt.n(t.entry)}</td>
                     <td className="px-2 py-1 font-mono text-[11px]">
-                      {fmt.n(t.z)} / <span className="text-amber-400">{fmt.n(t.s1)}</span>
+                      {t.z != null ? fmt.n(t.z) : '—'} / <span className="text-amber-400">{fmt.n(t.s1 ?? t.stop)}</span>
                     </td>
                     <td className="px-2 py-1 font-mono text-[11px]">
-                      {fmt.n(t.r1)} / {fmt.n(t.r2)}
+                      {fmt.n(t.r1 ?? t.t1)} / {fmt.n(t.r2 ?? t.t2)}
                     </td>
-                    <td className="px-2 py-1 font-mono">{t.rr_planned ?? '—'}</td>
-                    <td className="px-2 py-1">{t.align}/4</td>
+                    <td className="px-2 py-1 font-mono">{t.rr_planned ?? t.rr ?? '—'}</td>
+                    <td className="px-2 py-1">{t.align != null ? `${t.align}/4` : '—'}</td>
                     <td className="px-2 py-1 font-mono text-[11px]">
                       {t.exit_reason} {t.exits.length ? hhmm(t.exits[t.exits.length - 1].ts) : ''}
                     </td>
@@ -194,7 +202,20 @@ export function ObBacktest() {
           row={asRow(open)}
           day={open.day}
           at={open.exits.length ? hhmm(open.exits[open.exits.length - 1].ts + 900) : '15:14'}
-          trade={{ entry_ts: open.entry_ts, entry: open.entry, exits: open.exits, signal_at: hhmm(open.signal_ts) }}
+          trade={{
+            entry_ts: open.entry_ts ?? open.signal_ts,
+            entry: open.entry,
+            exits: open.exits,
+            signal_at: hhmm(open.signal_ts),
+            lines:
+              open.stop != null
+                ? [
+                    { price: open.stop, title: 'stop', color: '#f59e0b' },
+                    ...(open.t1 != null ? [{ price: open.t1, title: 'T1', color: '#e2e8f0' }] : []),
+                    ...(open.t2 != null ? [{ price: open.t2, title: 'T2', color: '#e2e8f0' }] : []),
+                  ]
+                : undefined,
+          }}
           onClose={() => setOpen(null)}
         />
       )}
@@ -204,9 +225,9 @@ export function ObBacktest() {
 
 function asRow(t: ObTrade): BoardRow {
   return {
-    symbol: t.symbol, sector: '', last: t.entry, pct: null, score: 0, side: t.side, rank: t.rank, percentile: null,
+    symbol: t.symbol, sector: '', last: t.entry, pct: null, score: 0, side: t.side, rank: t.rank ?? null, percentile: null,
     event_risk: false, above_vwap: null, oi_build_up: null, oi_change_pct: null, pick: true,
-    rule: `${t.exit_reason} · ${t.r.toFixed(2)} R · net ${fmt.signedInr(t.net)}`, align: t.align, setup: null,
+    rule: `${t.setup ?? 'ORDER BLOCK'} · ${t.exit_reason} · ${t.r.toFixed(2)} R · net ${fmt.signedInr(t.net)}`, align: t.align ?? null, setup: null,
   }
 }
 
