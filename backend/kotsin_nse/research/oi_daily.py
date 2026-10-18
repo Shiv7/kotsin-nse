@@ -45,18 +45,21 @@ def futures_table(store: OiDailyStore, cache: Path | None = None) -> pd.DataFram
     for d in days:
         df = store.load(d, columns=("symbol", "kind", "expiry", "close", "settle", "oi"))
         fut = df[df["kind"] == "FUTSTK"]
-        if fut.empty:
-            continue
-        near = fut.sort_values("expiry").groupby("symbol").first()
-        tot = fut.groupby("symbol")["oi"].sum()
-        rows.append(pd.DataFrame({"day": d.isoformat(), "symbol": tot.index, "fut_oi": tot.values, "near_close": near.loc[tot.index, "settle"].values}))
+        if not fut.empty:
+            rows.append(fut.assign(day=d.isoformat())[["day", "symbol", "expiry", "settle", "oi"]])
     if not rows:
         return pd.DataFrame(columns=["day", "symbol", "fut_oi", "near_close", "oi_chg_pct", "price_chg_pct", "label"])
-    t = pd.concat(rows, ignore_index=True).sort_values(["symbol", "day"])
-    g = t.groupby("symbol")
-    t["oi_chg_pct"] = (t["fut_oi"] / g["fut_oi"].shift(1) - 1) * 100
-    t["price_chg_pct"] = (t["near_close"] / g["near_close"].shift(1) - 1) * 100
-    t = t.dropna(subset=["oi_chg_pct", "price_chg_pct"])
+    c = pd.concat(rows, ignore_index=True).sort_values(["symbol", "expiry", "day"])
+    # the price change of a session = the NEAR contract against ITS OWN previous settle, so the
+    # switch to the next month after an expiry (which trades at a premium) is not a price move
+    c["prev_settle"] = c.groupby(["symbol", "expiry"])["settle"].shift(1)
+    near = c.sort_values(["symbol", "day", "expiry"]).groupby(["symbol", "day"]).first().reset_index()
+    tot = c.groupby(["symbol", "day"])["oi"].sum().rename("fut_oi").reset_index()
+    t = tot.merge(near[["symbol", "day", "settle", "prev_settle"]], on=["symbol", "day"]).sort_values(["symbol", "day"])
+    t = t.rename(columns={"settle": "near_close"})
+    t["oi_chg_pct"] = (t["fut_oi"] / t.groupby("symbol")["fut_oi"].shift(1) - 1) * 100
+    t["price_chg_pct"] = (t["near_close"] / t["prev_settle"] - 1) * 100
+    t = t.drop(columns=["prev_settle"]).dropna(subset=["oi_chg_pct", "price_chg_pct"])
     t["label"] = [label(p, o) for p, o in zip(t["price_chg_pct"], t["oi_chg_pct"], strict=True)]
     t = t.reset_index(drop=True)
     if cache is not None:

@@ -48,3 +48,16 @@ def test_alignment_with_the_trade():
     assert oi_alignment("BEARISH", "SHORT COVERING") == "AGAINST"
     assert oi_alignment("BEARISH", "SHORT BUILD-UP") == "WITH"
     assert oi_alignment("BULLISH", "") == ""
+
+
+def test_the_day_after_expiry_compares_the_new_near_contract_with_its_own_previous_settle(tmp_path):
+    store = OiDailyStore(tmp_path)
+    store.write(date(2026, 10, 27), pd.DataFrame([
+        {"scrip_code": "1", "symbol": "ABC", "kind": "FUTSTK", "expiry": "2026-10-27", "strike": 0, "option_type": "", "close": 100.0, "settle": 100.0, "oi": 500, "oi_change": 0, "volume": 1},
+        {"scrip_code": "2", "symbol": "ABC", "kind": "FUTSTK", "expiry": "2026-11-24", "strike": 0, "option_type": "", "close": 101.0, "settle": 101.0, "oi": 900, "oi_change": 0, "volume": 1},
+    ]))
+    store.write(date(2026, 10, 28), pd.DataFrame([  # October expired; November is near now, flat on its own
+        {"scrip_code": "2", "symbol": "ABC", "kind": "FUTSTK", "expiry": "2026-11-24", "strike": 0, "option_type": "", "close": 101.0, "settle": 101.0, "oi": 1500, "oi_change": 0, "volume": 1},
+    ]))
+    r = futures_table(store).iloc[-1]
+    assert r["price_chg_pct"] == 0.0  # not +1 % from switching contracts
