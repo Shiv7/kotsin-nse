@@ -75,6 +75,9 @@ class FibParams:
     cpr_narrow: bool = False
     cpr_max_pct: float = 0.3
     oi_filter: str = ""
+    #: skip a long the day after a short build-up and a short the day after a long build-up — the
+    #: one OI lesson that held across every run (fresh money against the trade)
+    skip_fresh_against: bool = False
     max_sessions: int = 5
     max_open: int = 5
     risk_inr: float = 5_000.0
@@ -313,6 +316,9 @@ def trades_for(
         side = "BULLISH" if sign > 0 else "BEARISH"
         align = oi_alignment(side, oi_state)
         if p.oi_filter and align != p.oi_filter:
+            continue
+        if p.skip_fresh_against and oi_state == ("SHORT BUILD-UP" if sign > 0 else "LONG BUILD-UP"):
+            _f("7y skipped: fresh build-up against the trade")
             continue
         _f("8 traded")
         fib = {f: touch_end - sign * f * span for f in (0.0, 0.382, 0.5, 0.618, 0.705, 0.786, 1.0)}
