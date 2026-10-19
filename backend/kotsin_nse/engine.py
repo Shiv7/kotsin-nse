@@ -1027,6 +1027,7 @@ class Engine:
             hub = read_hub_config(self.s.data_dir)
             if hub.connect is not None:
                 self.feed.hub = hub.connect
+                self.feed.hub_up_is_reconnect = self.s.hub_reconnect_repair
             elif hub.serve is not None:
                 try:
                     self.feed_hub = HubServer(self.feed, *hub.serve)

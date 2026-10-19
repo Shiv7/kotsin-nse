@@ -166,6 +166,13 @@ class Settings(BaseSettings):
     #: EnvironmentVariables (KN_BARS_REFUSE_UNTIMED) — never in .env, which is engine A's and forbids keys
     #: A does not know (2026-10-19).
     bars_refuse_untimed: bool = True
+    #: Reading the feed hub, the hub's ``#down`` then ``#up`` — the serving engine's broker socket dropped and
+    #: came back — repairs the bars as a reconnect of this engine's own does (``Aggregator.on_reconnect``:
+    #: forming bars PARTIAL, ``connected_since`` moved, the volume baseline re-primed). It only set
+    #: ``connected``: the reconnect snapshot then built one-print LIVE bars with the gap's volume lumped into
+    #: one minute — 624 of 721 B-only bars 13-16 Oct, CROMPTON 10:25 on 14 Oct at 10.5x its median minute.
+    #: False = the old flag-only handling. LaunchAgent (KN_HUB_RECONNECT_REPAIR), never .env (2026-10-19).
+    hub_reconnect_repair: bool = True
 
     telegram_bot_token: SecretStr | None = None
     telegram_chat_id: str | None = None

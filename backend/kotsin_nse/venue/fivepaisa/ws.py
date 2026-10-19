@@ -184,6 +184,10 @@ class FivePaisaFeed:
         self.hub_lines = 0
         self.hub_lag_ms = 0.0
         self.hub_lag_max_ms = 0.0
+        #: reading side: the hub's broker socket going down and up again is a reconnect of ours — the same
+        #: repair (``on_connect(True)``), not just the ``connected`` flag (Settings.hub_reconnect_repair)
+        self.hub_up_is_reconnect = False
+        self.hub_broker_reconnects = 0
         # -- the pool (operator, 2026-10-05: "whichever subscribes, must put all data in a pool that everyone can
         # have access to without waiting ... no engine will have to duplicate subscription or fetch data again
         # and again") ------------------------------------------------------------------------------------
@@ -332,7 +336,8 @@ class FivePaisaFeed:
         if self.hub is None:
             return None
         return {"role": "connect", "address": f"{self.hub[0]}:{self.hub[1]}", "messages": self.hub_lines,
-                "lag_ms": round(self.hub_lag_ms, 2), "lag_max_ms": round(self.hub_lag_max_ms, 2)}
+                "lag_ms": round(self.hub_lag_ms, 2), "lag_max_ms": round(self.hub_lag_max_ms, 2),
+                "broker_reconnects": self.hub_broker_reconnects, "reconnect_repair": self.hub_up_is_reconnect}
 
     async def _send_batched(self, channel: str, op: str, instruments: list[Instrument]) -> None:
         ws = self._ws
@@ -453,12 +458,17 @@ class FivePaisaFeed:
                     await self.on_connect(again)
                 except Exception as exc:  # noqa: BLE001 - a repair hook never costs the link
                     log.warning("feed.on_connect_failed", error=str(exc)[:160])
+            broker_up: bool | None = None  # the hub's broker socket as this link has seen it (None: no line yet)
             while True:
                 line = await reader.readline()
                 if not line:
                     raise ConnectionError("feed hub closed the link")
                 if line.startswith(b"#"):
-                    self.health.connected = line.strip() == b"#up"
+                    up = line.strip() == b"#up"
+                    self.health.connected = up
+                    if up and broker_up is False:
+                        await self._hub_broker_back()
+                    broker_up = up
                     continue
                 if line.startswith(b"="):
                     await self._take_pooled(line[1:])
@@ -478,6 +488,20 @@ class FivePaisaFeed:
                 self._ws = None
             self.health.connected = False
             writer.close()
+
+    async def _hub_broker_back(self) -> None:
+        """The hub's broker socket is back after a ``#down`` this link saw. Its resubscribe answers come next
+        on the stream, after the ``#up``: the serving engine repaired its bars at its own reconnect, and this
+        engine does the same here, before reading them. A link's first line is never one — a link that
+        (re)connects runs ``on_connect`` itself."""
+        self.hub_broker_reconnects += 1
+        log.info("feed.hub_broker_reconnected", n=self.hub_broker_reconnects, repair=self.hub_up_is_reconnect)
+        if not self.hub_up_is_reconnect or self.on_connect is None:
+            return
+        try:
+            await self.on_connect(True)
+        except Exception as exc:  # noqa: BLE001 - a repair hook never costs the link
+            log.warning("feed.on_connect_failed", error=str(exc)[:160])
 
     async def _take_pooled(self, line: bytes) -> None:
         """Reading side: the hub's pool answering this engine's subscribe for a code the hub already streams
