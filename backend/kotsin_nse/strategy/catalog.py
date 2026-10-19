@@ -369,6 +369,36 @@ BOOKS: tuple[Book, ...] = (
         ),
     ),
     Book(
+        key="FUDKII_CT_B1",
+        label="CT-B1 · B1 gap fade (shadow)",
+        tf="30m entry (the 09:15 candle), 1s exit",
+        summary=(
+            "A shadow with entries of its own: CTB-19Oct's B1 gap fade. Every FUDKII trigger on the 09:15 candle — NSE stocks "
+            "and indices, published or graded F — is faded when its OFFICIAL open (the pre-open print) gapped at least 0.25 "
+            "daily ATR the trigger's own way from the official close (the closing-auction print) and no key pivot sits within "
+            "0.5 ATR30 ahead of the close. No volume, breadth or grade gate. Every read records the 0.30 line and the "
+            "conviction points beside it."
+        ),
+        status="live",
+        params={
+            "entries": "every FUDKII trigger on the 09:15 candle (decided 09:45), NSE, any grade: gapOfficial >= 0.25 its own way "
+                       "(risk/limits.py B1_GAP_DATR) and no PIVOT/TC/BC/R1/S1/R2/S2 (1d/1wk/1mo) within 0.5 ATR30 ahead (B1_PIN_ATR)",
+            "records": "at_025, at_030 (B1_GAP_LINE), the pivot test, conviction /5: gap, stretch, room to the fade side's wall, a "
+                       "trigger-side wall within 1 ATR30 — the 5-read is not computed in the engine",
+            "plan": "PE for a bullish trigger, CE for a bearish one (CT-Y's strike choice); CT-Y's gap-fade stop (the nearer of 1 "
+                    "ATR30 and 0.1 ATR30 past the next classic level)",
+            "exits": "every lot at T1 = 1.0 ATR30 from the close on the underlying (B1_TARGET_ATR), at the stop, at 11:15 "
+                     "(B1_TIME_STOP_HM) or at the 15:14 flatten; no option ladder, no trail; 4 lots under ₹75,000",
+        },
+        have=("the official open (bars/official_open.py)", "30m/1m bars on the session grid", "MTF pivot zones"),
+        source="kotsin_nse/engine.py (_b1_fade, b1_plan); kotsin_nse/strategy/b1.py; kotsin_nse/risk/limits.py CT_B1_LIMITS",
+        note=(
+            "Operator, 2026-10-19 (paper start 21 Oct). Research, engine A, 7 sessions 9-19 Oct (hindsight: the winning side "
+            "0.5 ATR30 first): 0.25 line 11/17, 0.30 line 8/12, conviction >= 3 7/7. Rules not approved; paper, on the Shadow "
+            "page's B1 tab; its P&L is never added to the trading books'."
+        ),
+    ),
+    Book(
         key="FUDKII_RT",
         label="FUDKII-RT",
         tf="1m on a 30m signal",

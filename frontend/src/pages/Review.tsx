@@ -140,7 +140,7 @@ function FilterPanel({ f, set, opts, engine, days, setDays }: {
       </Group>
       <Group label="Twins · shadows">
         <Chip on={f.mirrors} onClick={() => set({ ...f, mirrors: !f.mirrors })} title="the twins: each book's stop-rule mirrors, the same fill under stop E and the adaptive stop, as cards of their own">{f.mirrors ? 'twins shown' : 'twins hidden'}</Chip>
-        <Chip on={f.shadows} onClick={() => set({ ...f, shadows: !f.shadows })} title="the shadow books: the wide stop, graded F, CT-M, CT-Y-F">{f.shadows ? 'shadows shown' : 'shadows hidden'}</Chip>
+        <Chip on={f.shadows} onClick={() => set({ ...f, shadows: !f.shadows })} title="the shadow books: the wide stop, graded F, CT-M, CT-Y-F, CT-B1">{f.shadows ? 'shadows shown' : 'shadows hidden'}</Chip>
       </Group>
       <Group label="Result">{many('result', [['win', 'win'], ['loss', 'loss'], ['open', 'open']])}</Group>
       <Group label="Trigger">{many('trigger', [['BULLISH', '▲ bullish'], ['BEARISH', '▼ bearish']])}</Group>

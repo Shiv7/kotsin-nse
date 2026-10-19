@@ -182,6 +182,9 @@ from .risk.costs import CostModel
 from .risk.exits import ExitEngine, MarketView, apply_exit
 from .risk.exposure import ExposureBook
 from .risk.limits import (
+    B1_TARGET_ATR,
+    B1_TIME_STOP_HM,
+    CT_B1_LIMITS,
     CT_M_LIMITS,
     CT_M_MARKET_AGAINST_MAX,
     CT_X_LIMITS,
@@ -199,6 +202,7 @@ from .risk.limits import (
 )
 from .risk.sizing import size_position
 from .risk.wallet import Wallet
+from .strategy.b1 import b1_read
 from .strategy.base import Outcome, Signal, published
 from .strategy.counter import (
     KEY_LEVELS,
@@ -247,7 +251,7 @@ SELECTION_POLICY = SelectionPolicy()
 NO_PREMIUM_FLOOR = frozenset({
     StrategyKey.FUDKII, StrategyKey.FUDKII_RT_X, StrategyKey.FUDKII_RT_N, StrategyKey.FUDKII_RT_Y,
     StrategyKey.FUDKII_CT_X, StrategyKey.FUDKII_CT_Y, StrategyKey.FUDKII_RT_Y_W1, StrategyKey.FUDKII_RT_Y_F,
-    StrategyKey.FUDKII_CT_M, StrategyKey.FUDKII_CT_Y_F,
+    StrategyKey.FUDKII_CT_M, StrategyKey.FUDKII_CT_Y_F, StrategyKey.FUDKII_CT_B1,
     *(m for m, (src, _r) in STOP_MIRRORS.items() if src.value != StrategyKey.FUDKII_RT_MCX.value),
 })
 MIN_STOP_TICKS = 8
@@ -301,6 +305,7 @@ BOOK_LABELS = {
     "FUDKII_CT_X": "CT-X", "FUDKII_CT_Y": "CT-Y", "FUDKII_RT_MCX": "RT-MCX",
     "FUDKII_RT_Y_W1": "RT-Y wide (shadow)", "FUDKII_RT_Y_F": "RT-Y graded F (shadow)",
     "FUDKII_CT_M": "CT-M market-against fade (shadow)", "FUDKII_CT_Y_F": "CT-Y graded F (shadow)",
+    "FUDKII_CT_B1": "CT-B1 B1 gap fade (shadow)",
 }
 for _m, (_src, _rule) in STOP_MIRRORS.items():
     BOOK_LABELS[_m.value] = f"{BOOK_LABELS[_src.value].replace(' (shadow)', '')} · {STOP_RULE_LABELS[_rule]} (shadow)"
@@ -327,7 +332,7 @@ _RESTING_DECISIONS = frozenset({"RESTING", "PARENT_HALTED_TWINS_RESTING", "PAREN
 ORDER_CODES = {
     "FUDKII": "FII-P", "FUDKII_RT_X": "FII-RTX", "FUDKII_RT_N": "FII-RTN", "FUDKII_RT_Y": "FII-RTY",
     "FUDKII_CT_X": "FII-CTX", "FUDKII_CT_Y": "FII-CTY", "FUDKII_RT_MCX": "FII-RTM", "FUDKII_RT_Y_W1": "FII-RYW", "FUDKII_RT_Y_F": "FII-RYF", "FUDKII_CT_M": "FII-CTM",
-    "FUDKII_CT_Y_F": "FII-CYF",
+    "FUDKII_CT_Y_F": "FII-CYF", "FUDKII_CT_B1": "FII-CTB",
     "FUKAA": "FKA",
 }
 # a stop-rule mirror's code: its source's with FIE- / FIA- (stop E / adaptive) for FII- — unique, the same length
@@ -579,6 +584,8 @@ class Engine:
             StrategyKey.FUDKII_CT_M.value: ExitEngine(CT_M_LIMITS),
             # the graded-F fade shadow: CT-Y's gap fade and exits, on light volume only
             StrategyKey.FUDKII_CT_Y_F.value: ExitEngine(CT_Y_F_LIMITS),
+            # the B1 gap fade shadow (CTB-19Oct): CT-Y's stop, one target on the underlying, out by 11:15
+            StrategyKey.FUDKII_CT_B1.value: ExitEngine(CT_B1_LIMITS),
         }
         # every book's two stop-rule mirrors (strategy/keys.py STOP_MIRRORS): its own limits, the stop changed
         for mirror, (source, rule) in STOP_MIRRORS.items():
@@ -791,6 +798,8 @@ class Engine:
         self._gap_faded: set[str] = set()
         #: the graded-F triggers the CT-Y-F shadow gap-faded
         self._gap_faded_f: set[str] = set()
+        #: the 09:15-candle triggers CT-B1 has read (taken or skipped) — once each
+        self._b1_judged: set[str] = set()
         #: positions with an exit order in flight: a second exit for the same position (the
         #: operator's SKIP racing the exit loop) must not send a second order
         self._exits_in_flight: set[str] = set()
@@ -2585,9 +2594,12 @@ class Engine:
             elif published(sig):  # the in-trend books keep the parent's grade
                 jobs.append(self._guarded("signal.failed", sig, self._handle_signal(sig, bar, books=IN_TREND_BOOKS, adopt=True)))
                 jobs.append(self._guarded("counter.failed", sig, self._handle_counter(sig, bar)))
+                jobs.append(self._guarded("b1.failed", sig, self._b1_fade(sig, bar)))
             else:  # every RT and CT book is offered it and decides for itself (2026-10-06)
                 jobs.append(self._guarded("signal.failed", sig, self._handle_unpublished(sig, bar)))
                 jobs.append(self._guarded("counter.failed", sig, self._handle_counter_unpublished(sig, bar)))
+                # CT-B1 reads every 09:15 trigger, published or not, on its own path (2026-10-19)
+                jobs.append(self._guarded("b1.failed", sig, self._b1_fade(sig, bar)))
         for sig in admitted:
             if self.fukaa.cfg.shadow and sig.strategy is StrategyKey.FUKAA:
                 jobs.append(self._guarded("signal.failed", sig, self._fukaa_shadow(sig)))
@@ -4418,8 +4430,10 @@ class Engine:
         graded_f_shadows = (StrategyKey.FUDKII_RT_Y_F, StrategyKey.FUDKII_CT_Y_F)
         sees_unpublished = key is not StrategyKey.FUDKII_RT_MCX
         only_unpublished = key in graded_f_shadows
+        #: CT-B1 reads the 09:15 candle alone (2026-10-19): its tab cards those triggers, published or not
+        b1_book = key is StrategyKey.FUDKII_CT_B1
         #: the fade books whose fade is their own signal on the trigger (not CT-X's route)
-        own_fade_books = (StrategyKey.FUDKII_CT_M, StrategyKey.FUDKII_CT_Y_F)
+        own_fade_books = (StrategyKey.FUDKII_CT_M, StrategyKey.FUDKII_CT_Y_F, StrategyKey.FUDKII_CT_B1)
         parents = sorted(
             (
                 sgn
@@ -4428,6 +4442,7 @@ class Engine:
                 and self.book_trades(key.value, self._segment_of(sgn["symbol"]))
                 and (sees_unpublished or sgn.get("decision") != "NOT_PUBLISHED")
                 and (not only_unpublished or sgn.get("decision") == "NOT_PUBLISHED")
+                and (not b1_book or self._on_open_bar(sgn))
             ),
             key=lambda x: x["ts"],
         )
@@ -4548,6 +4563,8 @@ class Engine:
                 state = "RECORDED_ONLY"
             elif skip is not None and (not owns_row or unpublished):
                 state = "SKIPPED"
+            elif b1_book and own is None:
+                state = "NOT_JUDGED"  # no B1 record: a restart between the trigger and the book
             elif unpublished and own is None:
                 state = "NOT_PUBLISHED"  # offered, not decided yet (or never: a restart between the trigger and the books)
             elif key is StrategyKey.FUDKII:
@@ -4639,8 +4656,9 @@ class Engine:
             fade_book = key.value in counter_books
             # A fade book with no fade has nothing to preview: falling back to the PARENT's signal
             # showed CT-Y a bullish trigger's CE (NAM-INDIA, 2026-09-25 14:45) as if CT-Y would buy it.
+            # (no preview for CT-B1 either: a paper shadow with no TAKE, and the trigger is not what it buys)
             if (ps is None and und is not None and (state not in ("IN_TREND", "NO_ROUTE") or key is StrategyKey.FUDKII)
-                    and not (fade_book and entry_sig is None) and not unpublished):
+                    and not (fade_book and entry_sig is None) and not unpublished and not b1_book):
                 plan_sig = entry_sig if entry_sig is not None else sgn
                 try:
                     plan = await self._plan_preview(key, plan_sig, und)
@@ -4667,6 +4685,8 @@ class Engine:
                 route_label = "SKIP"
             elif key is StrategyKey.FUDKII_CT_Y and gap_fade is not None:
                 route_label = "GAP FADE"
+            elif b1_book and own is not None:
+                route_label = "B1 GAP FADE"
             elif route is not None:
                 route_label = "COUNTER-TREND" if route.get("route") == "COUNTER" else "IN TREND"
             else:
@@ -4686,7 +4706,7 @@ class Engine:
                 side = ("SHORT" if trig_bull else "LONG") if fade_book else ("LONG" if trig_bull else "SHORT")
             rt_card = alert_cards.get(entry_sig["signal_id"]) if (fade_book and entry_sig is not None) else (None if fade_book else alert_cards.get(sid))
             no_plan = next((e for e in reversed(evs) if e.get("kind") == "counter.no_plan"), None)
-            cta = self._card_cta(book, key, state, ps, plan, route, skip, und, sgn, vs, fade_book, entry_sig is None, no_plan)
+            cta = self._card_cta(book, key, state, ps, plan, route, skip, und, sgn, vs, fade_book or b1_book, entry_sig is None, no_plan)
             if unpublished and (ps is None or key in graded_f_shadows):
                 # FUDKII's own grade kept it from publishing the trigger: no TAKE — each book offered it has decided
                 # for itself, and the card says what and why (review, 2026-09-28; 2026-10-06). The graded-F shadows'
@@ -4696,6 +4716,11 @@ class Engine:
                            else str(skip.get("reason") or "") if skip is not None
                            else f"not published — {sgn.get('decision_reason') or 'graded F'}")
                 cta = {**cta, "action": "take", "enabled": False, "reason": why_not}
+            if b1_book and (ps is None or ps.get("status") == "OPEN"):
+                # a paper shadow on its own rules (2026-10-19): no operator TAKE (``operator_take`` refuses one), and its
+                # card offers no SKIP of what it holds
+                cta = {**cta, "enabled": False, "reason": "paper shadow — it takes or skips the 09:15 triggers itself and exits on its "
+                                                          "own rules; no operator TAKE"}
             if state == "CARRIED" or (carry_q is not None and key is StrategyKey.FUDKII):
                 cta = {**cta, "action": "take", "enabled": False, "reason": "after the close — carried to the next session's 09:15 open"}
             if cut_q is not None and ps is None and not (skip is not None and skip.get("gate") == "graded_f"):
@@ -4716,6 +4741,8 @@ class Engine:
                 seg_books = list(nse_books)
                 if unpublished:  # and the two shadows that trade only what FUDKII did not publish
                     seg_books += [StrategyKey.FUDKII_RT_Y_F.value, StrategyKey.FUDKII_CT_Y_F.value]
+                if self._on_open_bar(sgn):  # and CT-B1, which reads every 09:15 trigger, published or not (2026-10-19)
+                    seg_books.append(StrategyKey.FUDKII_CT_B1.value)
             books_row = [book_row(b, position_on(b, sid, fade_x)) for b in seg_books]
             verdicts = self._card_verdicts(sgn, evs, fade_x, gap_fade, pos_by_key, unpublished=unpublished)
             if cta.get("type") not in ("CE", "PE"):
@@ -4972,7 +4999,10 @@ class Engine:
         if equity_stop > 0:
             rows.append({"kind": "stop", "at": f"underlying {equity_stop:.2f} confirmed", "action": "all", "qty": qty})
         if lim.own_ladder:
-            if lim.arm_mode == "immediate":
+            if lim.ladder_mode == "none":
+                trail = ("no option ladder and no trail: every lot leaves when the underlying reaches its T1"
+                         + (f", at the {lim.time_stop_hm} time stop" if lim.time_stop_hm else "") + ", at the stop or at the flatten")
+            elif lim.arm_mode == "immediate":
                 trail = f"armed at once by the equity T1 or a 1m close over own R1: peak − {lim.peak_giveback_pct:.0f}% ({lim.trail_dwell_samples} reads)"
             elif lim.arm_at_pct is not None:
                 confirm = f"{lim.trail_dwell_samples} reads" if lim.band_exit == "dwell" else f"{lim.sustain_s:.0f} s sustain"
@@ -4987,6 +5017,8 @@ class Engine:
         else:
             trail = f"trail arms at +{lim.trail_arm_pct:.0f}%: stop = peak − {lim.trail_giveback_pct:.0f}% of the gain; breakeven after T1"
         rows.append({"kind": "trail", "at": trail, "action": "all remaining", "qty": None})
+        if lim.time_stop_hm:
+            rows.append({"kind": "time", "at": f"time stop {lim.time_stop_hm} IST", "action": "all remaining", "qty": None})
         rows.append({"kind": "time", "at": f"force-flat {self._force_flat_hm(key.value, segment)} IST", "action": "all remaining", "qty": None})
         policy = {
             "FUDKII": "legacy: share ladder 40/30/20/10, trail 3%/40%",
@@ -4998,6 +5030,7 @@ class Engine:
             "FUDKII_CT_Y": "CT-Y: the fade under RT-Y's exits",
             "FUDKII_CT_M": "CT-M (shadow): CT-Y's fade on a trigger the market is clearly against (≤ 45 % agree)",
             "FUDKII_CT_Y_F": "CT-Y graded F (shadow): CT-Y's 09:45 gap fade and exits on graded-F triggers under 1.5x the NIFTY50's volume",
+            "FUDKII_CT_B1": "CT-B1 (shadow): the CTB-19Oct B1 gap fade — CT-Y's stop, every lot out at 1 ATR30 on the underlying or at 11:15",
             "FUDKII_RT_MCX": "RT-MCX: RT-X's exits on commodities",
         }.get(key.value, key.value)
         return {"policy": policy, "rows": rows}
@@ -5098,6 +5131,9 @@ class Engine:
         same entry path as an automatic fill (selection at the current market, sizing under the
         book's limits), the fade plan for a counter book. Audited before it is attempted."""
         key = StrategyKey(book)
+        if key is StrategyKey.FUDKII_CT_B1:
+            # its entry is B1's fade, decided at the trigger; a take here would buy the trigger's own side (2026-10-19)
+            raise RuntimeError("CT-B1 is a paper shadow: it takes or skips the 09:15 triggers itself — no operator take")
         sig = self._signals_today.get(signal_id)
         if sig is None:
             raise KeyError(f"no signal {signal_id} in today's book")
@@ -5177,6 +5213,8 @@ class Engine:
         own = self.leg_pivots.for_code(inst.scrip_code)
         tol, reg = self.option_ladder_tolerance(symbol, inst.strike, inst.option_type, entry)
         edm = self.expected_move(symbol, inst, entry)
+        if lim.ladder_mode == "none":  # CT-B1 (2026-10-19): no option rung — the underlying's T1 takes every lot
+            return (), edm, "no option ladder: every lot leaves at the underlying's T1"
         if own is None:
             rungs: list[float] = []
         elif lim.ladder_mode == "daily_r":
@@ -5454,6 +5492,90 @@ class Engine:
         log.info("gap_fade", book=key.value, symbol=sig.symbol, side=plan["side"], stop=plan["stop"], t1=plan["targets"][0], rr=plan["rr"])
         await self._handle_signal(fade, bar, adopt=False)
 
+    def b1_plan(self, sig: Signal, ctx: dict[str, Any] | None) -> dict[str, Any] | None:
+        """CT-B1's fade of a B1 trigger (CTB-19Oct, operator 2026-10-19: "PE for bull / CE for bear trigger ... CT-Y
+        gap-fade stop, target 1.0 ATR30"): CT-Y's gap-fade plan — the opposite OTM and its stock stop, the nearer of 1
+        ATR30 and 0.1 ATR30 past the next classic level — with ONE target, ``B1_TARGET_ATR`` ATR30 from the trigger's
+        close on the underlying, in place of the walls. Its RR (1.0) and grade are labels. None off NSE cash or without
+        an ATR30."""
+        plan = self.fade_plan(sig, ctx, nearer_level=self.limits_for(StrategyKey.FUDKII_CT_B1.value).fade_stop_nearer_level)
+        if plan is None:
+            return None
+        und = self.underlyings.get(sig.symbol)
+        tick = (und.tick_size if und else 0.05) or 0.05
+        sign = 1 if plan["direction"] == Direction.BULLISH.value else -1
+        atr30 = float(plan["atr30"])
+        close = float(sig.entry)
+        target = round(round((close + sign * B1_TARGET_ATR * atr30) / tick) * tick, 4)
+        rr = round(abs(target - close) / atr30, 2)
+        pol = self.fudkii.cfg.fade_grade_policy
+        plan.update(targets=[target], rr=rr, grade="A" if rr >= pol.rr_a else "B" if rr >= pol.rr_b else "C" if rr >= pol.rr_c else "F",
+                    targetNote=f"{B1_TARGET_ATR:g} ATR30 from the close, on the underlying (B1)")
+        return plan
+
+    async def _b1_fade(self, sig: Signal, bar: UnifiedBar | None) -> None:
+        """FUDKII-CT-B1, a paper shadow (CTB-19Oct, operator 2026-10-19: "Both together Wednesday" — the official-open gap
+        and the paper book trading every B1 at 0.25, recording at_030 and the conviction). Every FUDKII trigger on the
+        09:15 candle — published or graded F, any grade, NSE stocks and indices — is read here, on a path of its own beside
+        every other book's (``_decide``), never instead of one. B1 (strategy/b1.py): the official gap at least 0.25 daily
+        ATR its own way and no key pivot within 0.5 ATR30 ahead -> faded under CT-B1's own key, wallet and exits with
+        ``b1_plan``; anything else is a skip on its card with the reason. Every read, taken or skipped, is a
+        ``counter.b1`` record: both gaps, both lines (at_025, at_030), the pivot test and the conviction points."""
+        key = StrategyKey.FUDKII_CT_B1
+        if sig.strategy is not StrategyKey.FUDKII or sig.signal_id in self._b1_judged:
+            return
+        und = self.underlyings.get(sig.symbol)
+        if und is None or und.segment is not Segment.NSE_EQ or not self.book_trades(key.value, und.segment):
+            return
+        ctx = self._breadth_at.get(sig.signal_id)
+        if ctx is None:
+            ctx = self.trigger_context(sig)
+        if not ctx.get("openBar"):
+            return  # B1 reads the 09:15 candle alone: a later trigger is not one it judges
+        self._b1_judged.add(sig.signal_id)
+        bull = sig.direction is Direction.BULLISH
+        read = b1_read(ctx, close=float(sig.entry), bullish=bull, zones=self.zones_for(sig.symbol),
+                       pivots_known=bool(self._pivot_points(sig.symbol)))
+        plan = self.b1_plan(sig, ctx) if read["take"] else None
+        if read["take"] and plan is None:
+            read = {**read, "take": False, "gate": "no_plan", "why": "no fade plan — no ATR30"}
+        conv = read["conviction"]
+        event = {"signal_id": sig.signal_id, "symbol": sig.symbol, "book": key.value, "trigger": sig.direction.value,
+                 "triggerGrade": sig.grade, "published": published(sig), "side": "PE" if bull else "CE", **read}
+        if plan is None:
+            await self.ledger.event("counter.b1", event)
+            await self._book_skip(key.value, sig, read["why"], gate=read["gate"], gapOfficial=read["gapOfficial"],
+                                  at030=read["at_030"], conviction=conv["total"])
+            return
+        lines = "at 0.30 too" if read["at_030"] else "under 0.30"
+        fade = replace(
+            sig,
+            strategy=key,
+            direction=Direction(plan["direction"]),
+            stop=plan["stop"],
+            targets=tuple(plan["targets"]),
+            grade=plan["grade"],
+            rr=plan["rr"],
+            reason=(f"B1 GAP FADE of {sig.signal_id}: official gap {read['gapOfficial']:.3f} daily ATR its own way "
+                    f"({read['gapOpenSrc']}; {lines}), no key pivot within 0.5 ATR30; conviction {conv['total']:g}/5 without "
+                    f"the 5-read; stop {plan['stopNote']}; T1 {plan['targets'][0]:g} (1 ATR30), out by {B1_TIME_STOP_HM}"),
+            source_signal_id=sig.signal_id,
+            evidence={**dict(sig.evidence), "gap_official": read["gapOfficial"], "gap_datr": read["gapDatr"],
+                      "at_030": read["at_030"], "conviction": conv["total"], "rr": plan["rr"]},
+            context={
+                **dict(sig.context),
+                "b1_fade": {**plan, "read": read},
+                "confluence": {"stop": plan["stop"], "stop_zone": plan["stopNote"], "targets": plan["targets"],
+                               "target_zones": [plan["targetNote"]], "grade": plan["grade"], "rr": plan["rr"]},
+            },
+        )
+        event.update(plan)
+        event["fade_signal_id"] = fade.signal_id
+        await self.ledger.event("counter.b1", event)
+        log.info("b1_fade", symbol=sig.symbol, side=plan["side"], gap=read["gapOfficial"], at_030=read["at_030"],
+                 conviction=conv["total"], stop=plan["stop"], t1=plan["targets"][0])
+        await self._handle_signal(fade, bar, adopt=False)
+
     async def _counter_legs(self, underlying: Instrument, bar: UnifiedBar, *, low_priority: bool = False) -> list[Leg]:
         """The equity's side of the trigger from the store, the front future's from the broker
         (``_fut_context``): candle, ATR30m, classic levels with their weights, volume surges."""
@@ -5613,6 +5735,14 @@ class Engine:
         log.info("fut.gaps_filled", symbol=front.symbol, missing=len(missing), filled=filled,
                  slots=[to_ist(s).strftime("%d %b %H:%M") for s in sorted(missing)][:6])
         return [have[k] for k in sorted(have)], failed
+
+    def _on_open_bar(self, sgn: dict[str, Any]) -> bool:
+        """A trigger row's bar is its session's first 30m bar — the 09:15 candle, decided at 09:45 (CT-B1's)."""
+        seg = self._segment_of(str(sgn.get("symbol") or ""))
+        if seg is Segment.MCX_FO:
+            return False
+        ts = int(sgn.get("ts") or 0)
+        return ts > 0 and ts == int(session_open_ts(seg or Segment.NSE_EQ, ist_day(ts)))
 
     def _segment_of(self, symbol: str) -> Segment | None:
         """The underlying's segment, from the live universe. None when the name is not in it —

@@ -75,9 +75,9 @@ PART_LABEL = {
 }
 SHORT = {"FUDKII": "FUDKII", "FUDKII_RT_X": "RT-X", "FUDKII_RT_N": "RT-N", "FUDKII_RT_Y": "RT-Y", "FUDKII_RT_Y_F": "RT-Y-F",
          "FUDKII_RT_Y_W1": "RT-Y-W1", "FUDKII_CT_X": "CT-X", "FUDKII_CT_Y": "CT-Y", "FUDKII_CT_M": "CT-M",
-         "FUDKII_CT_Y_F": "CT-Y-F", "FUDKII_RT_MCX": "RT-MCX", "FUKAA": "FUKAA"}
+         "FUDKII_CT_Y_F": "CT-Y-F", "FUDKII_CT_B1": "CT-B1", "FUDKII_RT_MCX": "RT-MCX", "FUKAA": "FUKAA"}
 BOOK_ORDER = ("FUDKII", "FUDKII_RT_X", "FUDKII_RT_N", "FUDKII_RT_Y", "FUDKII_RT_Y_W1", "FUDKII_RT_Y_F", "FUDKII_CT_X",
-              "FUDKII_CT_Y", "FUDKII_CT_M", "FUDKII_CT_Y_F")
+              "FUDKII_CT_Y", "FUDKII_CT_M", "FUDKII_CT_Y_F", "FUDKII_CT_B1")
 CLASS_ORDER = {"trading": 0, "shadow": 1, "mirror": 2}
 RULE_ORDER = {"current": 0, "E": 1, "A": 2}
 RULE_NAME = {"current": "current stop", "E": "stock stop E (60 s)", "A": "stock stop A (adaptive)"}
@@ -223,7 +223,8 @@ PARAMS: tuple[tuple[str, str, Callable[[Any], str]], ...] = (
     ("bid_cap_pct", "premium cap on the bid", lambda v: "off (the option stop rules)" if v is None else f"{v:g} % under paid, sold at once"),
     ("arm_at_pct", "arms at", lambda v: "first rung touch" if v is None else f"+{v:g} % on the premium"),
     ("arm_mode", "arming", lambda v: str(v)),
-    ("ladder_mode", "ladder", lambda v: {"mtf": "the option's own daily+weekly rungs", "daily_r": "the option's daily R1-R4"}.get(v, str(v))),
+    ("ladder_mode", "ladder", lambda v: {"mtf": "the option's own daily+weekly rungs", "daily_r": "the option's daily R1-R4",
+                                         "none": "none: the underlying's T1 takes every lot"}.get(v, str(v))),
     ("own_ladder", "own ladder", lambda v: "yes" if v else "no (equity targets via delta)"),
     ("peak_giveback_pct", "give-back from the peak", lambda v: "none (40 % trail after +3 %)" if v is None else f"{v:g} %"),
     ("sustain_s", "option-stop sustain", lambda v: "one read" if v is None else f"{v:g} s"),

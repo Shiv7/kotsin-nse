@@ -28,7 +28,7 @@ from .daybook import _CSS, _fmt, contract_label, render_ab
 BOOKS = ("FUDKII", "FUDKII_RT_X", "FUDKII_RT_N", "FUDKII_RT_Y", "FUDKII_CT_X", "FUDKII_CT_Y", "FUDKII_CT_M", "FUDKII_RT_MCX")
 LABELS = {"FUDKII": "FUDKII", "FUDKII_RT_X": "RT-X", "FUDKII_RT_N": "RT-N", "FUDKII_RT_Y": "RT-Y",
           "FUDKII_CT_X": "CT-X", "FUDKII_CT_Y": "CT-Y", "FUDKII_CT_M": "CT-M", "FUDKII_RT_MCX": "RT-MCX",
-          "FUDKII_RT_Y_F": "RT-Y-F", "FUDKII_RT_Y_W1": "RT-Y-W1", "FUDKII_CT_Y_F": "CT-Y-F"}
+          "FUDKII_RT_Y_F": "RT-Y-F", "FUDKII_RT_Y_W1": "RT-Y-W1", "FUDKII_CT_Y_F": "CT-Y-F", "FUDKII_CT_B1": "CT-B1"}
 COUNTER = ("FUDKII_CT_X", "FUDKII_CT_Y")
 
 
@@ -113,6 +113,7 @@ class ShadowData:
     graded_f: dict[str, Any] = field(default_factory=dict)
     gap: dict[str, Any] = field(default_factory=dict)
     market_fade: dict[str, Any] = field(default_factory=dict)
+    b1: dict[str, Any] = field(default_factory=dict)
     fukaa: dict[str, Any] = field(default_factory=dict)
     labels: dict[str, Any] = field(default_factory=dict)
     volume: dict[str, Any] = field(default_factory=dict)
@@ -474,6 +475,73 @@ def market_fade_summary(*, signals: list[dict], positions: list[dict], trades: l
     return {"rows": rows, "skipped": skipped, "total": total}
 
 
+# -- FUDKII-CT-B1, the CTB-19Oct B1 gap fade ------------------------------------------------------------------
+
+B1_BOOK = "FUDKII_CT_B1"
+
+
+def b1_summary(*, signals: list[dict], positions: list[dict], trades: list[dict], events: list[dict]) -> dict[str, Any]:
+    """Every 09:15-candle trigger FUDKII-CT-B1 read (the B1 gap fade shadow, operator 2026-10-19): the official gap and
+    the first trade's, both lines, the pivot test, the conviction, the fade or the skip and why — and the trade: the
+    contract, the fill, the exit and the net. Totals for every fade, for the ones at the 0.30 line, and for conviction
+    3 or more (the two filters the operator has not chosen between)."""
+    latest: dict[str, dict] = {}
+    for sg in signals:
+        latest[sg["signal_id"]] = sg
+    own_by = {(sg["strategy"], sg["source_signal_id"]): sg for sg in latest.values() if sg.get("source_signal_id")}
+    pos_by = {(p["strategy"], p["signal_id"]): p for p in positions}
+    net_by = _net_by_position(trades)
+    reads: dict[str, dict] = {}
+    for e in events:
+        if e.get("kind") == "counter.b1" and e.get("signal_id"):
+            reads[e["signal_id"]] = e
+
+    def fired(sid: str) -> float | None:
+        trig = latest.get(sid) or {}
+        return float(trig.get("created_ts") or (float(trig["ts"]) + 1800 if trig.get("ts") else 0)) or None
+
+    rows: list[dict[str, Any]] = []
+    for sid, ev in sorted(reads.items(), key=lambda kv: fired(kv[0]) or 0.0):
+        trig = latest.get(sid) or {}
+        own = own_by.get((B1_BOOK, sid))
+        bp = pos_by.get((B1_BOOK, own["signal_id"])) if own else None
+        b = _book_on(pos_by, net_by, B1_BOOK, own["signal_id"] if own else None)
+        conv = ev.get("conviction") or {}
+        pins = ev.get("pins") or []
+        rows.append({
+            "signal_id": sid, "symbol": ev.get("symbol") or trig.get("symbol"), "trigger": ev.get("trigger") or trig.get("direction"),
+            "fired": fired(sid), "published": ev.get("published"), "grade": ev.get("triggerGrade"),
+            "gap": ev.get("gapOfficial"), "gap_first": ev.get("gapDatr"), "src": ev.get("gapOpenSrc"),
+            "open": ev.get("officialOpen"), "close": ev.get("officialClose"), "at_030": bool(ev.get("at_030")),
+            "pin": f"{pins[0][0]} +{float(pins[0][1]):.2f}" if pins else None,
+            "conviction": conv.get("total"), "points": conv.get("points") or {},
+            "take": bool(ev.get("take")), "gate": ev.get("gate"), "why": ev.get("why"),
+            "side": ev.get("side"), "stop": ev.get("stop") if ev.get("take") else None,
+            "target": (ev.get("targets") or [None])[0] if ev.get("take") else None,
+            "contract": ((bp or {}).get("instrument") or {}).get("name"), "fill": (bp or {}).get("entry"),
+            "exit_reason": (bp or {}).get("exit_reason") if b["status"] == "EXITED" else None,
+            "not_taken": (own or {}).get("decision_reason") if (ev.get("take") and bp is None) else None, "b1": b,
+        })
+    fades = [r for r in rows if r["take"]]
+    done = [r for r in fades if r["b1"]["net"] is not None]
+
+    def tally(sub: list[dict[str, Any]]) -> dict[str, Any]:
+        nets = [r["b1"]["net"] for r in sub]
+        return {"closed": len(sub), "net": sum(nets), "win": sum(1 for x in nets if x > 0),
+                "best": max(nets, default=None), "worst": min(nets, default=None)}
+
+    gates: dict[str, int] = {}
+    for r in rows:
+        if not r["take"]:
+            gates[str(r["gate"])] = gates.get(str(r["gate"]), 0) + 1
+    total = {
+        "read": len(rows), "fades": len(fades), "traded": sum(1 for r in fades if r["b1"]["status"] != "NONE"),
+        "all": tally(done), "at_030": tally([r for r in done if r["at_030"]]),
+        "conv3": tally([r for r in done if (r["conviction"] or 0) >= 3]), "skipped": gates,
+    }
+    return {"rows": rows, "total": total}
+
+
 # -- FUKAA in shadow -------------------------------------------------------------------------------------
 
 
@@ -821,6 +889,45 @@ def _render_market_fade(d: ShadowData) -> str:
 <tbody>{near_rows or '<tr><td colspan="5" class="dim">none</td></tr>'}</tbody></table></div>"""
 
 
+def _render_b1(d: ShadowData) -> str:
+    g = d.b1 or {"rows": [], "total": {}}
+    t = g.get("total") or {}
+
+    def tally_row(label: str, x: dict[str, Any] | None) -> str:
+        x = x or {}
+        n = x.get("closed", 0)
+        return (f'<tr><td class="l">{html.escape(label)}</td><td>{n}</td>{_net_cell(x.get("net") if n else None)}'
+                f'<td>{_pct(x.get("win", 0), n)}</td>{_net_cell(x.get("best"))}{_net_cell(x.get("worst"))}</tr>')
+
+    def pts(p: dict[str, Any]) -> str:
+        return " · ".join(f"{k} {float(v):g}" for k, v in p.items() if v) or "—"
+
+    body = "".join(
+        f'<tr><td class="sym">{_ist(r["fired"])}</td><td class="sym l">{html.escape(str(r["symbol"]))}</td>'
+        f'<td class="{"pos" if r["trigger"] == "BULLISH" else "neg"}">{"BULL" if r["trigger"] == "BULLISH" else "BEAR" if r["trigger"] else "—"}</td>'
+        f'<td>{html.escape(str(r["grade"] or "—"))}{"" if r["published"] else " (F)"}</td>'
+        f'<td>{_fmt(r["gap"], 3)}</td><td class="l">{html.escape(str(r["src"] or "—"))}</td><td>{_fmt(r["gap_first"], 3)}</td>'
+        f'<td>{"yes" if r["at_030"] else "no"}</td><td class="l">{html.escape(str(r["pin"] or "—"))}</td>'
+        f'<td>{_fmt(r["conviction"], 1)}</td><td class="l">{html.escape(pts(r["points"]))}</td>'
+        f'<td class="{"" if r["take"] else "why "}l">{"FADE " + html.escape(str(r["side"] or "")) if r["take"] else html.escape(str(r["why"] or "—"))}</td>'
+        f'<td>{_fmt(r["stop"])}</td><td>{_fmt(r["target"])}</td>'
+        f'<td class="l">{html.escape(contract_label(str(r["contract"] or r["not_taken"] or "—")))}</td><td>{_fmt(r["fill"])}</td>'
+        f'<td class="l">{html.escape(str(r["exit_reason"] or "—"))}</td>{_net_cell(r["b1"]["net"], r["b1"]["status"])}</tr>'
+        for r in g["rows"]
+    )
+    skipped = " · ".join(f"{html.escape(k.replace('_', ' '))} {v}" for k, v in sorted((t.get("skipped") or {}).items())) or "none"
+    return f"""<h3>B1 gap fade · running total</h3>
+<div class="scroll"><table><thead><tr><th class="l">Closed fades since {d.ab["since"]}</th><th>Closed</th><th>CT-B1 net</th><th>Win</th>
+<th>Best</th><th>Worst</th></tr></thead><tbody>{tally_row("every B1 (the 0.25 line)", t.get("all"))}{tally_row("at the 0.30 line too", t.get("at_030"))}
+{tally_row("conviction 3 or more (of 5, no 5-read)", t.get("conv3"))}</tbody></table></div>
+<p class="sub">Read: {t.get("read", 0)} triggers on the 09:15 candle · faded {t.get("fades", 0)}, entered {t.get("traded", 0)} · not faded: {skipped}.</p>
+<h3>B1 gap fade · every 09:15 trigger read · {len(g["rows"])}</h3>
+<div class="scroll"><table><thead><tr><th>Fired</th><th class="l">Symbol</th><th>Trigger</th><th>Grade</th><th>Official gap</th><th class="l">Open from</th>
+<th>First-tick gap</th><th>At 0.30</th><th class="l">Key pivot ≤ 0.5 ATR30</th><th>Conviction</th><th class="l">Points</th><th class="l">B1</th>
+<th>Stop</th><th>T1 (1 ATR30)</th><th class="l">Contract / why not entered</th><th>Fill</th><th class="l">Exit</th><th>CT-B1 net</th></tr></thead>
+<tbody>{body or '<tr><td colspan="18" class="dim">no 09:15 trigger read since CT-B1 began</td></tr>'}</tbody></table></div>"""
+
+
 def _render_fukaa(d: ShadowData) -> str:
     g = d.fukaa or {"rows": [], "total": {}}
     t = g.get("total") or {}
@@ -1131,6 +1238,45 @@ MARKET_FADE = Brief(
     ),
 )
 
+B1_BRIEF = Brief(
+    name="B1 gap fade · CT-B1",
+    testing="Whether a 09:15-candle trigger that the OFFICIAL open gapped its own way is worth trading against (CTB-19Oct, B1).",
+    for_rule=(
+        "The shadow book FUDKII-CT-B1: every FUDKII trigger on the 09:15 candle — NSE stocks and indices, published or graded "
+        "F — is faded when the official open (the pre-open print, the 1D open; the first trade with no pre-open match) "
+        "gapped at least 0.25 daily ATR the trigger's own way from the official close (the closing-auction print), and no "
+        "key pivot (PIVOT/TC/BC/R1/S1/R2/S2, 1d/1wk/1mo) sits within 0.5 ATR30 ahead of the close. No volume, breadth or "
+        "grade gate. PE for a bullish trigger, CE for a bearish one; CT-Y's gap-fade stop; every lot out at 1 ATR30 from the "
+        "close on the underlying, at 11:15, or at the 15:14 flatten."
+    ),
+    against=(
+        "The 0.30 line (the same rule from 0.30, at_030 on every read) and conviction 3 or more — the two filters still "
+        "to choose — and CT-Y / CT-Y-F, which fade the first-tick gap of 0.3 under a volume ceiling."
+    ),
+    logic=(
+        "Its own entries and ₹10 L purse; decided at the 09:45 decision second beside every other book, never instead of "
+        "one: the resting limit entry with the +3 % cap, held 30 s, missed at 60 s; 4 lots under ₹75,000. Conviction points "
+        "(cap 5): gap 0.25-0.5 0.5 / 0.5-1 1 / 1-1.5 1.5 / ≥1.5 2; stretch of the 09:45 close from the official close "
+        "0.8-1.5 0.5 / 1.5-2.5 1 / ≥2.5 1.5; room to the first wall on the fade side 0.5-1 0.5 / 1-2 1 / ≥2 or none 1.5; a "
+        "wall in the trigger's direction within 1 ATR30 0.5. The research's 5-read (up to 1.5) is not computed in the engine. "
+        "A shadow: never in the day's totals, never a live order."
+    ),
+    pros=(
+        "Research, engine A, 7 sessions 9-19 Oct (hindsight: the winning side 0.5 ATR30 first): the 0.25 line 11/17, the 0.30 "
+        "line 8/12, conviction ≥ 3 7/7 (ANANDRATHI, RBLBANK, POWERINDIA, CGPOWER, GVT&D, PNB, AXISBANK).",
+        "The 4-day bucket run 14-19 Oct: B1 10/14 against a 61 % base rate of the counter side moving first.",
+    ),
+    cons=(
+        "Seven sessions, hindsight, and the rule was shaped on them; below conviction 3 it was 4/10.",
+        "The target and the 11:15 time stop are a one-name fit.",
+        "ENRIN 15 Oct: a gap with no resistance in the trigger's direction should not be a fade (open decision b).",
+    ),
+    decide=(
+        "After about 20 closed fades: keep it if its net after charges is positive; then choose the 0.25 or 0.30 line and "
+        "whether conviction 3 is required, from the totals above."
+    ),
+)
+
 FUKAA_SHADOW = Brief(
     name="FUKAA · in shadow",
     testing="Whether FUKAA — FUDKII's trigger admitted only when volume confirms it — is worth trading, now that its inputs are read correctly.",
@@ -1225,6 +1371,7 @@ TABS: list[ShadowTab] = [
     ShadowTab("graded-f", "Graded F · RT-Y-F, RT-Y, CT-Y-F", GRADED_F, _render_graded_f),
     ShadowTab("gap-fade", "Gap fade · CT-Y 09:45", GAP_FADE, _render_gap),
     ShadowTab("market-fade", "Market fade · CT-M ≤45%", MARKET_FADE, _render_market_fade),
+    ShadowTab("b1", "B1 gap fade · CT-B1", B1_BRIEF, _render_b1),
     ShadowTab("fukaa", "FUKAA · shadow", FUKAA_SHADOW, _render_fukaa),
     ShadowTab("volume", "Volume · dried & surge", VOLUME, _render_volume),
     ShadowTab("labels", "Trigger labels", LABELS_BRIEF, _render_labels),
@@ -1282,6 +1429,7 @@ def render_shadow(d: ShadowData) -> str:
     ft = (d.graded_f or {}).get("total") or {}
     gt = (d.gap or {}).get("total") or {}
     mt = (d.market_fade or {}).get("total") or {}
+    bt = (d.b1 or {}).get("total") or {}
     kt = (d.fukaa or {}).get("total") or {}
     st = ((d.stop_rules or {}).get("total") or {}).get("current") or {}
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -1305,6 +1453,7 @@ def render_shadow(d: ShadowData) -> str:
       <div class="tal"><b>{ft.get("traded", 0)}</b><span>graded-F trades</span></div>
       <div class="tal"><b>{gt.get("fired", 0)}</b><span>gap fades</span></div>
       <div class="tal"><b>{mt.get("fades", 0)}</b><span>CT-M fades</span></div>
+      <div class="tal"><b>{bt.get("fades", 0)}</b><span>B1 fades</span></div>
       <div class="tal"><b>{kt.get("signals", 0)}</b><span>FUKAA signals</span></div>
     </div>
   </div>

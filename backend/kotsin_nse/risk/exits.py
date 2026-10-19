@@ -27,6 +27,7 @@ from dataclasses import dataclass, replace
 from ..domain import Direction, ExitDecision, ExitReason, OptionType, Position
 from ..instrument.pricing import value_at
 from ..instrument.select import estimate_delta
+from ..market.session import ist_day, ist_hm
 from .limits import RiskLimits
 
 
@@ -238,6 +239,10 @@ class ExitEngine:
                 pos.qty_remaining,
                 f"held {view.bars_held} bars ≥ {lim.time_stop_bars}",
             )
+        if lim.time_stop_hm is not None and (
+                ist_hm(view.now) >= lim.time_stop_hm or ist_day(view.now) > ist_day(pos.opened_ts)):
+            # a wall-clock time stop (CT-B1, operator 2026-10-19: "time stop 11:15"): every lot left, the day it opened
+            return ExitDecision(pos.id, ExitReason.TIME_STOP, ltp, pos.qty_remaining, f"time stop {lim.time_stop_hm} IST")
         return None
 
     def evaluate_stale(self, pos: Position, view: MarketView) -> ExitDecision | None:

@@ -22,6 +22,7 @@ const BOOKS: [string, string][] = [
   ['FUDKII_RT_Y_W1', 'RT-Y · wide stop (shadow)'],
   ['FUDKII_CT_M', 'FUDKII-CT-M (shadow)'],
   ['FUDKII_CT_Y_F', 'CT-Y · graded F (shadow)'],
+  ['FUDKII_CT_B1', 'CT-B1 · B1 gap fade (shadow)'],
 ]
 
 const HEAD = ['Book', 'Underlying', 'Instrument', 'Qty', 'Entry', 'LTP', 'Unreal', 'R', 'Max DD', 'Opt SL', 'Eq SL', 'T hit', 'Grade', 'Opened']
