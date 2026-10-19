@@ -23,6 +23,7 @@ import os
 from collections.abc import Mapping
 from enum import StrEnum
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -196,6 +197,14 @@ class Settings(BaseSettings):
     #: a stop checked against a price from minutes ago is worse than one not checked at all. A
     #: forced exit (force-flat or halt) overrides this and proceeds on the last known price.
     position_quote_max_age_s: float = 60.0
+    #: The gap the gap rules read (CTB-19Oct, operator 18-19 Oct 2026: "the 1 AM definition"). ``first_tick``: CT-Y's
+    #: 09:45 gap fade, CT-Y-F, RT-Y's gap switch and RT-Y / RT-Y-F's 09:45 gap skip read ``gapDatr`` — the open of
+    #: today's first 30m bar, the first continuous trade, against the previous close — as they always have.
+    #: ``official``: they read ``gapOfficial`` — the official open (the pre-open equilibrium print, the 1D candle's
+    #: open; the first trade where there was no pre-open match) against the official close (the closing-auction print,
+    #: the 1D close). Every trigger carries both either way, and CT-B1 reads ``gapOfficial`` whatever this says. The
+    #: operator decides (19 Oct: built "behind KN_GAP_SOURCE (default first_tick) awaiting the operator's choice").
+    gap_source: Literal["first_tick", "official"] = "first_tick"
 
     # ---- review committee -----------------------------------------------------------------------
     # Post-mortems on the algo's own signals and trades, by Claude, with an experiment loop that

@@ -17,11 +17,20 @@ from ..risk.limits import CT_M_MARKET_AGAINST_MAX, RiskLimits
 GAP_SWITCH_GAP_DATR = 0.3
 
 
+def rule_gap(ctx: dict[str, Any] | None) -> float | None:
+    """The 09:45 gap the gap rules read — CT-Y's gap fade, CT-Y-F, the gap switch, RT-Y / RT-Y-F's gap skip: ``gapDatr``
+    (the open of the first 30m bar, the first continuous trade) as always, or ``gapOfficial`` (the pre-open print against
+    the closing-auction close) when the trigger was logged under KN_GAP_SOURCE=official — its context says which in
+    ``gapRule`` (CTB-19Oct, 2026-10-19). A context logged without it reads ``gapDatr``."""
+    ctx = ctx or {}
+    return ctx.get("gapOfficial") if ctx.get("gapRule") == "official" else ctx.get("gapDatr")
+
+
 def gap_switch(ctx: dict[str, Any] | None, lim: RiskLimits) -> str | None:
     """Why a 09:45 gap is followed in trend by a book with the gap switch — its volume at least
     ``gap_switch_rel_vol`` times the NIFTY50's — or None (operator, 2026-10-06)."""
     ctx = ctx or {}
-    x, gap, rv = lim.gap_switch_rel_vol, ctx.get("gapDatr"), ctx.get("relVol")
+    x, gap, rv = lim.gap_switch_rel_vol, rule_gap(ctx), ctx.get("relVol")
     if x is None or not ctx.get("openBar") or gap is None or gap < GAP_SWITCH_GAP_DATR or rv is None or rv < x:
         return None
     return f"gap switch: 09:45 gap {gap:.2f} daily ATR its own way on {rv:.1f}x the NIFTY50's volume (≥ {x:g}x) — followed in trend"
@@ -55,7 +64,7 @@ def rt_gate_reasons(ctx: dict[str, Any] | None, lim: RiskLimits) -> list[tuple[s
             near = list(ctx.get("pivotsAhead") or [])
         if near:
             out.append(("pivot_ahead", "pivot just ahead: " + ", ".join(near[:3]) + f" (within {lim.skip_pivot_ahead_atr:g} ATR30)"))
-    gap = ctx.get("gapDatr")
+    gap = rule_gap(ctx)
     if lim.skip_open_gap_datr is not None and ctx.get("openBar") and gap is not None and gap >= lim.skip_open_gap_datr:
         out.append(("open_gap", f"09:45 trigger gapped {gap:.2f} daily ATR its own way (≥ {lim.skip_open_gap_datr:g}) — the first-bar trap"))
     return out

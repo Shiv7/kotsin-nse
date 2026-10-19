@@ -51,6 +51,7 @@ from .bars.daily import (
 from .bars.daily import audit as audit_daily
 from .bars.indicators import atr, dried_volume
 from .bars.micro import MicroAggregator
+from .bars.official_open import FIRST_BAR, OfficialOpens, official_gap
 from .bars.oi_read import OiReading, oi_quadrant, read_oi, relative_z
 from .bars.periods import monthly, previous_complete, weekly
 from .bars.pivots import (
@@ -226,6 +227,7 @@ from .strategy.regime_gates import (
     gap_switch,
     graded_f_verdicts,
     rt_gate_reasons,
+    rule_gap,
     trigger_verdicts,
     volume_labels,
 )
@@ -606,6 +608,9 @@ class Engine:
         )
         #: the tick tape: every held, considered and carded contract and its legs, once a second
         self.tape = Tape(self.archive, enabled=settings.tape_enabled, legs_for=self._tape_legs)
+        #: today's official open of every NSE underlying — the pre-open print, else the first trade — read off the feed's
+        #: frames (bars/official_open.py) and kept in ``archive/official_open/<day>.json``: what ``gapOfficial`` reads
+        self.official_opens = OfficialOpens(settings.data_dir / "archive" / "official_open")
         #: the full tape: every NSE code the feed quotes, once a second on change (ops/fulltape.py)
         self._fulltape_skip_cache: dict[str, bool] = {}
         self.fulltape = FullTape(
@@ -911,6 +916,8 @@ class Engine:
         self.alerts.store_dir = self.s.data_dir / "alerts"
         self.alerts.restore(self._last_alerts_reset_ts())
         self._load_decided()
+        if (n := self.official_opens.load(ist_today())):
+            log.info("official_open.restored", opens=n, day=ist_today().isoformat())
 
     async def start_market(self) -> None:
         """The slow half: the catalogue, the backfill, the replay of today's closed bars into the
@@ -1231,6 +1238,7 @@ class Engine:
             armed_until=self._armed_until,
             segments=[s.value for s in self.s.segment_list],
             universe=len(self.underlyings),
+            gap_source=self.s.gap_source,
             strategies=[k.value for k in ALL_KEYS],
             fukaa_top_n=self.fukaa.cfg.top_n if self.fukaa.cfg.top_n is not None else "OFF",
             fukaa_max_same_direction=(
@@ -1771,6 +1779,7 @@ class Engine:
     async def _on_tick(self, tick: dict[str, Any]) -> None:
         code = str(tick["scrip_code"])
         ltp = float(tick.get("ltp") or 0)
+        self._note_official_open(code, ltp, tick)
         if tick.get("pooled"):
             self._take_pooled_quote(code, ltp, tick)
             return
@@ -1787,6 +1796,17 @@ class Engine:
             )
         await self.aggregator.on_tick(tick)
         await self.bus.publish(Topic.TICK, tick)
+
+    def _note_official_open(self, code: str, ltp: float, tick: dict[str, Any]) -> None:
+        """An NSE underlying's frame for the official-open capture (bars/official_open.py): its exchange time decides —
+        a frame without one never counts — pooled or not, since a pooled frame keeps the time the broker stamped it."""
+        st = self.aggregator.state.get(code)
+        if st is None or st.instrument.segment is not Segment.NSE_EQ:
+            return
+        self.official_opens.note(
+            st.instrument.symbol, ltp, tick.get("exch_ts"), float(tick.get("recv_ts") or time.time()),
+            feed_open=float(tick.get("open") or 0) or None, feed_prev_close=float(tick.get("prev_close") or 0) or None,
+        )
 
     def _take_pooled_quote(self, code: str, ltp: float, tick: dict[str, Any]) -> None:
         """A code this engine just subscribed, primed from the feed's pool (``FivePaisaFeed._prime``): the
@@ -4035,6 +4055,11 @@ class Engine:
         * ``gapDatr`` — today's first 30m open against the previous close, in daily ATRs, signed
           the trade's way. 09:45 triggers gapping WITH the trade (>= 0.3) averaged −2.0 % / −5.7 %
           in the two halves, against −0.7 % / −1.3 % without.
+        * ``gapOfficial`` — the same gap on the official numbers (CTB-19Oct, operator 18-19 Oct 2026: "the 1 AM
+          definition"): the official open — the pre-open print, else the first continuous trade
+          (bars/official_open.py) — against the official close, over the same daily ATR, with ``gapOpenSrc``,
+          ``officialOpen``, ``officialClose`` beside it. ``gapRule`` names the one the gap rules read
+          (``Settings.gap_source``, KN_GAP_SOURCE; ``regime_gates.rule_gap``).
         * ``pivotsAhead`` — classic 1d/1wk/1mo key levels within 0.5 ATR30 AHEAD of the close.
           Trades with one averaged −1.5 % / −1.6 % against +0.1 % / +1.0 % without.
         * ``openBar`` — the trigger is the session's first 30m bar (fires at 09:45)."""
@@ -4066,6 +4091,19 @@ class Engine:
         datr = atr([b for b in dailies if b.ts <= prev.ts], 14) if prev is not None else None
         if prev is not None and first is not None and datr:
             out["gapDatr"] = round(sign * (first.open - prev.close) / datr, 3)
+            # the official gap: the official open (the pre-open print, else the first continuous trade; the first 30m bar's
+            # open when this process never saw the open) against the official close — the previous session's daily row,
+            # the closing-auction print — over the same daily ATR. 6 dp: B1's line is 0.25 and UNIONBANK read 0.2495 on
+            # 19 Oct. ``gapDatr`` above stays the first trade's, whatever the gap rules read
+            oo = self.official_opens.get(sig.symbol, today)
+            o_px = oo.price if oo is not None else first.open
+            g = official_gap(o_px, prev.close, datr, bullish=sign > 0)
+            if g is not None:
+                out["gapOfficial"] = round(g, 6)
+            out.update(gapOpenSrc=oo.src if oo is not None else FIRST_BAR, officialOpen=o_px, officialClose=prev.close,
+                       officialOpenTs=oo.exch_ts if oo is not None else float(first.ts),
+                       officialCloseEod=is_official(prev), dAtr=round(datr, 4))
+        out["gapRule"] = self.s.gap_source
         atr30 = atr(self.store.bars(sig.symbol, DECISION_TF, 60), 14) or 0.0
         if atr30 > 0:
             ahead = sorted(
@@ -4125,6 +4163,12 @@ class Engine:
             log.warning("regime.context_failed", symbol=sig.symbol, error=str(exc)[:120])
         self._breadth_at[sig.signal_id] = br
         log.info("regime.breadth", symbol=sig.symbol, direction=sig.direction.value, share=br["share"], names=br["names"])
+        if br.get("openBar"):
+            # both gaps on every 09:15-candle trigger (CTB-19Oct): the first trade's and the official one, and which the
+            # gap rules read — the record is the regime.breadth event below
+            log.info("gap.read", symbol=sig.symbol, direction=sig.direction.value, gapDatr=br.get("gapDatr"),
+                     gapOfficial=br.get("gapOfficial"), openSrc=br.get("gapOpenSrc"), officialOpen=br.get("officialOpen"),
+                     officialClose=br.get("officialClose"), rule=br.get("gapRule"))
         await self.ledger.event("regime.breadth", {"signal_id": sig.signal_id, "symbol": sig.symbol, **br})
 
     async def _await_gap_rel_vol(self, sig: Signal, ctx: dict[str, Any]) -> None:
@@ -4132,7 +4176,7 @@ class Engine:
         not in yet — the members' bars close in the same few seconds — wait up to REL_VOL_WAIT_S for it, then read the
         trigger again. Only where it can come: the stock's own half-hour reading stands and 25 members are in the
         universe. Without it the books decide as before."""
-        if ctx.get("relVol") is not None or not ctx.get("openBar") or (ctx.get("gapDatr") or 0.0) < GAP_SWITCH_GAP_DATR:
+        if ctx.get("relVol") is not None or not ctx.get("openBar") or (rule_gap(ctx) or 0.0) < GAP_SWITCH_GAP_DATR:
             return
         if sum(1 for m in NIFTY50 if m in self.underlyings) < 25 or self._slot_ratio(sig.symbol, sig.ts) is None:
             return
@@ -4561,7 +4605,7 @@ class Engine:
                 ahead = breadth.get("pivotsAhead") or []
                 if ahead:
                     cons.append("pivot just ahead: " + ", ".join(ahead[:3]))
-                gap = breadth.get("gapDatr")
+                gap = rule_gap(breadth)
                 if breadth.get("openBar") and gap is not None and gap >= 0.3:
                     cons.append(f"09:45 gap with the trade: {gap:.2f} daily ATR")
             reads = (route or {}).get("reads") or []
@@ -5248,12 +5292,14 @@ class Engine:
         its own (T1 against 1 ATR30) and its grade a label."""
         lim = self._exits_by_strategy[key.value].limits
         ctx = ctx or {}
-        gap = ctx.get("gapDatr")
+        gap = rule_gap(ctx)  # the first trade's gapDatr unless KN_GAP_SOURCE=official (2026-10-19)
         if lim.gap_fade_datr is None or not ctx.get("openBar") or gap is None or gap < lim.gap_fade_datr:
             return None
         plan = self.fade_plan(sig, ctx, nearer_level=lim.fade_stop_nearer_level)
         if plan is not None:
             plan["gapDatr"] = gap
+            if ctx.get("gapRule") == "official":
+                plan["gapRule"] = "official"  # the gap above is the official one
         return plan
 
     def fade_plan(self, sig: Signal, ctx: dict[str, Any] | None, *, nearer_level: bool = False) -> dict[str, Any] | None:
@@ -7078,6 +7124,9 @@ class Engine:
                     self._fudkii_scan_task = asyncio.create_task(self.scan_fudkii(), name="fudkii-rescan")
                 if len(self._decided) != self._decided_saved:
                     await asyncio.to_thread(self._save_decided)
+                if self.official_opens.dirty:
+                    snap = self.official_opens.snapshot()  # on the loop, where the feed's frames change it
+                    await asyncio.to_thread(self.official_opens.write, snap)
                 if self.alerts.dirty and self.alerts.store_dir is not None:
                     snap = self.alerts.snapshot()  # on the loop, where the rings are mutated
                     await asyncio.to_thread(self.alerts.write, snap)
@@ -7498,6 +7547,8 @@ class Engine:
             },
             "telegram": self.telegram.stats(),
             "booting": self.booting,
+            # the gap the gap rules read (KN_GAP_SOURCE) and today's official-open capture (CTB-19Oct)
+            "gap": {"source": self.s.gap_source, "official_open": self.official_opens.stats()},
             "positions_open": len([p for p in self.positions.values() if p.status == "OPEN"]),
             "positions_stale_quote": len(self._stale_positions),
             "boot_notes": self.boot_notes,

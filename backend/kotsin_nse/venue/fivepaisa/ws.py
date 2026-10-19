@@ -570,7 +570,8 @@ class FivePaisaFeed:
 
     @staticmethod
     def _tick(row: dict[str, Any], arrived: float | None = None) -> dict[str, Any]:
-        ts = parse_broker_date(row.get("TickDt")) or float(row.get("Time") or 0) or time.time()
+        exch = parse_broker_date(row.get("TickDt"))
+        ts = exch or float(row.get("Time") or 0) or time.time()
         return {
             "scrip_code": str(row.get("Token")),
             "exch": str(row.get("Exch") or ""),
@@ -588,6 +589,9 @@ class FivePaisaFeed:
             "bid_qty": int(row.get("BidQty") or 0),
             "ask_qty": int(row.get("OffQty") or 0),
             "ts": ts,
+            # the frame's own exchange time, None when TickDt is missing or .NET's minimum date (a negative date):
+            # what the official-open capture trusts (bars/official_open.py). ``ts`` keeps its fallbacks, unchanged
+            "exch_ts": exch if exch is not None and exch > 0 else None,
             "recv_ts": arrived if arrived is not None else time.time(),
             "dispatch_ts": time.time(),
         }
