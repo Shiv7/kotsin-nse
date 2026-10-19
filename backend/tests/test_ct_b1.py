@@ -209,6 +209,63 @@ async def test_canbk_and_unionbank_like_are_skips_on_its_card_with_the_lines(set
         await e.stop()
 
 
+@pytest.mark.parametrize(("name", "gap"), [("UNIONBANK 19 Oct", 0.452), ("AXISBANK 15 Oct", 0.283), ("PREMIERENE 19 Oct", 0.145)])
+def test_an_open_this_process_never_saw_is_no_fade_and_no_verdict(name, gap):
+    """Review 19 Oct: ``first_bar`` — a boot or a feed reconnect after 09:15 — gives the first 30m bar's open, the first
+    trade's gap B1 replaced. UNIONBANK read 0.452 on it (0.2495 official, not B1), AXISBANK 15 Oct 0.283 (0.093, the
+    operator's bad fade), PREMIERENE 0.145 (0.252, a B1): on that number neither a fade nor a "no gap" can be told."""
+    r = b1_read({**PNB_LIKE, "gapOfficial": gap, "gapDatr": gap, "gapOpenSrc": "first_bar"}, close=187.25, bullish=True, zones=[])
+    assert r["take"] is False and r["gate"] == "open_unknown", name
+    assert r["gapOfficial"] == gap and "official open not seen" in r["why"] and "first_bar" == r["gapOpenSrc"], "the gaps kept"
+    assert b1_read({**PNB_LIKE, "gapOfficial": gap, "gapOpenSrc": "first_trade"}, close=187.25, bullish=True,
+                   zones=[])["gate"] != "open_unknown", "a first trade the feed saw is the official open (no pre-open match)"
+
+
+@pytest.mark.asyncio
+async def test_the_engine_skips_a_unionbank_like_first_bar_read(settings):
+    e, _trig, handled, events = await _judge(settings, {**UNIONBANK_LIKE, "gapOfficial": 0.452, "gapOpenSrc": "first_bar"})
+    try:
+        assert handled == []
+        skip = next(x for x in events if x.get("kind") == "rt_twin.skipped" and x.get("book") == B1.value)
+        assert skip["gate"] == "open_unknown" and skip["gapOfficial"] == 0.452
+        rec = next(x for x in events if x.get("kind") == "counter.b1")
+        assert rec["take"] is False and rec["gapOpenSrc"] == "first_bar" and rec["at_025"] is True, "recorded as read"
+    finally:
+        await e.stop()
+
+
+@pytest.mark.asyncio
+async def test_an_index_read_through_its_future_is_recorded_not_faded(settings):
+    """NIFTYNXT50 has no cash code in the master: its underlying is its front future (NSE_FO), and the capture reads the
+    cash feed — no official open. It returned silently (no record); now it is judged and skipped (review 19 Oct)."""
+    e = Engine(settings)
+    await e.start()
+    try:
+        fut = Instrument("48705", "NIFTYNXT50", Segment.NSE_FO, InstrumentKind.FUTURE, name="NIFTYNXT50 27 OCT 2026", lot_size=25,
+                         tick_size=0.05, underlying="NIFTYNXT50")
+        e.underlyings["NIFTYNXT50"] = fut
+        trig = Signal(strategy=StrategyKey.FUDKII, symbol="NIFTYNXT50", direction=Direction.BULLISH, ts=_open_ts(), entry=69300.0,
+                      stop=69100.0, targets=(69500.0,), reason="ST flip UP + close above upper band")
+        e._breadth_at[trig.signal_id] = {**PNB_LIKE, "atr30": 120.0}  # even a context that says preopen
+        e.zones_for = lambda symbol: []  # type: ignore[method-assign]
+        e._pivot_points = lambda symbol: FAR  # type: ignore[method-assign]
+        handled: list = []
+
+        async def capture(sig, bar, *, adopt=True):
+            handled.append(sig)
+
+        e._handle_signal = capture  # type: ignore[method-assign]
+        await e._b1_fade(trig, None)
+        events = await e.ledger.rows_between("events", 0, time.time() + 5)
+        assert handled == []
+        rec = next(x for x in events if x.get("kind") == "counter.b1")
+        assert rec["take"] is False and rec["gate"] == "open_unknown" and "through its future" in rec["why"]
+        skip = next(x for x in events if x.get("kind") == "rt_twin.skipped" and x.get("book") == B1.value)
+        assert skip["gate"] == "open_unknown"
+    finally:
+        await e.stop()
+
+
 def test_no_classic_level_for_the_name_is_no_fade():
     r = b1_read(PNB_LIKE, close=187.25, bullish=True, zones=[], pivots_known=False)
     assert r["take"] is False and r["gate"] == "pivots_unknown" and r["pivotsKnown"] is False and r["at_030"] is True

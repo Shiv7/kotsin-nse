@@ -202,7 +202,7 @@ from .risk.limits import (
 )
 from .risk.sizing import size_position
 from .risk.wallet import Wallet
-from .strategy.b1 import b1_read
+from .strategy.b1 import OPEN_UNKNOWN, b1_read
 from .strategy.base import Outcome, Signal, published
 from .strategy.counter import (
     KEY_LEVELS,
@@ -1814,7 +1814,7 @@ class Engine:
             return
         self.official_opens.note(
             st.instrument.symbol, ltp, tick.get("exch_ts"), float(tick.get("recv_ts") or time.time()),
-            feed_open=float(tick.get("open") or 0) or None, feed_prev_close=float(tick.get("prev_close") or 0) or None,
+            pooled=bool(tick.get("pooled")), feed_open=float(tick.get("open") or 0) or None, feed_prev_close=float(tick.get("prev_close") or 0) or None,
         )
 
     def _take_pooled_quote(self, code: str, ltp: float, tick: dict[str, Any]) -> None:
@@ -2220,6 +2220,10 @@ class Engine:
         return session_phase_of(inst.segment if inst else Segment.NSE_EQ, ts)
 
     async def _on_feed_connect(self, reconnect: bool) -> None:
+        # first, every connect: after 09:15 a name the official-open capture has not settled may have traded while the
+        # feed was down, and the snapshot that follows carries its LAST trade — it reads its first 30m bar instead
+        # (review 19 Oct, bars/official_open.py ``feed_connected``)
+        self.official_opens.feed_connected(time.time())
         if not reconnect:
             return
         marked = self.aggregator.on_reconnect()
@@ -4114,7 +4118,9 @@ class Engine:
                 out["gapOfficial"] = round(g, 6)
             out.update(gapOpenSrc=oo.src if oo is not None else FIRST_BAR, officialOpen=o_px, officialClose=prev.close,
                        officialOpenTs=oo.exch_ts if oo is not None else float(first.ts),
-                       officialCloseEod=is_official(prev), dAtr=round(datr, 4))
+                       # the broker's EOD row (00:00), not a provisional 09:15 or an index's 08:59 pre-open row — those
+                       # are REST and complete too (review 19 Oct); recorded, never blocking
+                       officialCloseEod=is_official(prev) and to_ist(prev.ts).time() == dt_time(0, 0), dAtr=round(datr, 4))
         out["gapRule"] = self.s.gap_source
         atr30 = atr(self.store.bars(sig.symbol, DECISION_TF, 60), 14) or 0.0
         if atr30 > 0:
@@ -5525,7 +5531,8 @@ class Engine:
         if sig.strategy is not StrategyKey.FUDKII or sig.signal_id in self._b1_judged:
             return
         und = self.underlyings.get(sig.symbol)
-        if und is None or und.segment is not Segment.NSE_EQ or not self.book_trades(key.value, und.segment):
+        if (und is None or und.segment not in (Segment.NSE_EQ, Segment.NSE_FO)
+                or not self.book_trades(key.value, und.segment)):
             return
         ctx = self._breadth_at.get(sig.signal_id)
         if ctx is None:
@@ -5536,6 +5543,11 @@ class Engine:
         bull = sig.direction is Direction.BULLISH
         read = b1_read(ctx, close=float(sig.entry), bullish=bull, zones=self.zones_for(sig.symbol),
                        pivots_known=bool(self._pivot_points(sig.symbol)))
+        if und.segment is Segment.NSE_FO:
+            # an index with no cash code in the master (NIFTYNXT50, 19 Oct) is read through its front future: the capture
+            # reads the cash feed, so its official open is never seen — judged and recorded, never faded (review 19 Oct)
+            read = {**read, "take": False, "gate": OPEN_UNKNOWN,
+                    "why": "index read through its future: no official open captured (the capture reads the cash feed)"}
         plan = self.b1_plan(sig, ctx) if read["take"] else None
         if read["take"] and plan is None:
             read = {**read, "take": False, "gate": "no_plan", "why": "no fade plan — no ATR30"}

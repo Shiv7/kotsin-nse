@@ -24,6 +24,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
+from ..bars.official_open import FIRST_BAR
 from ..bars.pivots import WALL_MIN_STRENGTH, Zone
 from ..risk.limits import B1_GAP_DATR, B1_GAP_LINE, B1_PIN_ATR
 from .counter import KEY_LEVELS
@@ -35,6 +36,8 @@ ROOM_TIERS = ((0.5, 0.5), (1.0, 1.0), (2.0, 1.5))
 #: a wall in the trigger's direction this near (ATR30) is worth TRIG_WALL_POINTS
 TRIG_WALL_ATR, TRIG_WALL_POINTS = 1.0, 0.5
 CONVICTION_CAP = 5.0
+#: the gate when the official open was not seen: the gap read is the first trade's, the one B1 replaced
+OPEN_UNKNOWN = "open_unknown"
 #: why the conviction is out of 5 with one read missing
 NO_READ5 = "5-read (OI, volume, IV, premium, stock against the trigger: up to 1.5) not computed in the engine"
 
@@ -89,8 +92,11 @@ def conviction(ctx: dict[str, Any], *, close: float, bullish: bool, zones: Seque
 def b1_read(ctx: dict[str, Any] | None, *, close: float, bullish: bool, zones: Sequence[Zone],
             pivots_known: bool = True) -> dict[str, Any]:
     """B1 on one 09:15-candle trigger: ``take`` and why, the gap and its lines, the pivot test and the conviction.
-    ``gate`` names a refusal: ``not_open_bar``, ``no_gap_value``, ``no_gap`` (under 0.25 its own way),
-    ``pivots_unknown`` (``pivots_known`` False: the engine holds no classic level for the name — its daily row not the
+    ``gate`` names a refusal: ``not_open_bar``, ``no_gap_value``, ``open_unknown`` (``gapOpenSrc`` ``first_bar``: the
+    process never saw the open — a boot or a reconnect after 09:15 — so the "official" gap is the first 30m bar's, the
+    first trade's, the very number B1 replaced: UNIONBANK 19 Oct read 0.452 on it against 0.2495 official, AXISBANK
+    15 Oct 0.283 against 0.093, PREMIERENE 19 Oct 0.145 against 0.252 — neither a fade nor a "no gap" can be told;
+    review 19 Oct), ``no_gap`` (under 0.25 its own way), ``pivots_unknown`` (``pivots_known`` False: the engine holds no classic level for the name — its daily row not the
     broker's official one, or too few of them — so "no key pivot ahead" cannot be told from "none read"; B1 does not
     fade blind), ``pivot_pin``."""
     ctx = ctx or {}
@@ -108,6 +114,9 @@ def b1_read(ctx: dict[str, Any] | None, *, close: float, bullish: bool, zones: S
         return {**out, "take": False, "gate": "not_open_bar", "why": "B1 reads the 09:15 candle only"}
     if gap is None:
         return {**out, "take": False, "gate": "no_gap_value", "why": "no official gap — no daily ATR or previous close"}
+    if out["gapOpenSrc"] == FIRST_BAR:
+        return {**out, "take": False, "gate": OPEN_UNKNOWN,
+                "why": f"official open not seen (the first 30m bar's open, gap {gap:.3f}); B1 does not fade the first-trade gap"}
     if gap < B1_GAP_DATR:
         return {**out, "take": False, "gate": "no_gap",
                 "why": f"official gap {gap:.3f} daily ATR its own way < {B1_GAP_DATR:g} ({out['gapOpenSrc'] or 'open'})"}
