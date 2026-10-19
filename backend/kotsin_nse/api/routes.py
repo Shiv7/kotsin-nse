@@ -1700,7 +1700,7 @@ The bid/ask spread is not a charge: fills pay it by trading against the order bo
         return {
             "day": data.day.isoformat(), "days": data.days, "ab": data.ab, "rows": data.rows,
             "wideStop": data.wide, "gradedF": data.graded_f, "gapFade": data.gap, "marketFade": data.market_fade,
-            "fukaa": data.fukaa, "labels": data.labels, "volume": data.volume,
+            "b1": data.b1, "fukaa": data.fukaa, "labels": data.labels, "volume": data.volume,
             "tabs": [{"id": t.id, "title": t.title, "brief": asdict(t.brief)} for t in shadow.TABS],
         }
 

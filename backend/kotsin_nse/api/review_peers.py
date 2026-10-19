@@ -229,6 +229,8 @@ PARAMS: tuple[tuple[str, str, Callable[[Any], str]], ...] = (
     ("peak_giveback_pct", "give-back from the peak", lambda v: "none (40 % trail after +3 %)" if v is None else f"{v:g} %"),
     ("sustain_s", "option-stop sustain", lambda v: "one read" if v is None else f"{v:g} s"),
     ("time_stop_bars", "time stop", lambda v: "none" if v is None else f"{v:g} × 30m bars"),
+    # CT-B1's wall-clock stop (11:15): without it the table said "time stop: none" for CT-B1 (review 19 Oct)
+    ("time_stop_hm", "clock time stop", lambda v: "none" if v is None else f"{v} IST"),
     ("min_stop_ticks", "min stop distance", lambda v: f"{v:g} ticks"),
     ("band_exit", "give-back exit", lambda v: str(v)),
     ("post_arm_sustain", "rung stop sustained", lambda v: "yes" if v else "no"),

@@ -127,13 +127,30 @@ def test_stretch_room_and_the_trigger_wall_tiers():
     # bearish: stretch = (official close - close) / dATR; the fade side is ABOVE the close
     assert c(184.0 - 0.79 * 4, [])["stretch"] == 0.0 and c(184.0 - 0.8 * 4, [])["stretch"] == 0.5
     assert c(184.0 - 1.5 * 4, [])["stretch"] == 1.0 and c(184.0 - 2.5 * 4, [])["stretch"] == 1.5
-    assert c(180.0, [])["room"] == 1.5, "no wall on the fade's side: all the room there is"
+    assert c(180.0, [Zone(178.0, 3.0)])["room"] == 1.5, "zones read, no wall on the fade's side: all the room there is"
     assert c(180.0, [Zone(180.9, 6.0)])["room"] == 0.0 and c(180.0, [Zone(181.0, 6.0)])["room"] == 0.5
     assert c(180.0, [Zone(182.0, 6.0)])["room"] == 1.0 and c(180.0, [Zone(184.0, 6.0)])["room"] == 1.5
     assert c(180.0, [Zone(178.0, 6.0)])["trigWall"] == 0.5 and c(180.0, [Zone(177.9, 6.0)])["trigWall"] == 0.0
     assert c(180.0, [Zone(181.0, 6.0)], atr30=0)["room"] == 0.0, "no ATR30: the room cannot be read"
     assert conviction({**PNB_LIKE, "gapOfficial": 3.0, "officialClose": 150.0}, close=187.25, bullish=True,
                       zones=[Zone(188.0, 6.0)])["total"] == 5.0, "capped at 5"
+
+
+def test_no_zone_for_the_name_leaves_both_wall_points_unknown_not_scored():
+    """Review 19 Oct, as research's v2 rule (b1_build.py: c_room / c_wall None when no zones were saved): a name with no
+    zone at all has its walls UNKNOWN — not "no wall ahead" (1.5) nor "no trigger-side wall" (0). Both points blank,
+    the total the known points only."""
+    c = conviction(PNB_LIKE, close=187.25, bullish=True, zones=[])
+    assert c["points"] == {"gap": 2.0, "stretch": 0.5, "room": None, "trigWall": None} and c["total"] == 2.5
+    assert c["wallsKnown"] is False and c["roomAtr"] is None and c["trigWallAtr"] is None and c["roomWall"] is None
+    assert len(c["unknown"]) == 2 and "+0..1.5" in c["unknown"][0] and "+0..0.5" in c["unknown"][1]
+    # one weak zone is a read: then no wall on either side IS "all the room there is" and no trigger-side wall
+    k = conviction(PNB_LIKE, close=187.25, bullish=True, zones=[Zone(186.0, 3.0)])
+    assert k["wallsKnown"] is True and k["unknown"] == [] and k["points"]["room"] == 1.5 and k["points"]["trigWall"] == 0.0
+    assert k["total"] == 4.0
+    # the engine's case: no classic level for the name, so no zones either — the skip records the known points alone
+    r = b1_read(PNB_LIKE, close=187.25, bullish=True, zones=[], pivots_known=False)
+    assert r["gate"] == "pivots_unknown" and r["conviction"]["total"] == 2.5 and r["conviction"]["points"]["room"] is None
 
 
 # -- the engine: judged on the 09:15 candle, on its own path -------------------------------------------------------
@@ -516,3 +533,49 @@ def test_the_shadow_page_tab_totals_every_b1_by_both_lines_and_conviction():
     assert t["all"]["net"] == 3900.0 and t["all"]["win"] == 1 and t["at_030"]["net"] == 5200.0 and t["conv3"]["closed"] == 1
     assert [r["symbol"] for r in got["rows"]] == ["PNB", "PREMIERENE", "CANBK"] and got["rows"][2]["pin"] == "1mo.PIVOT +0.05"
     assert any(tab.id == "b1" for tab in shadow.TABS)
+
+
+def test_the_shadow_tab_shows_an_unknown_wall_point_as_unknown():
+    from kotsin_nse.api import shadow
+
+    ev = [{"kind": "counter.b1", "signal_id": "T1", "symbol": "PNB", "trigger": "BULLISH", "take": False, "gate": "pivots_unknown",
+           "gapOfficial": 1.58, "at_030": True, "why": "no classic level",
+           "conviction": {"total": 2.5, "points": {"gap": 2.0, "stretch": 0.5, "room": None, "trigWall": None}}}]
+    got = shadow.b1_summary(signals=[], positions=[], trades=[], events=ev)
+    page = shadow._render_b1(shadow.ShadowData(day=date(2026, 10, 21), days=[], rows=[], ab={"since": "2026-09-28"}, b1=got))
+    assert "gap 2 · stretch 0.5 · room ? · trigWall ?" in page
+
+
+@pytest.mark.asyncio
+async def test_the_shadow_json_carries_the_b1_reads_like_the_page(settings):
+    """Review 19 Oct: /api/shadow (the daily read without opening the page) returned every other tab but not CT-B1's."""
+    import httpx
+
+    from kotsin_nse.api.routes import build_app
+
+    e = Engine(settings)
+    await e.ledger.init()
+    try:
+        await e.ledger.event("counter.b1", {"signal_id": "T1", "symbol": "PNB", "trigger": "BULLISH", "take": False,
+                                            "gate": "pivot_pin", "gapOfficial": 0.62, "at_030": True, "pins": [["1mo.PIVOT", 0.05]],
+                                            "why": "pinned", "conviction": {"total": 1.0, "points": {"gap": 1.0}}})
+        app = build_app(e)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+            j = (await c.get("/api/shadow")).json()
+        assert j["b1"]["total"]["read"] == 1 and j["b1"]["total"]["skipped"] == {"pivot_pin": 1}
+        assert [r["symbol"] for r in j["b1"]["rows"]] == ["PNB"] and j["b1"]["rows"][0]["pin"] == "1mo.PIVOT +0.05"
+    finally:
+        await e.ledger.close()
+
+
+def test_the_review_table_shows_its_11_15_clock_time_stop():
+    """Review 19 Oct: the Review page's parameter rows read ``time_stop_bars`` alone, so CT-B1 (and its mirrors) said
+    "time stop: none" beside a book that does stop on time."""
+    from kotsin_nse.api import review_peers as rp
+
+    b1p, cty = rp.params_json(CT_B1_LIMITS), rp.params_json(CT_Y_LIMITS)
+    assert b1p["time_stop_hm"] == "11:15" and cty["time_stop_hm"] is None and b1p["time_stop_bars"] is None
+    diffs = {d["key"]: d for d in rp.param_diffs(b1p, cty)}
+    assert diffs["time_stop_hm"] == {"key": "time_stop_hm", "label": "clock time stop", "this": "11:15 IST", "peer": "none"}
+    older = {k: v for k, v in cty.items() if k != "time_stop_hm"}
+    assert "time_stop_hm" not in {d["key"] for d in rp.param_diffs(b1p, older)}, "a record from before the field: left out"

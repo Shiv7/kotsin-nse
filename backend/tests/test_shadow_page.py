@@ -101,7 +101,7 @@ async def test_the_shadow_routes_serve_the_page_the_workbook_and_json(settings):
         j = (await c.get("/api/shadow", params={"day": DAY.isoformat()})).json()
         assert j["day"] == "2026-09-28" and [r["symbol"] for r in j["rows"]] == ["LODHA", "NYKAA"]
         assert [t["id"] for t in j["tabs"]] == ["gate-b", "stop-rules", "wide-stop", "graded-f", "gap-fade", "market-fade", "b1", "fukaa", "volume", "labels"] and all(t["brief"]["decide"] for t in j["tabs"])
-        assert set(j) >= {"wideStop", "gapFade", "labels", "ab"}
+        assert set(j) >= {"wideStop", "gapFade", "labels", "ab", "b1"}
         assert (await c.get("/shadow", params={"day": "yesterday"})).status_code == 400
     await engine.ledger.close()
 
