@@ -87,6 +87,33 @@ class SymbolState:
     late_qty: dict[str, float] = field(default_factory=dict)
 
 
+class RefusedSampler:
+    """Which refused frames earn a log line: the first ``per_day`` of an IST day, else the first ``per_key``
+    of each segment/phase — never the same code twice within ``per_code_s``. Enough to read what the
+    broker sent, never a line per frame (a weekend burst is 6,000 frames)."""
+
+    def __init__(self, per_day: int = 20, per_key: int = 5, per_code_s: float = 600.0) -> None:
+        self.per_day, self.per_key, self.per_code_s = per_day, per_key, per_code_s
+        self.day = ""
+        self.n_day = 0
+        self.n_key: dict[str, int] = {}
+        self.last_by_code: dict[str, float] = {}
+
+    def take(self, day: str, key: str, code: str, now: float) -> bool:
+        if day != self.day:
+            self.day, self.n_day = day, 0
+            self.n_key.clear()
+            self.last_by_code.clear()
+        if now - self.last_by_code.get(code, float("-inf")) < self.per_code_s:
+            return False
+        if self.n_day >= self.per_day and self.n_key.get(key, 0) >= self.per_key:
+            return False
+        self.n_day += 1
+        self.n_key[key] = self.n_key.get(key, 0) + 1
+        self.last_by_code[code] = now
+        return True
+
+
 class Aggregator:
     """One instance owns every symbol's bars. Single-threaded by construction."""
 
@@ -96,10 +123,18 @@ class Aggregator:
         *,
         on_bar_close: Callable[[UnifiedBar], Awaitable[None]] | None = None,
         timeframes: tuple[str, ...] = TIMEFRAMES,
+        refuse_untimed: bool = True,
     ) -> None:
         self.store = store
         self.on_bar_close = on_bar_close
         self.timeframes = timeframes
+        #: a frame whose ``exch_ts`` is None (no broker time) builds no bar and primes no baseline
+        #: (Settings.bars_refuse_untimed); a tick without the key — a replay, a test — is judged as before
+        self.refuse_untimed = refuse_untimed
+        self.untimed_ticks = 0
+        #: refused frames by "<segment>/<phase>" (phase by arrival: pre-open, session, post-close, weekend)
+        self.untimed_by: dict[str, int] = {}
+        self._untimed_sample = RefusedSampler()
         self.state: dict[str, SymbolState] = {}
         self.bars_closed = 0
         self.partial_bars = 0
@@ -192,8 +227,14 @@ class Aggregator:
         price = float(tick.get("ltp") or 0)
         if price <= 0:
             return
-        ts = float(tick.get("ts") or 0) or time.time()
         st.ticks += 1
+        if self.refuse_untimed and "exch_ts" in tick and tick["exch_ts"] is None:
+            # No trade time, so no bucket: what a reconnect re-sends for a contract with no print yet — the
+            # weekend and holiday flat bars, and the 0.0 / LastQty frames of a name that has not traded today.
+            # Refused before the day roll and the pre-open priming: it moves no baseline either.
+            self._refuse_untimed(st, tick)
+            return
+        ts = float(tick.get("ts") or 0) or time.time()
 
         segment = st.instrument.segment
         day_d = ist_day(ts)
@@ -225,6 +266,29 @@ class Aggregator:
         qty = self._volume_delta(st, tick)
         new_high, new_low = self._day_extreme_moves(st, tick)
         await self._apply(st, segment, ts, price, qty, new_high, new_low, open_ts=session_open_ts(segment, day_d))
+
+    def _refuse_untimed(self, st: SymbolState, tick: dict[str, Any]) -> None:
+        arrived = float(tick.get("recv_ts") or time.time())
+        segment = st.instrument.segment
+        d = ist_day(arrived)
+        if d.weekday() >= 5:
+            phase = "weekend"
+        elif arrived < session_open_ts(segment, d):
+            phase = "pre-open"
+        elif arrived >= session_close_ts(segment, d):
+            phase = "post-close"
+        else:
+            phase = "session"
+        key = f"{segment.value}/{phase}"
+        self.untimed_ticks += 1
+        self.untimed_by[key] = self.untimed_by.get(key, 0) + 1
+        code = st.instrument.scrip_code
+        if self._untimed_sample.take(d.isoformat(), key, code, arrived):
+            raw = tick.get("raw_time") or {}
+            log.info("bars.untimed_refused", symbol=st.instrument.symbol, token=code, exch=tick.get("exch"),
+                     exch_type=tick.get("exch_type"), tick_dt=raw.get("TickDt"), time_field=raw.get("Time"),
+                     ltp=tick.get("ltp"), total_qty=tick.get("total_qty"), last_qty=tick.get("last_qty"),
+                     arrived=round(arrived, 3), phase=phase, refused_today=self.untimed_by[key])
 
     def _roll_day(self, st: SymbolState, day: str, tick: dict[str, Any]) -> None:
         prev = float(tick.get("prev_close") or 0)
@@ -460,6 +524,8 @@ class Aggregator:
             "late_ticks": self.late_ticks,
             "stale_frames": self.stale_frames,
             "out_of_session_ticks": self.out_of_session_ticks,
+            "untimed_ticks": self.untimed_ticks,
+            "untimed_by": dict(self.untimed_by),
             "rows_dropped": self.rows_dropped,
             "ticks": sum(s.ticks for s in self.state.values()),
             "with_oi": sum(1 for s in self.state.values() if s.oi is not None),

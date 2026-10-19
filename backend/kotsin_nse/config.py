@@ -158,6 +158,14 @@ class Settings(BaseSettings):
     api_port: int = 8500
     engine_enabled: bool = True  # false → API only (tests and UI work with no broker session)
     feed_enabled: bool = True  # false → REST-polled bars only, no WebSocket
+    #: A feed frame with no usable broker time (TickDt missing, unparseable, or .NET's minimum date) never
+    #: builds a bar — quotes still take it. This engine stamped such frames with their ARRIVAL time, so the
+    #: snapshot burst of every broker resubscribe built flat bars at Friday's prices on weekends and holidays
+    #: (Saturday 1m bars from 3 Oct; Monday 12 Oct graded 121 of 122 triggers F); engine A keeps the negative
+    #: date and drops them. False = the old arrival-time stamping. Set it in the LaunchAgent's
+    #: EnvironmentVariables (KN_BARS_REFUSE_UNTIMED) — never in .env, which is engine A's and forbids keys
+    #: A does not know (2026-10-19).
+    bars_refuse_untimed: bool = True
 
     telegram_bot_token: SecretStr | None = None
     telegram_chat_id: str | None = None

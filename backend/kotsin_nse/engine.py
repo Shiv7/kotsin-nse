@@ -675,7 +675,8 @@ class Engine:
         )
         #: the feed hub this engine serves to its twin (venue/fivepaisa/hub.py), when it does
         self.feed_hub: HubServer | None = None
-        self.aggregator = Aggregator(self.store, on_bar_close=self._on_bar_close)
+        self.aggregator = Aggregator(self.store, on_bar_close=self._on_bar_close,
+                                     refuse_untimed=settings.bars_refuse_untimed)
         #: Advisory books — they read the same closed bars the decision path does and emit
         #: alerts only. Deliberately outside the gateway: nothing here can place an order.
         self.alerts = AlertEngine(self)

@@ -574,9 +574,11 @@ class FivePaisaFeed:
     @staticmethod
     def _tick(row: dict[str, Any], arrived: float | None = None) -> dict[str, Any]:
         # ``Time`` is seconds since midnight, not an epoch: as a fallback it put a frame in 1970.
-        # No usable TickDt → the arrival time.
-        ts = parse_broker_date(row.get("TickDt")) or (arrived if arrived is not None else time.time())
-        return {
+        # No usable TickDt → the arrival time, for the quote; ``exch_ts`` None tells the bar builder the
+        # frame has no trade time (``Aggregator.refuse_untimed``), and ``raw_time`` keeps what it carried.
+        exch_ts = parse_broker_date(row.get("TickDt"))
+        ts = exch_ts or (arrived if arrived is not None else time.time())
+        tick = {
             "scrip_code": str(row.get("Token")),
             "exch": str(row.get("Exch") or ""),
             "exch_type": str(row.get("ExchType") or ""),
@@ -593,9 +595,13 @@ class FivePaisaFeed:
             "bid_qty": int(row.get("BidQty") or 0),
             "ask_qty": int(row.get("OffQty") or 0),
             "ts": ts,
+            "exch_ts": exch_ts,
             "recv_ts": arrived if arrived is not None else time.time(),
             "dispatch_ts": time.time(),
         }
+        if exch_ts is None:
+            tick["raw_time"] = {"TickDt": row.get("TickDt"), "Time": row.get("Time")}
+        return tick
 
     @staticmethod
     def _oi(row: dict[str, Any], arrived: float | None = None) -> dict[str, Any]:
