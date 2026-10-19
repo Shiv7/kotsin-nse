@@ -9,8 +9,10 @@ print); the first trade differed on 122 of 146; the real cases below are 19 Oct'
 
 from __future__ import annotations
 
+import time
 from datetime import date, datetime, timedelta
 from datetime import time as dtime
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -90,12 +92,97 @@ def test_a_process_that_joined_after_the_open_takes_no_first_trade():
 
 
 def test_an_index_is_captured_like_any_underlying():
-    """NIFTY / BANKNIFTY ride the cash feed (999920xx); research found no index pre-open print on the 19 Oct tape, so
-    an index's official open is its first value of the session."""
+    """NIFTY / BANKNIFTY ride the cash feed (999920xx) and print their pre-open like a stock (review 19 Oct): BANKNIFTY
+    12 Oct read 55,350.15 at 09:13:59 on the tape — the 1D EOD open; its first continuous value was 55,328.40. An
+    order-entry value before it is refused. With no pre-open frame at all, the first value of the session."""
+    day = date(2026, 10, 12)
     oo = OfficialOpens(None)
-    oo.note("BANKNIFTY", 55844.0, at("15:30:00", DAY - timedelta(days=3)), at("08:30"))
-    got = oo.note("BANKNIFTY", 55797.0, at("09:15:00"), at("09:15:00"))
-    assert got is not None and (got.price, got.src) == (55797.0, FIRST_TRADE)
+    oo.note("BANKNIFTY", 55256.65, at("15:30:00", day - timedelta(days=3)), at("08:30", day))  # Friday's close
+    oo.note("BANKNIFTY", 55120.0, at("09:03:00", day), at("09:03:00", day))  # order entry: an indicative value
+    oo.note("BANKNIFTY", 55350.15, at("09:13:59", day), at("09:13:59", day))
+    got = oo.note("BANKNIFTY", 55328.4, at("09:15:00", day), at("09:15:00", day))
+    assert got is not None and (got.price, got.src, got.exch_ts) == (55350.15, PREOPEN, at("09:13:59", day))
+    assert oo.order_entry == 1 and oo.stats()["refusedOrderEntry"] == 1
+    g = official_gap(got.price, 55256.65, 683.3519, bullish=False)
+    assert g == pytest.approx(-0.136826, abs=5e-7), "a bearish trigger: the gap up is against it"
+    bare = OfficialOpens(None)
+    bare.note("BANKNIFTY", 55844.0, at("15:30:00", DAY - timedelta(days=3)), at("08:30"))
+    got = bare.note("BANKNIFTY", 55797.0, at("09:15:00"), at("09:15:00"))
+    assert got is not None and (got.price, got.src) == (55797.0, FIRST_TRADE), "no pre-open frame: the first value"
+
+
+def test_an_order_entry_frame_is_not_the_pre_open_match():
+    """MAHABANK 19 Oct (review 19 Oct): a frame that arrived 09:05:48 at the previous close, 79.79, with a crossed book —
+    order entry, before the match; research has no pre-open match and the first trade 79.86. Were it stamped today, it
+    would have stood as the open at a gap of 0. Order entry closes at a random second in 09:07-09:08: from 09:07 a frame
+    is the match's."""
+    oo = OfficialOpens(None)
+    oo.note("MAHABANK", 79.79, at("15:29:40", DAY - timedelta(days=3)), at("08:30"))
+    assert oo.note("MAHABANK", 79.79, at("09:05:48"), at("09:05:48")) is None and oo.order_entry == 1
+    assert oo.note("MAHABANK", 79.79, at("09:06:59"), at("09:06:59")) is None and oo.order_entry == 2
+    got = oo.note("MAHABANK", 79.86, at("09:15:01"), at("09:15:01"))
+    assert got is not None and (got.price, got.src) == (79.86, FIRST_TRADE)
+    oo.note("PNB", 120.87, at("09:07:00"), at("09:07:01"))  # the earliest second the match can carry
+    got = oo.note("PNB", 121.0, at("09:15:00"), at("09:15:00"))
+    assert got is not None and (got.price, got.src) == (120.87, PREOPEN)
+
+
+def test_a_reconnect_after_the_open_settles_no_first_trade_off_its_snapshot():
+    """Review 19 Oct: the feed up from 00:45, PNB's match caught at 09:08, then down 09:10-10:30 (the Mac asleep) — the
+    reconnect's first frame for a name with no pre-open price is the snapshot of its LAST trade (TickDt 10:29:58). It
+    settled as the open at the 10:29 price; now nothing settles and the engine reads the first 30m bar (``first_bar``)."""
+    oo = OfficialOpens(None)
+    oo.note("Y", 200.0, at("15:29:00", DAY - timedelta(days=3)), at("00:45"))  # the subscribe snapshot: Friday's trade
+    oo.note("PNB", 120.87, at("09:08:12"), at("09:08:13"))  # a pre-open price caught before the sleep
+    oo.feed_connected(at("10:30:00"))
+    assert oo.note("Y", 212.0, at("10:29:58"), at("10:30:05")) is None and oo.get("Y", DAY) is None
+    got = oo.note("PNB", 123.4, at("10:29:59"), at("10:30:05"))
+    assert got is not None and (got.price, got.src) == (120.87, PREOPEN), "a pre-open price held still settles"
+    oo.note("UNIONBANK", 172.9, at("09:08:30"), at("10:30:06"))  # re-sent with the match's own time
+    got = oo.note("UNIONBANK", 174.0, at("10:30:10"), at("10:30:10"))
+    assert got is not None and (got.price, got.src) == (172.9, PREOPEN)
+    assert oo.stats()["watchFrom"] == "10:30:00"
+
+
+def test_a_reconnect_before_the_open_changes_nothing():
+    oo = OfficialOpens(None)
+    oo.note("RELIANCE", 1400.0, at("15:29:30", DAY - timedelta(days=3)), at("00:45"))
+    oo.feed_connected(at("09:12:00"))  # the socket dropped 09:10-09:12: the open is still ahead
+    got = oo.note("RELIANCE", 1404.0, at("09:15:02"), at("09:15:02"))
+    assert got is not None and (got.price, got.src) == (1404.0, FIRST_TRADE) and oo.stats()["watchFrom"] == "00:45:00"
+    fresh = OfficialOpens(None)
+    fresh.feed_connected(at("08:30"))  # a first connect before the open: nothing to say yet
+    assert fresh.day == DAY and fresh.watch_from is None
+
+
+def test_a_pooled_frame_that_arrived_yesterday_never_rolls_today_away(tmp_path):
+    """Review 19 Oct: the pool primes a code with the time its frame first ARRIVED — possibly yesterday. It rolled the
+    day back, wiping today's pre-open prices and what ``load`` restored; nothing re-settled."""
+    oo = OfficialOpens(tmp_path)
+    assert oo.load(DAY) == 0 and oo.day == DAY, "the boot starts today with or without a file"
+    oo.note("X", 100.0, at("08:30"), at("08:30"))
+    oo.note("X", 101.0, at("09:08:10"), at("09:08:11"))
+    assert oo.note("Q", 50.0, at("15:29:00", DAY - timedelta(days=1)), at("15:30:00", DAY - timedelta(days=1)), pooled=True) is None
+    assert oo.day == DAY
+    got = oo.note("X", 101.5, at("09:15:01"), at("09:15:01"))
+    assert got is not None and (got.price, got.src) == (101.0, PREOPEN)
+
+
+def test_a_pooled_frame_never_says_the_feed_was_up_nor_settles_a_first_trade():
+    """Review 19 Oct: a restart at 09:20 whose first frame is a pooled one that arrived at the other engine 09:14:58 —
+    it claimed the feed was up for the open, and later frames settled as first trades. A pooled pre-open price is still
+    the name's pre-open price, by its exchange time."""
+    oo = OfficialOpens(None)
+    assert oo.note("W", 400.0, at("09:08:20"), at("09:14:58"), pooled=True) is None
+    assert oo.watch_from is None
+    assert oo.note("V", 512.0, at("09:20:01"), at("09:20:02")) is None, "V's 09:20 trade is not its first"
+    got = oo.note("W", 401.0, at("09:20:03"), at("09:20:03"))
+    assert got is not None and (got.price, got.src) == (400.0, PREOPEN)
+    up = OfficialOpens(None)
+    up.note("V", 500.0, at("15:29:00", DAY - timedelta(days=3)), at("08:30"))  # live: the feed was up before the open
+    assert up.note("V", 512.0, at("09:15:02"), at("09:15:03"), pooled=True) is None, "a pooled frame settles no first trade"
+    got = up.note("V", 512.5, at("09:15:04"), at("09:15:04"))
+    assert got is not None and (got.price, got.src) == (512.5, FIRST_TRADE)
 
 
 def test_the_days_opens_and_pending_pre_open_prices_survive_a_restart(tmp_path):
@@ -206,6 +293,72 @@ def test_a_process_that_never_saw_the_open_reads_the_first_bar(settings, monkeyp
     open_ts = _store(e, "HAL", "2303", first_open=4730.0)
     c = e.trigger_context(Signal(strategy=StrategyKey.FUDKII, symbol="HAL", direction=Direction.BULLISH, ts=open_ts, entry=4726.0, stop=4718.0))
     assert c["gapOpenSrc"] == FIRST_BAR and c["officialOpen"] == 4730.0 and c["gapOfficial"] == pytest.approx(c["gapDatr"])
+
+
+class _Clock:
+    """The engine module's ``time`` with a fixed ``time()`` — the rest is the real module."""
+
+    def __init__(self, now: float) -> None:
+        self.now = now
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(time, name)
+
+    def time(self) -> float:
+        return self.now
+
+
+@pytest.mark.asyncio
+async def test_the_engine_tells_the_capture_of_a_reconnect_after_the_open(settings, monkeypatch):
+    """Review 19 Oct, end to end: the feed up at 00:45, asleep over the open, back at 10:30 — the reconnect's snapshot
+    of HAL's 10:29:58 trade is not its open, and the trigger reads ``first_bar``."""
+    monkeypatch.setattr(engine_mod, "ist_today", lambda: DAY)
+    e = Engine(settings)
+    await e.start()
+    try:
+        inst = Instrument("2303", "HAL", Segment.NSE_EQ, InstrumentKind.EQUITY, name="HAL", underlying="HAL")
+        e.underlyings["HAL"] = inst
+        e.aggregator.track(inst)
+        open_ts = _store(e, "HAL", "2303", first_open=4730.0)
+        await e._on_tick({"scrip_code": "2303", "ltp": 4700.0, "ts": at("15:29:50", DAY - timedelta(days=3)),
+                          "exch_ts": at("15:29:50", DAY - timedelta(days=3)), "recv_ts": at("00:45")})
+        monkeypatch.setattr(engine_mod, "time", _Clock(at("10:30:00")))
+        await e._on_feed_connect(True)
+        await e._on_tick({"scrip_code": "2303", "ltp": 4790.0, "ts": at("10:29:58"), "exch_ts": at("10:29:58"), "recv_ts": at("10:30:05")})
+        assert e.official_opens.get("HAL", DAY) is None
+        c = e.trigger_context(Signal(strategy=StrategyKey.FUDKII, symbol="HAL", direction=Direction.BULLISH, ts=open_ts, entry=4726.0, stop=4718.0))
+        assert c["gapOpenSrc"] == FIRST_BAR and c["officialOpen"] == 4730.0
+    finally:
+        await e.stop()
+
+
+@pytest.mark.asyncio
+async def test_the_engine_passes_a_pooled_frame_as_pooled(settings, monkeypatch):
+    monkeypatch.setattr(engine_mod, "ist_today", lambda: DAY)
+    e = Engine(settings)
+    inst = Instrument("2303", "HAL", Segment.NSE_EQ, InstrumentKind.EQUITY, name="HAL", underlying="HAL")
+    e.underlyings["HAL"] = inst
+    e.aggregator.track(inst)
+    await e._on_tick({"scrip_code": "2303", "ltp": 4721.0, "ts": at("09:08:10"), "exch_ts": at("09:08:10"), "recv_ts": at("09:14:58"),
+                      "pooled": True})
+    assert e.official_opens.watch_from is None and e.official_opens.stats()["preopenPending"] == 1
+
+
+def test_the_close_is_flagged_official_only_off_the_eod_row(settings, monkeypatch):
+    """Review 19 Oct: ``officialCloseEod`` read ``is_official`` alone, true of an index's 08:59 pre-open row and of a
+    provisional 09:15 one too (REST and complete) — neither is the closing-auction print. The EOD row is the 00:00 one."""
+    monkeypatch.setattr(engine_mod, "ist_today", lambda: DAY)
+    e = Engine(settings)
+    e.underlyings["NIFTY"] = Instrument("999920000", "NIFTY", Segment.NSE_EQ, InstrumentKind.EQUITY, name="NIFTY", underlying="NIFTY")
+    open_ts = _store(e, "NIFTY", "999920000", first_open=4730.0)
+    sig = Signal(strategy=StrategyKey.FUDKII, symbol="NIFTY", direction=Direction.BULLISH, ts=open_ts, entry=4726.0, stop=4718.0)
+    assert e.trigger_context(sig)["officialCloseEod"] is True
+    fri = DAY - timedelta(days=3)
+    rows = [b for b in e.store.bars("NIFTY", "1d", 40) if b.ts < int(at("00:00", fri))]
+    e.store.seed("NIFTY", "1d", [*rows, UnifiedBar("NIFTY", "999920000", "1d", int(at("08:59", fri)), 4700, 4730, 4282, 4700, 0.0,
+                                                   source=BarSource.REST, complete=True)])
+    c = e.trigger_context(sig)
+    assert c["officialCloseEod"] is False and c["officialClose"] == 4700, "recorded, not blocking"
 
 
 def test_the_health_page_says_which_gap_the_rules_read(settings):
