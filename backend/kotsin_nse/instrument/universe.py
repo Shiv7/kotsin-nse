@@ -107,11 +107,17 @@ class ContractRoll:
     #: set when the underlying itself is a future and changes (MCX, an index with no cash leg): its
     #: bars, levels and the contract a book trades all move to it. None for a cash-led group.
     new_underlying: Instrument | None = None
+    #: why this plan is NOT followed: the master would drop a held contract that has not reached its roll,
+    #: move backwards, or list nothing for one that has — a partial scrip master, whose pick is never
+    #: obeyed (review, 2026-10-19). The held contracts stay; the roll is owed and alarms.
+    suspect: str = ""
 
     def describe(self) -> str:
         def one(i: Instrument) -> str:
             return f"{i.scrip_code} ({i.expiry[:10]})"
 
+        if not self.new:
+            return f"{self.root}: {', '.join(one(f) for f in self.old)} → nothing listed"
         if self.new_underlying is not None:
             return f"{self.root}: {one(self.old_underlying)} → {one(self.new_underlying)}"
         return f"{self.root}: futures {', '.join(one(f) for f in self.old)} → {', '.join(one(f) for f in self.new)}"
@@ -155,22 +161,52 @@ class UniverseBuilder:
         and the boot can never disagree (MCX: the roll window; NSE: unexpired, front + next)."""
         return self._unexpired_futures(root, segment, today)
 
+    def is_due(self, f: Instrument, today: date) -> bool:
+        """Has the held future ``f`` reached its roll — expired, or (MCX) ``mcx_roll_days`` or fewer from
+        expiry, the rule ``_unexpired_futures`` applies."""
+        if not f.expiry:
+            return False
+        days = (date.fromisoformat(f.expiry[:10]) - today).days
+        return days < 0 or (f.segment is Segment.MCX_FO and 0 < self.policy.mcx_roll_days and days <= self.policy.mcx_roll_days)
+
     def roll_plan(self, groups: dict[str, ScripGroup], today: date) -> list[ContractRoll]:
         """Every group whose held futures are not the ones a boot on ``today`` would pick.
 
         The pick was made once, at boot: a process that runs across an expiry kept the expired month
         (engine A ran 10–19 Oct on CRUDEOIL 19 Oct while the rule had moved it to November on 14 Oct).
-        A group with no pick today keeps what it holds — never left without a contract."""
+        A group with no pick today keeps what it holds — never left without a contract. A roll only ever
+        moves forward, off contracts that are due: a held contract that is not due and is no longer picked,
+        a pick that expires before the held front, or no pick at all for a due front is the master's fault
+        (the 5paisa ScripMaster has answered 404 since 17 Oct; a truncated download parses as a short
+        list) — such a plan is returned with ``suspect`` set, for the alarm, and is never followed."""
+
+        def one(i: Instrument) -> str:
+            return f"{i.scrip_code} ({i.expiry[:10]})"
+
         out: list[ContractRoll] = []
         for root, g in groups.items():
             want = self.futures_for(root, g.segment, today)
-            if not want or [f.scrip_code for f in want] == [f.scrip_code for f in g.futures]:
+            held = g.futures[0] if g.futures else None
+            if not want:
+                if held is not None and self.is_due(held, today):
+                    out.append(ContractRoll(root=root, segment=g.segment, old=list(g.futures), new=[],
+                                            old_underlying=g.underlying,
+                                            suspect=f"the master lists no {g.segment.value} future for {root}; {one(held)} is due"))
+                continue
+            if [f.scrip_code for f in want] == [f.scrip_code for f in g.futures]:
                 continue
             new_underlying = want[0] if g.equity is None else None
             if new_underlying is not None and new_underlying.scrip_code == g.underlying.scrip_code:
                 new_underlying = None
+            picked = {f.scrip_code for f in want}
+            dropped = [f for f in g.futures if f.scrip_code not in picked and not self.is_due(f, today)]
+            suspect = ""
+            if held is not None and want[0].expiry[:10] < held.expiry[:10]:
+                suspect = f"the master's pick {one(want[0])} expires before the held {one(held)}"
+            elif dropped:  # an exchange lists new months beyond the ones it has, never before them
+                suspect = f"the master no longer lists {', '.join(one(f) for f in dropped)}, not due"
             out.append(ContractRoll(root=root, segment=g.segment, old=list(g.futures), new=want,
-                                    old_underlying=g.underlying, new_underlying=new_underlying))
+                                    old_underlying=g.underlying, new_underlying=new_underlying, suspect=suspect))
         return out
 
     def build_underlyings(self, segments: Iterable[Segment], today: date) -> dict[str, ScripGroup]:
