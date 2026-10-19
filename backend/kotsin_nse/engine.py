@@ -144,7 +144,6 @@ from .market.session import (
     NSE_FORCED_FILL,
     NSE_OUT_BY,
     TF_SECONDS,
-    TradingCalendar,
     bucket_start,
     from_ist,
     held_overnight,
@@ -154,6 +153,7 @@ from .market.session import (
     ist_hm,
     ist_naive_to_ts,
     ist_today,
+    load_calendar,
     on_session_grid,
     past_force_flat,
     past_nse_forced_fill,
@@ -625,7 +625,7 @@ class Engine:
         #: and the decision can never disagree.
         self.position_marks: dict[str, dict[str, Any]] = {}
         self.exposure = ExposureBook(self.limits)
-        self.calendar = TradingCalendar.from_file(settings.data_dir / "holidays.txt")
+        self.calendar, self._calendar_warning = load_calendar(settings.data_dir)
         self.telegram = Telegram(
             settings.telegram_bot_token.get_secret_value() if settings.telegram_bot_token else None,
             settings.telegram_chat_id,
@@ -989,6 +989,12 @@ class Engine:
         if warn:
             self.boot_notes.append(warn)
             log.warning("calendar.no_holidays", detail=warn)
+        if self._calendar_warning:
+            self.boot_notes.append(self._calendar_warning)
+            log.warning("calendar.mcx_on_nse_list", detail=self._calendar_warning)
+        elif self.calendar.mcx is not None:
+            log.info("calendar.mcx", closed=len(self.calendar.mcx.closed), evening=len(self.calendar.mcx.evening),
+                     morning=len(self.calendar.mcx.morning))
         ignored = sorted(k for k in self.s.model_fields_set if k.startswith("cost_"))
         if ignored:
             # Kept in Settings only so an old .env still boots; nothing reads them (review,
@@ -1482,12 +1488,14 @@ class Engine:
         start_intraday = min(start_intraday, first - timedelta(days=1))
         start_daily = end - timedelta(days=400)  # a year of dailies for monthly pivots
         expected_prev = self.calendar.previous_trading_day(end)
+        expected_mcx = self.calendar.previous_trading_day(end, Segment.MCX_FO)
         counts = {"ok": 0, "failed": 0, "daily_from_cache": 0}
         sem = asyncio.Semaphore(max(1, self.s.backfill_concurrency))
 
         def daily_current(inst: Instrument) -> bool:
             prev = previous_session(self.store.bars(inst.symbol, "1d"), end)
-            return (prev is not None and is_official(prev) and ist_day(prev.ts) == expected_prev
+            want = expected_mcx if inst.segment is Segment.MCX_FO else expected_prev
+            return (prev is not None and is_official(prev) and ist_day(prev.ts) == want
                     and not is_provisional(prev, inst.segment))
 
         async def one(inst: Instrument, tf: str, start: date) -> None:
@@ -1790,15 +1798,15 @@ class Engine:
             now = time.time()
             prov = set(a.provisional)
             wanted = sorted(
-                {sym for sym in a.needs_refresh if sym not in prov and self._daily_confirmed.get(sym) != a.expected_prev}
+                {sym for sym in a.needs_refresh if sym not in prov and self._daily_confirmed.get(sym) != a.expected(sym)}
                 | {sym for sym in prov if now - self._daily_provisional_asked.get(sym, 0.0) >= PROVISIONAL_RETRY_S}
                 | {sym for sym in self._daily_failed if sym in self.underlyings}
             )
             for sym in wanted:
                 if sym in prov:
                     self._daily_provisional_asked[sym] = now
-                elif a.expected_prev is not None:
-                    self._daily_confirmed[sym] = a.expected_prev
+                elif (exp := a.expected(sym)) is not None:
+                    self._daily_confirmed[sym] = exp
             if wanted:
                 n = await self._refetch_daily(wanted[:REPAIR_BATCH])
                 log.info("daily.repaired", refetched=n, asked=len(wanted), audit=a.summary())
@@ -2010,9 +2018,14 @@ class Engine:
         day = ist_day(ts)
         seg = self._segment_by_code.get(code, Segment.NSE_FO)
         if self._oi_ref_day != day:
-            if (self._oi_ref_day is not None
-                    and self.calendar.previous_trading_day(day) != self.calendar.previous_trading_day(self._oi_ref_day)):
-                rolled = {c: lv[0] for c, lv in self._fut_oi.items() if ist_day(lv[1]) < day and lv[0] > 0}
+            if self._oi_ref_day is not None:
+                # per exchange: MCX's evening on an NSE holiday is a session of its own (21 Oct measures MCX
+                # from 20 Oct's close, NSE from 19 Oct's); without holidays_mcx.txt both read the NSE list
+                was = self._oi_ref_day
+                moved = {sg: self.calendar.previous_trading_day(day, sg) != self.calendar.previous_trading_day(was, sg)
+                         for sg in (Segment.NSE_FO, Segment.MCX_FO)}
+                rolled = {c: lv[0] for c, lv in self._fut_oi.items() if ist_day(lv[1]) < day and lv[0] > 0
+                          and moved[Segment.MCX_FO if self._segment_by_code.get(c) is Segment.MCX_FO else Segment.NSE_FO]}
                 self._oi_ref.update(rolled)
                 self._oi_ref_src.update(dict.fromkeys(rolled, "archive"))
             self._oi_ref_day = day
@@ -2020,7 +2033,7 @@ class Engine:
             self._oi_ref[code] = oi
             self._oi_ref_src[code] = "preopen"
         self._fut_oi[code] = (oi, ts)
-        self.oi_candles.on_print(code, oi, ts, seg, trading_day=self.calendar.is_trading_day(day))
+        self.oi_candles.on_print(code, oi, ts, seg, trading_day=self.calendar.is_trading_day(day, seg))
 
     def _seed_oi_reference(self, *, today: date | None = None) -> int:
         """The previous session's closing OI for every future we map, from the engine's own OI archive
@@ -2031,9 +2044,16 @@ class Engine:
         prev = self.calendar.previous_trading_day(today)
         refs: dict[str, float] = {}
         src: dict[str, str] = {}
+        # an MCX contract's previous session is MCX's own (an evening-only day); the NSE bhavcopy never has it
+        mcx_prev = self.calendar.previous_trading_day(today, Segment.MCX_FO)
+        own_prev = {c for c in codes if self._segment_by_code.get(c) is Segment.MCX_FO} if mcx_prev != prev else set()
+        if own_prev:
+            found = self._oi_from_archive(mcx_prev, own_prev, last=True)
+            refs.update(found)
+            src.update(dict.fromkeys(found, "archive"))
         for source, read in (
             ("nse", lambda want: self._oi_from_bhavcopy(prev, want)),
-            ("archive", lambda want: self._oi_from_archive(prev, want, last=True)),
+            ("archive", lambda want: self._oi_from_archive(prev, want - own_prev, last=True)),
             ("preopen", lambda want: self._oi_from_archive(today, want, last=False, before=session_open_ts(Segment.NSE_EQ, today))),
         ):
             missing = codes - set(refs)
@@ -2118,12 +2138,17 @@ class Engine:
         if not futs:
             return OiReading(doubt="no unexpired future on the OI feed")
         expiry = date.fromisoformat(futs[0].expiry[:10])
-        sessions = sum(1 for k in range((expiry - today).days + 1) if self.calendar.is_trading_day(today + timedelta(days=k)))
+        seg = futs[0].segment
+        sessions = sum(1 for k in range((expiry - today).days + 1) if self.calendar.is_trading_day(today + timedelta(days=k), seg))
         # Only a level received during TODAY's session is today's OI. 5paisa's OI frames carry no
         # broker time, and at a subscribe it re-sends each contract's last print: on a Saturday
         # JSWSTEEL's last 1 Oct print arrived fresh and read +1.05 % against NSE's official close
         # (review, 2026-10-03). Before the open, or on a closed day, the reading is doubtful.
-        since = (session_open_ts(Segment.NSE_FO, today) if self.calendar.is_trading_day(today) else float("inf"))
+        if seg is Segment.MCX_FO and self.calendar.mcx is not None:
+            hours = self.calendar.session_hours(seg, today)  # MCX's own day: an evening-only session from 17:00
+            since = from_ist(datetime.combine(today, hours[0], tzinfo=IST)) if hours is not None else float("inf")
+        else:
+            since = (session_open_ts(Segment.NSE_FO, today) if self.calendar.is_trading_day(today) else float("inf"))
         return read_oi([f.scrip_code for f in futs], sessions_left=sessions, levels=self._fut_oi, refs=self._oi_ref,
                        now=time.time() if now is None else now, ref_sources=self._oi_ref_src, session_open=since)
 
@@ -2145,7 +2170,8 @@ class Engine:
                 "day": day.to_json() if day is not None else None,
                 "candles30m": [c.to_json() for c in self.oi_candles.series(f.scrip_code, "30m", 14)],
             })
-        return {"symbol": symbol, "reading": reading.to_json(), "refDay": self.calendar.previous_trading_day(today).isoformat(),
+        ref_day = self.calendar.previous_trading_day(today, futs[0].segment if futs else None)
+        return {"symbol": symbol, "reading": reading.to_json(), "refDay": ref_day.isoformat(),
                 "bhavcopyDay": self._oi_bhav_day.isoformat() if self._oi_bhav_day else None, "legs": legs,
                 "brokerFields": dict(self.oi_frames)}
 
@@ -5874,7 +5900,7 @@ class Engine:
             def prev_day(d: date) -> date:
                 cur = d - timedelta(days=1)
                 for _ in range(30):
-                    if cur in days or self.calendar.is_trading_day(cur):
+                    if cur in days or self.calendar.is_trading_day(cur, Segment.MCX_FO):
                         return cur
                     cur -= timedelta(days=1)
                 return cur

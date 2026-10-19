@@ -1,0 +1,41 @@
+# MCX trading days that differ from a plain weekday session: one "YYYY-MM-DD STATE" per line. Blank lines and
+# # comments are ignored. STATE is one of:
+#   closed   - no session at all
+#   evening  - the morning session closed; trading 17:00 to the close (most NSE holidays)
+#   morning  - 09:00 to 17:00; the evening session closed
+# Every weekday not listed trades both sessions; weekends never trade (a weekend entry is a no-op).
+#
+# This file is DATA, and MCX's own: data/holidays.txt is NSE's list and stays as it is. The engine reads MCX's
+# days from here for every MCX question (is it open now, which session was the previous one); with no file,
+# MCX follows the NSE list as before 2026-10-19 and the boot says so. A malformed line leaves MCX on the
+# NSE list (boot note "holidays_mcx.txt unreadable"). Never guess a day.
+#
+# -- PROVENANCE --------------------------------------------------------------------------------------------
+# MCX circular MCX/TRD/636/2025 (15 Dec 2025), "Trading holidays for the calendar year 2026", as published by
+#   https://upstox.com/stocks-market/mcx-holidays/            (all 16 weekday rows below except 15 Jan)
+#   https://kotakneo.com/share-market-holidays/mcx-holidays/  (the same 16 rows)
+#   https://www.jainam.in/mcx-holidays/                       (agrees; omits 1 Jan, adds the weekend ones)
+#   https://bankbazaar.com/indian-holiday/mcx-holidays.html   (agrees, and lists 15 Jan; omits 25 Dec)
+# read 19 Oct 2026. 15 Jan (Maharashtra municipal elections, evening open) has one source, and 5paisa's own
+# daily candles hold an MCX row for 15 Jan on the long-lived contracts (stamped ~17:00) - the evening traded.
+# mcxindia.com refused the request (HTTP 403); check the next year's circular before 2027.
+# Not modelled: special sessions (Muhurat trading on Diwali, Sun 8 Nov 2026) - weekends never trade here.
+
+# -- MCX 2026 --
+2026-01-01 morning   # New Year Day: morning open, evening closed
+2026-01-15 evening   # Municipal Corporation Election - Maharashtra
+2026-01-26 closed    # Republic Day
+2026-03-03 evening   # Holi (2nd day)
+2026-03-26 evening   # Shri Ram Navmi
+2026-03-31 evening   # Shri Mahavir Jayanti
+2026-04-03 closed    # Good Friday
+2026-04-14 evening   # Dr. Baba Saheb Ambedkar Jayanti
+2026-05-01 evening   # Maharashtra Day
+2026-05-28 evening   # Bakri Id
+2026-06-26 evening   # Moharram
+2026-09-14 evening   # Ganesh Chaturthi
+2026-10-02 closed    # Mahatma Gandhi Jayanti
+2026-10-20 evening   # Dussehra
+2026-11-10 evening   # Diwali-Balipratipada
+2026-11-24 evening   # Prakash Gurpurb Sri Guru Nanak Dev
+2026-12-25 closed    # Christmas

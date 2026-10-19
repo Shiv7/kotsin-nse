@@ -124,6 +124,9 @@ class DailyAudit:
     expected_prev: date | None
     #: the latest previous-session date any name actually holds — the market's own calendar
     consensus_prev: date | None
+    #: a name whose exchange keeps its own days (MCX: ``data/holidays_mcx.txt``) and whose previous
+    #: session is not ``expected_prev`` — 21 Oct 2026 expects NSE's 19 Oct and MCX's 20 Oct evening
+    expected_by: dict[str, date] = field(default_factory=dict)
     ok: list[str] = field(default_factory=list)
     missing: list[str] = field(default_factory=list)  # no bar before today at all
     unofficial: list[str] = field(default_factory=list)  # previous bar built from ticks, not REST
@@ -140,6 +143,10 @@ class DailyAudit:
     #: now. show alerts but dont trade till there is liquidity"). Re-asked like any stale name, never
     #: a fault; no book trades it until its series is current again, when it leaves this list.
     quiet: list[str] = field(default_factory=list)
+
+    def expected(self, sym: str) -> date | None:
+        """The session ``sym``'s previous-session bar should come from."""
+        return self.expected_by.get(sym, self.expected_prev)
 
     @property
     def holiday_suspected(self) -> bool:
@@ -199,14 +206,18 @@ def audit(
     quiet: Collection[str] = (),
 ) -> DailyAudit:
     """Classify every name's daily series by whether its previous-session bar can carry a pivot.
-    ``segments`` names each series' exchange (default NSE_EQ, as ``Engine.zones_for`` assumes). A name
-    in ``quiet`` that is behind (missing, stale, short) is classed quiet, not a fault."""
+    ``segments`` names each series' exchange (default NSE_EQ, as ``Engine.zones_for`` assumes); an MCX
+    name's previous session is MCX's own (its evening session on an NSE holiday — ``data/holidays_mcx.txt``).
+    A name in ``quiet`` that is behind (missing, stale, short) is classed quiet, not a fault."""
     expected = calendar.previous_trading_day(today)
     prevs = {sym: previous_session(bars, today) for sym, bars in series.items()}
     consensus = max((ist_day(p.ts) for p in prevs.values() if p is not None), default=None)
     out = DailyAudit(today=today, expected_prev=expected, consensus_prev=consensus)
+    mcx_expected = calendar.previous_trading_day(today, Segment.MCX_FO)
     for sym, bars in series.items():
         prev = prevs[sym]
+        if (segments or {}).get(sym) is Segment.MCX_FO and mcx_expected != expected:
+            out.expected_by[sym] = mcx_expected
         if not bars:
             out.dormant.append(sym)
         elif prev is None:
@@ -215,7 +226,7 @@ def audit(
             out.unofficial.append(sym)
         elif is_provisional(prev, (segments or {}).get(sym, Segment.NSE_EQ)):
             out.provisional.append(sym)
-        elif ist_day(prev.ts) < expected:
+        elif ist_day(prev.ts) < out.expected(sym):  # type: ignore[operator]
             out.stale.append(sym)
         elif len(bars) < MIN_DAILY_BARS:
             out.short.append(sym)
