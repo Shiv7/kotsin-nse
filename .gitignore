@@ -12,6 +12,7 @@ backend/data*/
 !backend/data/
 backend/data/*
 !backend/data/holidays.txt
+!backend/data/holidays_mcx.txt
 # ...and the sector map, which three HotStocks score buckets are computed against
 !backend/data/hotstocks-sectors.tsv
 backend/**/*.db

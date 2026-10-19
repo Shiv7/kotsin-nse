@@ -143,7 +143,6 @@ from .market.session import (
     NSE_FORCED_FILL,
     NSE_OUT_BY,
     TF_SECONDS,
-    TradingCalendar,
     bucket_start,
     from_ist,
     held_overnight,
@@ -153,6 +152,7 @@ from .market.session import (
     ist_hm,
     ist_naive_to_ts,
     ist_today,
+    load_calendar,
     on_session_grid,
     past_force_flat,
     past_nse_forced_fill,
@@ -590,7 +590,7 @@ class Engine:
         #: and the decision can never disagree.
         self.position_marks: dict[str, dict[str, Any]] = {}
         self.exposure = ExposureBook(self.limits)
-        self.calendar = TradingCalendar.from_file(settings.data_dir / "holidays.txt")
+        self.calendar, self._calendar_warning = load_calendar(settings.data_dir)
         self.telegram = Telegram(
             settings.telegram_bot_token.get_secret_value() if settings.telegram_bot_token else None,
             settings.telegram_chat_id,
@@ -920,6 +920,12 @@ class Engine:
         if warn:
             self.boot_notes.append(warn)
             log.warning("calendar.no_holidays", detail=warn)
+        if self._calendar_warning:
+            self.boot_notes.append(self._calendar_warning)
+            log.warning("calendar.mcx_on_nse_list", detail=self._calendar_warning)
+        elif self.calendar.mcx is not None:
+            log.info("calendar.mcx", closed=len(self.calendar.mcx.closed), evening=len(self.calendar.mcx.evening),
+                     morning=len(self.calendar.mcx.morning))
 
         if not self.s.has_credentials:
             self.boot_notes.append(
@@ -1631,6 +1637,7 @@ class Engine:
         """Every underlying's daily series, classified by whether it can carry today's pivots."""
         return audit_daily(
             {sym: self.store.bars(sym, "1d") for sym in self.underlyings}, ist_today(), self.calendar,
+            segments={sym: inst.segment for sym, inst in self.underlyings.items()},
             quiet=self.quiet_listed(),
         )
 
@@ -1650,7 +1657,9 @@ class Engine:
         trade at the broker. None once it trades again (its previous session is current)."""
         if symbol.upper() not in self.quiet_listed():
             return None
-        one = audit_daily({symbol: self.store.bars(symbol, "1d")}, ist_today(), self.calendar, quiet={symbol})
+        inst = self.underlyings.get(symbol)
+        one = audit_daily({symbol: self.store.bars(symbol, "1d")}, ist_today(), self.calendar, quiet={symbol},
+                          segments={symbol: inst.segment} if inst is not None else None)
         if symbol not in one.quiet:
             return None
         prev = previous_session(self.store.bars(symbol, "1d"), ist_today())
@@ -1676,12 +1685,12 @@ class Engine:
             # A call that raised is retried every pass whatever the audit calls the name; a
             # dormant name (nothing at the broker) is asked once per session and left alone.
             wanted = sorted(
-                {sym for sym in a.needs_refresh if self._daily_confirmed.get(sym) != a.expected_prev}
+                {sym for sym in a.needs_refresh if self._daily_confirmed.get(sym) != a.expected(sym)}
                 | {sym for sym in self._daily_failed if sym in self.underlyings}
             )
             for sym in wanted:
-                if a.expected_prev is not None:
-                    self._daily_confirmed[sym] = a.expected_prev
+                if (exp := a.expected(sym)) is not None:
+                    self._daily_confirmed[sym] = exp
             if wanted:
                 n = await self._refetch_daily(wanted[:REPAIR_BATCH])
                 log.info("daily.repaired", refetched=n, asked=len(wanted), audit=a.summary())
@@ -1870,7 +1879,12 @@ class Engine:
         neither has no reference — its readings are doubtful until tomorrow, never guessed."""
         today = today or ist_today()
         codes = set(self._future_to_underlying)
-        refs = self._oi_from_archive(self.calendar.previous_trading_day(today), codes, last=True)
+        refs: dict[str, float] = {}
+        by_prev: dict[date, set[str]] = {}  # an MCX contract's previous session is MCX's own (an evening-only day)
+        for c in codes:
+            by_prev.setdefault(self.calendar.previous_trading_day(today, self._segment_by_code.get(c)), set()).add(c)
+        for prev, group in by_prev.items():
+            refs.update(self._oi_from_archive(prev, group, last=True))
         missing = codes - set(refs)
         if missing:
             refs.update(self._oi_from_archive(today, missing, last=False, before=session_open_ts(Segment.NSE_EQ, today)))
@@ -1913,7 +1927,8 @@ class Engine:
         if not futs:
             return OiReading(doubt="no unexpired future on the OI feed")
         expiry = date.fromisoformat(futs[0].expiry[:10])
-        sessions = sum(1 for k in range((expiry - today).days + 1) if self.calendar.is_trading_day(today + timedelta(days=k)))
+        seg = futs[0].segment
+        sessions = sum(1 for k in range((expiry - today).days + 1) if self.calendar.is_trading_day(today + timedelta(days=k), seg))
         return read_oi([f.scrip_code for f in futs], sessions_left=sessions, levels=self._fut_oi, refs=self._oi_ref,
                        now=time.time() if now is None else now)
 
@@ -5647,7 +5662,7 @@ class Engine:
             def prev_day(d: date) -> date:
                 cur = d - timedelta(days=1)
                 for _ in range(30):
-                    if cur in days or self.calendar.is_trading_day(cur):
+                    if cur in days or self.calendar.is_trading_day(cur, Segment.MCX_FO):
                         return cur
                     cur -= timedelta(days=1)
                 return cur
