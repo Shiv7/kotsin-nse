@@ -14,7 +14,8 @@ Recorded on every read, taken or not: ``at_025``, ``at_030`` (the 0.30 line the 
 test and the conviction points the engine can compute (tiered, cap 5): the gap (0.25-0.5 0.5 | 0.5-1 1 | 1-1.5 1.5 |
 >=1.5 2), the stretch of the 09:45 close from the official close in daily ATRs (0.8-1.5 0.5 | 1.5-2.5 1 | >=2.5 1.5), the
 room to the first wall (strength >= 5.2) on the fade's side in ATR30 (0.5-1 0.5 | 1-2 1 | >=2 or none 1.5) and a wall in
-the trigger's direction within 1 ATR30 (0.5). The fifth read — the 5-read against the trigger (3 0.5 | 4 1 | 5 1.5) —
+the trigger's direction within 1 ATR30 (0.5) — both blank when the name has no zone at all (unknown, not absent, as
+research's v2 rule). The fifth read — the 5-read against the trigger (3 0.5 | 4 1 | 5 1.5) —
 is the research's (oct15/live9b_tm15.py: option OI, volume, IV, premium and the stock read minute by minute); the engine
 does not compute it, and says so. Research, 7 sessions 9-19 Oct: conviction >= 3 7/7, below 3 4/10.
 """
@@ -40,6 +41,10 @@ CONVICTION_CAP = 5.0
 OPEN_UNKNOWN = "open_unknown"
 #: why the conviction is out of 5 with one read missing
 NO_READ5 = "5-read (OI, volume, IV, premium, stock against the trigger: up to 1.5) not computed in the engine"
+#: no zone at all for the name: its walls are unknown, not absent — research v2 (b1_build.py, 19 Oct 15:00: c_room and
+#: c_wall None when no zones were saved), so neither point is scored and each says what it could have added
+ROOM_UNKNOWN = "room to the fade side's wall (no zones for the name: +0..1.5)"
+TRIG_WALL_UNKNOWN = "trigger-direction wall (no zones for the name: +0..0.5)"
 
 
 def _tier(x: float | None, tiers: Sequence[tuple[float, float]]) -> float:
@@ -60,7 +65,9 @@ def key_pins(ctx: dict[str, Any], reach: float = B1_PIN_ATR) -> list[tuple[str, 
 
 def conviction(ctx: dict[str, Any], *, close: float, bullish: bool, zones: Sequence[Zone]) -> dict[str, Any]:
     """The conviction points the engine can compute, each with what it read. Walls are the day's zones of strength
-    WALL_MIN_STRENGTH or more; the fade's side is against the trigger."""
+    WALL_MIN_STRENGTH or more; the fade's side is against the trigger. With no zone at all for the name the walls are
+    UNKNOWN (review 19 Oct, as research's v2 rule): ``room`` and ``trigWall`` are None — blank, scored nothing, not the
+    "no wall ahead" 1.5 nor a "no trigger-side wall" 0 — ``wallsKnown`` is False and ``unknown`` names them."""
     sign = 1 if bullish else -1
     gap = ctx.get("gapOfficial")
     atr30 = float(ctx.get("atr30") or 0.0)
@@ -72,16 +79,20 @@ def conviction(ctx: dict[str, Any], *, close: float, bullish: bool, zones: Seque
     trig_side = sorted((z for z in walls if sign * (z.price - close) > 0), key=lambda z: abs(z.price - close))
     room = round(abs(fade_side[0].price - close) / atr30, 4) if (fade_side and atr30 > 0) else None
     trig = round(abs(trig_side[0].price - close) / atr30, 4) if (trig_side and atr30 > 0) else None
-    pts = {
+    walls_known = len(zones) > 0
+    pts: dict[str, float | None] = {
         "gap": _tier(gap, GAP_TIERS),
         "stretch": _tier(stretch, STRETCH_TIERS),
         # no wall on the fade's side is all the room there is; without an ATR30 the room cannot be read
-        "room": (ROOM_TIERS[-1][1] if not fade_side else _tier(room, ROOM_TIERS)) if atr30 > 0 else 0.0,
-        "trigWall": TRIG_WALL_POINTS if (trig is not None and trig <= TRIG_WALL_ATR) else 0.0,
+        "room": ((ROOM_TIERS[-1][1] if not fade_side else _tier(room, ROOM_TIERS)) if atr30 > 0 else 0.0)
+        if walls_known else None,
+        "trigWall": (TRIG_WALL_POINTS if (trig is not None and trig <= TRIG_WALL_ATR) else 0.0) if walls_known else None,
     }
     return {
-        "points": pts, "total": min(CONVICTION_CAP, sum(pts.values())), "of": CONVICTION_CAP, "read5": None,
-        "note": NO_READ5, "stretchDatr": stretch, "roomAtr": room, "trigWallAtr": trig,
+        "points": pts, "total": min(CONVICTION_CAP, sum(v for v in pts.values() if v is not None)), "of": CONVICTION_CAP,
+        "read5": None, "note": NO_READ5, "wallsKnown": walls_known,
+        "unknown": [] if walls_known else [ROOM_UNKNOWN, TRIG_WALL_UNKNOWN],
+        "stretchDatr": stretch, "roomAtr": room, "trigWallAtr": trig,
         "roomWall": None if not fade_side else {"price": fade_side[0].price, "strength": round(fade_side[0].strength, 2),
                                                 "members": list(fade_side[0].members)},
         "trigWall": None if not trig_side else {"price": trig_side[0].price, "strength": round(trig_side[0].strength, 2),

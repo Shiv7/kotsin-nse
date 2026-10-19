@@ -384,7 +384,8 @@ BOOKS: tuple[Book, ...] = (
             "entries": "every FUDKII trigger on the 09:15 candle (decided 09:45), NSE, any grade: gapOfficial >= 0.25 its own way "
                        "(risk/limits.py B1_GAP_DATR) and no PIVOT/TC/BC/R1/S1/R2/S2 (1d/1wk/1mo) within 0.5 ATR30 ahead (B1_PIN_ATR)",
             "records": "at_025, at_030 (B1_GAP_LINE), the pivot test, conviction /5: gap, stretch, room to the fade side's wall, a "
-                       "trigger-side wall within 1 ATR30 — the 5-read is not computed in the engine",
+                       "trigger-side wall within 1 ATR30 (both blank, not scored, when the name has no zones) — the 5-read is not "
+                       "computed in the engine",
             "plan": "PE for a bullish trigger, CE for a bearish one (CT-Y's strike choice); CT-Y's gap-fade stop (the nearer of 1 "
                     "ATR30 and 0.1 ATR30 past the next classic level)",
             "exits": "every lot at T1 = 1.0 ATR30 from the close on the underlying (B1_TARGET_ATR), at the stop, at 11:15 "

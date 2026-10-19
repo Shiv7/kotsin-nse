@@ -900,7 +900,8 @@ def _render_b1(d: ShadowData) -> str:
                 f'<td>{_pct(x.get("win", 0), n)}</td>{_net_cell(x.get("best"))}{_net_cell(x.get("worst"))}</tr>')
 
     def pts(p: dict[str, Any]) -> str:
-        return " · ".join(f"{k} {float(v):g}" for k, v in p.items() if v) or "—"
+        # a point the engine could not read (no zones for the name: room, trigWall) is None — shown as "?", not 0
+        return " · ".join(f"{k} ?" if v is None else f"{k} {float(v):g}" for k, v in p.items() if v is None or v) or "—"
 
     body = "".join(
         f'<tr><td class="sym">{_ist(r["fired"])}</td><td class="sym l">{html.escape(str(r["symbol"]))}</td>'
