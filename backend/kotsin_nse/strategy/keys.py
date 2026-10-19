@@ -56,6 +56,12 @@ class StrategyKey(StrEnum):
     #: F grade ones) to simultaneously be published to fudkii-rt and fudki-ct variants and twins"). CT-Y itself fades
     #: only published triggers. Its own wallet; on the Shadow page, off the trading totals.
     FUDKII_CT_Y_F = "FUDKII_CT_Y_F"
+    #: A SHADOW with entries of its own: CTB-19Oct's B1 gap fade (operator, 2026-10-19: "Both together Wednesday" — the
+    #: official-open gap and the paper book "trading every B1 at 0.25, recording at_030 + conviction"). Every FUDKII
+    #: trigger on the 09:15 candle, published or graded F, NSE stocks and indices: faded when its OFFICIAL open gapped
+    #: >= 0.25 daily ATR its own way with no key pivot within 0.5 ATR30 ahead — CT-Y's stop, one target 1 ATR30 from the
+    #: close on the underlying, out by 11:15. Its own wallet; on the Shadow page, off the trading totals.
+    FUDKII_CT_B1 = "FUDKII_CT_B1"
     #: STOP-RULE MIRRORS (operator, 2026-10-04: "each startegy ... have all 3 [stop rules] ... and then we
     #: compare which ... works best with which startegy"): every book's fill copied into two shadows — the
     #: same contract, size, price, instant and plan — that differ from it in the stop alone. ``_SE``: Model
@@ -85,6 +91,8 @@ class StrategyKey(StrEnum):
     FUDKII_CT_M_SA = "FUDKII_CT_M_SA"
     FUDKII_CT_Y_F_SE = "FUDKII_CT_Y_F_SE"
     FUDKII_CT_Y_F_SA = "FUDKII_CT_Y_F_SA"
+    FUDKII_CT_B1_SE = "FUDKII_CT_B1_SE"
+    FUDKII_CT_B1_SA = "FUDKII_CT_B1_SA"
 
     @property
     def display_name(self) -> str:
@@ -103,6 +111,7 @@ class StrategyKey(StrEnum):
             StrategyKey.FUDKII_RT_Y_F: "RT-Y · graded F (shadow)",
             StrategyKey.FUDKII_CT_M: "FUDKII-CT-M · market-against fade (shadow)",
             StrategyKey.FUDKII_CT_Y_F: "CT-Y · graded F (shadow)",
+            StrategyKey.FUDKII_CT_B1: "CT-B1 · B1 gap fade (shadow)",
         }[self]
 
     @property
@@ -155,16 +164,18 @@ SHADOW_OF: dict[StrategyKey, StrategyKey] = {
 
 #: Every book shown on the Shadow page instead of the trading tabs, and left out of the day's
 #: totals: the mirrors above, the two graded-F shadows, which place entries of their own on triggers
-#: FUDKII does not publish, CT-M, and every stop-rule mirror.
+#: FUDKII does not publish, CT-M, CT-B1 (paper only, 2026-10-19), and every stop-rule mirror.
 SHADOW_BOOKS: frozenset[StrategyKey] = frozenset({
-    *SHADOW_OF, StrategyKey.FUDKII_RT_Y_F, StrategyKey.FUDKII_CT_Y_F, StrategyKey.FUDKII_CT_M, *STOP_MIRRORS,
+    *SHADOW_OF, StrategyKey.FUDKII_RT_Y_F, StrategyKey.FUDKII_CT_Y_F, StrategyKey.FUDKII_CT_M, StrategyKey.FUDKII_CT_B1,
+    *STOP_MIRRORS,
 })
 
 #: The books that fade the trigger — they buy the opposite option to the one the SuperTrend flip asks
-#: for (strategy/counter.py, CT-Y's gap fade, CT-M's market-against fade). Every other book trades the
-#: trigger's own way: with the new trend.
+#: for (strategy/counter.py, CT-Y's gap fade, CT-M's market-against fade, CT-B1's B1 gap fade). Every other
+#: book trades the trigger's own way: with the new trend.
 COUNTER_TREND: frozenset[StrategyKey] = frozenset({
     StrategyKey.FUDKII_CT_X, StrategyKey.FUDKII_CT_Y, StrategyKey.FUDKII_CT_M, StrategyKey.FUDKII_CT_Y_F,
+    StrategyKey.FUDKII_CT_B1,
 })
 
 

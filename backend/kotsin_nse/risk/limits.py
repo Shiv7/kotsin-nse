@@ -85,6 +85,9 @@ class RiskLimits:
     #: and a bar count cutting a live trade at four hours is an exit nobody asked for. The
     #: default stays 8 so the books that already rely on it are unchanged.
     time_stop_bars: int | None = 8  # 8 × 30m
+    #: a wall-clock time stop, IST "HH:MM": every lot left goes at this minute of the day the position opened (and
+    #: anything still open on a later day at once). None = off — every book but CT-B1 ("time stop 11:15", 2026-10-19).
+    time_stop_hm: str | None = None
     # ── FUDKII-RT exit policy (off by default; only the RT_X book turns these on) ───────────
     #: an option-side breach must hold for this long before it exits. Measured as *continuous*
     #: breach: any recovery above the level resets the clock, because a touch now and another
@@ -159,7 +162,8 @@ class RiskLimits:
     #: Lots that leave when the ratchet arms.
     arm_tranche_lots: int = 1
     #: -- the knobs that tell the three RT books apart (docs/PIVOTS.md §6) --
-    #: "mtf": the contract's own daily+weekly rungs above entry | "daily_r": its daily R1–R4 above entry
+    #: "mtf": the contract's own daily+weekly rungs above entry | "daily_r": its daily R1–R4 above entry |
+    #: "none": no option rung at all — the underlying reaching its T1 takes every lot (CT-B1's one target, 2026-10-19)
     ladder_mode: str = "mtf"
     #: "touch": T1 touch pays a lot, its sustain steps the SL and arms the band |
     #: "immediate": arming (equity T1 touch or own-R1 1m close) pays a lot and starts the band at once
@@ -392,3 +396,24 @@ CT_Y_F_MAX_REL_VOL = 1.5
 CT_M_LIMITS = replace(CT_Y_LIMITS, gap_fade_datr=None,  # its own fade route, not CT-Y's 09:45 gap rule
                       fade_stop_nearer_level=False)  # and its 1-ATR30 stop as measured (2026-10-06)
 CT_Y_F_LIMITS = replace(CT_Y_LIMITS, gap_fade_max_rel_vol=CT_Y_F_MAX_REL_VOL)
+
+#: FUDKII-CT-B1 (CTB-19Oct, operator 2026-10-19: "Both together Wednesday" — the official-open gap and the paper book
+#: "trading every B1 at 0.25, recording at_030 + conviction"), a shadow: every FUDKII trigger on the 09:15 candle, NSE
+#: stocks and indices, published or graded F, faded when its official gap is at least B1_GAP_DATR daily ATR its own way
+#: and no key pivot sits within B1_PIN_ATR ATR30 ahead of the close (a pinned gap, CANBK 19 Oct, is in trend). No
+#: volume, breadth or grade gate. Research, engine A, 7 sessions 9-19 Oct (hindsight: the winning side 0.5 ATR30 first):
+#: 0.25 line 11/17, 0.30 line 8/12, conviction >= 3 7/7. Unproven, hence paper.
+B1_GAP_DATR = 0.25
+#: the 1 AM / CT-Y line, recorded beside every B1 read (``at_030``) — the operator compares the two (open decision a)
+B1_GAP_LINE = 0.30
+B1_PIN_ATR = 0.5
+#: its one target, on the underlying, and its time stop ("target 1.0 ATR30, time stop 11:15 (one-name fit)")
+B1_TARGET_ATR = 1.0
+B1_TIME_STOP_HM = "11:15"
+#: CT-Y's exits with its stop rules untouched (the nearer gap-fade stop; the option stop, sustain and floor), and no option
+#: ladder: no rung sells, no +5 % arm, no give-back line — every lot leaves when the underlying reaches T1, at the stop,
+#: at 11:15 or at the NSE flatten. 4 lots under ₹75,000 as every NSE book.
+CT_B1_LIMITS = replace(
+    CT_Y_LIMITS, gap_fade_datr=None, gap_fade_max_rel_vol=None,  # its own rule (strategy/b1.py), not CT-Y's 09:45 gap
+    ladder_mode="none", arm_at_pct=None, peak_giveback_pct=None, time_stop_hm=B1_TIME_STOP_HM,
+)

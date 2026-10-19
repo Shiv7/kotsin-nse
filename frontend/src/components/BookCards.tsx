@@ -36,7 +36,7 @@ type Card = {
   // every rung's SELL resting, lowest first (since 3 Oct the whole ladder rests from the fill)
   restingTargets?: { rung: number; limit: number; qty: number; lots: number; placedTs: number }[]
   side?: 'CE' | 'PE' | 'LONG' | 'SHORT'
-  breadth?: { share: number | null; names: number; efficiency?: number; volBand?: string | null; gapDatr?: number; pivotsAhead?: string[]; openBar?: boolean; relVol?: number; relVolTier?: string; relVolMkt?: number; n50SurgeT?: number; slotVol?: number; n50SlotVol?: number } | null
+  breadth?: { share: number | null; names: number; efficiency?: number; volBand?: string | null; gapDatr?: number; gapOfficial?: number; gapOpenSrc?: string; gapRule?: string; pivotsAhead?: string[]; openBar?: boolean; relVol?: number; relVolTier?: string; relVolMkt?: number; n50SurgeT?: number; slotVol?: number; n50SlotVol?: number } | null
   books?: BookRow[]
   cta?: { action: 'take' | 'skip' | 'taken'; enabled: boolean; contract: string | null; type?: string | null; bid?: number | null; ask?: number | null; spreadPct?: number | null; reason: string | null } & Size
   // a trigger the route sends COUNTER-TREND, on an in-trend book's card: the counter-trend book's buy
@@ -101,6 +101,9 @@ export const BOOK_TABS: [string, string][] = [
   ['FUDKII_CT_M', 'FUDKII-CT-M'],
   // the graded-F fade shadow (2026-10-06): CT-Y's 09:45 gap fade on triggers FUDKII graded F, under 1.5× the NIFTY50's volume — paper
   ['FUDKII_CT_Y_F', 'FUDKII-CT-Y-F'],
+  // the B1 gap fade shadow (CTB-19Oct, 2026-10-19): every 09:15 trigger whose OFFICIAL open gapped ≥ 0.25 daily ATR its way,
+  // no key pivot within 0.5 ATR30 ahead — faded, out at 1 ATR30 or 11:15 — paper
+  ['FUDKII_CT_B1', 'FUDKII-CT-B1'],
 ]
 const BOOK_LABEL = Object.fromEntries(BOOK_TABS)
 
@@ -142,9 +145,11 @@ const STATE: Record<string, { label: string; tone: Tone }> = {
   PAST_ENTRY_CUTOFF: { label: 'PAST ENTRY CUTOFF', tone: 'slate' },
   // 2026-10-17: decided after the 15:10 cutoff and before the close (the 14:45 bar) — on the list, never traded
   RECORDED_ONLY: { label: 'RECORDED ONLY · after the entry cutoff', tone: 'sky' },
+  // 2026-10-19: a 09:15 trigger CT-B1 holds no B1 read of (a restart between the trigger and the book)
+  NOT_JUDGED: { label: 'NOT JUDGED · no B1 read', tone: 'slate' },
 }
 const stateOf = (s: string) => STATE[s] ?? { label: s.replace(/_/g, ' '), tone: 'slate' as Tone }
-const routeTone = (l: string | null): Tone => (l === 'COUNTER-TREND' ? 'orange' : l === 'SKIP' ? 'rose' : l === 'IN TREND' ? 'sky' : 'slate')
+const routeTone = (l: string | null): Tone => (l === 'COUNTER-TREND' || l === 'B1 GAP FADE' ? 'orange' : l === 'SKIP' ? 'rose' : l === 'IN TREND' ? 'sky' : 'slate')
 
 const ist = (ts: number, secs = true) => {
   const parts = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).formatToParts(new Date(ts * 1000))
@@ -855,7 +860,7 @@ function Expanded({ book, c }: { book: string; c: Card }) {
             <div className="text-[14px] leading-relaxed">
               <div><b className="text-emerald-300">For:</b> <span className="text-slate-200">{c.pros.length ? c.pros.join(' · ') : '—'}</span></div>
               <div className="mt-1.5"><b className="text-rose-300">Against:</b> <span className="text-slate-200">{c.cons.length ? c.cons.join(' · ') : '—'}</span></div>
-              {c.breadth && <div className="mt-1.5 text-slate-400"><b className="text-slate-300">Context:</b> trend efficiency {c.breadth.efficiency != null ? f(c.breadth.efficiency) : '—'} · own volatility {c.breadth.volBand ?? '—'} · gap {c.breadth.gapDatr != null ? `${f(c.breadth.gapDatr)} daily ATR` : '—'}{c.breadth.openBar ? ' · first bar (09:45)' : ''}{c.breadth.relVol != null ? ` · volume ${f(c.breadth.relVol)}× the NIFTY50's (${c.breadth.relVolTier}; ${f(c.breadth.slotVol)}× its usual half hour, NIFTY50 ${f(c.breadth.n50SlotVol)}×)` : ''}</div>}
+              {c.breadth && <div className="mt-1.5 text-slate-400"><b className="text-slate-300">Context:</b> trend efficiency {c.breadth.efficiency != null ? f(c.breadth.efficiency) : '—'} · own volatility {c.breadth.volBand ?? '—'} · gap {c.breadth.gapDatr != null ? `${f(c.breadth.gapDatr)} daily ATR` : '—'}{c.breadth.gapOfficial != null ? ` · official gap ${f(c.breadth.gapOfficial, 3)} (${(c.breadth.gapOpenSrc ?? 'open').replace('_', ' ')}${c.breadth.gapRule === 'official' ? '; the gap rules read it' : ''})` : ''}{c.breadth.openBar ? ' · first bar (09:45)' : ''}{c.breadth.relVol != null ? ` · volume ${f(c.breadth.relVol)}× the NIFTY50's (${c.breadth.relVolTier}; ${f(c.breadth.slotVol)}× its usual half hour, NIFTY50 ${f(c.breadth.n50SlotVol)}×)` : ''}</div>}
               {c.route && <div className="mt-1.5 text-slate-400">{c.route.reason}</div>}
             </div>
           </Section>

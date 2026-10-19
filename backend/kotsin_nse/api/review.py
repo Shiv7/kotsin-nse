@@ -37,7 +37,7 @@ THRESHOLDS: dict[str, float] = {
     "breakeven_r": 0.25,      # a raised stop that closed within this many R of the entry: the trail at breakeven
 }
 
-COUNTER_TREND_BOOKS = ("FUDKII_CT_X", "FUDKII_CT_Y", "FUDKII_CT_M", "FUDKII_CT_Y_F")
+COUNTER_TREND_BOOKS = ("FUDKII_CT_X", "FUDKII_CT_Y", "FUDKII_CT_M", "FUDKII_CT_Y_F", "FUDKII_CT_B1")
 OPTION_STOP_EXITS = ("SL-OP",)
 #: exits a rule or a person made, not the market: a halt, the daily loss limit, the NSE flatten (15:14 since
 #: 2026-10-17, 15:20 before), a manual close

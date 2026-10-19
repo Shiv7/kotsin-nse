@@ -27,7 +27,9 @@ def test_every_book_has_a_name_and_a_side_and_only_the_fades_are_counter_trend()
         assert d["strategy_label"] == k.display_name and d["trend"] in {"trend", "counter-trend"}
     mirrored_fades = {m for m, (src, _r) in STOP_MIRRORS.items() if src in COUNTER_TREND}
     assert {k for k in ALL_KEYS if describe_book(k.value)["trend"] == "counter-trend"} == COUNTER_TREND | mirrored_fades, "a mirror trades its source's side"
-    assert COUNTER_TREND == {StrategyKey.FUDKII_CT_X, StrategyKey.FUDKII_CT_Y, StrategyKey.FUDKII_CT_M, StrategyKey.FUDKII_CT_Y_F}
+    assert COUNTER_TREND == {StrategyKey.FUDKII_CT_X, StrategyKey.FUDKII_CT_Y, StrategyKey.FUDKII_CT_M, StrategyKey.FUDKII_CT_Y_F,
+                             StrategyKey.FUDKII_CT_B1}
+    assert describe_book("FUDKII_CT_B1")["trend"] == "counter-trend", "the B1 gap fade shadow fades (2026-10-19)"
     assert describe_book("FUDKII_CT_Y_F")["trend"] == "counter-trend", "the graded-F fade shadow fades"
     assert describe_book("FUDKII_RT_Y_F")["trend"] == "trend", "the graded-F shadow trades the trigger's own way"
     assert describe_book("FUDKII_RT") == {"strategy_label": "FUDKII_RT", "trend": ""}, "a retired key: raw, side unknown"
