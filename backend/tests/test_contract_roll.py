@@ -15,8 +15,18 @@ import pytest
 
 from kotsin_nse.bars.unified import BarSource, UnifiedBar
 from kotsin_nse.config import Segment
-from kotsin_nse.domain import Direction, Instrument, InstrumentKind, Position, PosSide
+from kotsin_nse.domain import (
+    Direction,
+    Instrument,
+    InstrumentKind,
+    OrderIntent,
+    OrderSide,
+    Position,
+    PosSide,
+    Purpose,
+)
 from kotsin_nse.engine import CONTRACT_ROLL_RETRY_S, Engine
+from kotsin_nse.exec.resting import Resting
 from kotsin_nse.instrument.catalogue import Catalogue
 from kotsin_nse.instrument.select import Quote
 from kotsin_nse.instrument.universe import UniverseBuilder
@@ -264,3 +274,99 @@ async def test_a_daily_refetch_in_flight_for_the_old_month_never_lands_on_the_ne
     e._seed_daily(C_OCT, [{"dt": f"{(TODAY - timedelta(days=1)).isoformat()} 00:00:00", "o": 9572.0, "h": 9600.0,
                            "l": 9500.0, "c": 9572.0, "v": 5.0}])
     assert {b.scrip_code for b in e.store.bars("CRUDEOIL", "1d")} == {"C_NOV"}
+
+
+# -- review, 2026-10-19: a partial master is never followed; a working order blocks the swap -----------------
+
+
+def _drop_from_master(e: Engine, *codes: str) -> None:
+    """The day's master without ``codes`` — a truncated ScripMaster download parses as a short list."""
+    cat = e.catalogue_loader.catalogue
+    for code in codes:
+        inst = cat.by_code.pop(code)
+        cat.futures_by_symbol[inst.underlying].remove(inst)
+
+
+@pytest.mark.asyncio
+async def test_a_partial_master_never_drops_a_contract_that_is_not_due(settings):
+    e, feed = _engine(settings)
+    _drop_from_master(e, "C_NOV")  # still 34 days to run: only a broken master leaves it out
+    plan = {r.root: r for r in e.contract_drift(TODAY)}
+    assert plan["CRUDEOIL"].suspect and "C_NOV" in plan["CRUDEOIL"].suspect
+    await e._roll_contracts(now=NIGHT)
+    assert e.underlyings["CRUDEOIL"] is C_OCT and [f.scrip_code for f in e.groups["CRUDEOIL"].futures] == ["C_OCT", "C_NOV"]
+    assert "partial scrip master" in e._contract_roll_pending["CRUDEOIL"]
+    assert "C_NOV" not in feed.subscribed("u", "mf") and "C_DEC" not in feed.subscribed("s", "mf")
+    assert [f.scrip_code for f in e.groups["RELIANCE"].futures] == ["N_NOV", "N_DEC"], "the rest of the master is still followed"
+    assert e._contract_roll_day != TODAY.isoformat(), "owed: retried, alarmed"
+    assert any(k == "contracts.roll_pending" for k, _ in e.ledger.events)  # type: ignore[attr-defined]
+    check = e._contracts_check(now=_at(TODAY, 2))
+    assert not check.ok and "CRUDEOIL" in check.detail
+
+
+@pytest.mark.asyncio
+async def test_a_due_contract_the_master_lists_nothing_after_is_kept_and_alarms(settings):
+    e, _ = _engine(settings)
+    _drop_from_master(e, "I_NOV", "I_DEC")  # NIFTYNXT50's October future expired yesterday; nothing later listed
+    plan = {r.root: r for r in e.contract_drift(TODAY)}
+    assert plan["NIFTYNXT50"].new == [] and "lists no" in plan["NIFTYNXT50"].suspect
+    assert "nothing listed" in plan["NIFTYNXT50"].describe()
+    await e._roll_contracts(now=NIGHT)
+    assert e.underlyings["NIFTYNXT50"] is I_OCT, "never left without a contract"
+    assert "NIFTYNXT50" in e._contract_roll_pending
+    assert not e._contracts_check(now=_at(TODAY, 2)).ok
+
+
+def test_a_pick_never_moves_backwards(settings):
+    e, _ = _engine(settings)
+    early = _fut("C_EARLY", "CRUDEOIL", 1, Segment.MCX_FO)  # a month before the held front: never listed after it
+    later = _fut("C_LATER", "CRUDEOIL", 20, Segment.MCX_FO)
+    e.groups["CRUDEOIL"].futures = [later, C_NOV]
+    e.groups["CRUDEOIL"].underlying = later
+    cat = e.catalogue_loader.catalogue
+    cat.futures_by_symbol["CRUDEOIL"] = [early, C_NOV, later]
+    e.universe_builder = UniverseBuilder(cat, e.universe_builder.policy)  # type: ignore[union-attr]
+    e.universe_builder.policy = type(e.universe_builder.policy)(mcx_roll_days=0)
+    plan = {r.root: r for r in e.contract_drift(TODAY)}
+    assert "expires before" in plan["CRUDEOIL"].suspect
+
+
+def test_a_partial_master_never_stops_entries_on_a_contract_that_is_not_due(settings):
+    e, _ = _engine(settings)
+    e.groups["CRUDEOIL"].futures = [C_NOV, C_DEC]
+    e.groups["CRUDEOIL"].underlying = C_NOV
+    e.underlyings["CRUDEOIL"] = C_NOV
+    _drop_from_master(e, "C_NOV")
+    assert e._contract_not_current("CRUDEOIL", C_NOV) is None, "34 days to run: the contract a boot kept"
+    assert "not today's contract" in (e._contract_not_current("CRUDEOIL", C_OCT) or ""), "in its roll window: refused"
+    _drop_from_master(e, "C_DEC")
+    assert e._contract_not_current("CRUDEOIL", C_OCT) is None, "the only month listed: a boot would read it (never all of them)"
+    _drop_from_master(e, "I_NOV", "I_DEC")
+    assert "no later month" in (e._contract_not_current("NIFTYNXT50", I_OCT) or ""), "expired, nothing after it"
+
+
+@pytest.mark.asyncio
+async def test_a_working_order_on_the_old_month_blocks_the_swap(settings):
+    e, _ = _engine(settings)
+    intent = OrderIntent(strategy="FUDKII_RT_MCX", instrument=C_OCT, side=OrderSide.BUY, qty=1, purpose=Purpose.ENTRY,
+                         signal_id="s", client_order_id="s|ENTRY|p")
+    e._resting[intent.client_order_id] = Resting(intent=intent, kind="entry", limit=9572.0, placed_ts=NIGHT - 5,
+                                                 deadline_s=30.0, signal_ts=NIGHT - 5)
+    await e._roll_contracts(now=NIGHT)
+    assert e.underlyings["CRUDEOIL"] is C_OCT and "working entry order" in e._contract_roll_pending["CRUDEOIL"]
+    e._resting.clear()
+    e._contract_roll_last_try = NIGHT
+    await e._roll_contracts(now=NIGHT + CONTRACT_ROLL_RETRY_S)
+    assert e.underlyings["CRUDEOIL"] is C_NOV
+
+
+@pytest.mark.asyncio
+async def test_a_history_failure_alarms_only_once_the_login_window_has_had_its_hour(settings):
+    """The 5paisa login after midnight ran to 04:09 IST on 17 Oct: a roll waiting on the broker's history at
+    01:00 is retried quietly, and alarms from 02:00 if it is still owed."""
+    e, _ = _engine(settings, rest=Rest(fail={"C_NOV"}))
+    await e._roll_contracts(now=NIGHT)
+    assert "CRUDEOIL" in e._contract_roll_pending
+    assert not any(k == "contracts.roll_pending" for k, _ in e.ledger.events), "01:05: retried, not alarmed"  # type: ignore[attr-defined]
+    await e._roll_contracts(now=_at(TODAY, 2, 5))
+    assert any(k == "contracts.roll_pending" for k, _ in e.ledger.events), "02:05: still owed — alarmed"  # type: ignore[attr-defined]

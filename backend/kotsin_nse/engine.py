@@ -283,6 +283,10 @@ BAR_AUDIT_HM = "15:40"
 #: roll is retried every CONTRACT_ROLL_RETRY_S.
 CONTRACT_ROLL_HM = "01:00"
 CONTRACT_ROLL_RETRY_S = 600.0
+#: a roll owed only because the broker's history did not answer alarms from here, not at 01:00: the
+#: 5paisa login after midnight has run to 00:28, 04:09 and 00:00 IST (16-19 Oct, A log), and the
+#: retries every CONTRACT_ROLL_RETRY_S usually clear it unseen. Anything else owed alarms at once.
+CONTRACT_ROLL_ALARM_HM = "02:00"
 #: the audit alerts when more bars than this share (or this many) had to be repaired or added
 BAR_AUDIT_ALERT_SHARE, BAR_AUDIT_ALERT_MIN = 0.01, 5
 #: a feed with no frame for this long in an open session is dead, whatever its socket says
@@ -2305,11 +2309,20 @@ class Engine:
         rolled yet must not keep trading the expiring month in the meantime."""
         if inst is None or self.universe_builder is None or inst.kind is not InstrumentKind.FUTURE:
             return None
-        want = self.universe_builder.futures_for(root, inst.segment, ist_today())
-        if not want or want[0].scrip_code == inst.scrip_code:
+        today = ist_today()
+        want = self.universe_builder.futures_for(root, inst.segment, today)
+        if want and want[0].scrip_code == inst.scrip_code:
             return None
+        if not self.universe_builder.is_due(inst, today):
+            # not in its roll window: the contract a boot would have kept, whatever a partial master
+            # says today (``roll_plan`` never follows that pick either)
+            return None
+        nxt = want[0] if want and want[0].expiry[:10] > inst.expiry[:10] else None
+        if nxt is None:
+            return (f"{inst.name or inst.scrip_code} (expires {inst.expiry[:10]}) is in its roll window and the "
+                    "master lists no later month; no entry until the contract roll")
         return (f"{inst.name or inst.scrip_code} (expires {inst.expiry[:10]}) is not today's contract — "
-                f"{want[0].name or want[0].scrip_code} is; no entry until the contract roll")
+                f"{nxt.name or nxt.scrip_code} is; no entry until the contract roll")
 
     def _roll_blocked(self, roll: ContractRoll, now: float) -> str | None:
         """Why a group's underlying cannot be swapped right now, or None."""
@@ -2319,6 +2332,9 @@ class Engine:
         for p in self.positions.values():
             if p.status == "OPEN" and p.qty_remaining > 0 and old in (p.instrument.scrip_code, p.underlying.scrip_code):
                 return f"position {p.id} is open on {old}"
+        for r in self._resting.values():
+            if r.intent.instrument.scrip_code == old:
+                return f"a working {r.kind} order {r.intent.client_order_id} is on {old}"
         return None
 
     async def _roll_history(self, inst: Instrument, today: date) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -2329,6 +2345,7 @@ class Engine:
         rows30 = await self.rest.candles(inst, DECISION_TF, start_intraday.isoformat(), today.isoformat())
         await asyncio.sleep(0.15)
         rows1d = await self.rest.candles(inst, "1d", start_daily.isoformat(), today.isoformat())
+        await asyncio.sleep(0.15)  # paced like ``_backfill``: 16 MCX names roll on one night (26 Oct)
         return list(rows30 or []), list(rows1d or [])
 
     def _swap_underlying(self, g: ScripGroup, new: Instrument, rows30: list[dict[str, Any]], rows1d: list[dict[str, Any]]) -> None:
@@ -2378,6 +2395,9 @@ class Engine:
             done: list[ContractRoll] = []
             for r in plan:
                 g = self.groups[r.root]
+                if r.suspect:
+                    pending[r.root] = f"not rolled: {r.suspect} (partial scrip master?) — the held contracts stay"
+                    continue
                 if r.new_underlying is not None:
                     why = self._roll_blocked(r, now)
                     if why is None:
@@ -2445,7 +2465,8 @@ class Engine:
                 self.telegram.fire_and_forget("🔁 Contract roll: " + "; ".join(moved[:12]))
         if pending:
             log.warning("contracts.roll_pending", day=day, pending=pending)
-            if self._contract_roll_alarmed != day:
+            waiting = all(v.startswith("history for ") for v in pending.values()) and ist_hm(now) < CONTRACT_ROLL_ALARM_HM
+            if self._contract_roll_alarmed != day and not waiting:
                 self._contract_roll_alarmed = day
                 await self.ledger.event("contracts.roll_pending", {"day": day, "pending": pending})
                 self.telegram.fire_and_forget(
