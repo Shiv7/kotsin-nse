@@ -185,6 +185,8 @@ from .risk.costs import CostModel
 from .risk.exits import ExitEngine, MarketView, apply_exit
 from .risk.exposure import ExposureBook
 from .risk.limits import (
+    B1_PIN_ATR,
+    B1_PIN_OUTER_ATR,
     B1_TARGET_ATR,
     B1_TIME_STOP_HM,
     CT_B1_LIMITS,
@@ -205,7 +207,7 @@ from .risk.limits import (
 )
 from .risk.sizing import size_position
 from .risk.wallet import Wallet
-from .strategy.b1 import OPEN_UNKNOWN, b1_read
+from .strategy.b1 import OPEN_UNKNOWN, b1_read, outer_ahead
 from .strategy.base import Outcome, Signal, published
 from .strategy.counter import (
     KEY_LEVELS,
@@ -229,12 +231,14 @@ from .strategy.keys import (
     stop_mirrors_of,
 )
 from .strategy.regime_gates import (
+    GAP_READ_FIRST_BAR,
     GAP_SWITCH_GAP_DATR,
     gap_fade_volume_block,
     gap_switch,
     graded_f_verdicts,
     rt_gate_reasons,
     rule_gap,
+    rule_gap_read,
     trigger_verdicts,
     volume_labels,
 )
@@ -4329,7 +4333,9 @@ class Engine:
           definition"): the official open — the pre-open print, else the first continuous trade
           (bars/official_open.py) — against the official close, over the same daily ATR, with ``gapOpenSrc``,
           ``officialOpen``, ``officialClose`` beside it. ``gapRule`` names the one the gap rules read
-          (``Settings.gap_source``, KN_GAP_SOURCE; ``regime_gates.rule_gap``).
+          (``Settings.gap_source``, KN_GAP_SOURCE, official by default from 21 Oct; ``regime_gates.rule_gap``), and
+          ``gapRuleRead`` the one they did read: ``first_bar`` where the rule is official but this process never saw the
+          official open — they read the first-bar ``gapDatr`` there.
         * ``pivotsAhead`` — classic 1d/1wk/1mo key levels within 0.5 ATR30 AHEAD of the close.
           Trades with one averaged −1.5 % / −1.6 % against +0.1 % / +1.0 % without.
         * ``openBar`` — the trigger is the session's first 30m bar (fires at 09:45)."""
@@ -4376,6 +4382,7 @@ class Engine:
                        # are REST and complete too (review 19 Oct); recorded, never blocking
                        officialCloseEod=is_official(prev) and to_ist(prev.ts).time() == dt_time(0, 0), dAtr=round(datr, 4))
         out["gapRule"] = self.s.gap_source
+        out["gapRuleRead"] = rule_gap_read(out)  # first_bar: the rule official, the open unseen — the rules read gapDatr
         atr30 = atr(self.store.bars(sig.symbol, DECISION_TF, 60), 14) or 0.0
         if atr30 > 0:
             ahead = sorted(
@@ -4440,7 +4447,7 @@ class Engine:
             # gap rules read — the record is the regime.breadth event below
             log.info("gap.read", symbol=sig.symbol, direction=sig.direction.value, gapDatr=br.get("gapDatr"),
                      gapOfficial=br.get("gapOfficial"), openSrc=br.get("gapOpenSrc"), officialOpen=br.get("officialOpen"),
-                     officialClose=br.get("officialClose"), rule=br.get("gapRule"))
+                     officialClose=br.get("officialClose"), rule=br.get("gapRule"), read=br.get("gapRuleRead"))
         await self.ledger.event("regime.breadth", {"signal_id": sig.signal_id, "symbol": sig.symbol, **br})
 
     async def _await_gap_rel_vol(self, sig: Signal, ctx: dict[str, Any]) -> None:
@@ -5590,14 +5597,16 @@ class Engine:
         its own (T1 against 1 ATR30) and its grade a label."""
         lim = self._exits_by_strategy[key.value].limits
         ctx = ctx or {}
-        gap = rule_gap(ctx)  # the first trade's gapDatr unless KN_GAP_SOURCE=official (2026-10-19)
+        gap = rule_gap(ctx)  # the official gap (KN_GAP_SOURCE, official from 21 Oct); the first trade's under first_tick
         if lim.gap_fade_datr is None or not ctx.get("openBar") or gap is None or gap < lim.gap_fade_datr:
             return None
         plan = self.fade_plan(sig, ctx, nearer_level=lim.fade_stop_nearer_level)
         if plan is not None:
             plan["gapDatr"] = gap
             if ctx.get("gapRule") == "official":
-                plan["gapRule"] = "official"  # the gap above is the official one
+                plan["gapRule"] = "official"  # the gap above is the official one ...
+                # ... or, where the official open was not seen, the first bar's — flagged (operator 19 Oct: official for all)
+                plan["gapRuleRead"] = rule_gap_read(ctx)
         return plan
 
     def fade_plan(self, sig: Signal, ctx: dict[str, Any] | None, *, nearer_level: bool = False) -> dict[str, Any] | None:
@@ -5736,7 +5745,8 @@ class Engine:
             grade=plan["grade"],
             rr=plan["rr"],
             reason=(f"GAP FADE{' (graded F)' if shadow else ''} of {sig.signal_id}: 09:45 gap with the trigger {plan['gapDatr']:.2f} "
-                    f"daily ATR; stop {plan['stopNote']}"),
+                    f"daily ATR{' (first bar: official open not seen)' if plan.get('gapRuleRead') == GAP_READ_FIRST_BAR else ''}; "
+                    f"stop {plan['stopNote']}"),
             source_signal_id=sig.signal_id,
             evidence={**dict(sig.evidence), "gap_datr": plan["gapDatr"], "rr": plan["rr"]},
             context={
@@ -5778,7 +5788,8 @@ class Engine:
         and the paper book trading every B1 at 0.25, recording at_030 and the conviction). Every FUDKII trigger on the
         09:15 candle — published or graded F, any grade, NSE stocks and indices — is read here, on a path of its own beside
         every other book's (``_decide``), never instead of one. B1 (strategy/b1.py): the official gap at least 0.25 daily
-        ATR its own way and no key pivot within 0.5 ATR30 ahead -> faded under CT-B1's own key, wallet and exits with
+        ATR its own way, no key pivot within 0.5 ATR30 ahead and no R3/S3/R4/S4 within 0.25 (operator, 19 Oct; read here
+        from the name's levels, the shared key set untouched) -> faded under CT-B1's own key, wallet and exits with
         ``b1_plan``; anything else is a skip on its card with the reason. Every read, taken or skipped, is a
         ``counter.b1`` record: both gaps, both lines (at_025, at_030), the pivot test and the conviction points."""
         key = StrategyKey.FUDKII_CT_B1
@@ -5795,8 +5806,11 @@ class Engine:
             return  # B1 reads the 09:15 candle alone: a later trigger is not one it judges
         self._b1_judged.add(sig.signal_id)
         bull = sig.direction is Direction.BULLISH
+        points = self._pivot_points(sig.symbol)
+        # the outer rungs R3/S3/R4/S4 ahead, on the logged ATR30, as the context measures the key ones (PIVOT_SCAN_ATR)
+        outer = outer_ahead(points, close=float(sig.entry), atr30=float(ctx.get("atr30") or 0.0), bullish=bull, scan=PIVOT_SCAN_ATR)
         read = b1_read(ctx, close=float(sig.entry), bullish=bull, zones=self.zones_for(sig.symbol),
-                       pivots_known=bool(self._pivot_points(sig.symbol)))
+                       pivots_known=bool(points), outer=outer)
         if und.segment is Segment.NSE_FO:
             # an index with no cash code in the master (NIFTYNXT50, 19 Oct) is read through its front future: the capture
             # reads the cash feed, so its official open is never seen — judged and recorded, never faded (review 19 Oct)
@@ -5823,7 +5837,8 @@ class Engine:
             grade=plan["grade"],
             rr=plan["rr"],
             reason=(f"B1 GAP FADE of {sig.signal_id}: official gap {read['gapOfficial']:.3f} daily ATR its own way "
-                    f"({read['gapOpenSrc']}; {lines}), no key pivot within 0.5 ATR30; conviction {conv['total']:g}/5 without "
+                    f"({read['gapOpenSrc']}; {lines}), no key pivot within {B1_PIN_ATR:g} ATR30 nor R3/S3/R4/S4 within "
+                    f"{B1_PIN_OUTER_ATR:g}; conviction {conv['total']:g}/5 without "
                     f"the 5-read; stop {plan['stopNote']}; T1 {plan['targets'][0]:g} (1 ATR30), out by {B1_TIME_STOP_HM}"),
             source_signal_id=sig.signal_id,
             evidence={**dict(sig.evidence), "gap_official": read["gapOfficial"], "gap_datr": read["gapDatr"],

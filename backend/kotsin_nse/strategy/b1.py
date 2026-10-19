@@ -7,8 +7,11 @@ the official close (the closing-auction print, the 1D close), in daily ATRs — 
 
 The rule (resume file CTB-19Oct_README.md, "B1 rule (proposal)"): the gap at least ``B1_GAP_DATR`` (0.25) its own way
 AND no key pivot (PIVOT, TC, BC, R1, S1, R2, S2 of 1d / 1wk / 1mo — the context's ``pivotsAheadAtr``, as RT-Y's gate B
-reads it) within ``B1_PIN_ATR`` (0.5) ATR30 ahead of the close: a gap pinned by a pivot is in trend (B1x, CANBK 19 Oct).
-No volume, breadth or grade gate — group 1 ran 0.8x to 22x volume, grades A and F.
+reads it) within ``B1_PIN_ATR`` (0.5) ATR30 ahead of the close, AND no outer rung (R3, S3, R4, S4 of 1d / 1wk / 1mo —
+``outer_ahead``, read here from the engine's levels, never added to the shared key set) within ``B1_PIN_OUTER_ATR``
+(0.25) ATR30 ahead (operator, 19 Oct: "R3/S3/R4/S4 pin only when they're very close, say within 0.25 ATR" — BANKINDIA
+15 Oct closed 0.18 above its daily S3; POWERINDIA 13 Oct's S3 0.48 ahead stays a fade): a gap pinned by a level is in
+trend (B1x, CANBK 19 Oct). No volume, breadth or grade gate — group 1 ran 0.8x to 22x volume, grades A and F.
 
 Recorded on every read, taken or not: ``at_025``, ``at_030`` (the 0.30 line the operator compares it with), the pivot
 test and the conviction points the engine can compute (tiered, cap 5): the gap (0.25-0.5 0.5 | 0.5-1 1 | 1-1.5 1.5 |
@@ -26,10 +29,12 @@ from collections.abc import Sequence
 from typing import Any
 
 from ..bars.official_open import FIRST_BAR
-from ..bars.pivots import WALL_MIN_STRENGTH, Zone
-from ..risk.limits import B1_GAP_DATR, B1_GAP_LINE, B1_PIN_ATR
+from ..bars.pivots import WALL_MIN_STRENGTH, PivotPoint, Zone
+from ..risk.limits import B1_GAP_DATR, B1_GAP_LINE, B1_PIN_ATR, B1_PIN_OUTER_ATR
 from .counter import KEY_LEVELS
 
+#: the outer rungs that pin a B1 gap only within B1_PIN_OUTER_ATR — CT-B1's own list, not counter.KEY_LEVELS (operator 19 Oct)
+OUTER_LEVELS = frozenset({"R3", "S3", "R4", "S4"})
 #: conviction tiers: (from, points) — the highest tier reached counts
 GAP_TIERS = ((0.25, 0.5), (0.5, 1.0), (1.0, 1.5), (1.5, 2.0))
 STRETCH_TIERS = ((0.8, 0.5), (1.5, 1.0), (2.5, 1.5))
@@ -61,6 +66,32 @@ def key_pins(ctx: dict[str, Any], reach: float = B1_PIN_ATR) -> list[tuple[str, 
     """The key pivots within ``reach`` ATR30 ahead of the close, nearest first, as the context logged them."""
     return [(str(lab), float(d)) for lab, d in (ctx.get("pivotsAheadAtr") or [])
             if str(lab).split(".", 1)[-1] in KEY_LEVELS and float(d) <= reach]
+
+
+def outer_ahead(points: Sequence[PivotPoint], *, close: float, atr30: float, bullish: bool,
+                scan: float) -> list[tuple[str, float]]:
+    """The outer rungs (R3, S3, R4, S4 of 1d / 1wk / 1mo) ahead of the close the trigger's way, within ``scan`` ATR30,
+    nearest first — as the context's ``pivotsAheadAtr`` measures the key ones (4 dp), which never carries these. Empty
+    without an ATR30."""
+    if atr30 <= 0:
+        return []
+    sign = 1 if bullish else -1
+    return sorted(((p.label, round(sign * (p.price - close) / atr30, 4)) for p in points
+                   if p.label.split(".", 1)[-1] in OUTER_LEVELS and 0 <= sign * (p.price - close) <= scan * atr30),
+                  key=lambda x: x[1])
+
+
+def b1_pins(ctx: dict[str, Any], outer: Sequence[Sequence[Any]] = ()) -> list[tuple[str, float]]:
+    """What pins a B1 gap, nearest first: a key pivot within ``B1_PIN_ATR`` (0.5) ATR30 ahead, or an outer rung
+    (``outer``, from ``outer_ahead``) within ``B1_PIN_OUTER_ATR`` (0.25)."""
+    near_outer = [(str(lab), float(d)) for lab, d in outer
+                  if str(lab).split(".", 1)[-1] in OUTER_LEVELS and float(d) <= B1_PIN_OUTER_ATR]
+    return sorted([*key_pins(ctx), *near_outer], key=lambda x: x[1])
+
+
+def _reach(label: str) -> str:
+    return (f"R3/S3/R4/S4 within {B1_PIN_OUTER_ATR:g}" if label.split(".", 1)[-1] in OUTER_LEVELS
+            else f"key pivots within {B1_PIN_ATR:g}")
 
 
 def conviction(ctx: dict[str, Any], *, close: float, bullish: bool, zones: Sequence[Zone]) -> dict[str, Any]:
@@ -101,7 +132,7 @@ def conviction(ctx: dict[str, Any], *, close: float, bullish: bool, zones: Seque
 
 
 def b1_read(ctx: dict[str, Any] | None, *, close: float, bullish: bool, zones: Sequence[Zone],
-            pivots_known: bool = True) -> dict[str, Any]:
+            pivots_known: bool = True, outer: Sequence[Sequence[Any]] = ()) -> dict[str, Any]:
     """B1 on one 09:15-candle trigger: ``take`` and why, the gap and its lines, the pivot test and the conviction.
     ``gate`` names a refusal: ``not_open_bar``, ``no_gap_value``, ``open_unknown`` (``gapOpenSrc`` ``first_bar``: the
     process never saw the open — a boot or a reconnect after 09:15 — so the "official" gap is the first 30m bar's, the
@@ -109,16 +140,17 @@ def b1_read(ctx: dict[str, Any] | None, *, close: float, bullish: bool, zones: S
     15 Oct 0.283 against 0.093, PREMIERENE 19 Oct 0.145 against 0.252 — neither a fade nor a "no gap" can be told;
     review 19 Oct), ``no_gap`` (under 0.25 its own way), ``pivots_unknown`` (``pivots_known`` False: the engine holds no classic level for the name — its daily row not the
     broker's official one, or too few of them — so "no key pivot ahead" cannot be told from "none read"; B1 does not
-    fade blind), ``pivot_pin``."""
+    fade blind), ``pivot_pin`` (a key pivot within 0.5 ATR30 ahead, or an R3/S3/R4/S4 in ``outer`` within 0.25)."""
     ctx = ctx or {}
     gap = ctx.get("gapOfficial")
-    pins = key_pins(ctx)
+    pins = b1_pins(ctx, outer)
     out: dict[str, Any] = {
         "gapOfficial": gap, "gapDatr": ctx.get("gapDatr"), "gapOpenSrc": ctx.get("gapOpenSrc"),
         "officialOpen": ctx.get("officialOpen"), "officialClose": ctx.get("officialClose"), "dAtr": ctx.get("dAtr"),
         "atr30": ctx.get("atr30"),
         "at_025": gap is not None and gap >= B1_GAP_DATR, "at_030": gap is not None and gap >= B1_GAP_LINE,
         "keyPivotAhead": bool(pins), "pins": [[lab, d] for lab, d in pins], "pivotsKnown": pivots_known,
+        "outerAheadAtr": [[str(lab), float(d)] for lab, d in outer],
         "conviction": conviction(ctx, close=close, bullish=bullish, zones=zones),
     }
     if not ctx.get("openBar"):
@@ -137,6 +169,7 @@ def b1_read(ctx: dict[str, Any] | None, *, close: float, bullish: bool, zones: S
     if pins:
         lab, d = pins[0]
         return {**out, "take": False, "gate": "pivot_pin",
-                "why": f"gap {gap:.3f} pinned: key pivot {lab} +{d:.2f} ATR30 ahead (within {B1_PIN_ATR:g}) — in trend, B1x"}
+                "why": f"gap {gap:.3f} pinned: {lab} +{d:.2f} ATR30 ahead ({_reach(lab)}) — in trend, B1x"}
     return {**out, "take": True, "gate": None,
-            "why": f"official gap {gap:.3f} daily ATR its own way (≥ {B1_GAP_DATR:g}), no key pivot within {B1_PIN_ATR:g} ATR30"}
+            "why": f"official gap {gap:.3f} daily ATR its own way (≥ {B1_GAP_DATR:g}), no key pivot within {B1_PIN_ATR:g} ATR30 "
+                   f"nor R3/S3/R4/S4 within {B1_PIN_OUTER_ATR:g}"}

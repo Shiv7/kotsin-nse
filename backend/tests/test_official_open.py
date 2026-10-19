@@ -2,7 +2,9 @@
 open is the pre-open equilibrium print — the 1D candle's open — read off the feed's frames by their exchange time, the
 first continuous trade where there was no pre-open match (NSE's rule); the official close is the previous session's
 closing-auction print, the 1D close. Every trigger carries ``gapOfficial`` beside the first trade's ``gapDatr``, and
-KN_GAP_SOURCE (default ``first_tick``) says which one the gap rules read — the default leaves every rule as it was.
+KN_GAP_SOURCE says which one the gap rules read: ``official`` by default (operator, 19 Oct: "did we not decide to use
+official open ... at 1 AM?" — official for every book, confirmed 19 Oct), the first bar's ``gapDatr`` where the open was
+not seen (flagged ``gapRuleRead`` first_bar); ``first_tick``, the switch-back, makes every decision the one made before.
 
 Research (b1_7days, 9-19 Oct): the official numbers matched 126/126 (broker 1D = engine 1D = the tape's last pre-open
 print); the first trade differed on 122 of 146; the real cases below are 19 Oct's and 29 Sep's."""
@@ -34,7 +36,7 @@ from kotsin_nse.market.session import IST
 from kotsin_nse.risk.limits import CT_Y_LIMITS, RT_Y_F_LIMITS, RT_Y_LIMITS
 from kotsin_nse.strategy.base import Signal
 from kotsin_nse.strategy.keys import StrategyKey
-from kotsin_nse.strategy.regime_gates import gap_switch, rt_gate_reasons, rule_gap
+from kotsin_nse.strategy.regime_gates import gap_switch, rt_gate_reasons, rule_gap, rule_gap_read
 from kotsin_nse.venue.fivepaisa.ws import FivePaisaFeed
 from tests.test_gate_b_and_gap_fade import _seed, _trigger
 
@@ -266,7 +268,8 @@ async def test_every_trigger_carries_both_gaps_and_the_feed_fills_the_official_o
     assert c["gapDatr"] == pytest.approx(0.5), "the first trade's gap is kept, named as before"
     assert c["gapOfficial"] == pytest.approx(21 / 60) and c["gapOpenSrc"] == PREOPEN
     assert (c["officialOpen"], c["officialClose"], c["dAtr"], c["officialCloseEod"]) == (4721.0, 4700.0, 60.0, True)
-    assert c["officialOpenTs"] == at("09:08:10") and c["gapRule"] == "first_tick"
+    assert c["officialOpenTs"] == at("09:08:10") and c["gapRule"] == "official" and c["gapRuleRead"] == "official"
+    assert rule_gap(c) == c["gapOfficial"], "the default: the gap rules read the official gap"
     bear = e.trigger_context(Signal(strategy=StrategyKey.FUDKII, symbol="HAL", direction=Direction.BEARISH, ts=open_ts, entry=4726.0, stop=4740.0))
     assert bear["gapOfficial"] == pytest.approx(-21 / 60), "signed the trigger's way"
 
@@ -293,6 +296,8 @@ def test_a_process_that_never_saw_the_open_reads_the_first_bar(settings, monkeyp
     open_ts = _store(e, "HAL", "2303", first_open=4730.0)
     c = e.trigger_context(Signal(strategy=StrategyKey.FUDKII, symbol="HAL", direction=Direction.BULLISH, ts=open_ts, entry=4726.0, stop=4718.0))
     assert c["gapOpenSrc"] == FIRST_BAR and c["officialOpen"] == 4730.0 and c["gapOfficial"] == pytest.approx(c["gapDatr"])
+    # official by default, but the open was not seen: the gap rules fall back to the first bar's gapDatr, and say so
+    assert c["gapRule"] == "official" and c["gapRuleRead"] == FIRST_BAR and rule_gap(c) == c["gapDatr"] == 0.5
 
 
 class _Clock:
@@ -364,15 +369,18 @@ def test_the_close_is_flagged_official_only_off_the_eod_row(settings, monkeypatc
 def test_the_health_page_says_which_gap_the_rules_read(settings):
     e = Engine(settings)
     h = e.health_snapshot()
-    assert h["gap"]["source"] == "first_tick" and "settled" in h["gap"]["official_open"]
+    assert h["gap"]["source"] == "official" and "settled" in h["gap"]["official_open"]
+    assert Engine(settings.model_copy(update={"gap_source": "first_tick"})).health_snapshot()["gap"]["source"] == "first_tick"
 
 
-# -- KN_GAP_SOURCE: first_tick unless the operator flips it ----------------------------------------------------
+# -- KN_GAP_SOURCE: official for every book (operator, 19 Oct), first_tick the switch-back ----------------------
 
 
-def test_the_switch_defaults_to_the_first_tick_and_takes_only_its_two_values(tmp_path):
-    assert Settings(_env_file=None, data_dir=tmp_path).gap_source == "first_tick"
-    assert Settings(_env_file=None, data_dir=tmp_path, gap_source="official").gap_source == "official"
+def test_the_switch_defaults_to_the_official_open_and_takes_only_its_two_values(tmp_path):
+    """Operator, 19 Oct: "did we not decide to use official open ... at 1 AM?" — the 1 AM definition for every book,
+    confirmed 19 Oct (built defaulting to first_tick, awaiting that choice). ``first_tick`` stays as the switch-back."""
+    assert Settings(_env_file=None, data_dir=tmp_path).gap_source == "official"
+    assert Settings(_env_file=None, data_dir=tmp_path, gap_source="first_tick").gap_source == "first_tick"
     with pytest.raises(ValidationError):
         Settings(_env_file=None, data_dir=tmp_path, gap_source="pre_open")
     assert "KN_GAP_SOURCE" in known_env_keys(), "a known key: the boot's unknown-key check lets it through"
@@ -389,15 +397,33 @@ CTXS = [
 
 
 @pytest.mark.parametrize("ctx", CTXS)
-def test_the_default_leaves_every_gap_rule_as_it_was(ctx):
-    """Pinned: a context logged under the default reads gapDatr — its decisions are those of the same context with no
-    official gap in it at all, byte for byte."""
+def test_first_tick_reproduces_the_old_decisions_exactly(ctx):
+    """Pinned: a context logged under the switch-back (``first_tick``) reads gapDatr — its decisions are those of the
+    same context with no official gap in it at all (the engine before the official open), byte for byte."""
     before = {k: v for k, v in ctx.items() if k != "gapOfficial"}
-    now = {**ctx, "gapRule": "first_tick"}
-    assert rule_gap(now) == rule_gap(before) == ctx["gapDatr"]
+    now = {**ctx, "gapRule": "first_tick", "gapOpenSrc": PREOPEN}
+    assert rule_gap(now) == rule_gap(before) == ctx["gapDatr"] and rule_gap_read(now) == "first_tick"
     for lim in (RT_Y_LIMITS, RT_Y_F_LIMITS, CT_Y_LIMITS):
         assert rt_gate_reasons(now, lim) == rt_gate_reasons(before, lim)
         assert gap_switch(now, lim) == gap_switch(before, lim)
+
+
+@pytest.mark.parametrize("ctx", CTXS)
+def test_the_default_official_rule_falls_back_to_the_first_bar_only_where_the_open_was_not_seen(ctx):
+    """Under the default the rules read gapOfficial; where the official open was not seen (``gapOpenSrc`` first_bar)
+    they read the first bar's gapDatr — the decisions first_tick makes — and the reason says so."""
+    seen = {**ctx, "gapRule": "official", "gapOpenSrc": PREOPEN}
+    assert rule_gap(seen) == ctx["gapOfficial"] and rule_gap_read(seen) == "official"
+    unseen = {**ctx, "gapRule": "official", "gapOpenSrc": FIRST_BAR}
+    first = {**ctx, "gapRule": "first_tick", "gapOpenSrc": FIRST_BAR}
+    assert rule_gap(unseen) == rule_gap(first) == ctx["gapDatr"] and rule_gap_read(unseen) == FIRST_BAR
+    for lim in (RT_Y_LIMITS, RT_Y_F_LIMITS, CT_Y_LIMITS):
+        got, old = rt_gate_reasons(unseen, lim), rt_gate_reasons(first, lim)
+        assert [g for g, _ in got] == [g for g, _ in old], "the same gates as first_tick"
+        assert all("first bar: official open not seen" in w for g, w in got if g == "open_gap")
+        assert (gap_switch(unseen, lim) is None) == (gap_switch(first, lim) is None)
+    assert "first bar: official open not seen" in rt_gate_reasons({**CTXS[1], "gapRule": "official", "gapOpenSrc": FIRST_BAR,
+                                                                   "relVol": None}, RT_Y_LIMITS)[0][1]
 
 
 def test_official_makes_the_same_rules_read_the_official_gap():
@@ -416,7 +442,12 @@ def test_ct_ys_gap_fade_reads_the_gap_the_switch_names(settings):
     assert e.gap_fade_plan(_trigger(Direction.BULLISH), {**ctx, "gapRule": "first_tick"}) is None
     assert e.gap_fade_plan(_trigger(Direction.BULLISH), ctx) is None, "a context without the switch: the first tick"
     plan = e.gap_fade_plan(_trigger(Direction.BULLISH), {**ctx, "gapRule": "official"})
-    assert plan is not None and plan["gapDatr"] == 0.45 and plan["gapRule"] == "official"
+    assert plan is not None and plan["gapDatr"] == 0.45 and plan["gapRule"] == "official" and plan["gapRuleRead"] == "official"
+    assert e.gap_fade_plan(_trigger(Direction.BULLISH), {**ctx, "gapRule": "official", "gapOpenSrc": FIRST_BAR}) is None, (
+        "the open not seen: the first bar's 0.29, as first_tick")
+    fb = e.gap_fade_plan(_trigger(Direction.BULLISH), {**ctx, "gapDatr": 0.45, "gapOfficial": 0.45, "gapRule": "official",
+                                                      "gapOpenSrc": FIRST_BAR})
+    assert fb is not None and fb["gapDatr"] == 0.45 and fb["gapRuleRead"] == FIRST_BAR, "flagged on the plan"
     first = e.gap_fade_plan(_trigger(Direction.BULLISH), {**ctx, "gapDatr": 0.45, "gapOfficial": 0.1, "gapRule": "first_tick"})
     assert first is not None and "gapRule" not in first and first["gapDatr"] == 0.45, "the default plan, as before"
 
@@ -424,17 +455,24 @@ def test_ct_ys_gap_fade_reads_the_gap_the_switch_names(settings):
 @pytest.mark.asyncio
 async def test_the_switch_is_stamped_on_every_trigger_as_it_is_logged(settings, monkeypatch):
     monkeypatch.setattr(engine_mod, "ist_today", lambda: DAY)
-    e = Engine(settings.model_copy(update={"gap_source": "official"}))
-    e.underlyings["HAL"] = Instrument("2303", "HAL", Segment.NSE_EQ, InstrumentKind.EQUITY, name="HAL", underlying="HAL")
-    open_ts = _store(e, "HAL", "2303", first_open=4730.0)
-    c = e.trigger_context(Signal(strategy=StrategyKey.FUDKII, symbol="HAL", direction=Direction.BULLISH, ts=open_ts, entry=4726.0, stop=4718.0))
-    assert c["gapRule"] == "official" and rule_gap(c) == c["gapOfficial"]
+    for rule in ("official", "first_tick"):
+        e = Engine(settings.model_copy(update={"gap_source": rule}))
+        e.underlyings["HAL"] = Instrument("2303", "HAL", Segment.NSE_EQ, InstrumentKind.EQUITY, name="HAL", underlying="HAL")
+        open_ts = _store(e, "HAL", "2303", first_open=4730.0)
+        for px, exch in ((4721.0, at("09:08:10")), (4730.0, at("09:15:00"))):  # the pre-open print, settled at 09:15
+            e.official_opens.note("HAL", px, exch, exch + 1)
+        c = e.trigger_context(Signal(strategy=StrategyKey.FUDKII, symbol="HAL", direction=Direction.BULLISH, ts=open_ts, entry=4726.0,
+                                     stop=4718.0))
+        assert c["gapRule"] == rule == c["gapRuleRead"] and c["gapOpenSrc"] == PREOPEN, rule
+        assert rule_gap(c) == (c["gapOfficial"] if rule == "official" else c["gapDatr"]), rule
+        assert (c["gapOfficial"], c["gapDatr"]) == (pytest.approx(21 / 60), 0.5), "both logged either way"
 
 
 @pytest.mark.asyncio
-async def test_ct_y_and_rt_y_decide_on_the_first_tick_by_default(settings):
-    """The whole counter path on a trigger whose first trade gapped 0.29 and whose official open gapped 0.45: under the
-    default CT-Y does not gap-fade it — as before this change — and under ``official`` it does."""
+async def test_ct_y_decides_on_the_official_gap_by_default_and_on_the_first_tick_on_the_switch_back(settings):
+    """The whole counter path on a trigger whose first trade gapped 0.29 and whose official open gapped 0.45: under
+    ``official`` (the default from 21 Oct) CT-Y gap-fades it; under ``first_tick`` it does not — as before 21 Oct."""
+    assert settings.gap_source == "official"
     for rule, faded in (("first_tick", False), ("official", True)):
         e = Engine(settings)
         await e.start()

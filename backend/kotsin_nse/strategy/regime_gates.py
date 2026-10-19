@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..bars.official_open import FIRST_BAR
 from ..risk.limits import CT_M_MARKET_AGAINST_MAX, RiskLimits
 
 #: The gap the gap switch reads (``RiskLimits.gap_switch_rel_vol``): a 09:45 trigger that gapped this many daily
@@ -17,13 +18,36 @@ from ..risk.limits import CT_M_MARKET_AGAINST_MAX, RiskLimits
 GAP_SWITCH_GAP_DATR = 0.3
 
 
-def rule_gap(ctx: dict[str, Any] | None) -> float | None:
-    """The 09:45 gap the gap rules read — CT-Y's gap fade, CT-Y-F, the gap switch, RT-Y / RT-Y-F's gap skip: ``gapDatr``
-    (the open of the first 30m bar, the first continuous trade) as always, or ``gapOfficial`` (the pre-open print against
-    the closing-auction close) when the trigger was logged under KN_GAP_SOURCE=official — its context says which in
-    ``gapRule`` (CTB-19Oct, 2026-10-19). A context logged without it reads ``gapDatr``."""
+#: what ``rule_gap_read`` names: the official gap, the first-bar gap read in its place (the rule official, the official
+#: open not seen), or the first tick's (the rule first_tick, or a context logged before the switch)
+GAP_READ_OFFICIAL, GAP_READ_FIRST_BAR, GAP_READ_FIRST_TICK = "official", FIRST_BAR, "first_tick"
+
+
+def rule_gap_read(ctx: dict[str, Any] | None) -> str:
+    """Which gap the gap rules read on this context. ``official`` — the trigger was logged under KN_GAP_SOURCE=official
+    (``gapRule``, the default from 21 Oct: operator, 19 Oct, "did we not decide to use official open ... at 1 AM?") and
+    the official open was seen; ``first_bar`` — logged under official, but the process never saw the official open
+    (``gapOpenSrc`` first_bar: a boot or a feed reconnect after 09:15), so the rules fall back to ``gapDatr``, the first
+    30m bar's gap, and the record names it; ``first_tick`` — logged under the switch-back, or before the switch existed."""
     ctx = ctx or {}
-    return ctx.get("gapOfficial") if ctx.get("gapRule") == "official" else ctx.get("gapDatr")
+    if ctx.get("gapRule") != "official":
+        return GAP_READ_FIRST_TICK
+    return GAP_READ_FIRST_BAR if ctx.get("gapOpenSrc") == FIRST_BAR else GAP_READ_OFFICIAL
+
+
+def rule_gap(ctx: dict[str, Any] | None) -> float | None:
+    """The 09:45 gap the gap rules read — CT-Y's gap fade, CT-Y-F, the gap switch, RT-Y / RT-Y-F's gap skip:
+    ``gapOfficial`` (the pre-open print against the closing-auction close) when the trigger was logged under
+    KN_GAP_SOURCE=official, the default — its context says which in ``gapRule`` (CTB-19Oct, 2026-10-19) — except where
+    the official open was not seen (``rule_gap_read`` first_bar): there, and under first_tick, ``gapDatr`` (the open of
+    the first 30m bar, the first continuous trade) as before. A context logged without ``gapRule`` reads ``gapDatr``."""
+    ctx = ctx or {}
+    return ctx.get("gapOfficial") if rule_gap_read(ctx) == GAP_READ_OFFICIAL else ctx.get("gapDatr")
+
+
+def _gap_note(ctx: dict[str, Any]) -> str:
+    """The flag on a gap rule's reason when it read the first-bar gap in place of the official one."""
+    return " (first bar: official open not seen)" if rule_gap_read(ctx) == GAP_READ_FIRST_BAR else ""
 
 
 def gap_switch(ctx: dict[str, Any] | None, lim: RiskLimits) -> str | None:
@@ -33,7 +57,8 @@ def gap_switch(ctx: dict[str, Any] | None, lim: RiskLimits) -> str | None:
     x, gap, rv = lim.gap_switch_rel_vol, rule_gap(ctx), ctx.get("relVol")
     if x is None or not ctx.get("openBar") or gap is None or gap < GAP_SWITCH_GAP_DATR or rv is None or rv < x:
         return None
-    return f"gap switch: 09:45 gap {gap:.2f} daily ATR its own way on {rv:.1f}x the NIFTY50's volume (≥ {x:g}x) — followed in trend"
+    return (f"gap switch: 09:45 gap {gap:.2f} daily ATR its own way{_gap_note(ctx)} on {rv:.1f}x the NIFTY50's volume "
+            f"(≥ {x:g}x) — followed in trend")
 
 
 def gap_fade_volume_block(ctx: dict[str, Any] | None, lim: RiskLimits) -> str | None:
@@ -66,7 +91,8 @@ def rt_gate_reasons(ctx: dict[str, Any] | None, lim: RiskLimits) -> list[tuple[s
             out.append(("pivot_ahead", "pivot just ahead: " + ", ".join(near[:3]) + f" (within {lim.skip_pivot_ahead_atr:g} ATR30)"))
     gap = rule_gap(ctx)
     if lim.skip_open_gap_datr is not None and ctx.get("openBar") and gap is not None and gap >= lim.skip_open_gap_datr:
-        out.append(("open_gap", f"09:45 trigger gapped {gap:.2f} daily ATR its own way (≥ {lim.skip_open_gap_datr:g}) — the first-bar trap"))
+        out.append(("open_gap", f"09:45 trigger gapped {gap:.2f} daily ATR its own way{_gap_note(ctx)} (≥ {lim.skip_open_gap_datr:g}) "
+                                "— the first-bar trap"))
     return out
 
 
