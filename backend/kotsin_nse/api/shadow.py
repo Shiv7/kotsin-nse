@@ -21,7 +21,7 @@ from ..market.session import IST
 from ..risk.limits import RiskLimits
 from ..strategy.keys import SHADOW_BOOKS, STOP_MIRRORS, StrategyKey, stop_mirrors_of
 from ..strategy.regime_gates import GATE_B as GATE_B_GATES
-from ..strategy.regime_gates import trigger_verdicts
+from ..strategy.regime_gates import rule_gap, trigger_verdicts
 from .daybook import _CSS, _fmt, contract_label, render_ab
 
 #: the books whose status each trigger row shows, in the order the cards show them
@@ -78,6 +78,8 @@ def shadow_rows(
             "fired": float(sg.get("created_ts") or (float(sg["ts"]) + 1800)), "rr": sg.get("rr"), "decision": sg.get("decision"),
             "breadth": ctx.get("share"), "names": ctx.get("names"), "efficiency": ctx.get("efficiency"), "volBand": ctx.get("volBand"),
             "gapDatr": ctx.get("gapDatr"), "openBar": ctx.get("openBar"), "pivotsAhead": list(ctx.get("pivotsAhead") or []),
+            # the gap the gap rules read on it: official from 21 Oct (KN_GAP_SOURCE), the first tick's before
+            "ruleGap": rule_gap(ctx),
             "logged": bool(ctx), "rtY": verdicts["rtY"], "ctY": verdicts["ctY"], "ctM": verdicts["ctM"], "books": books,
             "volSurgeT": ctx.get("volSurgeT"), "volSurgeT1": ctx.get("volSurgeT1"), "mktSurgeT": ctx.get("mktSurgeT"),
             "mktSurgeT1": ctx.get("mktSurgeT1"), "volDried": ctx.get("volDried"), "volDriedRel": ctx.get("volDriedRel"),
@@ -605,7 +607,7 @@ def label_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         ("Own-volatility band", lambda r: r.get("volBand")),
         ("Key pivot ≤ 0.5 ATR ahead", lambda r: None if not r.get("logged") else ("yes" if r.get("pivotsAhead") else "no")),
         ("09:45 gap its own way ≥ 0.3 dATR", lambda r: None if not r.get("logged") else (
-            "yes" if (r.get("openBar") and (r.get("gapDatr") or 0) >= 0.3) else "no")),
+            "yes" if (r.get("openBar") and (r.get("ruleGap") or 0) >= 0.3) else "no")),
     ]
     out = []
     for name, key in groups:
@@ -659,7 +661,7 @@ def _triggers_table(rows: list[dict[str, Any]]) -> str:
             f'<tr><td class="sym">{_ist(r["fired"])}</td><td class="sym l">{html.escape(str(r["symbol"]))}</td>'
             f'<td class="{"pos" if r["direction"] == "BULLISH" else "neg"}">{"BULL" if r["direction"] == "BULLISH" else "BEAR"}</td>'
             f'<td>{_fmt(r["rr"])}</td><td>{breadth}</td>'
-            f'<td>{_fmt(r["efficiency"])}</td><td class="l">{html.escape(r["volBand"] or "—")}</td><td>{_fmt(r["gapDatr"])}</td>'
+            f'<td>{_fmt(r["efficiency"])}</td><td class="l">{html.escape(r["volBand"] or "—")}</td><td>{_fmt(r.get("ruleGap"))}</td>'
             f'<td>{"yes" if r["openBar"] else "—"}</td><td class="l">{html.escape(", ".join(r["pivotsAhead"]) or "—")}</td>'
             f'<td><span class="chip {y_cls}">{html.escape(y["action"].lower() if y["state"] in ("taken", "skipped") else y["state"])}</span></td>'
             f'<td class="why l">{html.escape("; ".join(y["why"]) or "—")}</td>'
@@ -924,7 +926,7 @@ def _render_b1(d: ShadowData) -> str:
 <p class="sub">Read: {t.get("read", 0)} triggers on the 09:15 candle · faded {t.get("fades", 0)}, entered {t.get("traded", 0)} · not faded: {skipped}.</p>
 <h3>B1 gap fade · every 09:15 trigger read · {len(g["rows"])}</h3>
 <div class="scroll"><table><thead><tr><th>Fired</th><th class="l">Symbol</th><th>Trigger</th><th>Grade</th><th>Official gap</th><th class="l">Open from</th>
-<th>First-tick gap</th><th>At 0.30</th><th class="l">Key pivot ≤ 0.5 ATR30</th><th>Conviction</th><th class="l">Points</th><th class="l">B1</th>
+<th>First-tick gap</th><th>At 0.30</th><th class="l">Pin (key ≤ 0.5 · R3/S3/R4/S4 ≤ 0.25 ATR30)</th><th>Conviction</th><th class="l">Points</th><th class="l">B1</th>
 <th>Stop</th><th>T1 (1 ATR30)</th><th class="l">Contract / why not entered</th><th>Fill</th><th class="l">Exit</th><th>CT-B1 net</th></tr></thead>
 <tbody>{body or '<tr><td colspan="18" class="dim">no 09:15 trigger read since CT-B1 began</td></tr>'}</tbody></table></div>"""
 
@@ -1245,14 +1247,16 @@ B1_BRIEF = Brief(
     for_rule=(
         "The shadow book FUDKII-CT-B1: every FUDKII trigger on the 09:15 candle — NSE stocks and indices, published or graded "
         "F — is faded when the official open (the pre-open print, the 1D open; the first trade with no pre-open match) "
-        "gapped at least 0.25 daily ATR the trigger's own way from the official close (the closing-auction print), and no "
-        "key pivot (PIVOT/TC/BC/R1/S1/R2/S2, 1d/1wk/1mo) sits within 0.5 ATR30 ahead of the close. No volume, breadth or "
+        "gapped at least 0.25 daily ATR the trigger's own way from the official close (the closing-auction print), no "
+        "key pivot (PIVOT/TC/BC/R1/S1/R2/S2, 1d/1wk/1mo) sits within 0.5 ATR30 ahead of the close, and no R3/S3/R4/S4 "
+        "(1d/1wk/1mo) within 0.25 ATR30 (operator, 19 Oct: \"pin only when they're very close\"). No volume, breadth or "
         "grade gate. PE for a bullish trigger, CE for a bearish one; CT-Y's gap-fade stop; every lot out at 1 ATR30 from the "
         "close on the underlying, at 11:15, or at the 15:14 flatten."
     ),
     against=(
         "The 0.30 line (the same rule from 0.30, at_030 on every read) and conviction 3 or more — the two filters still "
-        "to choose — and CT-Y / CT-Y-F, which fade the first-tick gap of 0.3 under a volume ceiling."
+        "to choose — and CT-Y / CT-Y-F, which fade a 09:45 gap of 0.3 under a volume ceiling (the official gap from 21 Oct, "
+        "KN_GAP_SOURCE; the first tick's before)."
     ),
     logic=(
         "Its own entries and ₹10 L purse; decided at the 09:45 decision second beside every other book, never instead of "

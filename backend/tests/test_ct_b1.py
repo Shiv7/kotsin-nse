@@ -7,7 +7,9 @@ other book and never instead of one.
 
 The named cases are 19 Oct's (resume file CTB-19Oct_README.md): PNB gapped 1.58 official with nothing ahead (group 1, a
 fade); CANBK's gap was pinned by its monthly pivot 0.05 ATR30 ahead (in trend, B1x); UNIONBANK's 0.2495 is the near
-miss — not B1."""
+miss — not B1. The outer rungs (operator, 19 Oct: "R3/S3/R4/S4 pin only when they're very close, say within 0.25 ATR"):
+BANKINDIA 15 Oct closed 0.18 ATR30 above its daily S3 (pinned), POWERINDIA 13 Oct 0.48 above its daily S3 (a fade),
+BANKINDIA 19 Oct 0.24 under its daily R3 and COLPAL 9 Oct 0.15 under its daily R3 (pinned)."""
 
 from __future__ import annotations
 
@@ -36,14 +38,16 @@ from kotsin_nse.risk.limits import (
     B1_GAP_DATR,
     B1_GAP_LINE,
     B1_PIN_ATR,
+    B1_PIN_OUTER_ATR,
     B1_TARGET_ATR,
     B1_TIME_STOP_HM,
     CT_B1_LIMITS,
     CT_Y_LIMITS,
 )
-from kotsin_nse.strategy.b1 import NO_READ5, b1_read, conviction
+from kotsin_nse.strategy.b1 import NO_READ5, OUTER_LEVELS, b1_read, conviction, outer_ahead
 from kotsin_nse.strategy.base import Signal
 from kotsin_nse.strategy.catalog import BOOKS
+from kotsin_nse.strategy.counter import KEY_LEVELS
 from kotsin_nse.strategy.keys import (
     COUNTER_TREND,
     SHADOW_BOOKS,
@@ -74,6 +78,7 @@ FAR = [PivotPoint(100_000.0, "1mo.R4", "1mo", 2.0)]
 
 def test_the_rule_and_its_numbers_are_the_operators():
     assert (B1_GAP_DATR, B1_GAP_LINE, B1_PIN_ATR, B1_TARGET_ATR, B1_TIME_STOP_HM) == (0.25, 0.30, 0.5, 1.0, "11:15")
+    assert B1_PIN_OUTER_ATR == 0.25 and OUTER_LEVELS == {"R3", "S3", "R4", "S4"}
 
 
 def test_a_pnb_like_gap_with_nothing_ahead_is_b1_and_reads_its_conviction():
@@ -105,12 +110,97 @@ def test_premierene_like_0_252_is_b1_at_the_025_line_only():
     assert r["take"] is True and r["at_025"] is True and r["at_030"] is False
 
 
+#: the outer rungs, on the named days' numbers (research b1_all0915.csv: the 09:45 close, the engine's ATR30, the daily
+#: level's distance). Each is given a B1-sized official gap so the pin test is reached — BANKINDIA 15 Oct's official gap
+#: was 0.00 (0.444 was the live engine's first-tick read), BANKINDIA 19 Oct's 0.231 and COLPAL 9 Oct's 0.012
+BANKINDIA15 = {**PNB_LIKE, "gapOfficial": 0.444, "officialClose": 134.48, "dAtr": 3.3299, "atr30": 1.1393,
+               "pivotsAheadAtr": [["1wk.S2", 1.18]]}
+POWERINDIA13 = {**PNB_LIKE, "gapOfficial": 0.861, "officialClose": 31290.0, "dAtr": 905.9295, "atr30": 322.4619,
+                "pivotsAheadAtr": [["1wk.S1", 1.02]]}
+BANKINDIA19 = {**PNB_LIKE, "gapOfficial": 0.30, "officialClose": 132.36, "dAtr": 3.4613, "atr30": 0.872,
+               "pivotsAheadAtr": [["1mo.TC", 1.87]]}
+COLPAL9 = {**PNB_LIKE, "gapOfficial": 0.5, "officialClose": 1735.7, "dAtr": 43.1402, "atr30": 16.2636,
+           "pivotsAheadAtr": [["1mo.R1", 1.54]]}
+
+
+def _outer(ctx: dict, close: float, bullish: bool, *points: tuple[str, float]) -> list[tuple[str, float]]:
+    pts = [PivotPoint(px, lab, lab.split(".")[0], 1.0) for lab, px in points]
+    return outer_ahead(pts, close=close, atr30=ctx["atr30"], bullish=bullish, scan=2.0)
+
+
+def test_bankindia_15_oct_like_bear_closed_just_above_its_daily_s3_is_pinned():
+    """Operator, 19 Oct: BANKINDIA 15 Oct closed 129.00, 0.18 ATR30 above its daily S3 128.79 — "include R3/S3 (and
+    R4/S4) in the 'level just ahead' check". A bearish trigger: below the close is ahead; the R3 above is behind."""
+    outer = _outer(BANKINDIA15, 129.0, False, ("1d.S3", 128.79), ("1d.R3", 140.1), ("1wk.S4", 121.0))
+    assert outer == [("1d.S3", pytest.approx(0.1843, abs=1e-4))], "S4 7 ATR30 away is past the scan; the R3 is behind"
+    r = b1_read(BANKINDIA15, close=129.0, bullish=False, zones=[], outer=outer)
+    assert r["take"] is False and r["gate"] == "pivot_pin" and r["keyPivotAhead"] is True and r["at_030"] is True
+    assert r["pins"] == [["1d.S3", pytest.approx(0.1843, abs=1e-4)]] and r["outerAheadAtr"] == [["1d.S3", pytest.approx(0.1843, abs=1e-4)]]
+    assert "1d.S3 +0.18 ATR30" in r["why"] and "R3/S3/R4/S4 within 0.25" in r["why"] and "B1x" in r["why"]
+    assert b1_read(BANKINDIA15, close=129.0, bullish=False, zones=[])["take"] is True, "without the outer rung: faded, as built before"
+
+
+def test_powerindia_13_oct_like_bear_gap_with_its_daily_s3_0_48_ahead_is_still_faded():
+    """Operator, 19 Oct: the outer rungs pin "only when they're very close, say within 0.25 ATR" — POWERINDIA 13 Oct
+    (bear, official gap 0.861, closed 30,030 with its daily S3 0.48 ATR30 below) stays a B1 fade (research: it was a
+    right fade, 0.5 ATR30 first at 10:11). At 0.5, the key pivots' reach, it would have been pinned."""
+    outer = _outer(POWERINDIA13, 30030.0, False, ("1d.S3", 29875.2))
+    (lab, d), = outer
+    assert lab == "1d.S3" and d == pytest.approx(0.48, abs=1e-3) and B1_PIN_OUTER_ATR < d < B1_PIN_ATR
+    r = b1_read(POWERINDIA13, close=30030.0, bullish=False, zones=[], outer=outer)
+    assert r["take"] is True and r["gate"] is None and r["pins"] == [] and r["outerAheadAtr"] == [["1d.S3", d]]
+    assert "nor R3/S3/R4/S4 within 0.25" in r["why"]
+
+
+def test_bankindia_19_oct_like_bull_closed_just_under_its_daily_r3_is_pinned():
+    """BANKINDIA 19 Oct (bull) closed 135.72, its daily R3 0.24 ATR30 above (and its weekly R1 0.42, a key pivot)."""
+    outer = _outer(BANKINDIA19, 135.72, True, ("1d.R3", 135.93), ("1d.S3", 128.0))
+    assert outer == [("1d.R3", pytest.approx(0.2408, abs=1e-4))]
+    alone = b1_read(BANKINDIA19, close=135.72, bullish=True, zones=[], outer=outer)
+    assert alone["gate"] == "pivot_pin" and alone["pins"][0][0] == "1d.R3", "the R3 alone pins it"
+    both = b1_read({**BANKINDIA19, "pivotsAheadAtr": [["1wk.R1", 0.42], ["1mo.TC", 1.87]]}, close=135.72, bullish=True, zones=[],
+                   outer=outer)
+    assert [lab for lab, _ in both["pins"]] == ["1d.R3", "1wk.R1"], "every pin, nearest first"
+
+
+def test_colpal_9_oct_like_bull_with_its_daily_r3_0_15_ahead_is_pinned():
+    outer = _outer(COLPAL9, 1841.3, True, ("1d.R3", 1843.74), ("1wk.R4", 1900.0))
+    assert outer == [("1d.R3", pytest.approx(0.15, abs=1e-3))], "the weekly R4 3.6 ATR30 away is past the scan"
+    r = b1_read(COLPAL9, close=1841.3, bullish=True, zones=[], outer=outer)
+    assert r["take"] is False and r["gate"] == "pivot_pin" and "1d.R3 +0.15" in r["why"]
+
+
+@pytest.mark.parametrize(("d", "pinned"), [(0.0, True), (0.25, True), (0.2501, False), (0.49, False)])
+def test_an_outer_rung_pins_within_0_25_inclusive(d, pinned):
+    r = b1_read(PNB_LIKE, close=187.25, bullish=True, zones=[], outer=[["1mo.S4", d]])
+    assert (r["gate"] == "pivot_pin") is pinned and r["take"] is not pinned
+
+
+def test_the_shared_key_set_rt_y_and_ct_x_read_is_unchanged(settings):
+    """CT-B1's test alone (operator, 19 Oct): the key levels RT-Y's gate B and CT-X read stay PIVOT/TC/BC/R1/S1/R2/S2, and
+    the context's ``pivotsAheadAtr`` never carries an outer rung."""
+    from kotsin_nse.risk.limits import RT_Y_LIMITS
+    from kotsin_nse.strategy.regime_gates import rt_gate_reasons
+
+    assert KEY_LEVELS == {"PIVOT", "TC", "BC", "R1", "S1", "R2", "S2"} and not (KEY_LEVELS & OUTER_LEVELS)
+    e = Engine(settings)
+    _seed(e, zones=[])
+    e._pivot_points = lambda symbol: [PivotPoint(187.6, "1d.R3", "1d", 1.0), PivotPoint(189.0, "1wk.R1", "1wk", 1.5)]  # type: ignore[method-assign]
+    c = e.trigger_context(_trigger(Direction.BULLISH))
+    assert c["pivotsAheadAtr"] == [["1wk.R1", 0.875]] and c["pivotsAhead"] == [], "the R3 0.175 ahead is not in it"
+    assert [g for g, _ in rt_gate_reasons({**c, "share": 0.7}, RT_Y_LIMITS)] == [], "gate B does not see the R3"
+
+
 def test_what_b1_does_not_read():
     assert b1_read({**PNB_LIKE, "openBar": False}, close=187.25, bullish=True, zones=[])["gate"] == "not_open_bar"
     assert b1_read({**PNB_LIKE, "gapOfficial": None}, close=187.25, bullish=True, zones=[])["gate"] == "no_gap_value"
     assert b1_read({**PNB_LIKE, "gapOfficial": -0.6}, close=187.25, bullish=True, zones=[])["gate"] == "no_gap", "a gap against"
-    far = b1_read({**PNB_LIKE, "pivotsAheadAtr": [["1d.R3", 0.1], ["1wk.R1", 0.51]]}, close=187.25, bullish=True, zones=[])
-    assert far["take"] is True, "R3 is not a key level, and 0.51 is past the reach"
+    far = b1_read({**PNB_LIKE, "pivotsAheadAtr": [["1wk.R1", 0.51]]}, close=187.25, bullish=True, zones=[],
+                  outer=[["1d.R3", 0.26], ["1wk.R4", 0.9]])
+    assert far["take"] is True, "0.51 is past the key reach, 0.26 past the outer rungs'"
+    assert far["outerAheadAtr"] == [["1d.R3", 0.26], ["1wk.R4", 0.9]] and far["pins"] == [], "recorded, not pinning"
+    shared = b1_read({**PNB_LIKE, "pivotsAheadAtr": [["1d.R3", 0.1], ["1wk.R1", 0.51]]}, close=187.25, bullish=True, zones=[])
+    assert shared["take"] is True, "the shared key list never carries an outer rung: B1 reads those from its own list"
     # no volume, breadth or grade gate: a light, against-the-market gap is still B1
     assert b1_read({**PNB_LIKE, "relVol": 0.8, "share": 0.1}, close=187.25, bullish=True, zones=[])["take"] is True
 
@@ -157,13 +247,15 @@ def test_no_zone_for_the_name_leaves_both_wall_points_unknown_not_scored():
 
 
 async def _judge(settings, ctx: dict, *, direction: Direction = Direction.BULLISH, published: bool = True, ts: int | None = None,
-                 zones: list[Zone] | None = None, pivots: bool = True) -> tuple[Engine, Signal, list, list[dict]]:
-    """``_b1_fade`` on a TATASTEEL trigger logged with ``ctx``: what reached ``_handle_signal`` and the events."""
+                 zones: list[Zone] | None = None, pivots: bool = True,
+                 points: list[PivotPoint] | None = None) -> tuple[Engine, Signal, list, list[dict]]:
+    """``_b1_fade`` on a TATASTEEL trigger logged with ``ctx``: what reached ``_handle_signal`` and the events. ``points``:
+    the name's classic levels (FAR by default)."""
     e = Engine(settings)
     await e.start()
     _seed(e, zones=zones or [Zone(184.0, 6.0, ["1d.PIVOT", "1wk.BC"])])
     if pivots:
-        e._pivot_points = lambda symbol: FAR  # type: ignore[method-assign]
+        e._pivot_points = lambda symbol: points or FAR  # type: ignore[method-assign]
     trig = _trigger(direction, ts)
     if not published:
         trig = replace(trig, grade="F", context={"parent": {"published": False, "gate": "grade", "reason": "grade F rr=0.0 no wall ahead"}})
@@ -295,6 +387,30 @@ async def test_the_engine_does_not_fade_a_name_whose_pivots_it_could_not_read(se
     try:
         assert handled == []
         assert next(x for x in events if x.get("kind") == "rt_twin.skipped" and x.get("book") == B1.value)["gate"] == "pivots_unknown"
+    finally:
+        await e.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("s3", "pinned"), [(186.89, True), (186.29, False)])
+async def test_the_engine_reads_the_outer_rungs_from_the_names_levels(settings, s3, pinned):
+    """BANKINDIA 15 Oct-like (a bearish trigger 0.18 ATR30 above its daily S3: pinned, a skip on its card) and
+    POWERINDIA 13 Oct-like (0.48 above: faded) through ``_b1_fade``: the engine measures R3/S3/R4/S4 from the name's
+    classic levels on the logged ATR30 (2.0 here) — the context's key list does not carry them."""
+    ctx = {**PNB_LIKE, "gapOfficial": 0.861, "pivotsAheadAtr": [["1wk.S1", 1.02]]}
+    e, _trig, handled, events = await _judge(settings, ctx, direction=Direction.BEARISH,
+                                             points=[PivotPoint(s3, "1d.S3", "1d", 1.0), PivotPoint(200.0, "1d.R3", "1d", 1.0)])
+    try:
+        d = round((187.25 - s3) / 2.0, 4)
+        rec = next(x for x in events if x.get("kind") == "counter.b1")
+        assert rec["outerAheadAtr"] == [["1d.S3", d]], "the R3 above is behind a bearish trigger"
+        if pinned:
+            assert handled == [] and rec["gate"] == "pivot_pin" and rec["pins"] == [["1d.S3", d]]
+            skip = next(x for x in events if x.get("kind") == "rt_twin.skipped" and x.get("book") == B1.value)
+            assert skip["gate"] == "pivot_pin" and "1d.S3 +0.18" in skip["reason"]
+        else:
+            assert [s.strategy for s, _ in handled] == [B1] and rec["take"] is True and rec["pins"] == []
+            assert "nor R3/S3/R4/S4 within 0.25" in handled[0][0].reason
     finally:
         await e.stop()
 
@@ -438,6 +554,30 @@ def test_the_11_15_time_stop_and_the_flatten():
     flat = ex.evaluate(_b1_pos(_at("09:46")), _view(_at("10:30"), 186.5, flat=True))
     assert flat is not None and flat.reason is ExitReason.EOD
     assert ExitEngine(CT_Y_LIMITS).evaluate(_b1_pos(_at("09:46")), _view(_at("11:30"), 186.5, mid=1.22)) is None, "CT-Y has no clock"
+
+
+def test_four_lots_under_75000_exactly_as_ct_y():
+    """Operator, 19 Oct: "4lots". CT-B1 buys exactly 4 lots when they cost under ₹75,000 and declines — never cuts to
+    fewer lots — when they do not, as CT-Y; the selector passes over a strike whose 4 lots cost ₹75,000 or more."""
+    from kotsin_nse.config import Settings
+    from kotsin_nse.risk.costs import CostModel
+    from kotsin_nse.risk.sizing import size_position
+
+    assert (CT_B1_LIMITS.max_lots, CT_B1_LIMITS.fixed_lots_under_inr) == (4, 75_000.0)
+    costs = CostModel(Settings(_env_file=None))
+
+    def size(lim, premium):
+        return size_position(instrument=PE, premium=premium, option_stop=premium * 0.75, option_target1=None,
+                             balance=1_000_000.0, available=1_000_000.0, limits=lim, costs=costs)
+
+    ok, rich = size(CT_B1_LIMITS, 6.0), size(CT_B1_LIMITS, 6.9)
+    assert (ok.lots, ok.qty, ok.outlay) == (4, 4 * PE.lot_size, pytest.approx(66_000.0)), "4 x 2,750 at 6.00: ₹66,000"
+    assert not rich.ok and rich.lots == 0 and rich.reason == "4 lots cost ₹75,900 — not under ₹75,000", "declined, not cut"
+    for premium in (1.2, 6.0, 6.8, 6.9, 20.0):
+        b1, cty = size(CT_B1_LIMITS, premium), size(CT_Y_LIMITS, premium)
+        assert (b1.qty, b1.lots, b1.reason) == (cty.qty, cty.lots, cty.reason), premium
+    pol = Engine.selection_policy_for(B1)
+    assert pol == Engine.selection_policy_for(StrategyKey.FUDKII_CT_Y) and (pol.outlay_lots, pol.outlay_under_inr) == (4, 75_000.0)
 
 
 def test_the_stop_is_ct_ys():

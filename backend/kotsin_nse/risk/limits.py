@@ -400,13 +400,19 @@ CT_Y_F_LIMITS = replace(CT_Y_LIMITS, gap_fade_max_rel_vol=CT_Y_F_MAX_REL_VOL)
 #: FUDKII-CT-B1 (CTB-19Oct, operator 2026-10-19: "Both together Wednesday" — the official-open gap and the paper book
 #: "trading every B1 at 0.25, recording at_030 + conviction"), a shadow: every FUDKII trigger on the 09:15 candle, NSE
 #: stocks and indices, published or graded F, faded when its official gap is at least B1_GAP_DATR daily ATR its own way
-#: and no key pivot sits within B1_PIN_ATR ATR30 ahead of the close (a pinned gap, CANBK 19 Oct, is in trend). No
-#: volume, breadth or grade gate. Research, engine A, 7 sessions 9-19 Oct (hindsight: the winning side 0.5 ATR30 first):
-#: 0.25 line 11/17, 0.30 line 8/12, conviction >= 3 7/7. Unproven, hence paper.
+#: and no key pivot sits within B1_PIN_ATR ATR30 ahead of the close, nor an R3/S3/R4/S4 within B1_PIN_OUTER_ATR (a
+#: pinned gap, CANBK 19 Oct, is in trend). No volume, breadth or grade gate. Research, engine A, 7 sessions 9-19 Oct
+#: (hindsight: the winning side 0.5 ATR30 first): 0.25 line 11/17, 0.30 line 8/12, conviction >= 3 7/7. Unproven, hence
+#: paper.
 B1_GAP_DATR = 0.25
 #: the 1 AM / CT-Y line, recorded beside every B1 read (``at_030``) — the operator compares the two (open decision a)
 B1_GAP_LINE = 0.30
 B1_PIN_ATR = 0.5
+#: the outer rungs R3/S3/R4/S4 (1d/1wk/1mo) pin a B1 gap too, but only this near (operator, 19 Oct: "include R3/S3 (and
+#: R4/S4) in the 'level just ahead' check" — BANKINDIA 15 Oct closed 0.18 ATR30 above its daily S3 — then "R3/S3/R4/S4 pin
+#: only when they're very close, say within 0.25 ATR"; POWERINDIA 13 Oct's daily S3 0.48 ahead stays a fade). CT-B1's
+#: test alone: the key set RT-Y's gate B and CT-X read (strategy/counter.py KEY_LEVELS) is unchanged
+B1_PIN_OUTER_ATR = 0.25
 #: its one target, on the underlying, and its time stop ("target 1.0 ATR30, time stop 11:15 (one-name fit)")
 B1_TARGET_ATR = 1.0
 B1_TIME_STOP_HM = "11:15"

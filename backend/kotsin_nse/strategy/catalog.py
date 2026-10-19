@@ -375,14 +375,15 @@ BOOKS: tuple[Book, ...] = (
         summary=(
             "A shadow with entries of its own: CTB-19Oct's B1 gap fade. Every FUDKII trigger on the 09:15 candle — NSE stocks "
             "and indices, published or graded F — is faded when its OFFICIAL open (the pre-open print) gapped at least 0.25 "
-            "daily ATR the trigger's own way from the official close (the closing-auction print) and no key pivot sits within "
-            "0.5 ATR30 ahead of the close. No volume, breadth or grade gate. Every read records the 0.30 line and the "
-            "conviction points beside it."
+            "daily ATR the trigger's own way from the official close (the closing-auction print), no key pivot sits within "
+            "0.5 ATR30 ahead of the close and no R3/S3/R4/S4 within 0.25. No volume, breadth or grade gate. Every read "
+            "records the 0.30 line and the conviction points beside it."
         ),
         status="live",
         params={
             "entries": "every FUDKII trigger on the 09:15 candle (decided 09:45), NSE, any grade: gapOfficial >= 0.25 its own way "
-                       "(risk/limits.py B1_GAP_DATR) and no PIVOT/TC/BC/R1/S1/R2/S2 (1d/1wk/1mo) within 0.5 ATR30 ahead (B1_PIN_ATR)",
+                       "(risk/limits.py B1_GAP_DATR), no PIVOT/TC/BC/R1/S1/R2/S2 (1d/1wk/1mo) within 0.5 ATR30 ahead (B1_PIN_ATR) "
+                       "and no R3/S3/R4/S4 (1d/1wk/1mo) within 0.25 ATR30 ahead (B1_PIN_OUTER_ATR; operator 19 Oct)",
             "records": "at_025, at_030 (B1_GAP_LINE), the pivot test, conviction /5: gap, stretch, room to the fade side's wall, a "
                        "trigger-side wall within 1 ATR30 (both blank, not scored, when the name has no zones) — the 5-read is not "
                        "computed in the engine",

@@ -197,14 +197,17 @@ class Settings(BaseSettings):
     #: a stop checked against a price from minutes ago is worse than one not checked at all. A
     #: forced exit (force-flat or halt) overrides this and proceeds on the last known price.
     position_quote_max_age_s: float = 60.0
-    #: The gap the gap rules read (CTB-19Oct, operator 18-19 Oct 2026: "the 1 AM definition"). ``first_tick``: CT-Y's
-    #: 09:45 gap fade, CT-Y-F, RT-Y's gap switch and RT-Y / RT-Y-F's 09:45 gap skip read ``gapDatr`` — the open of
-    #: today's first 30m bar, the first continuous trade, against the previous close — as they always have.
-    #: ``official``: they read ``gapOfficial`` — the official open (the pre-open equilibrium print, the 1D candle's
-    #: open; the first trade where there was no pre-open match) against the official close (the closing-auction print,
-    #: the 1D close). Every trigger carries both either way, and CT-B1 reads ``gapOfficial`` whatever this says. The
-    #: operator decides (19 Oct: built "behind KN_GAP_SOURCE (default first_tick) awaiting the operator's choice").
-    gap_source: Literal["first_tick", "official"] = "first_tick"
+    #: The gap the gap rules read (CTB-19Oct, operator 18-19 Oct 2026: "the 1 AM definition"). ``official`` (the
+    #: default): CT-Y's 09:45 gap fade, CT-Y-F, RT-Y's gap switch and RT-Y / RT-Y-F's 09:45 gap skip read ``gapOfficial``
+    #: — the official open (the pre-open equilibrium print, the 1D candle's open; the first trade where there was no
+    #: pre-open match) against the official close (the closing-auction print, the 1D close). Where this process never saw
+    #: the official open (``gapOpenSrc`` first_bar: a boot or a feed reconnect after 09:15) they read ``gapDatr``, the
+    #: first-bar gap, and the record says so (``gapRuleRead`` first_bar; ``regime_gates.rule_gap_read``); CT-B1 skips
+    #: those (open_unknown). ``first_tick``, the switch-back: they read ``gapDatr`` — the open of today's first 30m bar,
+    #: the first continuous trade, against the previous close — as they did before 21 Oct. Every trigger carries both
+    #: either way, and CT-B1 reads ``gapOfficial`` whatever this says. Operator, 19 Oct: "did we not decide to use
+    #: official open ... at 1 AM?" — official for every book, confirmed 19 Oct (it was built defaulting to first_tick).
+    gap_source: Literal["first_tick", "official"] = "official"
 
     # ---- review committee -----------------------------------------------------------------------
     # Post-mortems on the algo's own signals and trades, by Claude, with an experiment loop that
