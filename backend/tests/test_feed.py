@@ -141,3 +141,23 @@ async def test_engine_measures_order_flow_on_watched_contracts_and_archives_clos
         assert [m.ts for m in closed] == [int(t0)]
     finally:
         await e.stop()
+
+
+async def test_bar_oi_comes_from_the_front_future_only(settings, equity):
+    """RELIANCE's 1m bars flipped between the near (139.8M) and next-month (27.4M) OI on
+    2026-10-19: every future of the root stamped the bars. Only the front month may."""
+    e = Engine(settings)
+    await e.start()
+    try:
+        e.underlyings = {equity.symbol: equity}
+        e.aggregator.track(equity)
+        e._future_to_underlying = {"F1": equity.symbol, "F2": equity.symbol}
+        e._front_future = {"F1": equity.symbol}
+        e.oi_ref = {"F1": 100_000_000.0}
+        await e._on_oi({"scrip_code": "F1", "open_interest": 139_800_000, "oi_change_pct": 0.0, "recv_ts": 1.0})
+        await e._on_oi({"scrip_code": "F2", "open_interest": 27_400_000, "oi_change_pct": 0.0, "recv_ts": 2.0})
+        st = e.aggregator.state[equity.scrip_code]
+        assert st.oi == 139_800_000 and st.fut_scrip_code == "F1"
+        assert round(e.fut_oi_change[equity.symbol], 1) == 39.8
+    finally:
+        await e.stop()

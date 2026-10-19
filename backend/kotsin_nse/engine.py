@@ -488,8 +488,12 @@ class Engine:
         inst = self.underlyings.get(symbol)
         if inst is None:
             return
+        if fut_code not in self._front_future:
+            # the next-month future: its OI is archived above, but stamping it on the bars made
+            # every underlying's bar OI flip between two contracts (RELIANCE 139.8M ↔ 27.4M)
+            return
         ref = self.oi_ref.get(fut_code)
-        if fut_code in self._front_future and ref:
+        if ref:
             self.fut_oi_change[symbol] = (float(oi["open_interest"]) / ref - 1) * 100
         self.aggregator.set_oi(
             inst.scrip_code,
