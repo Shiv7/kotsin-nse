@@ -256,33 +256,44 @@ async def test_a_new_day_prunes_to_its_own_band_and_the_feed_keeps_what_the_engi
     assert pruned and all(feed.record_instruments("mf").get(c) is None for c in pruned)
 
 
-async def test_the_wall_candidates_join_the_record_price_channel_once_a_bar(settings):
-    """At each 30m bar's start: the largest recorded OI call at or above the price and put at or below it go on the
-    record price channel (their premium is read 30 minutes later) — once per bar."""
+async def test_the_wall_candidates_join_the_record_price_channel_a_minute_before_each_bar(settings):
+    """A minute before each 30m bar's start (HH:14 / HH:44): the largest recorded OI call at or above the price and put
+    at or below it go on the record price channel — streaming by the bar's start, which their premium change is read
+    from 30 minutes later, and picked outside the decision burst at HH:15:00 / HH:45:00 (review, 20 Oct) — once a bar;
+    a missed pick runs as soon as it can."""
     e, feed, cat = _engine_with_band(settings, record5_band_mf=True)
     e.ltps["PNBEQ"] = 120.0
     rec = e.recorder
     assert rec is not None
-    t = _at("2026-10-19", "09:44:00")
+    t = _at("2026-10-19", "09:13:00")
     rec.roll(date(2026, 10, 19))
     rec.set_watch({i.scrip_code: "opt" for i in cat.options_by_symbol["PNB"]})
     far_ce = "PNB1027129CE"
     far_pe = "PNB1027111PE"
     for code, oi in ((far_ce, 9e6), (far_pe, 8e6), ("PNB1027121CE", 1e5)):
         rec.on_frame("oi", {"Token": code, "OpenInterest": oi}, t)
-    await e._rec_sync(_at("2026-10-19", "09:45:03"))
+    await e._rec_sync(_at("2026-10-19", "09:13:55"))
+    assert far_ce not in feed.record["mf"], "not before the minute ahead of the first bar"
+    await e._rec_sync(_at("2026-10-19", "09:14:02"))
     assert far_ce in feed.record["mf"] and far_pe in feed.record["mf"]
     assert far_ce not in feed.record["oi"], "a wall candidate is a price the band lacks; its OI is the engine's band"
+    assert e._rec_wall_slots == {"2026-10-19 09:15"}
     n = len(feed.record["mf"])
-    e.ltps["PNBEQ"] = 120.0
-    await e._rec_sync(_at("2026-10-19", "09:50:00"))
-    assert len(feed.record["mf"]) == n
+    await e._rec_sync(_at("2026-10-19", "09:15:03"))
+    assert len(feed.record["mf"]) == n and e._rec_wall_slots == {"2026-10-19 09:15"}, "nothing in the decision burst"
+    await e._rec_sync(_at("2026-10-19", "09:44:01"))
+    assert "2026-10-19 09:45" in e._rec_wall_slots
+    e2, _feed2, _cat2 = _engine_with_band(settings, record5_band_mf=True)
+    e2.ltps["PNBEQ"] = 120.0
+    await e2._rec_sync(_at("2026-10-19", "10:20:00"))  # a restart mid-bar: the bar it is in, at once
+    assert e2._rec_wall_slots == {"2026-10-19 10:15"}
 
 
 def test_the_band_constant_and_expiry_rule_match_the_design():
     from kotsin_nse.config import Settings
     s = Settings(_env_file=None)
     assert (s.record5_band_strikes, s.record5_max_extra_mf, s.record5_max_extra_oi, s.record_band, s.record5_enabled) == (3, 2000, 1000, False, True)
+    assert (s.record5_volume_keep_days, s.record5_detail_keep_days, s.record5_min_free_gb) == (30, 90, 2.0)
 
 
 async def test_the_recorders_day_is_seeded_from_the_engines_own_archive(settings):

@@ -30,6 +30,7 @@ from kotsin_nse.exec.paper import BookSnapshot
 from kotsin_nse.instrument.catalogue import Catalogue
 from kotsin_nse.instrument.select import Quote, Selection
 from kotsin_nse.market.session import ist_day
+from kotsin_nse.ops.optrec import read_detail_day
 from kotsin_nse.strategy import b1 as B1
 from kotsin_nse.strategy.base import Outcome, Signal
 from kotsin_nse.strategy.keys import StrategyKey
@@ -134,7 +135,8 @@ async def _run(settings: Any, tmp: Path, *, on: bool) -> dict[str, Any]:
             "breadth": e._breadth_at.get(sig.signal_id),
             "wallets": {k: (round(w.balance, 4), round(w.deployed, 4), w.trades) for k, w in e.wallets.items()},
             "ctx_same": dict(sig.context) == ctx_before, "ev_same": dict(sig.evidence) == ev_before,
-            "read5_at": dict(e._read5_at), "stats": dict(e.read5_stats),
+            "stats": dict(e.read5_stats),
+            "detail": read_detail_day(tmp / "archive" / "read5_detail", ist_day(now).isoformat()),
         }
     finally:
         await e.stop()
@@ -154,12 +156,16 @@ async def test_the_decision_is_the_same_with_the_recorder_off_and_on_fed_absurd_
     assert on["positions"] == off["positions"] and on["orders"] == off["orders"] and on["wallets"] == off["wallets"]
     assert on["events"] == off["events"]
     assert _strip_volatile(on["breadth"]) == _strip_volatile(off["breadth"])
-    assert off["read5"] == [] and off["read5_at"] == {}
+    assert off["read5"] == [] and off["detail"] == []
     kinds = [ev["kind"] for ev in on["read5"]]
     assert kinds == ["read5.trigger", "read5.follow"], (kinds, on["stats"])
     trig = on["read5"][0]
     assert not trig.get("excluded") and trig["legs"]["CE1"]["strike"] == 1510.0 and trig["walls"]["overall"] is not None
-    assert on["read5"][1]["complete"] is True and len(on["read5"][1]["rows"]) == 16
+    assert on["read5"][1]["complete"] is True and on["read5"][1]["stages"] == 16
+    # the ledger keeps the compact copy; the day's detail file the whole record (legs' snapshots, the sixteen stages)
+    assert "rows" not in on["read5"][1] and "X" not in trig["legs"]["CE1"] and "stage0" not in trig
+    assert [d["kind"] for d in on["detail"]] == kinds
+    assert len(on["detail"][1]["record"]["rows"]) == 16 and "X" in on["detail"][0]["record"]["legs"]["CE1"]
     assert on["ctx_same"] and on["ev_same"], "nothing written into the signal"
     assert not any("read5" in k.lower() for k in (on["breadth"] or {})), "nothing written into the logged context"
 
@@ -278,3 +284,64 @@ async def test_the_card_reads_the_day_s_events_and_says_when_a_restart_cut_the_f
         assert r5["lines"][1] == "first 3 of 5: Bullish 09:46:05 (+1 min, Weak) — with engine" and r5["f3"]["label"] == "Weak"
     finally:
         await e.stop()
+
+
+@pytest.mark.asyncio
+async def test_the_read_touches_the_chain_only_after_its_wait(settings, monkeypatch):
+    """Nothing of the read runs at ``_decide``'s first await (review, 20 Oct: the legs' lookup cost 2.2 ms a 40-trigger
+    burst before the books decided): the chain is read after the signal + 10 s wait."""
+    from kotsin_nse.ops import read5rec
+    from kotsin_nse.research.read5 import at_ist
+
+    e = await _paper(settings)
+    try:
+        order: list[str] = []
+
+        async def wait(until: float) -> None:
+            order.append("wait")
+
+        def contracts(*_a: Any, **_k: Any) -> tuple[None, str]:
+            order.append("contracts")
+            return None, "no NSE option chain (MCX / no options listed)"
+
+        e._read5_wait = wait  # type: ignore[method-assign]
+        monkeypatch.setattr(read5rec, "contracts", contracts)
+        e.underlyings["TCS"] = Instrument("11536", "TCS", Segment.NSE_EQ, InstrumentKind.EQUITY, underlying="TCS")
+        c0 = at_ist("2026-10-19", "10:15")
+        sig = Signal(strategy=StrategyKey.FUDKII, symbol="TCS", direction=Direction.BULLISH, ts=int(c0), entry=4000.0,
+                     stop=3990.0, targets=(), grade="A", rr=5.0, reason="t")
+        await e._read5_record(sig, c0 + 1805)
+        assert order == ["wait", "contracts"] and e.read5_stats["excluded"] == 1
+    finally:
+        await e.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_new_day_empties_the_seen_triggers_however_the_recorder_rolled(settings):
+    from kotsin_nse.research.read5 import at_ist
+
+    e = Engine(settings)
+    assert e.recorder is not None
+    e._read5_seen.add("FUDKII-TCS-old")
+    e._read5_day = "2026-10-16"
+    e.recorder.roll(date(2026, 10, 19))  # a frame rolled the recorder before the housekeeping saw the day
+    await e._rec_tick(at_ist("2026-10-19", "09:00"))
+    assert e._read5_seen == set() and e._read5_day == "2026-10-19"
+
+
+@pytest.mark.asyncio
+async def test_only_the_sockets_owner_writes_the_minute_volumes(settings):
+    from kotsin_nse.research.read5 import at_ist
+
+    e = Engine(settings)
+    rec = e.recorder
+    assert rec is not None
+    rec.roll(date(2026, 10, 19))
+    rec.set_watch({"O1": "opt"})
+    rec.on_frame("mf", {"Token": "O1", "LastRate": 1.0, "TotalQty": 0, "TickDt": f"/Date({int(at_ist('2026-10-16', '15:29') * 1000)})/"},
+                 at_ist("2026-10-19", "09:08"))
+    rec.on_frame("mf", {"Token": "O1", "LastRate": 1.1, "TotalQty": 50, "TickDt": f"/Date({int(at_ist('2026-10-19', '09:20') * 1000)})/"},
+                 at_ist("2026-10-19", "09:20"))
+    e.feed.hub = ("127.0.0.1", 8510)  # this engine reads its twin's socket
+    await e._rec_tick(at_ist("2026-10-19", "09:30"))
+    assert e.volume_tape.enabled is False and e.volume_tape.rows_skipped == 1 and e.volume_tape.rows_written == 0

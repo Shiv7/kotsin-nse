@@ -4,6 +4,7 @@ reads, and what it archives. Every read is as of a moment; a stretch it cannot v
 
 from __future__ import annotations
 
+import json
 import math
 from datetime import date
 from pathlib import Path
@@ -296,7 +297,10 @@ def test_one_leg_of_a_pair_still_reads_iv_and_premium_but_not_oi_or_vol():
     assert "CE2" in r["legsNoPriceAtSignal"]
 
 
-def test_the_previous_sessions_oi_stands_in_and_says_so():
+def test_the_previous_sessions_close_is_kept_beside_but_never_read_as_the_candles_oi():
+    """No OI print today by a moment means the code was not streaming OI then — every OI subscription prints on
+    subscribe (19 Oct: all 7,320 codes' first print came at boot) — so the previous close would read the change since
+    yesterday as the candle's. It is kept beside (``oiPrev``), not read, and the read says so (review, 20 Oct)."""
     rec = recorder({"C1": "opt", "C2": "opt", "P1": "opt", "P2": "opt", "F": "fut", "E": "eq"}, silence_s=None)
     c0, s = at("10:15:00"), at("10:45:05")
     _feed_basic(rec, c0, s, skip={"P2"})
@@ -304,8 +308,33 @@ def test_the_previous_sessions_oi_stands_in_and_says_so():
     rec.on_frame("mf", mf("P2", 1.4, 1.35, 1.45), s - 5)
     rec.oi_prev["P2"] = 7_000.0
     r = _read(rec, c0, s)
-    assert r["legs"]["PE2"]["X"]["oiBasis"] == "prevday" and r["legs"]["PE2"]["B"]["oiBasis"] == "prevday"
-    assert r["reads"]["OI"]["pe"] is not None
+    x, b = r["legs"]["PE2"]["X"], r["legs"]["PE2"]["B"]
+    assert x["oiBasis"] == b["oiBasis"] == "prevday" and x["oi"] is None and x["oiPrev"] == 7_000.0
+    assert r["reads"]["OI"]["pe"] is None and "OI" in r["missingReads"]
+    assert "PE2 no OI print by 10:45:05 (previous close only)" in r["reads"]["OI"]["missing"]
+    assert "PE2 no OI print by 10:15:00 (previous close only)" in r["reads"]["OI"]["missing"]
+    assert r["reads"]["OI"]["ce"] is not None, "the other side reads as before"
+
+
+def test_a_restart_says_the_baseline_before_it_is_not_on_record():
+    """An engine restarted mid-candle: the candle-start prices and OI are before the recorder's first frame. They are
+    missing, and the read says the recorder started then — never yesterday's close read as the candle's OI."""
+    rec = recorder({"C1": "opt", "C2": "opt", "P1": "opt", "P2": "opt", "F": "fut", "E": "eq"}, silence_s=None)
+    c0, s = at("10:15:00"), at("10:45:05")
+    restart = at("10:30:00.5")
+    for code, px in (("C1", 2.0), ("C2", 1.0), ("P1", 3.0), ("P2", 1.5)):
+        rec.oi_prev[code] = 9_000.0
+        rec.on_frame("oi", {"Token": code, "OpenInterest": 10_000}, restart)  # the resubscribe's snapshot
+        rec.on_frame("mf", mf(code, px, px - 0.05, px + 0.05), restart)
+    rec.on_frame("mf", mf("F", 105.0, 104.9, 105.1), restart)
+    rec.on_frame("mf", mf("E", 104.0), restart)
+    assert rec.started == restart
+    r = _read(rec, c0, s)
+    assert r["reads"]["OI"]["ce"] is None and r["reads"]["PREMIUM"]["ce"] is None and r["reads"]["IV"]["ce"] is None
+    assert "CE1 no OI print by 10:15:00 (recorder started 10:30:00 (restart))" in r["reads"]["OI"]["missing"]
+    assert "CE1 not priced at the baseline (recorder started 10:30:00 (restart))" in r["reads"]["PREMIUM"]["missing"]
+    assert "recorder started 10:30:00 (restart)" in r["reads"]["IV"]["missing"]
+    assert r["legs"]["CE1"]["X"]["oi"] == 10_000.0, "the moment after the restart reads as ever"
 
 
 def test_an_iv_below_intrinsic_is_missing_with_its_reason():
@@ -365,3 +394,180 @@ def test_the_flat_archive_row_mirrors_score5s_columns(tmp_path: Path):
     a.flush()
     back = pd.read_parquet(tmp_path / "read5" / f"{DAY}.parquet")
     assert len(back) == 1 and back.f3_label.iloc[0] == "Skip", "the follow-up's row replaces the trigger's"
+
+
+# -- review, 20 Oct ----------------------------------------------------------------------------------------------
+
+
+def _open_read(rec: OptionRecorder, s: float) -> dict[str, Any]:
+    record, _, _ = RR.trigger_read(rec, _contracts(), signal_id="X-1", symbol="X", direction="Bullish", c0=at("09:15:00"),
+                                   s=s, spot=104.5, atr=1.0, atr_src="regime.breadth", sessions=["2026-10-16", DAY], now=s + 10)
+    return record
+
+
+def test_a_first_frame_just_before_the_signal_is_not_the_0915_open():
+    """19 Oct MAHABANK CE2: its first frame of the day came at 09:45:05.339, 63 ms before the signal — a subscription
+    snapshot, the state then, not the open. A leg not streaming by 09:15 has no opening price, and says why; a leg
+    streaming since its boot snapshot keeps the first print at or after 09:15 as before."""
+    rec = recorder({"C1": "opt", "C2": "opt", "P1": "opt", "P2": "opt", "F": "fut", "E": "eq"}, silence_s=None)
+    s = at("09:45:05.402")
+    for code, px in (("C1", 2.0), ("P1", 3.0), ("P2", 1.5)):
+        rec.on_frame("mf", mf(code, px, px - 0.05, px + 0.05), at("00:45:10"))  # the boot snapshot
+        rec.on_frame("mf", mf(code, px * 1.1, px * 1.1 - 0.05, px * 1.1 + 0.05), at("09:15:20"))
+        rec.on_frame("mf", mf(code, px * 1.2, px * 1.2 - 0.05, px * 1.2 + 0.05), s - 5)
+    rec.on_frame("mf", mf("C2", 1.8, 1.75, 1.85), at("09:45:05.339"))  # subscribed late: lands 63 ms before s
+    for code in ("F", "E"):
+        rec.on_frame("mf", mf(code, 104.0, 103.9, 104.1), at("00:45:10"))
+        rec.on_frame("mf", mf(code, 104.2, 104.1, 104.3), at("09:15:01"))
+    assert rec.first_frame("C2") == at("09:45:05.339") and rec.first_after_open("C2")[0] < s
+    r = _open_read(rec, s)
+    b2 = r["legs"]["CE2"]["B"]
+    assert b2["px"] is None and b2["pxWhy"] == "not streaming at 09:15 (first frame 09:45:05)"
+    assert r["legs"]["CE2"]["B"]["ivWhy"] == b2["pxWhy"] and r["legs"]["CE2"]["X"]["px"] is not None
+    b1 = r["legs"]["CE1"]["B"]
+    assert b1["pxSrc"] == "first print" and math.isclose(b1["px"], 2.2), "streaming since boot: its 09:15:20 print"
+    assert math.isclose(r["reads"]["PREMIUM"]["ce"], 100 * (2.4 / 2.2 - 1)), "CE from CE1 alone, never CE2's late snapshot"
+    assert r["stock"]["B"] == 104.2
+
+
+def test_a_wall_strike_not_streaming_at_0915_has_no_opening_premium():
+    rec = recorder({"W1": "opt", "W2": "opt"}, silence_s=None)
+    c = _contracts()
+    w_early = Instrument("W1", "X", Segment.NSE_FO, InstrumentKind.OPTION, expiry="2026-10-27", strike=130.0,
+                         option_type=OptionType.CE, underlying="X")
+    w_late = Instrument("W2", "X", Segment.NSE_FO, InstrumentKind.OPTION, expiry="2026-10-27", strike=140.0,
+                        option_type=OptionType.CE, underlying="X")
+    for code in ("W1", "W2"):
+        rec.on_frame("oi", {"Token": code, "OpenInterest": 50_000}, at("00:45:00"))
+        rec.on_frame("oi", {"Token": code, "OpenInterest": 52_000}, at("09:40:00"))
+    rec.on_frame("mf", mf("W1", 1.0, 0.95, 1.05), at("09:14:00"))  # the band's candidates, a minute before the bar
+    rec.on_frame("mf", mf("W1", 1.1, 1.05, 1.15), at("09:15:30"))
+    rec.on_frame("mf", mf("W1", 0.9, 0.85, 0.95), at("09:45:00"))
+    rec.on_frame("mf", mf("W2", 2.0, 1.95, 2.05), at("09:20:00"))  # first streamed at 09:20
+    rec.on_frame("mf", mf("W2", 1.8, 1.75, 1.85), at("09:45:00"))
+    x = at("09:45:05")
+    early = RR.wall_at(rec, "CE", w_early, x, at("09:15:00"), [])
+    late = RR.wall_at(rec, "CE", w_late, x, at("09:15:00"), [])
+    assert early["px0Src"] == "first print" and math.isclose(early["pxChg"], 100 * (0.9 / 1.1 - 1))
+    assert late["pxChg"] is None and late["px0Src"] == "not streaming at 09:15 (first frame 09:20:00)"
+    assert c.legs  # the contracts helper stays as the other tests use it
+
+
+def test_the_future_a_few_ms_after_the_options_snapshot_stands_in_for_its_iv():
+    """19 Oct HDFCBANK CE1: the option's price time is its subscription snapshot (09:03:22.552), the future's first
+    frame of the same burst came 48 ms later — no future at or before the option's price time. The future's first
+    quote within 5 s after stands in, said in its source; never one after the moment read."""
+    rec = recorder({"C1": "opt", "F": "fut"}, silence_s=None)
+    c = _contracts()
+    rec.on_frame("mf", mf("C1", 12.0), at("09:03:22.552"))
+    rec.on_frame("mf", mf("F", 104.0, 103.9, 104.1), at("09:03:22.600"))
+    snap = RR.leg_snap(rec, c, c.legs["CE1"], at("09:45:05"))  # type: ignore[arg-type]
+    assert snap["pxSrc"] == "ltp" and snap["pxT"] == at("09:03:22.552")
+    assert snap["FSrc"] == "mid first after (+0.048 s)" and snap["iv"] is not None and math.isfinite(snap["iv"])
+    F, _src, _ft = RR.fwd_at(rec, c.fut, at("09:03:22.552"))
+    assert math.isnan(F), "without the stand-in (the snapshot's own future read) nothing changes"
+    early = RR.leg_snap(rec, c, c.legs["CE1"], at("09:03:22.560"))  # type: ignore[arg-type]
+    assert early["ivWhy"] == "no future price at the option's price time", "never a future after the moment read"
+
+
+def test_stats_keep_todays_bar_counts_without_walking_the_bars():
+    """Every /api/health call reads ``stats()`` on the trading loop (review, 20 Oct: 39-67 ms a call walking 87.5k
+    bars): the counts are kept as bars close and load, and match a full walk."""
+    import time as _time
+
+    rec = recorder(silence_s=None)
+    bars = [{"scrip_code": f"O{i}", "bucket_ts": int(at(b, d)), "v": 100.0, "verified": (i % 3 != 0), "from_ts": None}
+            for i in range(3500) for d in ("2026-10-16", DAY) for b in ("09:15", "09:45", "10:15", "10:45", "11:15", "11:45",
+                                                                         "12:15", "12:45", "13:15", "13:45", "14:15", "14:45", "15:15")][:91_000]
+    rec.merge_bars(RR_parse(bars))
+    walk_today = [v for k, v in rec._b30.items() if k[1] == DAY]
+    st = rec.stats()
+    assert st["bars_closed_today"] == len(walk_today) > 0
+    assert st["bars_verified_today"] == sum(1 for v in walk_today if v[1])
+    t0 = _time.perf_counter()
+    for _ in range(20):
+        rec.stats()
+    assert (_time.perf_counter() - t0) / 20 < 0.005, "well under the 39 ms a walk took"
+    rec.on_frame("mf", mf("O1", 1.0, TotalQty=0, TickDt=dt(at("15:29:00", "2026-10-16"))), at("09:08:00"))
+    rec.on_frame("mf", mf("O1", 1.0, TotalQty=10, TickDt=dt(at("15:20:00"))), at("15:20:01"))
+    before = rec.stats()["bars_closed_today"]
+    rec.close_bars(at("16:00:00"))
+    walk_today = [v for k, v in rec._b30.items() if k[1] == DAY]
+    assert rec.stats()["bars_closed_today"] == len(walk_today) and len(walk_today) >= before
+    assert rec.stats()["bars_verified_today"] == sum(1 for v in walk_today if v[1])
+    rec.roll(date(2026, 10, 20))
+    assert rec.stats()["bars_closed_today"] == 0 and rec.stats()["bars_verified_today"] == 0
+
+
+def RR_parse(rows: list[dict[str, Any]]) -> dict[Any, Any]:
+    from kotsin_nse.ops.optrec import parse_bars
+
+    return parse_bars(rows)
+
+
+def test_the_history_is_built_off_the_loop_and_merged_the_same_as_before():
+    """``parse_bars`` / ``oi_grid`` run in the worker thread; ``merge_bars`` keeps a bar already held, as
+    ``load_bars`` always did."""
+    from kotsin_nse.ops.optrec import oi_grid, parse_bars
+
+    rows = [{"scrip_code": "O1", "bucket_ts": int(at("09:15")), "v": 5.0, "verified": True, "from_ts": at("09:00")},
+            {"scrip_code": "O1", "bucket_ts": int(at("09:15")), "v": 7.0, "verified": False, "from_ts": float("nan")}]
+    parsed = parse_bars(rows)
+    assert parsed == {("O1", DAY, "09:15"): (5.0, True, at("09:00"))}, "the first row of a key stands"
+    rec = recorder()
+    rec._put_bar(("O1", DAY, "09:15"), (9.0, False, None))
+    assert rec.merge_bars(parsed) == 0 and rec._b30[("O1", DAY, "09:15")] == (9.0, False, None)
+    prev = pd.DataFrame({"scrip_code": ["O1", "O1"], "ts": [at("09:16:00", "2026-10-16"), at("15:30:00", "2026-10-16")],
+                         "oi": [800.0, 950.0]})
+    old = recorder()
+    old.set_oi_grid("2026-10-16", prev)
+    assert oi_grid("2026-10-16", prev) == old.oi_grid_prev
+
+
+def test_a_gap_seen_twice_is_one_gap():
+    rec = recorder()
+    rec.note_gap(at("10:00:00"), at("10:00:20"), "hub broker socket down")
+    rec.note_gap(at("09:59:58"), at("10:00:21"), "feed reconnect")
+    rec.note_gap(at("11:00:00"), at("11:00:05"), "feed reconnect")
+    assert rec.gaps == [(at("09:59:58"), at("10:00:21"), "hub broker socket down"), (at("11:00:00"), at("11:00:05"), "feed reconnect")]
+
+
+def test_the_minute_volumes_are_written_by_the_sockets_owner_alone_and_never_below_the_disk_floor(tmp_path):
+    rows = [("O1", int(at("09:20:00")), 300.0, 300.0)]
+    twin = VolumeTape(tmp_path / "twin")
+    twin.enabled = False
+    assert twin.write(rows) == 0 and twin.rows_skipped == 1 and not (tmp_path / "twin").exists()
+    full = VolumeTape(tmp_path / "full", min_free_gb=1e9)  # more free space than any disk has
+    assert full.write(rows) == 0 and full.rows_skipped == 1 and "GB free" in full.skipped_why
+    owner = VolumeTape(tmp_path / "owner")
+    assert owner.write(rows, now=at("09:23:02")) == 1 and owner.bytes_written > 0 and owner.stats()["enabled"]
+    assert VolumeTape(tmp_path / "x").keep_days == 30
+
+
+def test_the_detail_file_keeps_the_whole_record_and_the_ledger_a_compact_copy(tmp_path):
+    from kotsin_nse.ops.optrec import DetailLog, read_detail_day
+
+    rec = recorder({"C1": "opt", "C2": "opt", "P1": "opt", "P2": "opt", "F": "fut", "E": "eq"}, silence_s=None)
+    c0, s = at("10:15:00"), at("10:45:05")
+    _feed_basic(rec, c0, s)
+    r = _read(rec, c0, s)
+    r["walls"] = {"spot": 104.5, "pickedAt": "10:45:15", "moment": "10:45:05", "overall": "Bullish",
+                  "ce": {"strike": 130.0, "code": "W1", "state": "SHORT BUILD-UP", "interp": "Bearish", "oiChg": 2.0,
+                         "pxChg": -3.0, "oicp": 160.0, "significant": True, "oi0": 1.0, "oi1": 2.0, "p0": 1.0, "p1": 0.9,
+                         "window": "10:15:05-10:45:05"}, "pe": None}
+    small = RR.compact_trigger(r)
+    assert len(json.dumps(small)) < len(json.dumps(r)) / 2 and len(json.dumps(small)) < 3_000
+    assert small["split"] == r["split"] and small["reads"] == r["reads"] and small["legs"]["CE1"] == {"code": "C1", "strike": 110.0, "type": "CE"}
+    assert small["walls"]["ce"]["state"] == "SHORT BUILD-UP" and "p0" not in small["walls"]["ce"] and "stage0" not in small
+    assert RR.card_lines(small, None, now=s + 60) == RR.card_lines(r, None, now=s + 60), "the card reads the same"
+    follow = {"signal_id": "X-1", "symbol": "X", "f2": None, "f3": None, "f4": None, "rows": [r["stage0"]] * 16,
+              "wallsAtF3": None, "complete": True, "stoppedAt": "11:01:05"}
+    assert RR.compact_follow(follow) == {"signal_id": "X-1", "symbol": "X", "f2": None, "f3": None, "f4": None,
+                                         "complete": True, "stoppedAt": "11:01:05", "wallsAtF3": None, "stages": 16}
+    log = DetailLog(tmp_path / "read5_detail", keep_days=2)
+    (tmp_path / "read5_detail").mkdir()
+    (tmp_path / "read5_detail" / "2026-10-10.jsonl").write_text("{}\n")
+    assert log.write("read5.trigger", s, r) and log.write("read5.follow", s, follow)
+    back = read_detail_day(tmp_path / "read5_detail", DAY)
+    assert [b["kind"] for b in back] == ["read5.trigger", "read5.follow"] and back[1]["record"]["rows"][0]["m"] == 0
+    assert not (tmp_path / "read5_detail" / "2026-10-10.jsonl").exists(), "older than keep_days: pruned"

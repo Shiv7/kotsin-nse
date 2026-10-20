@@ -20,6 +20,9 @@ Wire, newline-framed on a loopback TCP socket:
   side still wants.
 - hub → twin, on a subscribe for codes the broker already streams here: ``=<arrived> <since> <row>``,
   each code's last frame from the pool (the broker does not send it again) and since when it has streamed.
+- RECORD-ONLY (2026-10-20): a twin's frame for its record band carries ``"Record": 1`` and is pinned apart from its
+  engine's codes; it is never answered from the pool. A twin engine's subscribe of a code only a record set streams
+  here is answered as the broker answers a fresh subscribe: ``<now> <row>``, the code's current state, a plain frame.
 
 Both sides keep that pool — the last frame of every code on the socket, whoever asked for it — and a code
 either engine subscribes is read from it at once (operator, 2026-10-05).
@@ -32,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -116,6 +120,7 @@ class HubServer:
         self.sent = 0
         self.dropped = 0
         self.answered = 0
+        self.answered_snapshot = 0
         self._up = False
 
     async def start(self) -> None:
@@ -177,13 +182,18 @@ class HubServer:
                     frame = json.loads(line)
                     channel, op = _CHANNEL[frame["Method"]], _OP[frame["Operation"]]
                     instruments = wire_instruments(list(frame.get("MarketFeedData") or []))
+                    record = bool(frame.get("Record"))
                 except (ValueError, KeyError, TypeError) as exc:
                     log.warning("feed_hub.bad_request", twin=cid, error=str(exc)[:120])
                     continue
-                held = self.feed.streaming(channel, but_twin=cid) if op == "s" else set()
-                await self.feed.pin(cid, channel, op, instruments)
+                engine_sub = op == "s" and not record  # a record band's subscribe is never answered from the pool
+                held = self.feed.streaming(channel, but_twin=cid) if engine_sub else set()
+                rec_only = self.feed.record_only(channel, but_twin=cid) if engine_sub else set()
+                await self.feed.pin(cid, channel, op, instruments, record=record)
                 if held:
                     self._answer_from_pool(cid, writer, channel, [i.scrip_code for i in instruments if i.scrip_code in held])
+                if rec_only:
+                    self._answer_as_snapshot(cid, writer, channel, [i.scrip_code for i in instruments if i.scrip_code in rec_only])
         except (ConnectionError, asyncio.IncompleteReadError, asyncio.LimitOverrunError) as exc:
             log.warning("feed_hub.twin_error", twin=cid, error=str(exc)[:120])
         finally:
@@ -205,10 +215,21 @@ class HubServer:
             self._write(cid, writer, f"={arrived:.6f} {since:.6f} ".encode() + body + b"\n")
             self.answered += 1
 
+    def _answer_as_snapshot(self, cid: str, writer: asyncio.StreamWriter, channel: str, codes: list[str]) -> None:
+        """RECORD-ONLY: a twin engine's subscribe of codes only a record set streams here — answered as the broker
+        answers a fresh subscribe, with each code's current state (the pool's last frame of this connection) as a plain
+        frame arriving now, so the twin reads what it would without the band (``FivePaisaFeed._snapshot_from_pool``)."""
+        now = time.time()
+        for row in self.feed.snapshots(channel, codes):
+            body = json.dumps(row, separators=(",", ":")).encode()
+            self._write(cid, writer, f"{now:.6f} ".encode() + body + b"\n")
+            self.answered_snapshot += 1
+
     def stats(self) -> dict[str, Any]:
         return {"role": "serve", "address": f"{self.host}:{self.port}", "twins": len(self._clients),
                 "messages_sent": self.sent, "twins_dropped": self.dropped, "pinned": self.feed.pinned_counts(),
-                "pool": self.feed.pool_stats(), "answered_from_pool": self.answered}
+                "pinned_record": self.feed.pinned_record_counts(), "pool": self.feed.pool_stats(),
+                "answered_from_pool": self.answered, "answered_as_snapshot": self.answered_snapshot}
 
 
 class HubLink:

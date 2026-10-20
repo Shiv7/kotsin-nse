@@ -8,12 +8,17 @@ quotes, OI and volume. This module joins them the way ``research-data/mdoft/oct1
   session's), and its implied vol, time-matched: the future and the time to expiry taken at the moment of the price
   used (the quote time of a mid, else the start of the current run of equal last prices);
 * the trigger read: X = snap(signal), B = snap(candle start) — for the opening candle the prices are the first print
-  at or after 09:15 (its IV time-matched to that print) and OI is read at 09:16;
+  at or after 09:15 (its IV time-matched to that print) and OI is read at 09:16; that first print is the open only for
+  a code streaming by 09:15 (its first frame of the day at or before it), never a subscription snapshot that lands
+  later;
 * each follow-up minute m = 1 … 16: X = snap(signal + m min) against B = snap(signal);
 * the walls: the largest recorded OI call strike at or above the trigger's close and put strike at or below it, at
   signal + 10 s, held fixed; their OI and premium change over the 30 minutes up to a moment, and the state.
 
-Every record says what it could not read, and why. Nothing here is read by a decision.
+Every record says what it could not read, and why. Two rules of the live record that the research did not need
+(review, 20 Oct): an OI that is only the previous session's close (no print today by the moment — every OI subscription
+prints on subscribe, so this means the code was not streaming) is not read; and a moment before the recorder's first
+frame (a restart) is not on record, and says so. Nothing here is read by a decision.
 """
 
 from __future__ import annotations
@@ -30,6 +35,10 @@ from ..research import read5 as R
 from .optrec import OptionRecorder, hms
 
 NAN = math.nan
+#: an option priced at its subscription snapshot can land a few ms before the future's own (one subscribe burst): the
+#: future's first quote this soon after the option's price time stands in when it has none at or before it (review,
+#: 20 Oct: BANKBARODA / HDFCBANK CE1 on 19 Oct, 3 of 584 leg snapshots), never past the moment read
+FWD_AFTER_S = 5.0
 #: reads whose two sides are change values (OI, IV, PREMIUM need the baseline and the moment; VOL a window)
 SIDES = {"CE": ("CE1", "CE2"), "PE": ("PE1", "PE2")}
 
@@ -83,21 +92,33 @@ def contracts(cat: Any, symbol: str, spot: float, today: date, eq: Instrument | 
 # -- snapshots ---------------------------------------------------------------------------------------------------
 
 
-def fwd_at(rec: OptionRecorder, fut: Instrument | None, t: float) -> tuple[float, str, float]:
+def not_on_record(rec: OptionRecorder, x: float) -> str:
+    """Why nothing at ``x`` is on this recorder's record: before its first frame (the engine restarted after it)."""
+    st = rec.started
+    return f"recorder started {hms(st)} (restart)" if st is not None and x < st else ""
+
+
+def fwd_at(rec: OptionRecorder, fut: Instrument | None, t: float, *, after_until: float | None = None) -> tuple[float, str, float]:
     """research ``fwd_at``: the future at t — its two-sided mid if at most 60 s old, else its last trade at or before
-    t. (price, source, its time)."""
+    t. (price, source, its time). With ``after_until`` (the time-matched IV), when the future has no quote at or before
+    t, its first quote after t — within ``FWD_AFTER_S`` and not past ``after_until`` — stands in, said in the source."""
     if fut is None:
         return NAN, "", NAN
     q = rec.quote(fut.scrip_code, t, 60)
+    after = ""
+    if q is None and after_until is not None and after_until > t:
+        q = rec.first_after(fut.scrip_code, t, min(FWD_AFTER_S, after_until - t))
+        if q is not None:
+            after = f" first after (+{q['eff'] - t:.3f} s)"
     if q is None:
         return NAN, "", NAN
     if q["two"] and q["fresh"]:
-        return q["mid"], "mid" + ("" if q["src"] == "ring" else "@minute"), q["eff"]
-    return q["ltp"], "ltp" + ("" if q["src"] == "ring" else "@minute"), q["eff"]
+        return q["mid"], "mid" + ("" if q["src"] == "ring" else "@minute") + after, q["eff"]
+    return q["ltp"], "ltp" + ("" if q["src"] == "ring" else "@minute") + after, q["eff"]
 
 
-def _iv(px: float, tp: float, rec: OptionRecorder, c: Contracts, inst: Instrument) -> dict[str, Any]:
-    F, fsrc, ft = fwd_at(rec, c.fut, tp)
+def _iv(px: float, tp: float, rec: OptionRecorder, c: Contracts, inst: Instrument, until: float) -> dict[str, Any]:
+    F, fsrc, ft = fwd_at(rec, c.fut, tp, after_until=until)
     if not R.isnum(F):
         return {"iv": NAN, "ivWhy": "no future price at the option's price time", "F": NAN, "FSrc": "", "FT": NAN}
     iv, why = R.iv76(px, F, inst.strike, R.tte_years(c.expiry, tp), inst.option_type.value)
@@ -108,13 +129,20 @@ def leg_snap(rec: OptionRecorder, c: Contracts, inst: Instrument, x: float) -> d
     q = rec.quote(inst.scrip_code, x, 60)
     px, src = R.opt_px(q)
     o, ot, basis = rec.oi_at(inst.scrip_code, x)
-    out: dict[str, Any] = {"px": px, "pxSrc": src, "pxT": NAN, "oi": o, "oiT": ot, "oiBasis": basis}
+    out: dict[str, Any] = {"px": px, "pxSrc": src, "pxT": NAN, "oi": o, "oiT": ot, "oiBasis": basis, "oiWhy": ""}
+    if basis == "prevday":
+        # no OI print today by x: the previous close is a guess, not a reading (it would read the change since
+        # yesterday's close as the candle's) — kept beside, not read
+        out.update(oi=NAN, oiPrev=o, oiWhy=not_on_record(rec, x) or "previous close only")
+    elif not R.isnum(o):
+        out["oiWhy"] = not_on_record(rec, x)
     if R.isnum(px) and q is not None:
         tp = q["eff"] if src == "mid" else q["run"]
         out["pxT"] = tp
-        out.update(_iv(px, tp, rec, c, inst))
+        out.update(_iv(px, tp, rec, c, inst, x))
     else:
-        out.update(iv=NAN, ivWhy="no price" if q is None else "no usable price", F=NAN, FSrc="", FT=NAN)
+        why = not_on_record(rec, x) or ("no price" if q is None else "no usable price")
+        out.update(pxWhy=why, iv=NAN, ivWhy=why, F=NAN, FSrc="", FT=NAN)
     return out
 
 
@@ -129,23 +157,41 @@ def snap(rec: OptionRecorder, c: Contracts, x: float) -> dict[str, Any]:
     return out
 
 
+def late_at_open(rec: OptionRecorder, code: str, open_: float) -> str:
+    """'' when the code was streaming by the 09:15 open (its first frame of the day at or before it); else why its
+    first print after 09:15 is not the open — a subscription snapshot that landed later is the state then, not the
+    open (review, 20 Oct: MAHABANK / SBICARD CE2 on 19 Oct, 63 ms and 2 ms before the signal)."""
+    seen = rec.first_frame(code)
+    if seen is None or seen <= open_:
+        return ""
+    restart = not_on_record(rec, open_)
+    return f"not streaming at 09:15 (first frame {hms(seen)})" + (f"; {restart}" if restart else "")
+
+
 def opening_baseline(rec: OptionRecorder, c: Contracts, c0: float, s: float) -> dict[str, Any]:
     """The 09:15 candle's baseline: snap(09:16) for OI; the stock and each leg priced at its first print at or after
-    09:15 (before the signal), the leg's IV time-matched to that print's last-trade time."""
+    09:15 (before the signal) — only for a code streaming by 09:15 — the leg's IV time-matched to that print's
+    last-trade time."""
     B = snap(rec, c, c0 + 60)
     B["x"] = c0
     fa = rec.first_after_open(c.eq.scrip_code) if c.eq is not None else None
-    B["stock"] = fa[1] if fa is not None and fa[0] < s else NAN
+    eq_late = late_at_open(rec, c.eq.scrip_code, c0) if c.eq is not None else ""
+    B["stock"] = fa[1] if fa is not None and fa[0] < s and not eq_late else NAN
+    if eq_late:
+        B["stockWhy"] = eq_late
     for k, inst in c.legs.items():
         if inst is None:
             continue
         leg = B[k]
         fa = rec.first_after_open(inst.scrip_code)
-        if fa is not None and fa[0] < s:
+        late = late_at_open(rec, inst.scrip_code, c0)
+        if fa is not None and fa[0] < s and not late:
             leg.update(px=fa[1], pxSrc="first print", pxT=fa[2])
-            leg.update(_iv(fa[1], fa[2], rec, c, inst))
+            leg.pop("pxWhy", None)
+            leg.update(_iv(fa[1], fa[2], rec, c, inst, fa[0]))
         else:
-            leg.update(px=NAN, pxSrc="", pxT=NAN, iv=NAN, ivWhy="no print from 09:15 before the signal", F=NAN, FSrc="", FT=NAN)
+            why = late or "no print from 09:15 before the signal"
+            leg.update(px=NAN, pxSrc="", pxT=NAN, pxWhy=why, iv=NAN, ivWhy=why, F=NAN, FSrc="", FT=NAN)
     return B
 
 
@@ -200,9 +246,9 @@ def _missing(X: Mapping[str, Any], B: Mapping[str, Any], r: Mapping[str, tuple[f
                 xl, bl = X.get(k) or {}, B.get(k) or {}
                 if read == "OI":
                     if not R.isnum(xl.get("oi")):
-                        bits.append(f"{k} no OI print by {hms(x)}")
+                        bits.append(f"{k} no OI print by {hms(x)}" + _why(xl.get("oiWhy")))
                     if not R.isnum(bl.get("oi")):
-                        bits.append(f"{k} no OI print by {hms(b)}")
+                        bits.append(f"{k} no OI print by {hms(b)}" + _why(bl.get("oiWhy")))
                 elif read == "VOL":
                     if vol_why.get(k):
                         bits.append(f"{k} {vol_why[k]}")
@@ -213,15 +259,19 @@ def _missing(X: Mapping[str, Any], B: Mapping[str, Any], r: Mapping[str, tuple[f
                         bits.append(f"{k} no IV at the baseline ({bl.get('ivWhy') or 'no price'})")
                 elif read == "PREMIUM":
                     if not R.isnum(xl.get("px")):
-                        bits.append(f"{k} not priced at {hms(x)}")
+                        bits.append(f"{k} not priced at {hms(x)}" + _why(xl.get("pxWhy"), skip=("no price",)))
                     if not R.isnum(bl.get("px")):
-                        bits.append(f"{k} not priced at the baseline")
+                        bits.append(f"{k} not priced at the baseline" + _why(bl.get("pxWhy"), skip=("no price",)))
         if bits:
             out[read] = "; ".join(dict.fromkeys(bits))
     if not R.isnum(mv):
         out["STOCK"] = ("no ATR30" if not (R.isnum(atr) and atr > 0) else
-                        "no stock price at " + (hms(x) if not R.isnum(X.get("stock")) else "the baseline"))
+                        "no stock price at " + (hms(x) if not R.isnum(X.get("stock")) else "the baseline" + _why(B.get("stockWhy"))))
     return out
+
+
+def _why(text: Any, skip: Sequence[str] = ()) -> str:
+    return f" ({text})" if text and text not in skip else ""
 
 
 def read_stage(X: Mapping[str, Any], B: Mapping[str, Any], vol: Mapping[str, tuple[float, float, str]], atr: float,
@@ -380,20 +430,32 @@ def wall_at(rec: OptionRecorder, side: str, inst: Instrument, x: float, c0: floa
     open_ = R.at_ist(day, "09:15")
     x0 = x - 1800
     first = x0 <= open_ + 60
-    oi0 = rec.oi_at(code, max(x0, open_ + 60) if first else x0)[0]
-    oi1 = rec.oi_at(code, x)[0]
+    t0 = max(x0, open_ + 60) if first else x0
+    oi0, _, basis0 = rec.oi_at(code, t0)
+    oi1, _, basis1 = rec.oi_at(code, x)
+    oi_why = []
+    for t_, basis in ((t0, basis0), (x, basis1)):
+        if basis == "prevday":  # the previous close is not a reading at t_ (see leg_snap)
+            oi_why.append(f"OI at {hms(t_)}: {not_on_record(rec, t_) or 'previous close only'}")
+    if basis0 == "prevday":
+        oi0 = NAN
+    if basis1 == "prevday":
+        oi1 = NAN
     if first:
         fa = rec.first_after_open(code)
-        p0, src0 = (fa[1], "first print") if fa is not None and fa[0] < x else (NAN, "")
+        late = late_at_open(rec, code, open_)
+        p0, src0 = (fa[1], "first print") if fa is not None and fa[0] < x and not late else (NAN, late)
     else:
         p0, src0 = R.opt_px(rec.quote(code, x0, 60))
+        if not R.isnum(p0):
+            src0 = not_on_record(rec, x0)
     p1, src1 = R.opt_px(rec.quote(code, x, 60))
     deltas = R.oi_deltas(rec.oi_windows(code, c0, list(prev_days)))
     w = R.wall_read(side, oi1, oi0, p1, p0, deltas)
     px_src = "quotes" if R.isnum(p0) and R.isnum(p1) else "none (not quoted on this engine's feed)"
     return {"strike": inst.strike, "code": code, "time": hms(x), "window": f"{hms(max(x0, open_))}-{hms(x)}",
             **{k: (jnum(v) if not isinstance(v, (str, bool)) and v is not None else v) for k, v in w.items()},
-            "pxSrc": px_src, "px0Src": src0, "px1Src": src1}
+            "pxSrc": px_src, "px0Src": src0, "px1Src": src1, "oiWhy": "; ".join(oi_why)}
 
 
 def walls(rec: OptionRecorder, c: Contracts, picked: Mapping[str, Instrument | None], x: float, c0: float,
@@ -404,6 +466,47 @@ def walls(rec: OptionRecorder, c: Contracts, picked: Mapping[str, Instrument | N
         out[side.lower()] = wall_at(rec, side, inst, x, c0, prev_days) if inst is not None else None
     ce, pe = out["ce"], out["pe"]
     out["overall"] = R.wall_overall((ce or {}).get("interp", "") or "", (pe or {}).get("interp", "") or "")
+    return out
+
+
+# -- the ledger's compact copies ----------------------------------------------------------------------------------
+
+#: what ``read5.trigger`` keeps in the ledger: the call, its reads (value, vote, why missing) and the legs' identities;
+#: the legs' snapshots and the stage row go to the day's detail file (``ops.optrec.DetailLog``)
+_TRIGGER_KEEP = ("signal_id", "symbol", "direction", "candle", "c0", "s", "signalTime", "spot", "expiry", "fut", "eq",
+                 "atr30", "atrSrc", "window", "stock", "reads", "votes", "bull", "bear", "skip", "lead", "leadVsEngine",
+                 "with", "against", "noVote", "split", "missingReads", "legsNoPriceAtSignal", "basis", "excluded")
+_WALL_KEEP = ("strike", "code", "state", "why", "interp", "oiChg", "pxChg", "oicp", "significant", "pxSrc", "oiWhy")
+
+
+def compact_walls(w: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if not w:
+        return None if w is None else dict(w)
+    out: dict[str, Any] = {k: w.get(k) for k in ("spot", "pickedAt", "moment", "overall")}
+    for side in ("ce", "pe"):
+        ws = w.get(side)
+        out[side] = None if ws is None else {k: ws.get(k) for k in _WALL_KEEP if k in ws}
+    return out
+
+
+def compact_trigger(record: Mapping[str, Any]) -> dict[str, Any]:
+    """The ledger's ``read5.trigger``: everything the card and a reader of the day need, about 1-2 KB (the full record
+    is in ``archive/read5_detail/<day>.jsonl``)."""
+    out = {k: record[k] for k in _TRIGGER_KEEP if k in record}
+    if "legs" in record:
+        out["legs"] = {k: (None if v is None else {"code": v["code"], "strike": v["strike"], "type": v["type"]})
+                       for k, v in record["legs"].items()}
+    if "walls" in record:
+        out["walls"] = compact_walls(record["walls"])
+    return out
+
+
+def compact_follow(follow: Mapping[str, Any]) -> dict[str, Any]:
+    """The ledger's ``read5.follow``: the first 2 / 3 / 4 of 5 and the walls at the 3 of 5; the sixteen stage rows are
+    in the detail file (``stages`` says how many)."""
+    out = {k: follow[k] for k in ("signal_id", "symbol", "f2", "f3", "f4", "complete", "stoppedAt") if k in follow}
+    out["wallsAtF3"] = compact_walls(follow.get("wallsAtF3"))
+    out["stages"] = len(follow.get("rows") or ())
     return out
 
 
@@ -498,6 +601,7 @@ def card_lines(trig: Mapping[str, Any] | None, follow: Mapping[str, Any] | None,
     return out
 
 
-__all__ = ["Contracts", "baseline30", "card_lines", "contracts", "first_calls", "flat_row", "follow_stage", "fwd_at",
-           "jnum", "leg_snap", "opening_baseline", "pick_walls", "read_stage", "snap", "stage_row", "trigger_read",
-           "wall_at", "walls"]
+__all__ = ["FWD_AFTER_S", "Contracts", "baseline30", "card_lines", "compact_follow", "compact_trigger", "compact_walls",
+           "contracts", "first_calls", "flat_row", "follow_stage", "fwd_at", "jnum", "late_at_open", "leg_snap",
+           "not_on_record", "opening_baseline", "pick_walls", "read_stage", "snap", "stage_row", "trigger_read", "wall_at",
+           "walls"]
