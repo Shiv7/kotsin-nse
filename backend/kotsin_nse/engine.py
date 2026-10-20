@@ -1104,6 +1104,7 @@ class Engine:
                 except OSError as exc:  # the trading engine never waits on its twin's plumbing
                     self.feed_hub = None
                     log.error("feed_hub.serve_failed", address=f"{hub.serve[0]}:{hub.serve[1]}", error=str(exc)[:160])
+            self._rec_owner_sync()  # RECORD-ONLY: the recorder's streams follow the hub role from boot
             self._tasks.append(asyncio.create_task(self.feed.run(), name="feed"))
             self._tasks.append(asyncio.create_task(self._keep_held_quotes(), name="held-quotes"))
             self._live_from_ts = time.time()
@@ -3282,7 +3283,7 @@ class Engine:
                 if rows:
                     # the minute volumes are the socket's: written by the engine that owns it, not by the twin reading
                     # the hub, which carries the same frames (review, 20 Oct: one copy, not two)
-                    self.volume_tape.enabled = self.feed.hub is None
+                    self._rec_owner_sync()
                     await asyncio.to_thread(self.volume_tape.write, rows)
             if self.s.record_band and now - self._rec_last_sync >= 15.0:
                 await self._rec_sync(now)
@@ -3290,6 +3291,15 @@ class Engine:
             self.read5_stats["errors"] += 1
             self.read5_stats["last_error"] = f"tick: {exc}"[:200]
             log.warning("read5.tick_failed", error=str(exc)[:160])
+
+    def _rec_owner_sync(self) -> None:
+        """What the recorder's streams owe to this engine's hub role, set once the feed is wired (``start_market``): the minute
+        volumes are written by the socket's owner alone, and only on its own socket does every OI subscription print on
+        subscribe (re-check, 20 Oct: health said ``volume_tape.enabled: true`` on the twin until its first write)."""
+        own = self.feed.hub is None
+        self.volume_tape.enabled = own
+        if self.recorder is not None:
+            self.recorder.oi_on_subscribe = own
 
     def record5_health(self, counts: dict[str, dict[str, int]] | None = None) -> dict[str, Any]:
         rec = self.recorder

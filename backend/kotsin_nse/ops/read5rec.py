@@ -16,9 +16,10 @@ quotes, OI and volume. This module joins them the way ``research-data/mdoft/oct1
   signal + 10 s, held fixed; their OI and premium change over the 30 minutes up to a moment, and the state.
 
 Every record says what it could not read, and why. Two rules of the live record that the research did not need
-(review, 20 Oct): an OI that is only the previous session's close (no print today by the moment — every OI subscription
-prints on subscribe, so this means the code was not streaming) is not read; and a moment before the recorder's first
-frame (a restart) is not on record, and says so. Nothing here is read by a decision.
+(review, 20 Oct): an OI that is only the previous session's close (no print today by the moment — on the socket's owner
+every OI subscription prints on subscribe, so this means the code was not streaming; reading the hub, which replays no
+OI, it can also mean the code streamed there before this recorder started and has not changed since) is not read; and a
+moment before the recorder's first frame (a restart) is not on record, and says so. Nothing here is read by a decision.
 """
 
 from __future__ import annotations
@@ -29,10 +30,10 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
 
-from ..domain import Instrument, OptionType
+from ..domain import Instrument, InstrumentKind, OptionType
 from ..market.session import IST
 from ..research import read5 as R
-from .optrec import OptionRecorder, hms
+from .optrec import OptionRecorder, day_start, hms
 
 NAN = math.nan
 #: an option priced at its subscription snapshot can land a few ms before the future's own (one subscribe burst): the
@@ -77,7 +78,10 @@ class Contracts:
 def contracts(cat: Any, symbol: str, spot: float, today: date, eq: Instrument | None) -> tuple[Contracts | None, str]:
     """inputs14.build: the legs' expiry (the nearest at least 2 calendar days after today, from TODAY's date), CE1 /
     CE2 the first and second listed call strike above ``spot``, PE1 / PE2 the first and second put below it; FUT0 the
-    nearest future expiring today or later; EQ the cash (or index) code. (None, why) when there is no NSE chain."""
+    nearest future expiring today or later; EQ the cash (or index) code. (None, why) when there is no NSE chain. A name
+    with no cash or index code (NIFTYNXT50, NIFTYFPI) is read by the engine through its front future: that is not an EQ
+    — None, so the trigger is not scored, as score5 has it ("contracts missing"; re-check, 20 Oct: 19 Oct NIFTYNXT50
+    09:15 was scored with STOCK read on the future)."""
     exp = R.legs_expiry(cat.expiries(symbol, on=today), today)
     if exp is None:
         return None, "no NSE option chain (MCX / no options listed)"
@@ -86,6 +90,8 @@ def contracts(cat: Any, symbol: str, spot: float, today: date, eq: Instrument | 
     picks = R.pick_legs([(i.strike, i) for i in ce], [(i.strike, i) for i in pe], spot)
     legs = {k: (v[1] if v is not None else None) for k, v in picks.items()}
     fut = cat.front_future(symbol, on=today)
+    if eq is not None and (eq.kind is InstrumentKind.FUTURE or (fut is not None and eq.scrip_code == fut.scrip_code)):
+        eq = None
     return Contracts(symbol=symbol, expiry=exp, legs=legs, fut=fut, eq=eq, chain=[*ce, *pe]), ""
 
 
@@ -96,6 +102,18 @@ def not_on_record(rec: OptionRecorder, x: float) -> str:
     """Why nothing at ``x`` is on this recorder's record: before its first frame (the engine restarted after it)."""
     st = rec.started
     return f"recorder started {hms(st)} (restart)" if st is not None and x < st else ""
+
+
+def prev_close_only(rec: OptionRecorder) -> str:
+    """Why an OI that is only the previous session's close is not read. On the engine that owns the broker socket every
+    OI subscription prints on subscribe, so no print means the code was not streaming. Reading the hub it can also mean
+    the code already streamed there before this recorder started: the hub does not replay OI, and such a code prints
+    only when its OI changes (re-check, 20 Oct)."""
+    st = rec.started
+    if rec.oi_on_subscribe or st is None:
+        return "previous close only"
+    when = hms(st) if rec.day is not None and st >= day_start(rec.day) else f"{datetime.fromtimestamp(st, IST):%d %b} {hms(st)}"
+    return f"previous close only; reading the hub, which replays no OI: none since this recorder started {when}"
 
 
 def fwd_at(rec: OptionRecorder, fut: Instrument | None, t: float, *, after_until: float | None = None) -> tuple[float, str, float]:
@@ -133,7 +151,7 @@ def leg_snap(rec: OptionRecorder, c: Contracts, inst: Instrument, x: float) -> d
     if basis == "prevday":
         # no OI print today by x: the previous close is a guess, not a reading (it would read the change since
         # yesterday's close as the candle's) — kept beside, not read
-        out.update(oi=NAN, oiPrev=o, oiWhy=not_on_record(rec, x) or "previous close only")
+        out.update(oi=NAN, oiPrev=o, oiWhy=not_on_record(rec, x) or prev_close_only(rec))
     elif not R.isnum(o):
         out["oiWhy"] = not_on_record(rec, x)
     if R.isnum(px) and q is not None:
@@ -436,7 +454,7 @@ def wall_at(rec: OptionRecorder, side: str, inst: Instrument, x: float, c0: floa
     oi_why = []
     for t_, basis in ((t0, basis0), (x, basis1)):
         if basis == "prevday":  # the previous close is not a reading at t_ (see leg_snap)
-            oi_why.append(f"OI at {hms(t_)}: {not_on_record(rec, t_) or 'previous close only'}")
+            oi_why.append(f"OI at {hms(t_)}: {not_on_record(rec, t_) or prev_close_only(rec)}")
     if basis0 == "prevday":
         oi0 = NAN
     if basis1 == "prevday":
@@ -603,5 +621,5 @@ def card_lines(trig: Mapping[str, Any] | None, follow: Mapping[str, Any] | None,
 
 __all__ = ["FWD_AFTER_S", "Contracts", "baseline30", "card_lines", "compact_follow", "compact_trigger", "compact_walls",
            "contracts", "first_calls", "flat_row", "follow_stage", "fwd_at", "jnum", "late_at_open", "leg_snap",
-           "not_on_record", "opening_baseline", "pick_walls", "read_stage", "snap", "stage_row", "trigger_read", "wall_at",
-           "walls"]
+           "not_on_record", "opening_baseline", "pick_walls", "prev_close_only", "read_stage", "snap", "stage_row",
+           "trigger_read", "wall_at", "walls"]

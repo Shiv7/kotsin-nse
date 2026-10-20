@@ -316,6 +316,50 @@ def test_the_previous_sessions_close_is_kept_beside_but_never_read_as_the_candle
     assert r["reads"]["OI"]["ce"] is not None, "the other side reads as before"
 
 
+def test_reading_the_hub_the_previous_close_says_the_hub_replays_no_oi():
+    """Re-check, 20 Oct: the hub answers no OI from its pool, so on the twin a code that already streamed there before
+    its recorder started prints only when its OI changes. 'previous close only' would say the code was not streaming;
+    the twin's reason names the hub and when the recorder started."""
+    rec = recorder({"C1": "opt", "C2": "opt", "P1": "opt", "P2": "opt", "F": "fut", "E": "eq"}, silence_s=None)
+    rec.oi_on_subscribe = False  # the engine's hub role (``Engine._rec_owner_sync``)
+    c0, s = at("10:15:00"), at("10:45:05")
+    _feed_basic(rec, c0, s, skip={"P2"})
+    rec.on_frame("mf", mf("P2", 1.5, 1.45, 1.55), c0 - 5)
+    rec.on_frame("mf", mf("P2", 1.4, 1.35, 1.45), s - 5)
+    rec.oi_prev["P2"] = 7_000.0
+    r = _read(rec, c0, s)
+    why = "previous close only; reading the hub, which replays no OI: none since this recorder started 10:14:55"
+    assert f"PE2 no OI print by 10:45:05 ({why})" in r["reads"]["OI"]["missing"]
+    assert r["legs"]["PE2"]["X"]["oi"] is None and r["legs"]["PE2"]["X"]["oiPrev"] == 7_000.0
+    rec.started = at("23:50:00", "2026-10-16")
+    assert RR.prev_close_only(rec).endswith("since this recorder started 16 Oct 23:50:00")
+
+
+def test_a_name_read_through_its_front_future_has_no_eq_and_is_not_scored():
+    """Re-check, 20 Oct: NIFTYNXT50 (and NIFTYFPI) have no cash or index code: the engine's underlying for them is the
+    front future, and 19 Oct NIFTYNXT50 09:15 was scored with FUT0 = EQ and STOCK read on the future. score5 does not
+    score it ("contracts missing"): EQ is None, so ``_read5_record`` excludes it with the reason."""
+    c = _contracts()
+
+    class Cat:
+        def expiries(self, symbol: str, on: date) -> list[str]:
+            return ["2026-10-27"]
+
+        def chain(self, symbol: str, exp: str, cp: OptionType) -> list[Instrument]:
+            return [i for i in c.legs.values() if i is not None and i.option_type is cp]
+
+        def front_future(self, symbol: str, on: date) -> Instrument | None:
+            return c.fut
+
+    assert c.fut is not None and c.eq is not None
+    got, why = RR.contracts(Cat(), "X", 104.5, D, c.fut)
+    assert got is not None and why == "" and got.eq is None and got.fut == c.fut
+    other_future = Instrument("F2", "X", Segment.NSE_FO, InstrumentKind.FUTURE, expiry="2026-11-24")
+    assert RR.contracts(Cat(), "X", 104.5, D, other_future)[0].eq is None  # type: ignore[union-attr]
+    kept, _ = RR.contracts(Cat(), "X", 104.5, D, c.eq)
+    assert kept is not None and kept.eq == c.eq and list(kept.legs) == ["CE1", "CE2", "PE1", "PE2"]
+
+
 def test_a_restart_says_the_baseline_before_it_is_not_on_record():
     """An engine restarted mid-candle: the candle-start prices and OI are before the recorder's first frame. They are
     missing, and the read says the recorder started then — never yesterday's close read as the candle's OI."""
@@ -468,6 +512,34 @@ def test_the_future_a_few_ms_after_the_options_snapshot_stands_in_for_its_iv():
     assert math.isnan(F), "without the stand-in (the snapshot's own future read) nothing changes"
     early = RR.leg_snap(rec, c, c.legs["CE1"], at("09:03:22.560"))  # type: ignore[arg-type]
     assert early["ivWhy"] == "no future price at the option's price time", "never a future after the moment read"
+
+
+def test_the_iv_stand_in_survives_the_futures_ring_being_trimmed_and_compacted():
+    """Re-check, 20 Oct: the stand-in read the ring, else each minute's LAST state. Once the future's ring was compacted
+    past the option's 09:03:22 price time, a future with six frames in 09:03 had no state before 09:03:50 — an 11:00
+    read found no future. Each minute's first state is kept beside its last: the 09:45 and 11:00 reads agree."""
+    rec = recorder({"C1": "opt", "F": "fut"}, silence_s=None)
+    c = _contracts()
+    rec.on_frame("mf", mf("C1", 12.0), at("09:03:22.552"))  # the option's carried pre-open price, never traded again
+    for k, t in enumerate(("09:03:22.600", "09:03:28", "09:03:35", "09:03:41", "09:03:47", "09:03:50")):
+        rec.on_frame("mf", mf("F", 104.0 + k * 0.1, 103.9 + k * 0.1, 104.1 + k * 0.1), at(t))
+    t, k = at("09:04:00"), 0
+    while t < at("11:00:00"):  # the future streams; housekeeping trims every 30 s
+        k += 1
+        rec.on_frame("mf", mf("F", 104.0 + (k % 50) * 0.05, 103.9 + (k % 50) * 0.05, 104.1 + (k % 50) * 0.05), t)
+        if k % 30 == 0:
+            rec.trim(t)
+        t += 1.0
+    assert rec._ring["F"].trimmed and rec._ring["F"].t[0] > at("09:30:00"), "compacted past the option's price time"
+    got = [RR.leg_snap(rec, c, c.legs["CE1"], at(x)) for x in ("09:45:05", "11:00:00")]  # type: ignore[arg-type]
+    for snap in got:
+        assert snap["FSrc"] == "mid@minute first after (+0.048 s)" and snap["F"] == 104.0, snap
+        assert math.isfinite(snap["iv"])
+    assert got[0]["iv"] == got[1]["iv"]
+    q = rec.quote("F", at("09:03:38"))
+    assert q is not None and q["eff"] == at("09:03:22.600") and q["src"] == "minute", "inside a minute: its first state"
+    assert rec.quote("F", at("09:03:51"))["eff"] == at("09:03:50"), "after the minute's last: the last"
+    assert rec.first_after("F", at("09:03:30"), 5.0) is None, "inside a minute the next state is past 5 s: none"
 
 
 def test_stats_keep_todays_bar_counts_without_walking_the_bars():

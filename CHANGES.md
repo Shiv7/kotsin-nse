@@ -30,6 +30,15 @@ the recorder's tap runs after the engine's dispatch; wall candidates are picked 
 volumes are written by the socket's owner alone (engine A: this engine reads the hub and writes none), kept 30 days,
 never below 2 GB free; the hub's #down/#up is a volume gap whatever KN_HUB_RECONNECT_REPAIR says.
 
+**Re-check fixes (20 Oct, fourth commit, the same as engine A's).** Band on, reading the hub (this engine): a book's
+subscribe of a strike its own band holds and engine A's books stream is primed from its own pool when the hub answers (it
+got no first frame before); the stand-in snapshot never re-sends a frame the stream delivered meanwhile; a subscribe
+builds no band-wide set (0.3 µs an all-held call, was 68 µs band off / 257 µs band on); a broker reconnect sends every
+channel's engine codes before any band's. Record: each minute's first future/stock state is kept beside its last (the IV
+stand-in survives the ring's compaction); a name read through its front future (NIFTYNXT50, NIFTYFPI) has no EQ and is
+not scored; reading the hub, an OI that is only the previous close says the hub replays no OI (after a restart of this
+engine alone, a code A already streams prints OI only on a change); the volume tape's owner flag is set at the hub wiring.
+
 ---
 
 # close-1514: engine B changes (operator decisions of 17 Oct 2026)

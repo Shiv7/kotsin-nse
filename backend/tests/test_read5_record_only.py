@@ -181,7 +181,7 @@ ALLOWED = {
     "__init__", "_on_record_frame", "_rec_watch", "_rec_prepare", "_boot_market", "start_market", "_on_feed_connect",
     "_decide", "_read5_note", "_read5_excluded", "_read5_wait", "_read5_atr", "_read5_record", "_rec_anchor", "_rec_sync",
     "_rec_wall_candidates", "_rec_tick", "record5_health", "stop", "_housekeeping", "health_snapshot", "book_cards",
-    "_read5_card",
+    "_read5_card", "_rec_owner_sync",
 }
 NAMES = ("recorder", "read5rec", "_read5", "_rec_", "volume_tape", "record5", "rec_hms", "rec_legs_expiry", "READ5_",
          "r5_", "RootBand", "nearest_first", "chain_pair", "OptionRecorder", "VolumeTape", "subscribe_record",
@@ -345,3 +345,18 @@ async def test_only_the_sockets_owner_writes_the_minute_volumes(settings):
     e.feed.hub = ("127.0.0.1", 8510)  # this engine reads its twin's socket
     await e._rec_tick(at_ist("2026-10-19", "09:30"))
     assert e.volume_tape.enabled is False and e.volume_tape.rows_skipped == 1 and e.volume_tape.rows_written == 0
+
+
+@pytest.mark.asyncio
+async def test_the_recorders_streams_follow_the_hub_role_from_boot(settings):
+    """Re-check, 20 Oct: ``volume_tape.enabled`` was set only before the first minute rows were written, so the twin's
+    health said true until then. It is set with the hub's wiring (``start_market``), and the recorder learns there whether
+    every OI subscription prints on subscribe (its own socket) or not (reading the hub)."""
+    e = Engine(settings)
+    assert e.recorder is not None
+    assert e.record5_health()["volume_tape"]["enabled"] is True and e.recorder.oi_on_subscribe is True
+    e.feed.hub = ("127.0.0.1", 8510)
+    e._rec_owner_sync()
+    assert e.record5_health()["volume_tape"]["enabled"] is False and e.recorder.oi_on_subscribe is False
+    src = inspect.getsource(Engine.start_market)
+    assert src.index("self.feed.hub = hub.connect") < src.index("self._rec_owner_sync()") < src.index("self.feed.run()")

@@ -13,8 +13,8 @@ What it keeps, per watched code (the options of each name's legs' expiry, its fr
 * **quotes** — a 40-minute change history of (time, last price, bid, ask, the start of the current last-price run),
   one entry a second at most (the full tape's 1 Hz on change: a frame that changes nothing writes nothing, two in one
   second keep the later), so a quote can be read AS OF any moment in the read window, exactly as the research read
-  its tape (``research/read5.py`` ``opt_px``, ``tte_years``); a future's or a stock's last state of every minute
-  for the whole day beyond it; and each code's first entry at or after 09:15;
+  its tape (``research/read5.py`` ``opt_px``, ``tte_years``); a future's or a stock's first and last state of
+  every minute for the whole day beyond it; and each code's first entry at or after 09:15;
 * **open interest** — every change of the day (time, OI), and the previous session's last print (seeded from the
   engine's OI archive at boot, rolled at the day change), so OI can be read as of any moment, with its basis
   (session / pre-open / previous day);
@@ -165,8 +165,11 @@ class _Ring:
 
 
 class _MinuteStates:
-    """A future's or a stock's last quote of every minute, the whole day: what an as-of read older than the ring
-    falls back to (the time-matched IV's future at an old last-trade time)."""
+    """A future's or a stock's FIRST and last quote of every minute, the whole day: what a read older than the ring
+    falls back to (the time-matched IV's future at an old last-trade time). The first is what the IV stand-in reads
+    (``first_after``: the future's first quote after an option's pre-open price time) and an as-of read inside a
+    minute's span falls back to — with the last alone, a minute of several frames had no state before its end
+    (re-check, 20 Oct: an 11:00 read of a 09:03:22 price time found no future). One entry a second, as the ring."""
 
     __slots__ = ("ask", "bid", "ltp", "m", "run", "t")
 
@@ -180,10 +183,12 @@ class _MinuteStates:
 
     def add(self, t: float, ltp: float, bid: float, ask: float, run: float) -> None:
         m = t // 60 * 60
-        if self.m and self.m[-1] == m:
-            self.t[-1], self.ltp[-1], self.bid[-1], self.ask[-1], self.run[-1] = t, ltp, bid, ask, run
+        n = len(self.m)
+        if n and m < self.m[-1]:
             return
-        if self.m and m < self.m[-1]:
+        if n and self.m[-1] == m and (int(t) == int(self.t[-1]) or (n > 1 and self.m[-2] == m)):
+            # the same second (the ring's rule: the later state), or the minute's last state moving on
+            self.t[-1], self.ltp[-1], self.bid[-1], self.ask[-1], self.run[-1] = t, ltp, bid, ask, run
             return
         for arr, v in ((self.m, m), (self.t, t), (self.ltp, ltp), (self.bid, bid), (self.ask, ask), (self.run, run)):
             arr.append(v)
@@ -238,6 +243,9 @@ class OptionRecorder:
         self._seen: dict[str, float] = {}
         #: the first frame this recorder read (this process): a baseline before it is not on record (a restart)
         self.started: float | None = None
+        #: every OI subscription prints on subscribe — on the engine's own broker socket; reading the hub (which replays
+        #: no OI) a code already streaming there prints only when it changes. Set by the engine from its hub role
+        self.oi_on_subscribe = True
         self._oi: dict[str, _Oi] = {}
         self.oi_prev: dict[str, float] = {}
         #: (code, previous session) -> the as-of OI at OI_GRID — the walls' oiChangePct windows
@@ -449,12 +457,16 @@ class OptionRecorder:
 
     def first_after(self, code: str, x: float, within: float) -> dict[str, Any] | None:
         """The code's first quote entry AFTER ``x`` and at most ``within`` seconds after it — the ring, else the minute
-        states — shaped as ``quote``'s, its ``age`` negative (how far after ``x``). None when there is none."""
+        states — shaped as ``quote``'s, its ``age`` negative (how far after ``x``). None when there is none. The ring
+        answers only when it still holds what came right after ``x``: compacted past ``x``, its first entry is merely
+        the oldest kept, and the minute states (each minute's first and last) answer instead."""
         ring = self._ring.get(code)
         if ring is not None:
             j = bisect_right(ring.t, x)
-            if j < len(ring.t) and ring.t[j] <= x + within:
-                return self._q(x, ring.t[j], ring.ltp[j], ring.bid[j], ring.ask[j], ring.run[j], "ring", within)
+            if j < len(ring.t) and (j > 0 or not ring.trimmed):
+                if ring.t[j] <= x + within:
+                    return self._q(x, ring.t[j], ring.ltp[j], ring.bid[j], ring.ask[j], ring.run[j], "ring", within)
+                return None
         ms = self._mins.get(code)
         if ms is not None:
             k = bisect_right(ms.t, x)
@@ -685,6 +697,7 @@ class OptionRecorder:
         ring_entries = sum(len(r.t) for r in self._ring.values())
         oi_entries = sum(len(o.t) for o in self._oi.values())
         vol_minutes = sum(len(v.m) for v in self._vol.values())
+        minute_states = sum(len(ms.m) for ms in self._mins.values())
         covered = sum(1 for v in self._vol.values() if v.since is not None)
         verified, today_bars = self._bars_verified_today, self._bars_today
         return {
@@ -696,8 +709,8 @@ class OptionRecorder:
             "vol_verified_share": round(verified / today_bars, 3) if today_bars else None,
             "gaps": [[hms(a), hms(b), w] for a, b, w in self.gaps[-10:]], "volume_restarts": self.volume_restarts,
             "late_minutes": self.late_minutes, "errors": self.errors, "last_error": self.last_error,
-            # arrays of 8-byte floats: quotes 5 a entry, OI 2, volume 3 (+ the minute states)
-            "memory_mb_est": round((ring_entries * 40 + oi_entries * 16 + vol_minutes * 24) / 1e6, 1),
+            # arrays of 8-byte floats: quotes 5 a entry, OI 2, volume 3, minute states 6 (two a minute at most)
+            "memory_mb_est": round((ring_entries * 40 + oi_entries * 16 + vol_minutes * 24 + minute_states * 48) / 1e6, 1),
         }
 
 
