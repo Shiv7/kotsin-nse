@@ -106,6 +106,12 @@ source_modules = ["kotsin_nse.engine", "kotsin_nse.exec", "kotsin_nse.risk", "ko
 forbidden_modules = ["kotsin_nse.api.review_peers", "kotsin_nse.api.review_direction", "kotsin_nse.api.review_evidence"]
 
 [[tool.importlinter.contracts]]
+name = "record-only 5-read (2026-10-19): nothing that trades imports the recorder, the reads or the record band"
+type = "forbidden"
+source_modules = ["kotsin_nse.strategy", "kotsin_nse.risk", "kotsin_nse.exec", "kotsin_nse.venue", "kotsin_nse.feed"]
+forbidden_modules = ["kotsin_nse.research.read5", "kotsin_nse.ops.optrec", "kotsin_nse.ops.read5rec", "kotsin_nse.instrument.recband"]
+
+[[tool.importlinter.contracts]]
 name = "only market.session knows about IST"
 type = "forbidden"
 source_modules = ["kotsin_nse.strategy", "kotsin_nse.risk", "kotsin_nse.bars", "kotsin_nse.exec"]
