@@ -64,12 +64,21 @@ export function StockPopup({ row, day, at, trade, onClose }: Props) {
     const vol = c.addHistogramSeries({ priceFormat: { type: 'volume' }, priceScaleId: 'vol', lastValueVisible: false, priceLineVisible: false })
     c.priceScale('vol').applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } })
     vol.setData(bars.map((b) => ({ time: b.ts as UTCTimestamp, value: b.v, color: b.c >= b.o ? 'rgba(16,185,129,0.35)' : 'rgba(244,63,94,0.35)' })))
-    // session VWAP, typical price weighted by volume — the board's own definition
+    // session VWAP, typical price weighted by volume — the board's own definition. It restarts
+    // each IST day: 80 five-minute bars reach into the previous session, and carrying its volume
+    // over put GOLD's line at 146,837 on 2026-10-20 against a true session VWAP of 146,392
     let pv = 0
     let vv = 0
+    let day = -1
     const vw = c.addLineSeries({ color: '#38bdf8', lineWidth: 1, lineStyle: LineStyle.Dashed, priceLineVisible: false, lastValueVisible: true, title: 'VWAP' })
     vw.setData(
       bars.map((b) => {
+        const d = Math.floor((b.ts + 19800) / 86400) // IST is UTC+5:30, no DST
+        if (d !== day) {
+          day = d
+          pv = 0
+          vv = 0
+        }
         pv += ((b.h + b.l + b.c) / 3) * b.v
         vv += b.v
         return vv > 0 ? { time: b.ts as UTCTimestamp, value: pv / vv } : { time: b.ts as UTCTimestamp }
