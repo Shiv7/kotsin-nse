@@ -81,7 +81,9 @@ class Engine:
         self.store = BarStore()
         self.ledger = Ledger(settings.db_url)
         self.costs = CostModel(settings)
-        self.calendar = TradingCalendar.from_file(settings.data_dir / "holidays.txt")
+        self.calendar = TradingCalendar.from_file(
+            settings.data_dir / "holidays.txt", settings.data_dir / "holidays-mcx.txt"
+        )
         self.telegram = Telegram(
             settings.telegram_bot_token.get_secret_value() if settings.telegram_bot_token else None,
             settings.telegram_chat_id,

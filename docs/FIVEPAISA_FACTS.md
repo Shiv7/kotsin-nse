@@ -168,8 +168,9 @@ holds the day's extreme.
 
 ## Holidays
 
-There is no exchange-holiday endpoint in this API. `data/holidays.txt` holds one `YYYY-MM-DD` per
-line and the engine warns at boot when it is empty. Never guess one: a wrong entry skips a real
+There is no exchange-holiday endpoint in this API. `data/holidays.txt` holds NSE's, one
+`YYYY-MM-DD` per line, and the engine warns at boot when it is empty; `data/holidays-mcx.txt` holds
+MCX's. The two differ: on 2026-10-20 (Dussehra) NSE was shut while MCX traded its evening session. Never guess one: a wrong entry skips a real
 trading day, and a missing one produces a session of empty bars that looks like a feed outage.
 
 ## Historical 1-minute candles (measured 2026-10-18)

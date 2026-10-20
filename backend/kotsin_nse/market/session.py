@@ -57,31 +57,42 @@ SESSIONS: dict[Segment, SessionSpec] = {
 
 
 class TradingCalendar:
-    """Weekday sessions minus an explicit holiday list.
+    """Weekday sessions minus an explicit holiday list, one list per exchange.
 
-    The holiday list is **data, not code**: ``data/holidays.txt`` holds one ``YYYY-MM-DD`` per line.
-    An empty or missing file means weekdays-only, which is wrong on about a dozen days a year — so
-    :meth:`missing_holidays_warning` says so at boot rather than letting a silent assumption ride.
-    Never guess a holiday: a wrong entry skips a real trading day, and a missing one produces a
-    session of empty bars that looks like a feed outage.
+    The holiday lists are **data, not code**: ``data/holidays.txt`` holds NSE's, one ``YYYY-MM-DD``
+    per line, and ``data/holidays-mcx.txt`` MCX's. An empty or missing file means weekdays-only,
+    which is wrong on about a dozen days a year — so :meth:`missing_holidays_warning` says so at boot
+    rather than letting a silent assumption ride. Never guess a holiday: a wrong entry skips a real
+    trading day, and a missing one produces a session of empty bars that looks like a feed outage.
+
+    The lists differ: on 2026-10-20 (Dussehra) NSE was shut while MCX traded its evening session.
+    One shared set marked MCX closed all evening — health read "market closed" with ticks flowing.
     """
 
-    def __init__(self, holidays: frozenset[date] | None = None) -> None:
+    def __init__(
+        self, holidays: frozenset[date] | None = None, mcx_holidays: frozenset[date] | None = None
+    ) -> None:
         self.holidays: frozenset[date] = holidays or frozenset()
+        self.mcx_holidays: frozenset[date] = mcx_holidays or frozenset()
 
-    @classmethod
-    def from_file(cls, path: Path | None) -> TradingCalendar:
+    @staticmethod
+    def _read(path: Path | None) -> frozenset[date]:
         if path is None or not path.exists():
-            return cls()
+            return frozenset()
         days: set[date] = set()
         for raw in path.read_text().splitlines():
             line = raw.split("#", 1)[0].strip()
             if line:
                 days.add(date.fromisoformat(line))
-        return cls(frozenset(days))
+        return frozenset(days)
 
-    def is_trading_day(self, d: date) -> bool:
-        return d.weekday() < 5 and d not in self.holidays
+    @classmethod
+    def from_file(cls, path: Path | None, mcx_path: Path | None = None) -> TradingCalendar:
+        return cls(cls._read(path), cls._read(mcx_path))
+
+    def is_trading_day(self, d: date, segment: Segment = Segment.NSE_EQ) -> bool:
+        closed = self.mcx_holidays if segment is Segment.MCX_FO else self.holidays
+        return d.weekday() < 5 and d not in closed
 
     def missing_holidays_warning(self) -> str | None:
         if self.holidays:
@@ -144,13 +155,13 @@ def session_close_ts(segment: Segment, d: date) -> float:
 
 def is_open(segment: Segment, ts: float, calendar: TradingCalendar) -> bool:
     dt = to_ist(ts)
-    return calendar.is_trading_day(dt.date()) and SESSIONS[segment].contains(dt.time())
+    return calendar.is_trading_day(dt.date(), segment) and SESSIONS[segment].contains(dt.time())
 
 
 def in_entry_window(segment: Segment, ts: float, calendar: TradingCalendar) -> bool:
     dt = to_ist(ts)
     s = SESSIONS[segment]
-    return calendar.is_trading_day(dt.date()) and s.open <= dt.time() <= s.entry_cutoff
+    return calendar.is_trading_day(dt.date(), segment) and s.open <= dt.time() <= s.entry_cutoff
 
 
 def past_force_flat(segment: Segment, ts: float) -> bool:

@@ -8,10 +8,11 @@ backend/.env.*
 
 # data
 backend/data*/
-# ...except the holiday list, which is checked-in data the engine needs
+# ...except the holiday lists, which is checked-in data the engine needs
 !backend/data/
 backend/data/*
 !backend/data/holidays.txt
+!backend/data/holidays-mcx.txt
 backend/**/*.db
 backend/**/*.db-wal
 backend/**/*.db-shm

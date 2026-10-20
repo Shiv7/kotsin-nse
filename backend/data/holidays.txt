@@ -12,9 +12,9 @@
 #   (NSE_HOLIDAYS_2026_EMBEDDED / NSE_HOLIDAYS_2027_EMBEDDED), whose canonical source is
 #   /home/ubuntu/.shared/holidays/calendar.json on the box.
 #
-# NSE ONLY. The MCX lists in that file differ (e.g. MCX closes 2026-01-01, NSE does not) and this
-# calendar is a single set shared by every segment — adding an MCX-only date here would skip a real
-# NSE trading day. Split the calendar per segment before adding MCX.
+# NSE ONLY: these dates close the NSE segments and nothing else. The MCX lists in that file differ
+# (e.g. MCX closes 2026-01-01, NSE does not, and on 2026-10-20 MCX traded its evening session while
+# NSE was shut) — MCX's own dates go in holidays-mcx.txt.
 #
 # Checked: every 2026 entry falls on a weekday, and 2026-08-15 is correctly absent (Saturday).
 # Weekends are already non-trading via session.py:83, so weekend entries below are no-ops.

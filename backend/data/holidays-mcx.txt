@@ -1,0 +1,8 @@
+# MCX trading holidays, one YYYY-MM-DD per line. Blank lines and # comments are ignored.
+#
+# DATA, not code, and empty until filled from the MCX circular: never guess a holiday. A date here
+# closes MCX for the whole day. NSE's list (holidays.txt) does not apply to MCX — on most NSE
+# holidays MCX still trades an evening session, which a whole-day list cannot express, so such
+# days stay off this list (the morning then reads as a quiet feed, not as closed).
+#
+# Known but unverified, so not listed: the old stack's calendar has MCX shut on 2026-01-01.

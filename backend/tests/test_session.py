@@ -84,6 +84,24 @@ def test_missing_holiday_list_is_announced_not_assumed():
     assert TradingCalendar(frozenset({date(2026, 1, 26)})).missing_holidays_warning() is None
 
 
+def test_nse_holidays_do_not_close_mcx() -> None:
+    """2026-10-20: NSE shut for Dussehra, MCX traded its evening session."""
+    cal = TradingCalendar(frozenset({date(2026, 10, 20)}))
+    assert is_open(Segment.NSE_FO, ist_ts("2026-10-20", "11:00"), cal) is False
+    assert is_open(Segment.MCX_FO, ist_ts("2026-10-20", "18:50"), cal) is True
+    mcx_shut = TradingCalendar(frozenset(), frozenset({date(2026, 1, 1)}))
+    assert is_open(Segment.MCX_FO, ist_ts("2026-01-01", "18:50"), mcx_shut) is False
+    assert is_open(Segment.NSE_EQ, ist_ts("2026-01-01", "11:00"), mcx_shut) is True
+
+
+def test_calendar_reads_both_files(tmp_path) -> None:
+    (tmp_path / "nse.txt").write_text("# NSE\n2026-10-20\n")
+    (tmp_path / "mcx.txt").write_text("2026-01-01  # MCX only\n")
+    cal = TradingCalendar.from_file(tmp_path / "nse.txt", tmp_path / "mcx.txt")
+    assert cal.holidays == {date(2026, 10, 20)} and cal.mcx_holidays == {date(2026, 1, 1)}
+    assert TradingCalendar.from_file(tmp_path / "nse.txt").mcx_holidays == frozenset()
+
+
 def test_broker_timestamps_are_naive_ist():
     assert ist_naive_to_ts("2026-09-18T11:05:00") == ist_ts("2026-09-18", "11:05")
     assert ist_naive_to_ts("2026-09-18 11:05:00") == ist_ts("2026-09-18", "11:05")
