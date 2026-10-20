@@ -8,12 +8,12 @@ the same function the replay calls.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from datetime import date
 
 from ..bars.store import BarStore
 from ..market.session import ist_day
-from .board import Board, OIRead, build_board
+from .board import COMMODITY, Board, OIRead, build_board
 from .replay import guarded_adr
 from .sectors import sectors
 from .strength import DayState
@@ -72,9 +72,19 @@ class LiveScanner:
             vwap=pv / vol if vol > 0 else None,
         )
 
-    def scan(self, symbols: Iterable[str], now: float, oi: Mapping[str, OIRead] | None = None) -> Board:
+    def scan(
+        self,
+        symbols: Iterable[str],
+        now: float,
+        oi: Mapping[str, OIRead] | None = None,
+        *,
+        commodities: Collection[str] = (),
+    ) -> Board:
+        """``commodities`` are shown under their own sector and never picked."""
         states = [s for sym in symbols if (s := self.state(sym, now)) is not None]
-        self.board = build_board(int(now), states, self.sectors, oi)
+        sectors = {**self.sectors, **dict.fromkeys(commodities, COMMODITY)}
+        no_pick = dict.fromkeys(commodities, "NOT PICKED · MCX, rule untested")
+        self.board = build_board(int(now), states, sectors, oi, no_pick=no_pick)
         self.scans += 1
         return self.board
 

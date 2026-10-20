@@ -53,6 +53,7 @@ from .market.session import (
     ist_day,
     ist_hm,
     ist_naive_to_ts,
+    session_open_ts,
 )
 from .market.session import (
     session_phase as session_phase_of,
@@ -330,14 +331,20 @@ class Engine:
         start_daily = end - timedelta(days=400)
         ok = failed = 0
         # Started mid-session: today's 1m bars so far, so the board is right from the first scan
-        # and not only from the moment the socket joined.
-        today_open = self.calendar.is_trading_day(end) and ist_hm(time.time()) >= "09:15"
+        # and not only from the moment the socket joined. Per segment: MCX opens at 09:00, and on
+        # an NSE holiday it may be trading while NSE is not.
+        now = time.time()
+
+        def started(seg: Segment) -> bool:
+            return self.calendar.is_trading_day(end, seg) and now >= session_open_ts(seg, end)
         # The historical endpoint drops the LATEST session unless the end runs past it
         # (research/history.py, measured 2026-10-18), so every request asks two days further.
         ask_to = (end + timedelta(days=2)).isoformat()
         for inst in universe:
             frames: list[tuple[str, date]] = [(PRIMARY_TF, start_intraday), ("1d", start_daily)]
-            if today_open and inst.kind is InstrumentKind.EQUITY:
+            # an MCX underlying is its front future; on NSE the board reads the cash stock
+            on_board = inst.kind is InstrumentKind.EQUITY or inst.segment is Segment.MCX_FO
+            if on_board and started(inst.segment):
                 frames.append(("1m", end))
             for tf, start in frames:
                 try:
@@ -571,8 +578,15 @@ class Engine:
             log.warning("bar.reconcile_failed", symbol=bar.symbol, error=str(exc))
 
     def scan_symbols(self) -> list[str]:
-        """The board's universe: NSE stocks with F&O — not indices, not MCX."""
-        return sorted(r for r, g in self.groups.items() if g.equity is not None)
+        """The board's universe: NSE stocks with F&O and the MCX commodities — not indices."""
+        return sorted(
+            r for r, g in self.groups.items() if g.equity is not None or g.segment is Segment.MCX_FO
+        )
+
+    def commodities(self) -> list[str]:
+        """MCX roots: on the board as their own sector, never picked — the picks rule was built
+        and tested on NSE stocks only."""
+        return sorted(r for r, g in self.groups.items() if g.segment is Segment.MCX_FO)
 
     async def _scan(self, minute: int) -> None:
         """Two seconds after the minute's bars close — late enough for the whole universe's 1m
@@ -587,7 +601,7 @@ class Engine:
             now = time.time()
 
             def _run() -> None:
-                board = self.scanner.scan(self.scan_symbols(), now, oi)
+                board = self.scanner.scan(self.scan_symbols(), now, oi, commodities=self.commodities())
 
                 attach_setups(board, lambda sym: structure_from_store(self.store, sym, now))
 

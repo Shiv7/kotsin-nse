@@ -5,7 +5,8 @@ Rules (each a named constant, so a replay can be re-run with another value):
 
 * contenders — the ``CONTENDERS`` strongest on each side;
 * picks — the top ``PICKS_PER_SIDE`` of each side, at most ``MAX_PER_SECTOR`` from one sector, and
-  never a stock flagged as event risk;
+  never a stock flagged as event risk or one listed in ``no_pick`` (MCX commodities: ranked and
+  shown, but the rule was only ever tested on NSE stocks);
 * event risk — fell more than ``EVENT_RISK_ADRS`` average daily ranges from the previous close: a
   move that size is news, and a level drawn on it means nothing;
 * OI build-up — the near future's price change against its OI change, the standard four labels.
@@ -27,6 +28,8 @@ EVENT_RISK_ADRS = 3.0
 #: a futures OI move smaller than this (% vs the previous session) is no build-up at all: on
 #: 2026-10-19 a +0.05 % change labelled TECHM "SHORT BUILD-UP" along with 90 other stocks
 OI_NEUTRAL_PCT = 1.0
+#: the sector the live board files MCX commodities under
+COMMODITY = "Commodity"
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,8 +105,11 @@ def build_board(
     picks_per_side: int = PICKS_PER_SIDE,
     max_per_sector: int = MAX_PER_SECTOR,
     event_risk_adrs: float = EVENT_RISK_ADRS,
+    no_pick: Mapping[str, str] | None = None,
 ) -> Board:
+    """``no_pick`` maps a symbol to the reason it may rank but never be picked."""
     oi = oi or {}
+    no_pick = no_pick or {}
     rows: list[Row] = []
     for d in states:
         sc = strength(d)
@@ -138,6 +144,9 @@ def build_board(
         per_sector: dict[str, int] = defaultdict(int)
         taken = 0
         for r in side:
+            if r.symbol in no_pick:
+                r.rule = no_pick[r.symbol]  # takes no pick slot
+                continue
             if taken >= picks_per_side:
                 r.rule = r.rule or ("NOT PICKED · outside top" if r.rank and r.rank <= contenders else "")
                 continue

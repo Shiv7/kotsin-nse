@@ -145,3 +145,13 @@ def test_the_days_own_daily_candle_is_never_its_previous_close(tmp_path):
     store.save("UP", "1d", pd.concat([d1, today], ignore_index=True))
     r = DayReplay(store, day)
     assert r.days["UP"].prev_close == 100.0 and r.days["UP"].adr == pytest.approx(2.0)
+
+
+def test_no_pick_symbols_rank_but_never_take_a_pick_slot() -> None:
+    """MCX commodities ride the live board but the picks rule was only tested on NSE stocks."""
+    states = [st("CRUDEOIL", h=106, lo=99.9, last=105, vw=103), st("A", h=104, lo=99.9, last=103, vw=102)]
+    b = build_board(0, states, {"CRUDEOIL": "Commodity"}, no_pick={"CRUDEOIL": "NOT PICKED · MCX"})
+    crude = next(r for r in b.rows if r.symbol == "CRUDEOIL")
+    assert crude.rank == 1 and not crude.pick and crude.rule == "NOT PICKED · MCX"
+    assert b.picks == ["A"]
+    assert "Commodity" in {s["sector"] for s in b.sectors}
