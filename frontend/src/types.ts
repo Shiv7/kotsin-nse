@@ -54,6 +54,23 @@ export interface PositionView {
 export type StopRule = 'current' | 'E' | 'A'
 
 /** One trade under one stop rule — the book's current stop or a stop-rule mirror's (operator, 2026-10-04). */
+/** The 5-read and the strike walls at a trigger, RECORDED ONLY (operator, 2026-10-19: "for research only, so CT-B1 and
+ *  later B2 can use them") — read-only text on the card; no gate, book or order reads it. */
+export interface Read5Card {
+  lines: string[]
+  recordOnly: boolean
+  excluded?: string | null
+  split?: string | null
+  lead?: string | null
+  leadVsEngine?: string | null
+  basis?: string | null
+  missing?: string[] | null
+  walls?: string | null
+  f3?: { call: string; time: string; minute: number; label: string; vsEngine: string } | null
+  followComplete?: boolean
+  followRunning?: boolean
+}
+
 export interface StopRuleRow {
   rule: StopRule
   label: string

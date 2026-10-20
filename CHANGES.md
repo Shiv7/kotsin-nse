@@ -1,3 +1,23 @@
+# record-5read: the 5-read and the strike walls, recorded live — RECORD-ONLY (operator, 19 Oct 2026)
+
+Branch `record-5read` from `ctb-b1` (561dc9d). The same change as engine A's (7cecb25); B's archive writes the new streams as part files like its others. Nothing pushed or deployed. No decision, gate, book or order changes:
+CT-B1's conviction keeps `read5: None`. Write-up: `staging/next_record5/BUILD_record5.md`; design: `DESIGN_record5.md`.
+
+| File | Change |
+|---|---|
+| `backend/kotsin_nse/research/read5.py` (new) | the research arithmetic, ported unchanged: legs, `opt_px`, Black-76 `iv76`, the five reads and votes, `decide`, `first_n`, the label, the VOL baseline, the walls' state / reading / overall / oiChangePct |
+| `backend/kotsin_nse/ops/optrec.py` (new) | the recorder: as-of quotes (40-min ring, futures' minute states), OI of the day, per-minute option volume from `TotalQty`, coverage and gaps, 30m bars; minute part files `archive/option_volume/<day>/` |
+| `backend/kotsin_nse/ops/read5rec.py` (new) | the trigger read, each follow-up minute, the first 2/3/4 of 5, the walls, the archive row, the card text |
+| `backend/kotsin_nse/instrument/recband.py` (new) | the record band (KN_RECORD_BAND, default OFF): both types within K strikes of the day's prices, the cap |
+| `backend/kotsin_nse/venue/fivepaisa/ws.py` | the record set and the `on_record` tap; a record-only row never reaches the engine's handlers; a band-held code is held at the broker like a twin-held one |
+| `backend/kotsin_nse/ops/archive.py` | streams `option_volume_30m`, `read5` |
+| `backend/kotsin_nse/engine.py` | recorder wiring, `_read5_note` in `_decide` (no await), the read task, the band sync, health `record5`, the card's `read5` |
+| `backend/kotsin_nse/config.py` | `record5_enabled` (on), `record_band` (KN_RECORD_BAND, off), band K 3, caps 2000 / 1000 |
+| `backend/pyproject.toml` | import-linter: strategy / risk / exec / venue / feed may not import the recorder, the reads or the band |
+| `frontend/src/types.ts`, `components/BookCards.tsx` | the read-only "5-read · strike walls (recorded only)" text on every card |
+
+---
+
 # close-1514: engine B changes (operator decisions of 17 Oct 2026)
 
 This branch is `close-1514`. It was cut from `71036d2` (`phase35-engine-b`) in a scratch clone of

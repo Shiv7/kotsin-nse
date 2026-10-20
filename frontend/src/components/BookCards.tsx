@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { contractName, postJson } from '../lib/api'
 import { usePoll } from '../lib/usePoll'
-import type { StopRuleRow } from '../types'
+import type { Read5Card, StopRuleRow } from '../types'
 import { optStopNote, TradeMap } from './TradeMap'
 
 // One card per FUDKII trigger, read for one book. Every trigger is scored the same way whether the
@@ -53,6 +53,8 @@ type Card = {
   // decided after the NSE entry cutoff (the 14:45 bar, at 15:15): recorded and listed, never traded, never carried —
   // the reason, as the engine wrote it (operator, 2026-10-17: "record them but dont trade as of now. let it show on the list")
   recordedOnly?: string | null
+  // the 5-read and the strike walls at the trigger, recorded only (2026-10-19): read-only text
+  read5?: Read5Card | null
   atr: number | null; oi: number | null; oiChangePct: number | null
   clusters: { price: number; strength: number; members: string[]; wall: boolean; side: 'ahead' | 'behind' }[]
   futLevels: { close: number; atr: number | null; surgeT: number | null; surgeT1: number | null; volume: string; behind: Level | null; ahead: Level[] } | null
@@ -699,6 +701,7 @@ function TriggerCard({ book, c, open, onToggle, refresh, readOnly = false }: { b
 
         {c.books?.length ? <BookDots books={c.books} current={book} /> : null}
         {c.stopRules && c.stopRules.length > 0 ? <div className="mt-4"><StopRules rows={c.stopRules} /></div> : null}
+        {c.read5?.lines?.length ? <Read5 r={c.read5} /> : null}
 
         <div className="mt-4 flex items-center justify-between gap-3 border-t border-slate-800 pt-4">
           {readOnly ? <span className="text-[12.5px] text-violet-300">read-only here — Take / Skip on the twin's own page</span> : <Cta book={book} c={c} onDone={refresh} />}
@@ -843,6 +846,17 @@ function Section({ icon, title, children }: { icon: string; title: string; child
     <div className="flex flex-col gap-2.5">
       <div className="flex items-center gap-2 text-[12.5px] font-semibold uppercase tracking-wider text-slate-400"><I d={icon} className="text-slate-500" />{title}</div>
       {children}
+    </div>
+  )
+}
+
+/** The 5-read and the strike walls at the trigger — RECORDED ONLY (operator, 2026-10-19: "for research only"). Plain
+ *  text: nothing on this card, and no book, reads it. */
+function Read5({ r }: { r: Read5Card }) {
+  return (
+    <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/40 px-4 py-3 text-[13px] leading-relaxed text-slate-300" title="recorded only — no gate, book or order reads it">
+      <div className="mb-1 text-[11.5px] font-semibold uppercase tracking-wide text-slate-500">5-read · strike walls <span className="normal-case text-slate-600">(recorded only)</span></div>
+      {r.lines.map((line, i) => <div key={i}>{line}</div>)}
     </div>
   )
 }

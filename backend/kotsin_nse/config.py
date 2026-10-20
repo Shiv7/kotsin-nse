@@ -307,6 +307,32 @@ class Settings(BaseSettings):
     def depth_archive_list(self) -> list[str]:
         return [s.strip().upper() for s in self.depth_archive_symbols.split(",") if s.strip()]
 
+    # ---- the 5-read and the strike walls, recorded (RECORD-ONLY) --------------------------------
+    # Operator, 2026-10-19: "yes - the engine should start recording the 5-read and strike-wall state live, for
+    # research only, so CT-B1 and later B2 can use them". Nothing here is read by a gate, a book, a sizer or an exit.
+    #: the recorder (``ops/optrec.py``) and the reads at every FUDKII trigger (``ops/read5rec.py``): ledger events
+    #: ``read5.trigger`` / ``read5.follow``, ``archive/read5``, ``archive/option_volume[_30m]``, the cards' text.
+    #: Uses only what the feed already carries; adds no subscription.
+    record5_enabled: bool = True
+    #: KN_RECORD_BAND — the record band: subscribe calls and puts within ``record5_band_strikes`` strikes of each NSE
+    #: name's LIVE spot (from the 09:07 pre-open price, sticky for the day) and each 30m bar's wall candidates, for the
+    #: recorder alone (their frames never reach the engine's quotes, OI, books or strike chooser). OFF by default
+    #: (operator's decision 20 Oct): its one effect on the engine is that a band strike a book later selects is already
+    #: streaming (primed from the pool, as a code the twin holds is since 5 Oct). Without it the legs read only what
+    #: the engine subscribes anyway (all four legs on prices at the candle start on 43 % of 14-19 Oct's triggers;
+    #: 97 % with the band at 3 strikes).
+    record_band: bool = False
+    record5_band_strikes: int = 3
+    #: the band on the price channel too (False: OI only — no quote effect, price reads for 43 % of triggers)
+    record5_band_mf: bool = True
+    #: each 30m bar's wall candidates (largest recorded OI call at/above spot, put at/below) on the price channel
+    record5_walls_mf: bool = True
+    #: hard caps on the band's codes the engine does not itself hold (nearest strikes first; health says ``capped``)
+    record5_max_extra_mf: int = 2000
+    record5_max_extra_oi: int = 1000
+    #: calendar days of per-minute option volume part files kept (``archive/option_volume``; ~60 sessions)
+    record5_volume_keep_days: int = 90
+
     # ---- cost model ----------------------------------------------------------------------------
     # SUPERSEDED 2026-09-26: every rate below now comes from <data_dir>/charges.toml (risk/charge_rates.py,
     # per product). These fields stay only so an .env that sets KN_COST_* still boots; NOTHING reads

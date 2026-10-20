@@ -64,6 +64,12 @@ KEYS: dict[str, tuple[str, ...]] = {
     "option_quotes": ("scrip_code", "ts"),
     "quotes": ("scrip_code", "ts"),
     "quotes_held": ("scrip_code", "ts"),
+    # RECORD-ONLY (operator, 2026-10-19: record the 5-read and the strike walls "for research only"): each covered
+    # option's 30m volume bar (verified or not), and one row per FUDKII trigger's 5-read — rewritten when its
+    # follow-up ends, the last write winning. Both on the research window. The per-minute volumes are part files of
+    # their own (``ops/optrec.py`` VolumeTape): a day file re-read at every flush would not carry them.
+    "option_volume_30m": ("scrip_code", "bucket_ts"),
+    "read5": ("signal_id",),
 }
 #: streams whose ``held`` rows are moved to a longer-lived stream before their day is pruned
 HELD_ASIDE: dict[str, str] = {"quotes": "quotes_held"}
@@ -256,6 +262,11 @@ class DailyArchive:
                 "held": bool(held),
             },
         )
+
+    def record5(self, kind: str, ts: float, row: Mapping[str, Any]) -> None:
+        """A row of a record-only stream (``option_volume_30m``, ``read5``)."""
+        if kind in ("option_volume_30m", "read5"):
+            self._add(kind, ts, dict(row))
 
     def micro(self, scrip_code: str, bucket_ts: int, metrics: Mapping[str, Any]) -> None:
         row: dict[str, Any] = {"scrip_code": str(scrip_code), "bucket_ts": int(bucket_ts)}

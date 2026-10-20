@@ -24,6 +24,7 @@ import os
 import re
 import statistics
 import time
+import zlib
 from bisect import bisect_right
 from collections import deque
 from collections.abc import Awaitable, MutableMapping, Sequence
@@ -111,6 +112,8 @@ from .exec.resting import (
 from .instrument.catalogue import CatalogueLoader
 from .instrument.legs import OPTION_CLUSTER_TOL_PCT, LegPivotLoader, otm_legs
 from .instrument.pricing import value_at
+from .instrument.recband import RootBand, band, capped, chain_pair, nearest_first
+from .instrument.recband import legs_expiry as rec_legs_expiry
 from .instrument.select import (
     Quote,
     Selection,
@@ -174,13 +177,19 @@ from .market.volatility import (
     regime_for_commodity,
     regime_for_equity,
 )
+from .ops import read5rec
 from .ops.archive import DailyArchive
 from .ops.feed_rate import FeedRate
 from .ops.fulltape import FullTape
 from .ops.guard import Guards
 from .ops.health import Check, HealthMonitor
+from .ops.optrec import OptionRecorder, VolumeTape
+from .ops.optrec import hms as rec_hms
 from .ops.tape import ROLE_EQUITY, ROLE_FUTURE, ROLE_INDEX, ROLE_OPTION, Tape
 from .ops.telegram import Telegram
+from .research.read5 import FOLLOW_MIN as READ5_FOLLOW_MIN
+from .research.read5 import isnum as r5_isnum
+from .research.read5 import pick_walls as r5_pick_walls
 from .risk.costs import CostModel
 from .risk.exits import ExitEngine, MarketView, apply_exit
 from .risk.exposure import ExposureBook
@@ -691,6 +700,33 @@ class Engine:
         )
         #: the feed hub this engine serves to its twin (venue/fivepaisa/hub.py), when it does
         self.feed_hub: HubServer | None = None
+        # -- the 5-read and the strike walls, recorded at every FUDKII trigger: RECORD-ONLY (operator, 2026-10-19:
+        # "for research only, so CT-B1 and later B2 can use them"). Nothing below is read by a gate, a book, a sizer
+        # or an exit: the recorder sees the feed's rows through its own tap, the reads run as their own tasks after
+        # the trigger is handed off, and they write only the ledger events ``read5.*``, the archive and the card text.
+        self.recorder: OptionRecorder | None = OptionRecorder() if settings.record5_enabled else None
+        self.volume_tape = VolumeTape(settings.data_dir / "archive" / "option_volume", keep_days=settings.record5_volume_keep_days)
+        if self.recorder is not None:
+            self.feed.on_record = self._on_record_frame
+        #: the reads run once this process decides live (``start_market``); a test switches them on itself
+        self._read5_live = False
+        self._read5_tasks: set[asyncio.Task[Any]] = set()
+        self._read5_running: set[str] = set()
+        self._read5_seen: set[str] = set()
+        #: signal id -> the 5-read at its trigger, compact (the card's and health's; never a decision's)
+        self._read5_at: dict[str, dict[str, Any]] = {}
+        self.read5_stats: dict[str, Any] = {"triggers": 0, "read": 0, "excluded": 0, "follow_done": 0, "errors": 0,
+                                            "last_error": "", "legs_missing_last": None}
+        #: the record band (KN_RECORD_BAND): each NSE name's band for the day, the day it is for, its last sync
+        self._rec_bands: dict[str, RootBand] = {}
+        self._rec_day = ""
+        self._rec_last_sync = 0.0
+        self._rec_last_minutes = 0.0
+        self._rec_capped: dict[str, bool] = {"mf": False, "oi": False}
+        self._rec_wall_slots: set[str] = set()
+        self._rec_prep_task: asyncio.Task[Any] | None = None
+        self._rec_prepared_day = ""
+        self._rec_watch_done: set[str] = set()
         self.aggregator = Aggregator(self.store, on_bar_close=self._on_bar_close,
                                      refuse_untimed=settings.bars_refuse_untimed)
         #: Advisory books — they read the same closed bars the decision path does and emit
@@ -1058,6 +1094,7 @@ class Engine:
             self._tasks.append(asyncio.create_task(self.feed.run(), name="feed"))
             self._tasks.append(asyncio.create_task(self._keep_held_quotes(), name="held-quotes"))
             self._live_from_ts = time.time()
+            self._read5_live = self.recorder is not None
         self.booting = False
 
     async def _wait_for_broker(self, first_delay_s: float = 15.0, max_delay_s: float = 300.0) -> None:
@@ -1294,6 +1331,13 @@ class Engine:
 
     async def stop(self) -> None:
         self._stop.set()
+        for t in list(self._read5_tasks):
+            t.cancel()  # RECORD-ONLY follow-ups: a restart loses them, and the card says so
+        if self.recorder is not None:
+            try:
+                await asyncio.to_thread(self.volume_tape.write, self.recorder.take_minute_rows(time.time(), final=True))
+            except Exception as exc:  # noqa: BLE001 - shutting down; the recorder must not block it
+                log.warning("read5.final_write_failed", error=str(exc)[:120])
         try:
             self._save_decided()
         except Exception as exc:  # noqa: BLE001
@@ -1402,6 +1446,9 @@ class Engine:
                 self._option_codes.add(o.scrip_code)
         self._future_to_underlying = {f.scrip_code: g.root for g in groups.values() for f in g.futures}
         self._seed_oi_reference()
+        if self.recorder is not None:
+            # RECORD-ONLY: the recorder's day, off the boot path (archive reads in a worker thread)
+            self._rec_prep_task = asyncio.create_task(self._rec_prepare(ist_today()), name="read5-prepare")
 
         # Futures are OI sources, not bar sources: on NSE the front future's `symbol` is the cash
         # symbol, and tracking it wrote futures ticks into the equity's bars (found 2026-09-21).
@@ -1906,6 +1953,84 @@ class Engine:
         )
 
     # -- market data --------------------------------------------------------------------------------
+
+    # -- the 5-read recorder (RECORD-ONLY) -------------------------------------------------------------
+
+    def _on_record_frame(self, channel: str, row: dict[str, Any], arrived: float, pooled: bool) -> None:
+        """The feed's tap (``FivePaisaFeed.on_record``): every market-feed and OI row, to the recorder. The OI of a
+        code only the record band holds is archived here too — the engine's own OI handler never sees it."""
+        rec = self.recorder
+        if rec is None:
+            return
+        rec.on_frame(channel, row, arrived, pooled)
+        if channel == "oi" and not pooled:
+            code = str(row.get("Token") or row.get("ScripCode") or "")
+            if code and self.feed.is_record("oi", code) and not self.feed.is_subscribed("oi", code):
+                oi = float(row.get("OpenInterest") or 0)
+                if oi > 0:
+                    self.archive.oi(code, arrived, oi, None)
+
+    def _rec_watch(self, today: date) -> dict[str, str]:
+        """What the recorder keeps: every NSE name's options on its legs' expiry (the nearest at least 2 days out,
+        from today's date), its front future and its cash or index code."""
+        cat = self.catalogue_loader.catalogue
+        out: dict[str, str] = {}
+        for g in self.groups.values():
+            if g.segment is Segment.MCX_FO:
+                continue
+            exp = rec_legs_expiry(cat, g.root, today)
+            if exp is not None:
+                ce, pe = chain_pair(cat, g.root, exp)
+                out.update({i.scrip_code: "opt" for i in (*ce, *pe)})
+            fut = cat.front_future(g.root, on=today)
+            if fut is not None:
+                out[fut.scrip_code] = "fut"
+            out[g.underlying.scrip_code] = "eq"
+        return out
+
+    async def _rec_prepare(self, today: date) -> None:
+        """The recorder's day: what it watches, the previous session's last OI per code, the 30m volume bars of the
+        previous session (and of today, after a restart), and the two previous sessions' OI grids the walls'
+        oiChangePct reads — the archive files read in a worker thread."""
+        rec = self.recorder
+        if rec is None:
+            return
+        if rec.roll(today):
+            # a new day's reads start afresh (yesterday's follow-ups ended by 15:31)
+            self._read5_seen.clear()
+            self._read5_at.clear()
+        watch = self._rec_watch(today)
+        rec.set_watch(watch)
+        self._rec_prepared_day = today.isoformat()
+        prev = self.calendar.previous_trading_day(today, Segment.NSE_FO)
+        prev2 = self.calendar.previous_trading_day(prev, Segment.NSE_FO)
+        opts = {c for c, r in watch.items() if r == "opt"}
+
+        def load() -> tuple[dict[str, float], list[Any], dict[str, Any]]:
+            bars: list[Any] = []
+            for d in (prev, today):  # the day file and any parts its flushes left (ops/archive.py)
+                bars.extend(self.archive.read_day("option_volume_30m", d.isoformat()).to_dict("records"))
+            grids: dict[str, Any] = {}
+            for d in (prev, prev2):  # each OI day read once: the grids, and the previous session's last prints
+                df = self.archive.read_day("oi", d.isoformat(), columns=["scrip_code", "ts", "oi"])
+                if len(df):
+                    df = df[df.scrip_code.astype(str).isin(opts) & (df.oi > 0)]
+                    grids[d.isoformat()] = df.assign(scrip_code=df.scrip_code.astype(str))
+            last: dict[str, float] = {}
+            if prev.isoformat() in grids:
+                g = grids[prev.isoformat()].sort_values("ts", kind="stable")
+                last = {str(c): float(v) for c, v in g.groupby("scrip_code").oi.last().items()}
+            return last, bars, grids
+
+        try:
+            last, bars, grids = await asyncio.to_thread(load)
+        except Exception as exc:  # noqa: BLE001 - a recorder without history still records; the reads say what is missing
+            log.warning("read5.prepare_failed", error=str(exc)[:160])
+            return
+        rec.oi_prev.update({c: v for c, v in last.items() if c not in rec.oi_prev})
+        n_bars = rec.load_bars(bars)
+        n_grid = sum(rec.set_oi_grid(d, df) for d, df in grids.items())
+        log.info("read5.prepared", day=today.isoformat(), watched=len(watch), oi_prev=len(last), bars=n_bars, oi_grids=n_grid)
 
     async def _on_tick(self, tick: dict[str, Any]) -> None:
         code = str(tick["scrip_code"])
@@ -2476,6 +2601,8 @@ class Engine:
         self.official_opens.feed_connected(time.time())
         if not reconnect:
             return
+        if self.recorder is not None:
+            self.recorder.note_reconnect(time.time())  # RECORD-ONLY: the volume record has a hole here
         marked = self.aggregator.on_reconnect()
         log.warning("feed.gap_repaired", forming_marked_partial=marked)
         await self.ledger.event("feed.reconnected", {"forming_marked_partial": marked, "silence_reconnects": self._silence_reconnects})
@@ -2826,6 +2953,10 @@ class Engine:
         # and RT-N take neither. FUKAA runs beside them. Each path is guarded: one path's error never
         # costs another its entry.
         triggers = [*base_out.signals, *base_out.triggers]
+        for sig in triggers:
+            # RECORD-ONLY: note the moment and hand the 5-read to its own task — no await, nothing it computes is
+            # read by anything below (operator, 2026-10-19: "for research only")
+            self._read5_note(sig)
         for sig in base_out.triggers:
             # its own row first: the parent's decision on its trigger, found by the cards and the
             # Shadow page, and never mistaken for a FUDKII signal by a later write (the first row
@@ -2866,6 +2997,287 @@ class Engine:
                 jobs.append(self._guarded("signal.failed", sig, self._handle_signal(sig, bar)))
         if jobs:
             await asyncio.gather(*jobs)
+
+    # -- the 5-read and the strike walls at every FUDKII trigger: RECORD-ONLY ---------------------------------------
+
+    def _read5_note(self, sig: Signal) -> None:
+        """The moment a FUDKII trigger is handled, and its 5-read handed to a task of its own (operator, 2026-10-19:
+        "for research only"). Synchronous, no I/O: the decision path never waits on it, and nothing it records is
+        read by a gate, a book, a sizer or an exit (tests/test_read5_record_only.py)."""
+        try:
+            if not self._read5_live or self.recorder is None or sig.strategy is not StrategyKey.FUDKII:
+                return
+            if sig.signal_id in self._read5_seen:
+                return
+            self._read5_seen.add(sig.signal_id)
+            task = asyncio.create_task(self._read5_record(sig, time.time()), name=f"read5-{sig.symbol}")
+            self._read5_tasks.add(task)
+            task.add_done_callback(self._read5_tasks.discard)
+        except Exception as exc:  # noqa: BLE001 - a recorder fault never reaches the decision
+            self.read5_stats["errors"] += 1
+            self.read5_stats["last_error"] = f"note: {exc}"[:200]
+
+    def _read5_excluded(self, sig: Signal, s: float) -> str | None:
+        """research's ``auction`` rows: not scored, with why."""
+        und = self.underlyings.get(sig.symbol)
+        if und is None or und.segment is Segment.MCX_FO:
+            return "no NSE option chain (MCX)"
+        if (sig.context or {}).get("carried"):
+            return "08:45 carry copy"
+        if ist_hm(sig.ts) == "15:15":
+            return "15:15 auction candle"
+        if rec_hms(s) >= "15:15:00":
+            return "signal at/after 15:15"
+        return None
+
+    async def _read5_wait(self, until: float) -> None:
+        """Until a moment the read is taken at (the reads are as of their moment; the wait lets its frames land)."""
+        await asyncio.sleep(max(0.0, until - time.time()))
+
+    async def _read5_atr(self, sig: Signal, s: float) -> tuple[float, str]:
+        """The trigger's ATR30 as it was logged (``regime.breadth``'s atr30 — research's source), else the signal's own
+        ``evidence.atr``. Read only."""
+        while True:
+            br = self._breadth_at.get(sig.signal_id)
+            if br is not None:
+                if br.get("atr30"):
+                    return float(br["atr30"]), "regime.breadth"
+                break
+            if time.time() > s + 60:
+                break
+            await asyncio.sleep(1.0)
+        ev = (sig.evidence or {}).get("atr")
+        return (float(ev), "evidence.atr") if ev else (math.nan, "")
+
+    async def _read5_record(self, sig: Signal, s: float) -> None:
+        """The 5-read at the trigger (over the trigger candle, as of the signal), the walls at signal + 10 s, then each
+        minute to +16 min and the first 2 / 3 / 4 of 5 — to the ledger (``read5.trigger``, ``read5.follow``), the
+        archive (``read5``) and the card. Every value is read AS OF its moment from the recorder's history, so when
+        this task runs changes nothing. Never raises."""
+        rec = self.recorder
+        if rec is None:
+            return
+        sid = sig.signal_id
+        direction = "Bullish" if sig.direction is Direction.BULLISH else "Bearish"
+        base = {"signal_id": sid, "symbol": sig.symbol, "direction": direction, "c0": float(sig.ts), "s": s,
+                "signalTime": rec_hms(s), "candle": f"{ist_hm(sig.ts)}-{ist_hm(sig.ts + 1800)}"}
+        self.read5_stats["triggers"] += 1
+        try:
+            why = self._read5_excluded(sig, s)
+            today = ist_day(s)
+            c = None
+            if why is None:
+                c, why_c = read5rec.contracts(self.catalogue_loader.catalogue, sig.symbol, float(sig.entry), today,
+                                              self.underlyings.get(sig.symbol))
+                if c is None:
+                    why = why_c
+                else:
+                    gone = [k for k, v in (*c.legs.items(), ("FUT0", c.fut), ("EQ", c.eq)) if v is None]
+                    if gone:
+                        why = f"contracts missing: {', '.join(gone)} not listed"
+            if why is not None or c is None:
+                self.read5_stats["excluded"] += 1
+                rec5 = {**base, "excluded": why}
+                await self.ledger.event("read5.trigger", rec5)
+                self.archive.record5("read5", s, read5rec.flat_row(rec5, None))
+                return
+            # a burst (forty triggers at 09:45) is spread over three seconds, and each read yields between its steps:
+            # every value is as of its own moment, so when it is computed changes nothing
+            spread = (zlib.crc32(sid.encode()) % 3000) / 1000.0
+            await self._read5_wait(s + 10 + spread)
+            atr, atr_src = await self._read5_atr(sig, s)
+            prev = self.calendar.previous_trading_day(today, Segment.NSE_FO)
+            prev_days = [prev.isoformat(), self.calendar.previous_trading_day(prev, Segment.NSE_FO).isoformat()]
+            record, X, b30 = read5rec.trigger_read(rec, c, signal_id=sid, symbol=sig.symbol, direction=direction,
+                                                   c0=float(sig.ts), s=s, spot=float(sig.entry), atr=atr, atr_src=atr_src,
+                                                   sessions=[prev.isoformat(), today.isoformat()], now=time.time())
+            await asyncio.sleep(0)
+            picked = read5rec.pick_walls(rec, c, float(sig.entry), s + 10)
+            record["walls"] = read5rec.walls(rec, c, picked, s, float(sig.ts), prev_days, float(sig.entry), s + 10)
+            self._read5_at[sid] = {"split": record["split"], "lead": record["lead"], "basis": record["basis"],
+                                   "missing": record["missingReads"], "walls": record["walls"]["overall"]}
+            self.read5_stats["read"] += 1
+            self.read5_stats["legs_missing_last"] = {"symbol": sig.symbol, "legs": record["legsNoPriceAtSignal"]}
+            await self.ledger.event("read5.trigger", record)
+            self.archive.record5("read5", s, read5rec.flat_row(record, None))
+            self._read5_running.add(sid)
+            stages = [record["stage0"]]
+            walls_f3 = record["walls"] if read5rec.first_calls(stages, direction)["f3"] is not None else None
+            for m in range(1, READ5_FOLLOW_MIN + 1):
+                await self._read5_wait(s + 60 * m + 2 + spread)
+                st = read5rec.follow_stage(rec, c, s=s, m=m, B=X, b30=b30, atr=atr)
+                stages.append(st)
+                if walls_f3 is None and read5rec.first_calls(stages, direction)["f3"] is not None:
+                    await asyncio.sleep(0)
+                    walls_f3 = read5rec.walls(rec, c, picked, st["x"], float(sig.ts), prev_days, float(sig.entry), s + 10)
+            follow = {"signal_id": sid, "symbol": sig.symbol, **read5rec.first_calls(stages, direction),
+                      "rows": stages[1:], "wallsAtF3": walls_f3, "complete": True, "stoppedAt": stages[-1]["t"]}
+            await self.ledger.event("read5.follow", follow)
+            self.archive.record5("read5", s, read5rec.flat_row(record, follow))
+            self.read5_stats["follow_done"] += 1
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - the record is research's; a fault in it costs nothing else
+            self.read5_stats["errors"] += 1
+            self.read5_stats["last_error"] = f"{sig.symbol}: {exc}"[:200]
+            log.warning("read5.failed", symbol=sig.symbol, signal=sid, error=str(exc)[:160])
+        finally:
+            self._read5_running.discard(sid)
+
+    # -- the record band (KN_RECORD_BAND) ----------------------------------------------------------------------------
+
+    def _rec_anchor(self, g: ScripGroup) -> float | None:
+        """A name's price for its band: its last price on the feed (from 09:07 the pre-open frames', then the live
+        trades'), else the previous close. Read only."""
+        px = self.ltps.get(g.underlying.scrip_code)
+        if px:
+            return float(px)
+        return self._prev_close(g.underlying.symbol)
+
+    async def _rec_sync(self, now: float) -> dict[str, int]:
+        """The record band, every 15 s from 09:07 to 15:30 on an NSE trading day: both types of every listed strike
+        within ``record5_band_strikes`` of any price each NSE name has shown today, on its legs' expiry — sticky for
+        the day, pruned to the day's own band at its first sync, capped. Subscribed on the feed's RECORD set: their
+        frames reach the recorder alone. Off unless KN_RECORD_BAND."""
+        added = {"mf": 0, "oi": 0}
+        if not self.s.record_band or self.recorder is None or not self.groups:
+            return added
+        today = ist_day(now)
+        hm = ist_hm(now)
+        if not self.calendar.is_trading_day(today) or not ("09:07" <= hm < "15:30"):
+            return added
+        cat = self.catalogue_loader.catalogue
+        day = today.isoformat()
+        new_day = self._rec_day != day
+        if new_day:
+            self._rec_day, self._rec_bands, self._rec_wall_slots = day, {}, set()
+            self._rec_capped = {"mf": False, "oi": False}
+        k = max(0, int(self.s.record5_band_strikes))
+        grown: list[Instrument] = []
+        anchor: dict[str, float] = {}
+        for g in self.groups.values():
+            if g.segment is Segment.MCX_FO:
+                continue
+            px = self._rec_anchor(g)
+            if not px or px <= 0:
+                continue
+            anchor[g.root] = px
+            rb = self._rec_bands.get(g.root)
+            if rb is None:
+                exp = rec_legs_expiry(cat, g.root, today)
+                if exp is None:
+                    continue
+                rb = self._rec_bands[g.root] = RootBand(g.root, exp, px, px)
+            elif not rb.widen(px):
+                continue
+            ce, pe = chain_pair(cat, g.root, rb.expiry)
+            grown.extend(band(ce, pe, rb.lo, rb.hi, k))
+        if new_day:
+            # the day's own band only: yesterday's codes leave the record set (the feed keeps any the engine or a twin holds)
+            keep = {i.scrip_code for i in grown}
+            for ch in ("mf", "oi"):
+                stale = [i for c, i in self.feed.record_instruments(ch).items() if c not in keep]
+                if stale:
+                    await self.feed.unsubscribe_record(ch, stale)
+        channels = ("mf", "oi") if self.s.record5_band_mf else ("oi",)
+        for ch in channels:
+            cap = self.s.record5_max_extra_mf if ch == "mf" else self.s.record5_max_extra_oi
+            todo = nearest_first([i for i in grown if not self.feed.is_record(ch, i.scrip_code)], anchor)
+            if not todo:
+                continue
+            extra = self.feed.record_counts()[ch]["extra"]
+            mine = {c for c in (i.scrip_code for i in todo) if self.feed.is_subscribed(ch, c)}
+            admitted, hit = capped(todo, extra, cap, mine)
+            self._rec_capped[ch] = self._rec_capped[ch] or hit
+            if admitted:
+                added[ch] += len(await self.feed.subscribe_record(ch, admitted))
+        if self.s.record5_walls_mf and self.s.record5_band_mf:
+            added["mf"] += await self._rec_wall_candidates(now, anchor)
+        self._rec_last_sync = now
+        if added["mf"] or added["oi"]:
+            log.info("read5.band", added_mf=added["mf"], added_oi=added["oi"], roots=len(self._rec_bands),
+                     record=self.feed.record_counts(), capped=self._rec_capped)
+        return added
+
+    async def _rec_wall_candidates(self, now: float, anchor: dict[str, float]) -> int:
+        """At each 30m bar's start, every name's largest recorded OI call at or above its price and put at or below,
+        on the record price channel: the wall's premium change is read 30 minutes later."""
+        rec = self.recorder
+        if rec is None:
+            return 0
+        if ist_hm(now) < "09:15":
+            return 0  # the walls are read from the session's OI: from the first bar's start
+        day = ist_day(now).isoformat()
+        slot = ist_hm(bucket_start(Segment.NSE_EQ, now, DECISION_TF))
+        key = f"{day} {slot}"
+        if key in self._rec_wall_slots:
+            return 0
+        self._rec_wall_slots.add(key)
+        cat = self.catalogue_loader.catalogue
+        want: list[Instrument] = []
+        for root, rb in self._rec_bands.items():
+            px = anchor.get(root)
+            if not px:
+                continue
+            ce, pe = chain_pair(cat, root, rb.expiry)
+            cands = [(i.option_type.value, i.strike, rec.oi_at(i.scrip_code, now, allow_prev=False)[0], i) for i in (*ce, *pe)]
+            picked = r5_pick_walls([x for x in cands if r5_isnum(x[2])], px)
+            want.extend(v[2] for v in picked.values() if v is not None and not self.feed.is_record("mf", v[2].scrip_code))
+        if not want:
+            return 0
+        extra = self.feed.record_counts()["mf"]["extra"]
+        mine = {i.scrip_code for i in want if self.feed.is_subscribed("mf", i.scrip_code)}
+        admitted, hit = capped(want, extra, self.s.record5_max_extra_mf, mine)
+        self._rec_capped["mf"] = self._rec_capped["mf"] or hit
+        return len(await self.feed.subscribe_record("mf", admitted)) if admitted else 0
+
+    async def _rec_tick(self, now: float) -> None:
+        """The recorder's housekeeping: the day, the quote rings, the 30m volume bars, the minute volumes' part files
+        and the record band. Never raises into the housekeeping loop."""
+        rec = self.recorder
+        if rec is None:
+            return
+        try:
+            today = ist_day(now)
+            if self._rec_prepared_day != today.isoformat() and self.groups and (
+                    self._rec_prep_task is None or self._rec_prep_task.done()):
+                self._rec_prep_task = asyncio.create_task(self._rec_prepare(today), name="read5-prepare")
+            # the watch again once the day's scrip master is in (the day roll reloads it; the 09:20 rebuild refetches it)
+            for slot in ("09:05", "09:25"):
+                key = f"{today.isoformat()} {slot}"
+                if ist_hm(now) >= slot and key not in self._rec_watch_done and self._rec_prepared_day == today.isoformat():
+                    self._rec_watch_done.add(key)
+                    rec.set_watch(self._rec_watch(today))
+            rec.trim(now)
+            if rec.close_bars(now):
+                for r in rec.take_bar_rows():
+                    self.archive.record5("option_volume_30m", float(r["bucket_ts"]), r)
+            if now - self._rec_last_minutes >= self.s.tape_full_flush_s:
+                self._rec_last_minutes = now
+                rows = rec.take_minute_rows(now)
+                if rows:
+                    await asyncio.to_thread(self.volume_tape.write, rows)
+            if self.s.record_band and now - self._rec_last_sync >= 15.0:
+                await self._rec_sync(now)
+        except Exception as exc:  # noqa: BLE001 - the recorder's housekeeping never costs the engine's
+            self.read5_stats["errors"] += 1
+            self.read5_stats["last_error"] = f"tick: {exc}"[:200]
+            log.warning("read5.tick_failed", error=str(exc)[:160])
+
+    def record5_health(self) -> dict[str, Any]:
+        rec = self.recorder
+        return {
+            "enabled": rec is not None,
+            "band": {"on": self.s.record_band, "strikes": self.s.record5_band_strikes, "mf": self.s.record5_band_mf,
+                     "walls_mf": self.s.record5_walls_mf, "roots": len(self._rec_bands), "day": self._rec_day,
+                     "last_sync": self._rec_last_sync or None, "capped": dict(self._rec_capped),
+                     "caps": {"mf": self.s.record5_max_extra_mf, "oi": self.s.record5_max_extra_oi}},
+            "subscriptions": self.feed.record_counts(),
+            "recorder": rec.stats() if rec is not None else None,
+            "reads": {**self.read5_stats, "live": self._read5_live, "followups_running": len(self._read5_running)},
+            "volume_tape": self.volume_tape.stats(),
+            "tap_errors": self.feed.record_tap_errors,
+        }
 
     async def _fukaa_shadow(self, sig: Signal) -> None:
         """FUKAA in shadow (operator, 2026-10-02): the signal it would trade, recorded with every
@@ -4878,6 +5290,7 @@ class Engine:
             if s_t and s_t >= 2.5:
                 pros.append(f"volume surge {s_t:.1f}×")
             breadth = next((e for e in reversed(evs) if e.get("kind") == "regime.breadth"), None)
+            read5_card = self._read5_card(evs, sid)
             b_share = (breadth or {}).get("share")
             if b_share is not None:
                 # the share agreeing with the TRIGGER; a fade book reads the other side of it
@@ -5052,6 +5465,7 @@ class Engine:
                 "recordedOnly": (cut_q or {}).get("why") if cut_q is not None else None,
                 "position": ps, "trade": trades_by_pos.get(ps["id"]) if ps else None, "exits": exits_by_pos.get(ps["id"], []) if ps else [],
                 "live": live, "rtCard": rt_card, "pros": pros, "cons": cons, "cta": cta, "breadth": breadth, "books": books_row,
+                "read5": read5_card,
                 "pending": pending, "execLog": (ps or {}).get("exec_log") or None,
                 "restingTarget": self._resting_target_card(ps),
                 "restingTargets": self._resting_targets_card(ps),
@@ -5063,6 +5477,23 @@ class Engine:
         for c in cards:
             counts[c["state"]] = counts.get(c["state"], 0) + 1
         return {"book": book, "day": day.isoformat(), "wallet": self.wallets[book].to_json() if book in self.wallets else None, "counts": counts, "cards": cards, "nowTs": time.time()}
+
+    def _read5_card(self, evs: list[dict[str, Any]], sid: str) -> dict[str, Any] | None:
+        """The card's 5-read (RECORD-ONLY, read-only text), from the day's ``read5.*`` events — so a restart loses
+        nothing but a follow-up still running."""
+        trig = next((e for e in reversed(evs) if e.get("kind") == "read5.trigger"), None)
+        if trig is None:
+            return None
+        follow = next((e for e in reversed(evs) if e.get("kind") == "read5.follow"), None)
+        running = sid in self._read5_running
+        out: dict[str, Any] = {"lines": read5rec.card_lines(trig, follow, now=time.time(), running=running),
+                               "excluded": trig.get("excluded"), "recordOnly": True}
+        if not trig.get("excluded"):
+            out.update(split=trig.get("split"), lead=trig.get("lead"), leadVsEngine=trig.get("leadVsEngine"),
+                       basis=trig.get("basis"), missing=trig.get("missingReads"),
+                       walls=(trig.get("walls") or {}).get("overall"), f3=(follow or {}).get("f3"),
+                       followComplete=bool((follow or {}).get("complete")), followRunning=running)
+        return out
 
     @staticmethod
     def _cta_size(ps: dict[str, Any] | None, plan: dict[str, Any] | None) -> dict[str, Any]:
@@ -7607,6 +8038,8 @@ class Engine:
                             await asyncio.to_thread(self.fulltape.write, rows)
                         except Exception as exc:  # noqa: BLE001 - never costs the housekeeping after it
                             log.warning("tape_full.write_failed", error=str(exc)[:120])
+                if not self.booting:
+                    await self._rec_tick(now)  # RECORD-ONLY: the 5-read recorder's day, bars, minutes and band
 
             async with self.guards.duty("committee.autopilot"):
                 # The nightly research loop, once per day after its hour, only with every segment
@@ -8090,6 +8523,9 @@ class Engine:
                 "reconnects": fh.reconnects,
                 "silence_s": fh.silence_s,
                 "subscriptions": fh.subscriptions,
+                # RECORD-ONLY: the record band's codes per channel, and what the socket streams for both engines
+                "subscriptions_record": {ch: v["record"] for ch, v in self.feed.record_counts().items()},
+                "subscriptions_socket": {ch: v["socket"] for ch, v in self.feed.record_counts().items()},
                 # one broker socket for two engines: who serves, who reads, and the hop's delay
                 "hub": self.feed_hub.stats() if self.feed_hub is not None else self.feed.hub_stats(),
             },
@@ -8130,6 +8566,8 @@ class Engine:
             "booting": self.booting,
             # the gap the gap rules read (KN_GAP_SOURCE) and today's official-open capture (CTB-19Oct)
             "gap": {"source": self.s.gap_source, "official_open": self.official_opens.stats()},
+            # the 5-read and the strike walls, recorded (RECORD-ONLY): the band, the recorder, the reads
+            "record5": self.record5_health(),
             "positions_open": len([p for p in self.positions.values() if p.status == "OPEN"]),
             "positions_stale_quote": len(self._stale_positions),
             "boot_notes": self.boot_notes,

@@ -201,19 +201,33 @@ class FivePaisaFeed:
         self.pool_primed = 0
         #: serving side: channel -> code -> since when a twin has held it at the broker
         self._pinned_since: dict[str, dict[str, float]] = {"mf": {}, "md": {}, "oi": {}}
+        # -- the record set (RECORD-ONLY, operator 2026-10-19: record the 5-read and the strike walls "for research
+        # only") --------------------------------------------------------------------------------------------------
+        #: channel -> code -> instrument the RECORDER asked for (the record band, ``Engine._rec_sync``): streamed at
+        #: the broker beside ``_desired``, but a frame of a code only here never reaches the engine's handlers
+        self._record: dict[str, dict[str, Instrument]] = {"mf": {}, "md": {}, "oi": {}}
+        self._record_since: dict[str, dict[str, float]] = {"mf": {}, "md": {}, "oi": {}}
+        #: every market-feed and OI row this socket (or the hub) carries, whoever asked for it, handed to the
+        #: recorder before — and apart from — the engine's own dispatch: ``(channel, row, arrived, pooled)``. It must
+        #: not await and must not raise (it is wrapped anyway)
+        self.on_record: Callable[[str, dict[str, Any], float, bool], None] | None = None
+        self.record_tap_errors = 0
 
     # -- subscription state ----------------------------------------------------------------------
 
     async def subscribe(self, channel: str, instruments: list[Instrument]) -> None:
         fresh = [i for i in instruments if i.scrip_code not in self._desired[channel]]
         now = time.time()
-        held = self._twin_codes(channel)
+        # a code the record band holds is held at the broker exactly as a code the twin holds (RECORD-ONLY's one
+        # effect, behind KN_RECORD_BAND): not sent again, primed from the pool, live since the band's subscribe
+        held = self._twin_codes(channel) | set(self._record.get(channel, {}))
         pinned = self._pinned_since.get(channel, {})
+        rec_since = self._record_since.get(channel, {})
         for i in fresh:
             self._desired[channel][i.scrip_code] = i
             # a code a twin already holds has streamed through this socket since the twin's pin: a frame
             # from then on is as current for this engine as for the twin
-            since = min(now, pinned.get(i.scrip_code, now)) if i.scrip_code in held else now
+            since = min(now, pinned.get(i.scrip_code, now), rec_since.get(i.scrip_code, now)) if i.scrip_code in held else now
             self._since.setdefault(channel, {})[i.scrip_code] = since
         self.health.subscriptions = {k: len(v) for k, v in self._desired.items()}
         await self._prime(channel, fresh)
@@ -250,13 +264,16 @@ class FivePaisaFeed:
             since = self.subscribed_since(channel, code)
             if since is None:
                 since = self._pinned_since.get(channel, {}).get(code)
+            if since is None:
+                since = self._record_since.get(channel, {}).get(code)
             if since is not None:
                 out.append((hit[0], hit[1], since))
         return out
 
     def streaming(self, channel: str, *, but_twin: str) -> set[str]:
-        """Serving side: the codes the broker streams on ``channel`` for this engine or any twin but one."""
-        return set(self._desired.get(channel, {})) | self._twin_codes(channel, but=but_twin)
+        """Serving side: the codes the broker streams on ``channel`` for this engine (its own set and its record set)
+        or any twin but one."""
+        return set(self._desired.get(channel, {})) | set(self._record.get(channel, {})) | self._twin_codes(channel, but=but_twin)
 
     def pool_stats(self) -> dict[str, int]:
         return {"codes": len(self._pool), "primed": self.pool_primed}
@@ -274,10 +291,74 @@ class FivePaisaFeed:
         for i in gone:
             self._since.get(channel, {}).pop(i.scrip_code, None)
         self.health.subscriptions = {k: len(v) for k, v in self._desired.items()}
-        held = self._twin_codes(channel)
-        gone = [i for i in gone if i.scrip_code not in held]  # the twin still wants it
+        held = self._twin_codes(channel) | set(self._record.get(channel, {}))
+        gone = [i for i in gone if i.scrip_code not in held]  # the twin (or the record band) still wants it
         if gone and self._ws is not None:
             await self._send_batched(channel, "u", gone)
+
+    # -- the record set (RECORD-ONLY) ---------------------------------------------------------------
+
+    async def subscribe_record(self, channel: str, instruments: list[Instrument]) -> list[Instrument]:
+        """The recorder's codes: streamed at the broker (sent only when neither this engine nor a twin already
+        holds them), their frames handed to ``on_record`` and never to the engine's handlers unless the engine
+        subscribes them itself. Returns the codes newly added."""
+        if channel not in self._record:
+            return []
+        mine = self._record[channel]
+        fresh = [i for i in instruments if i.scrip_code not in mine]
+        now = time.time()
+        held = set(self._desired.get(channel, {})) | self._twin_codes(channel)
+        since = self._record_since.setdefault(channel, {})
+        for i in fresh:
+            mine[i.scrip_code] = i
+            since[i.scrip_code] = now
+        send = [i for i in fresh if i.scrip_code not in held]
+        if send and self._ws is not None:
+            await self._send_batched(channel, "s", send)
+        return fresh
+
+    async def unsubscribe_record(self, channel: str, instruments: list[Instrument]) -> list[Instrument]:
+        """Drop codes from the record set; one this engine or a twin still holds is not unsubscribed at the broker."""
+        if channel not in self._record:
+            return []
+        gone = [i for i in instruments if self._record[channel].pop(i.scrip_code, None)]
+        for i in gone:
+            self._record_since.get(channel, {}).pop(i.scrip_code, None)
+        held = set(self._desired.get(channel, {})) | self._twin_codes(channel)
+        send = [i for i in gone if i.scrip_code not in held]
+        if send and self._ws is not None:
+            await self._send_batched(channel, "u", send)
+        return gone
+
+    def is_record(self, channel: str, scrip_code: str) -> bool:
+        return scrip_code in self._record.get(channel, {})
+
+    def record_codes(self, channel: str) -> set[str]:
+        return set(self._record.get(channel, {}))
+
+    def record_instruments(self, channel: str) -> dict[str, Instrument]:
+        return dict(self._record.get(channel, {}))
+
+    def record_counts(self) -> dict[str, dict[str, int]]:
+        """The record set per channel, the part of it this engine does not itself hold (the EXTRA subscriptions),
+        and what the socket streams for this engine and its twins together."""
+        out: dict[str, dict[str, int]] = {}
+        for ch in self._desired:
+            rec = set(self._record.get(ch, {}))
+            mine = set(self._desired.get(ch, {}))
+            out[ch] = {"record": len(rec), "extra": len(rec - mine), "socket": len(mine | rec | self._twin_codes(ch))}
+        return out
+
+    def _tap_record(self, channel: str, row: dict[str, Any], arrived: float, pooled: bool) -> None:
+        tap = self.on_record
+        if tap is None or channel == "md":
+            return
+        try:
+            tap(channel, row, arrived, pooled)
+        except Exception as exc:  # noqa: BLE001 - the recorder never costs the reader a frame
+            self.record_tap_errors += 1
+            if self.record_tap_errors <= 5:
+                log.warning("feed.record_tap_failed", error=str(exc)[:120])
 
     # -- the twin's subscriptions (serving side) ---------------------------------------------------
 
@@ -293,7 +374,7 @@ class FivePaisaFeed:
         if channel not in self._desired:
             return
         mine = self._twins.setdefault(twin, {}).setdefault(channel, {})
-        others = self._twin_codes(channel, but=twin) | set(self._desired[channel])
+        others = self._twin_codes(channel, but=twin) | set(self._desired[channel]) | set(self._record.get(channel, {}))
         pinned = self._pinned_since.setdefault(channel, {})
         if op == "s":
             fresh = [i for i in instruments if i.scrip_code not in mine]
@@ -328,6 +409,8 @@ class FivePaisaFeed:
         channel, code = cc
         if code in self._desired.get(channel, {}):
             return True
+        if code in self._record.get(channel, {}):
+            return False  # the recorder's alone (RECORD-ONLY): it has had the row already
         if self.hub is not None:
             return False
         return code not in self._twin_codes(channel)
@@ -424,9 +507,10 @@ class FivePaisaFeed:
                 self._state(False)
 
     async def _subscribe_everything(self) -> None:
-        """A fresh broker socket: this engine's desired set and every code a twin holds through it."""
+        """A fresh broker socket: this engine's desired set, its record set and every code a twin holds through it."""
         for channel, wanted in self._desired.items():
-            union = {**wanted, **{c: i for t in self._twins.values() for c, i in t.get(channel, {}).items()}}
+            union = {**wanted, **self._record.get(channel, {}),
+                     **{c: i for t in self._twins.values() for c, i in t.get(channel, {}).items()}}
             if union:
                 await self._send_batched(channel, "s", list(union.values()))
 
@@ -449,8 +533,9 @@ class FivePaisaFeed:
         log.info("feed.hub_connected", hub=f"{host}:{port}", subscriptions=self.health.subscriptions)
         try:
             for channel, wanted in self._desired.items():
-                if wanted:
-                    await self._send_batched(channel, "s", list(wanted.values()))
+                union = {**wanted, **self._record.get(channel, {})}
+                if union:
+                    await self._send_batched(channel, "s", list(union.values()))
             again = self._connects > 0
             self._connects += 1
             if self.on_connect is not None:
@@ -527,6 +612,7 @@ class FivePaisaFeed:
         if held is not None and held[1] >= arrived:
             return  # this engine has the frame, or a newer one came off the stream meanwhile
         self._pool[cc] = (row, arrived)
+        self._tap_record(channel, row, arrived, True)
         if wanted:
             try:
                 await self._dispatch(row, arrived, pooled=True)
@@ -563,6 +649,7 @@ class FivePaisaFeed:
             cc = row_channel_code(row)
             if cc is not None:
                 self._pool[cc] = (row, arrived)
+                self._tap_record(cc[0], row, arrived, False)
             if not self._wants_cc(cc):
                 continue
             try:
