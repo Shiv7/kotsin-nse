@@ -200,19 +200,78 @@ async def test_unsubscribes_never_drop_a_code_the_other_side_holds():
 
 @pytest.mark.asyncio
 async def test_a_reconnect_subscribes_the_engines_codes_first_then_the_record_sets():
+    """Engines first across every channel (re-check, 20 Oct): a book's depth and OI never wait behind the bands' prices."""
     a = _feed([])
     a._ws = broker = Broker()
     await a.subscribe("mf", [RELIANCE])
+    await a.subscribe("md", [RELIANCE])
+    await a.subscribe("oi", [BAND])  # the engine's OI of a strike its band also streams: sent once, with the engine's
     await a.subscribe_record("mf", [BAND])
-    await a.subscribe_record("oi", [BAND2])
+    await a.subscribe_record("oi", [BAND, BAND2])
     await a.pin("twin-1", "mf", "s", [BAND2])
+    await a.pin("twin-1", "oi", "s", [Instrument("88004", "PNB", Segment.NSE_FO, InstrumentKind.OPTION)])
     await a.pin("twin-1", "mf", "s", [Instrument("88003", "PNB", Segment.NSE_FO, InstrumentKind.OPTION)], record=True)
     broker.frames.clear()
     await a._subscribe_everything()
     sent = [(f["Method"], e["ScripCode"]) for f in broker.frames for e in f["MarketFeedData"]]
     assert sent == [("MarketFeedV3", RELIANCE.scrip_code), ("MarketFeedV3", BAND2.scrip_code),
+                    ("MarketDepthService", RELIANCE.scrip_code),
+                    ("GetScripInfoForFuture", BAND.scrip_code), ("GetScripInfoForFuture", "88004"),
                     ("MarketFeedV3", BAND.scrip_code), ("MarketFeedV3", "88003"), ("GetScripInfoForFuture", BAND2.scrip_code)], \
-        "this engine's, the twin engine's, then this engine's band and the twin's band"
+        "this engine's and the twin engine's codes on every channel, then this engine's band and the twin's band"
+
+
+@pytest.mark.asyncio
+async def test_a_stream_frame_landing_during_the_stand_in_snapshot_is_not_sent_again_with_an_earlier_time():
+    """Re-check, 20 Oct: the stand-in snapshot dispatches one code after another, each awaiting the engine. A stream
+    frame of a later code landing meanwhile reaches the engine off the stream (the code is wanted already); the
+    snapshot does not send it again as a frame arriving before it — quote times never go back, no tick counts twice."""
+    seen: list[dict] = []
+    a = _feed(seen)
+    a._ws = Broker()
+    _up(a)
+    await a.subscribe_record("mf", [BAND, BAND2])
+    await a._handle(_tick(BAND.scrip_code, 4.2, 4.1, 4.3))
+    await a._handle(_tick(BAND2.scrip_code, 7.0, 6.9, 7.1))
+    landed = False
+
+    async def on_tick(t: dict) -> None:
+        nonlocal landed
+        seen.append(t)
+        if t["scrip_code"] == BAND.scrip_code and not landed:
+            landed = True
+            await asyncio.sleep(0.002)
+            await a._handle(_tick(BAND2.scrip_code, 7.05, 7.0, 7.1))  # BAND2's stream, during BAND's snapshot
+
+    a.on_tick = on_tick
+    ticks0 = a.health.ticks
+    await a.subscribe("mf", [BAND, BAND2])
+    b2 = [t for t in seen if t["scrip_code"] == BAND2.scrip_code]
+    assert [t["bid"] for t in b2] == [7.0], "BAND2 once: the stream's frame, not the pool's copy of it again"
+    assert a.health.ticks - ticks0 == 2 and a.pool_snapshots == 1
+    assert [t["recv_ts"] for t in seen] == sorted(t["recv_ts"] for t in seen)
+
+
+@pytest.mark.asyncio
+async def test_a_subscribe_builds_no_band_wide_set():
+    """On the decision path (strike selection, re-check 20 Oct: 69 → 230 µs a call with the band on): membership per
+    fresh code, and a call whose codes are all held returns at once."""
+    a = _feed([])
+    a._ws = broker = Broker()
+    _up(a)
+    await a.subscribe_record("mf", [BAND])
+    await a.pin("twin-1", "mf", "s", [BAND2], record=True)
+
+    def boom(*_a: Any, **_k: Any) -> set[str]:
+        raise AssertionError("a set of every band's codes built per subscribe")
+
+    a._twin_record_codes = boom  # type: ignore[method-assign]
+    a._twin_codes = boom  # type: ignore[method-assign]
+    await a.subscribe("mf", [RELIANCE, BAND, BAND2])
+    assert broker.subs(RELIANCE.scrip_code) == 1 and broker.subs(BAND.scrip_code) == 1 and broker.subs(BAND2.scrip_code) == 1
+    frames = len(broker.frames)
+    await a.subscribe("mf", [RELIANCE, BAND, BAND2])
+    assert len(broker.frames) == frames
 
 
 def test_the_record_marker_is_the_hubs_alone():
@@ -315,6 +374,45 @@ async def test_the_twins_own_band_code_goes_to_the_hub_and_its_engine_unsubscrib
     assert unsubs == 0 and server.stats()["pinned_record"]["mf"] == 1, "the twin's band still holds it at the broker"
     await b.unsubscribe_record("mf", [BAND])
     await _until(lambda: sum(1 for f in broker.frames if f["Operation"] == "Unsubscribe") == 1)
+
+
+async def _twin_reads_a_code_the_serving_engine_streams(hub, *, band: bool) -> tuple[list[tuple[Any, ...]], float | None, float]:
+    a, _a_seen, _broker, _server, twin = hub
+    await a.subscribe("mf", [BAND])  # the serving ENGINE holds the strike (a book of A priced it)
+    t_a = a.subscribed_since("mf", BAND.scrip_code)
+    await a._handle(_tick(BAND.scrip_code, 4.2, 4.1, 4.3))
+    b, b_seen = await twin()
+    if band:
+        await b.subscribe_record("mf", [BAND])  # the twin's band holds it too
+        await _until(lambda: _server.stats()["pinned_record"]["mf"] == 1)
+    await a._handle(_tick(BAND.scrip_code, 4.25, 4.2, 4.3))  # the stream's last frame before the twin's book wants it
+    await _until(lambda: ("mf", BAND.scrip_code) in b._pool and b._pool[("mf", BAND.scrip_code)][0]["LastRate"] == 4.25)
+    arrived = b._pool[("mf", BAND.scrip_code)][1]
+    await b.subscribe("mf", [BAND])  # the twin's book prices the same strike; no further frame comes (illiquid)
+    await _until(lambda: _server.stats()["answered_from_pool"] >= 1)
+    await asyncio.sleep(0.1)
+    got = [(t.get("pooled"), t["ltp"], t["bid"], t["ask"], t["recv_ts"] == arrived) for t in b_seen
+           if t["scrip_code"] == BAND.scrip_code]
+    assert t_a is not None
+    return got, b.subscribed_since("mf", BAND.scrip_code), t_a
+
+
+@pytest.mark.asyncio
+async def test_the_twins_band_code_the_serving_engine_streams_is_primed_from_its_own_pool_as_without_the_band(hub):
+    """Re-check, 20 Oct (BAJFINANCE 5 Oct shape): with its band on, the twin's book got NO first frame of a strike its
+    band held and the serving engine's books streamed — its subscribe left the own-pool prime to the hub's answer, and
+    the hub's pool frame was older than its own copy. Now: the twin's own pool frame, at its true age, live since the
+    serving engine's subscribe — as with the band off."""
+    got, since, t_a = await _twin_reads_a_code_the_serving_engine_streams(hub, band=True)
+    assert got == [(True, 4.25, 4.2, 4.3, True)], got
+    assert since == pytest.approx(t_a, abs=1e-5)
+
+
+@pytest.mark.asyncio
+async def test_the_same_twin_read_with_the_band_off(hub):
+    got, since, t_a = await _twin_reads_a_code_the_serving_engine_streams(hub, band=False)
+    assert got == [(True, 4.25, 4.2, 4.3, True)], got
+    assert since == pytest.approx(t_a, abs=1e-5)
 
 
 @pytest.mark.asyncio

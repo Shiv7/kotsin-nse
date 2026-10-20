@@ -26,7 +26,7 @@ import asyncio
 import json
 import random
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -49,6 +49,8 @@ MAX_ENTRIES_PER_FRAME = 200
 HEALTHY_CONNECTION_S = 60.0
 #: the twin reading from a feed hub retries this often at most: the hub is on this machine
 HUB_BACKOFF_MAX_S = 5.0
+#: ``_take_pooled``: the code's subscribe left no own-pool prime waiting on the hub's answer
+_NOT_PENDING: Any = object()
 
 
 def row_channel_code(row: dict[str, Any]) -> tuple[str, str] | None:
@@ -210,6 +212,11 @@ class FivePaisaFeed:
         #: reading side: the hub's broker socket was down from here to its ``#up`` — handed to ``on_broker_gap``
         self._hub_down_at: float | None = None
         self.on_broker_gap: Callable[[float, float], None] | None = None
+        #: reading side: channel -> code this engine subscribed while its own band held it -> the pool entry it joined
+        #: with. Its own-pool prime waits for the hub's answer (``_take_pooled``): a band-only code is answered as a fresh
+        #: snapshot, a code an engine streams there from the pool — then primed from this engine's own pool, as without
+        #: the band (re-check, 20 Oct: B's book got no first frame of a strike A's books streamed)
+        self._hub_prime: dict[str, dict[str, tuple[dict[str, Any], float] | None]] = {"mf": {}, "md": {}, "oi": {}}
         #: every market-feed and OI row this socket (or the hub) carries, whoever asked for it, handed to the
         #: recorder after — and apart from — the engine's own dispatch: ``(channel, row, arrived, pooled)``. It must
         #: not await and must not raise (it is wrapped anyway)
@@ -219,50 +226,77 @@ class FivePaisaFeed:
     # -- subscription state ----------------------------------------------------------------------
 
     async def subscribe(self, channel: str, instruments: list[Instrument]) -> None:
-        fresh = [i for i in instruments if i.scrip_code not in self._desired[channel]]
+        desired = self._desired[channel]
+        fresh = [i for i in instruments if i.scrip_code not in desired]
+        if not fresh:
+            return  # on the decision path (strike selection): an all-held call costs the membership checks only
         now = time.time()
-        held = self._twin_codes(channel)
         # RECORD-ONLY: a code only a record set streams (this engine's band, or a twin's) is subscribed exactly as if it
         # were not — live from now, not primed with the pool's aged frame — and its broker snapshot is stood in for by
         # the code's current state, which the pool holds while the band streams it (``_snapshot_from_pool``). On the
-        # reading side the hub answers the same way; nothing is deduplicated here (review, 20 Oct)
+        # reading side the hub answers the same way; nothing is deduplicated here (review, 20 Oct). Membership per
+        # fresh code, never a set of every band's codes built per call (re-check, 20 Oct: 69 → 230 µs a call band on)
         own_rec = self._record.get(channel, {})
-        rec_only = (set(own_rec) | self._twin_record_codes(channel)) - held if self.hub is None else set()
+        serving = self.hub is None
         pinned = self._pinned_since.get(channel, {})
+        ch_since = self._since.setdefault(channel, {})
+        held: set[str] = set()
+        rec_only: dict[str, tuple[dict[str, Any], float] | None] = {}  # code -> its pool entry when it joined
+        await_hub: list[str] = []
         for i in fresh:
-            self._desired[channel][i.scrip_code] = i
-            # a code a twin already holds has streamed through this socket since the twin's pin: a frame
-            # from then on is as current for this engine as for the twin
-            since = min(now, pinned.get(i.scrip_code, now)) if i.scrip_code in held else now
-            self._since.setdefault(channel, {})[i.scrip_code] = since
+            code = i.scrip_code
+            desired[code] = i
+            if self._twin_holds(channel, code):
+                held.add(code)
+                # a code a twin already holds has streamed through this socket since the twin's pin: a frame
+                # from then on is as current for this engine as for the twin
+                ch_since[code] = min(now, pinned.get(code, now))
+                continue
+            ch_since[code] = now
+            if code in own_rec or (serving and self._twin_band_holds(channel, code)):
+                if serving:
+                    rec_only[code] = self._pool.get((channel, code))
+                else:
+                    await_hub.append(code)
         self.health.subscriptions = {k: len(v) for k, v in self._desired.items()}
+        if await_hub and channel in PRIMED_CHANNELS:
+            # reading the hub, a code this engine's own band holds: the hub's answer decides — a fresh snapshot when only
+            # a band streams it, else its pool's frame, which ``_take_pooled`` primes from this engine's own pool as
+            # without the band (re-check, 20 Oct). Kept: the pool entry it joined with
+            pend = self._hub_prime.setdefault(channel, {})
+            for code in await_hub:
+                pend[code] = self._pool.get((channel, code))
         # the pool's aged frame primes as before (5 Oct) — but not a code only a band streams here, nor, reading the
         # hub, a code this engine's own band holds: the snapshot below (or the hub's) answers those
-        skip = rec_only if self.hub is None else set(own_rec)
-        await self._prime(channel, [i for i in fresh if i.scrip_code not in skip])
+        skip = set(rec_only) | set(await_hub)
+        await self._prime(channel, [i for i in fresh if i.scrip_code not in skip] if skip else fresh)
         if rec_only:
-            await self._snapshot_from_pool(channel, [i for i in fresh if i.scrip_code in rec_only])
-        fresh = [i for i in fresh if i.scrip_code not in held and i.scrip_code not in rec_only]  # already at the broker
-        if fresh and self._ws is not None:
-            await self._send_batched(channel, "s", fresh)
+            await self._snapshot_from_pool(channel, [i for i in fresh if i.scrip_code in rec_only], rec_only)
+        send = [i for i in fresh if i.scrip_code not in held and i.scrip_code not in rec_only]  # already at the broker
+        if send and self._ws is not None:
+            await self._send_batched(channel, "s", send)
 
-    async def _snapshot_from_pool(self, channel: str, instruments: list[Instrument]) -> None:
+    async def _snapshot_from_pool(self, channel: str, instruments: list[Instrument],
+                                  joined: Mapping[str, tuple[dict[str, Any], float] | None] | None = None) -> None:
         """RECORD-ONLY: this engine's subscribe of codes only a record set streams, answered as the broker answers a
         fresh subscribe — with the code's current state, now. The record set's stream is live, so the pool's last
         frame IS that state; it is dispatched as a broker frame arriving now (not ``pooled``: a price, a book and an
         OI print, exactly what the broker's snapshot carries), so a book reads what it would without the band, up to
         one round trip sooner. Only while the socket is up and only a frame of this connection: otherwise nothing,
-        and the stream's (or the reconnect's) next frame reaches the engine as it lands."""
+        and the stream's (or the reconnect's) next frame reaches the engine as it lands. ``joined``: each code's pool
+        entry when it joined the desired set — a frame that landed since (during an earlier code's dispatch) went to
+        the engine off the stream already, and is not sent again with an earlier time (re-check, 20 Oct)."""
         connected = self.health.connected_since
         if self._ws is None or not self.health.connected or connected is None:
             return
-        now = time.time()
         for i in instruments:
             hit = self._pool.get((channel, i.scrip_code))
             if hit is None or hit[1] < connected:
                 continue
+            if joined is not None and hit is not joined.get(i.scrip_code):
+                continue  # the stream's own frame since the subscribe: the engine has it
             try:
-                await self._dispatch(hit[0], now)
+                await self._dispatch(hit[0], time.time())
                 self.pool_snapshots += 1
             except Exception as exc:  # noqa: BLE001 - a stand-in snapshot is a head start, never a reason to stop
                 self.health.parse_errors += 1
@@ -339,8 +373,11 @@ class FivePaisaFeed:
 
     async def unsubscribe(self, channel: str, instruments: list[Instrument]) -> None:
         gone = [i for i in instruments if self._desired[channel].pop(i.scrip_code, None)]
+        pend = self._hub_prime.get(channel)
         for i in gone:
             self._since.get(channel, {}).pop(i.scrip_code, None)
+            if pend:
+                pend.pop(i.scrip_code, None)
         self.health.subscriptions = {k: len(v) for k, v in self._desired.items()}
         if self.hub is None:
             held = self._twin_codes(channel) | set(self._record.get(channel, {})) | self._twin_record_codes(channel)
@@ -422,6 +459,14 @@ class FivePaisaFeed:
     def _twin_record_codes(self, channel: str) -> set[str]:
         """The codes the twins' RECORD bands hold on ``channel`` (RECORD-ONLY)."""
         return {c for chans in self._twin_records.values() for c in chans.get(channel, {})}
+
+    def _twin_holds(self, channel: str, code: str) -> bool:
+        """Does a twin's ENGINE hold ``code`` on ``channel`` — membership, no set built."""
+        return any(code in chans.get(channel, ()) for chans in self._twins.values())
+
+    def _twin_band_holds(self, channel: str, code: str) -> bool:
+        """Does a twin's RECORD band hold ``code`` on ``channel`` (RECORD-ONLY) — membership, no set built."""
+        return any(code in chans.get(channel, ()) for chans in self._twin_records.values())
 
     def pinned_counts(self) -> dict[str, int]:
         return {ch: len(self._twin_codes(ch)) for ch in self._desired}
@@ -580,15 +625,21 @@ class FivePaisaFeed:
                 self._state(False)
 
     async def _subscribe_everything(self) -> None:
-        """A fresh broker socket: this engine's desired set, every code a twin's engine holds, then the record sets
-        (this engine's band, the twins') — the engines' own codes first (review, 20 Oct)."""
+        """A fresh broker socket: this engine's desired set and every code a twin's engine holds, on every channel, then
+        the record sets (this engine's band, the twins') — the engines' own codes first, prices, books and OI alike
+        (review, 20 Oct; re-check: across the channels too, so a book's depth and OI never wait behind the bands)."""
+        sent: dict[str, dict[str, Instrument]] = {}
         for channel, wanted in self._desired.items():
-            union = {**wanted,
-                     **{c: i for t in self._twins.values() for c, i in t.get(channel, {}).items()},
-                     **self._record.get(channel, {}),
-                     **{c: i for t in self._twin_records.values() for c, i in t.get(channel, {}).items()}}
+            union = {**wanted, **{c: i for t in self._twins.values() for c, i in t.get(channel, {}).items()}}
+            sent[channel] = union
             if union:
                 await self._send_batched(channel, "s", list(union.values()))
+        for channel in self._desired:
+            rec = {**self._record.get(channel, {}),
+                   **{c: i for t in self._twin_records.values() for c, i in t.get(channel, {}).items()}}
+            rest = [i for c, i in rec.items() if c not in sent[channel]]
+            if rest:
+                await self._send_batched(channel, "s", rest)
 
     def _state(self, up: bool) -> None:
         if self.on_state is not None:
@@ -606,6 +657,8 @@ class FivePaisaFeed:
         async with self._lock:
             self._ws = HubLink(writer)
         self.health.connected_since = time.time()
+        for pend in self._hub_prime.values():
+            pend.clear()  # a new link's resubscribe is answered as any reconnect's: no prime waits on it
         log.info("feed.hub_connected", hub=f"{host}:{port}", subscriptions=self.health.subscriptions)
         try:
             for channel, wanted in self._desired.items():
@@ -680,12 +733,25 @@ class FivePaisaFeed:
             return
         channel, code = cc
         wanted = code in self._desired.get(channel, {}) and channel in PRIMED_CHANNELS
+        pend = self._hub_prime.get(channel)
+        joined = pend.pop(code, _NOT_PENDING) if pend else _NOT_PENDING
         if wanted:
             ch_since = self._since.setdefault(channel, {})
             ch_since[code] = min(ch_since.get(code, since), since)
         held = self._pool.get(cc)
         if held is not None and held[1] >= arrived:
-            return  # this engine has the frame, or a newer one came off the stream meanwhile
+            # this engine has the frame, or a newer one came off the stream meanwhile. RECORD-ONLY: when its own band
+            # held the code, the subscribe left the own-pool prime to this answer — an engine streams the code at the
+            # hub, so the own pool's frame primes it now, as without the band. Only the very entry it joined with: a
+            # newer one came off the stream after the subscribe, and the engine has it already (re-check, 20 Oct)
+            if wanted and held is joined:
+                try:
+                    await self._dispatch(held[0], held[1], pooled=True)
+                    self.pool_primed += 1
+                except Exception as exc:  # noqa: BLE001
+                    self.health.parse_errors += 1
+                    log.warning("feed.prime_failed", channel=channel, scrip=code, error=str(exc)[:120])
+            return
         self._pool[cc] = (row, arrived)
         if wanted:
             try:
