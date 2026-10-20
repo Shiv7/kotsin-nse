@@ -205,6 +205,17 @@ def test_oi_as_of_a_moment_with_its_basis_and_the_previous_sessions_fallback():
     assert rec.oi_prev == {"O1": 1300.0} and rec.oi_at("O1", at("09:30:00", "2026-10-21"))[2] == "prevday"
 
 
+def test_a_pooled_frame_from_an_earlier_day_is_not_todays_quote():
+    """The pool keeps a code's last frame however old (the hub's answer to a twin's subscribe): one that first arrived
+    yesterday is neither today's quote nor a volume reference."""
+    rec = recorder()
+    rec.on_frame("mf", mf("O1", 9.0, 8.9, 9.1, TotalQty=50_000, TickDt=dt(at("15:29:00", "2026-10-16"))),
+                 at("15:29:01", "2026-10-16"), True)
+    assert rec.quote("O1", at("09:20:00")) is None and "O1" not in rec._vol and rec.frames_watched == 0
+    rec.on_frame("mf", mf("O1", 9.5, 9.4, 9.6, TotalQty=1_000, TickDt=dt(at("09:15:30"))), at("09:15:31"), True)
+    assert rec.quote("O1", at("09:20:00"))["ltp"] == 9.5 and rec.frames_pooled == 1
+
+
 def test_an_unwatched_code_costs_a_lookup_and_a_fault_never_reaches_the_reader():
     rec = recorder()
     rec.on_frame("mf", mf("ZZZ", 1.0), at("10:00:00"))

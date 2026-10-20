@@ -687,6 +687,7 @@ class Engine:
         self._rec_day = ""
         self._rec_last_sync = 0.0
         self._rec_last_minutes = 0.0
+        self._rec_last_trim = 0.0
         self._rec_capped: dict[str, bool] = {"mf": False, "oi": False}
         self._rec_wall_slots: set[str] = set()
         self._rec_prep_task: asyncio.Task[Any] | None = None
@@ -2829,16 +2830,17 @@ class Engine:
                     gone = [k for k, v in (*c.legs.items(), ("FUT0", c.fut), ("EQ", c.eq)) if v is None]
                     if gone:
                         why = f"contracts missing: {', '.join(gone)} not listed"
+            # nothing is written before signal + 10 s — the decision path's own ledger writes go first — and a burst
+            # (forty triggers at 09:45) is spread over three seconds, each read yielding between its steps: every value
+            # is as of its own moment, so when it is computed changes nothing
+            spread = (zlib.crc32(sid.encode()) % 3000) / 1000.0
+            await self._read5_wait(s + 10 + spread)
             if why is not None or c is None:
                 self.read5_stats["excluded"] += 1
                 rec5 = {**base, "excluded": why}
                 await self.ledger.event("read5.trigger", rec5)
                 self.archive.record5("read5", s, read5rec.flat_row(rec5, None))
                 return
-            # a burst (forty triggers at 09:45) is spread over three seconds, and each read yields between its steps:
-            # every value is as of its own moment, so when it is computed changes nothing
-            spread = (zlib.crc32(sid.encode()) % 3000) / 1000.0
-            await self._read5_wait(s + 10 + spread)
             atr, atr_src = await self._read5_atr(sig, s)
             prev = self.calendar.previous_trading_day(today, Segment.NSE_FO)
             prev_days = [prev.isoformat(), self.calendar.previous_trading_day(prev, Segment.NSE_FO).isoformat()]
@@ -3002,7 +3004,9 @@ class Engine:
                 if ist_hm(now) >= slot and key not in self._rec_watch_done and self._rec_prepared_day == today.isoformat():
                     self._rec_watch_done.add(key)
                     rec.set_watch(self._rec_watch(today))
-            rec.trim(now)
+            if now - self._rec_last_trim >= 30.0:
+                self._rec_last_trim = now
+                rec.trim(now)
             if rec.close_bars(now):
                 for r in rec.take_bar_rows():
                     self.archive.record5("option_volume_30m", float(r["bucket_ts"]), r)
@@ -3018,7 +3022,7 @@ class Engine:
             self.read5_stats["last_error"] = f"tick: {exc}"[:200]
             log.warning("read5.tick_failed", error=str(exc)[:160])
 
-    def record5_health(self) -> dict[str, Any]:
+    def record5_health(self, counts: dict[str, dict[str, int]] | None = None) -> dict[str, Any]:
         rec = self.recorder
         return {
             "enabled": rec is not None,
@@ -3026,7 +3030,7 @@ class Engine:
                      "walls_mf": self.s.record5_walls_mf, "roots": len(self._rec_bands), "day": self._rec_day,
                      "last_sync": self._rec_last_sync or None, "capped": dict(self._rec_capped),
                      "caps": {"mf": self.s.record5_max_extra_mf, "oi": self.s.record5_max_extra_oi}},
-            "subscriptions": self.feed.record_counts(),
+            "subscriptions": counts if counts is not None else self.feed.record_counts(),
             "recorder": rec.stats() if rec is not None else None,
             "reads": {**self.read5_stats, "live": self._read5_live, "followups_running": len(self._read5_running)},
             "volume_tape": self.volume_tape.stats(),
@@ -8009,6 +8013,7 @@ class Engine:
 
     def health_snapshot(self) -> dict[str, Any]:
         fh = self.feed.health
+        rec_counts = self.feed.record_counts()  # RECORD-ONLY: the record band's subscriptions, once
         open_now = self.market_open_now()
         # Outside the session a silent socket and a dead token are the normal state of affairs,
         # not faults. A health signal that is red every evening is one nobody reads (R17), so the
@@ -8110,8 +8115,8 @@ class Engine:
                 "silence_s": fh.silence_s,
                 "subscriptions": fh.subscriptions,
                 # RECORD-ONLY: the record band's codes per channel, and what the socket streams for both engines
-                "subscriptions_record": {ch: v["record"] for ch, v in self.feed.record_counts().items()},
-                "subscriptions_socket": {ch: v["socket"] for ch, v in self.feed.record_counts().items()},
+                "subscriptions_record": {ch: v["record"] for ch, v in rec_counts.items()},
+                "subscriptions_socket": {ch: v["socket"] for ch, v in rec_counts.items()},
                 # one broker socket for two engines: who serves, who reads, and the hop's delay
                 "hub": self.feed_hub.stats() if self.feed_hub is not None else self.feed.hub_stats(),
             },
@@ -8148,7 +8153,7 @@ class Engine:
             # the gap the gap rules read (KN_GAP_SOURCE) and today's official-open capture (CTB-19Oct)
             "gap": {"source": self.s.gap_source, "official_open": self.official_opens.stats()},
             # the 5-read and the strike walls, recorded (RECORD-ONLY): the band, the recorder, the reads
-            "record5": self.record5_health(),
+            "record5": self.record5_health(rec_counts),
             "positions_open": len([p for p in self.positions.values() if p.status == "OPEN"]),
             "positions_stale_quote": len(self._stale_positions),
             "boot_notes": self.boot_notes,

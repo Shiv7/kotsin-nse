@@ -300,6 +300,8 @@ class OptionRecorder:
                 return
             if self.day is None or arrived >= self._day0 + 86_400:
                 self.roll(ist_day(arrived))
+            if arrived < self._day0:
+                return  # a pooled frame that first arrived on an earlier day: no quote, OI or volume of today's
             self.frames_watched += 1
             if pooled:
                 self.frames_pooled += 1
