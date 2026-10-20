@@ -1,0 +1,4 @@
+# research data: the option candles are gone from the broker after 27 Oct 2026, the exploration parquet took 2 min to build
+!*.parquet
+!data/*.parquet
+__pycache__/

@@ -1,0 +1,195 @@
+day,symbol,trigger,grade,published,close_0945,atr30,dATR,gap_official,gap_first_bar,b1_take,b1_gate,b1_why,pins,conviction,conv_gap,conv_stretch,conv_room,conv_trigwall,fade_side,fade_anchor,fade_strike
+2026-10-01,AMBUJACEM,BEARISH,C,True,367.1,2.614,8.249,0.303085,0.303,True,,"official gap 0.303 daily ATR its own way (≥ 0.25), no key pivot within 0.5 ATR30 nor R3/S3/R4/S4 within 0.25",,2.5,0.5,0.5,1.5,0.0,CE,369.71,370.0
+2026-10-01,ASTRAL,BEARISH,F,True,1354.8,7.447,30.283,0.075949,0.109,False,no_gap,official gap 0.076 daily ATR its own way < 0.25 (daily_open),,0.0,0.0,0.0,0.0,0.0,CE,1362.25,1360.0
+2026-10-01,BANKINDIA,BEARISH,A,True,130.27,0.692,3.03,0.079208,0.079,False,no_gap,official gap 0.079 daily ATR its own way < 0.25 (daily_open),,1.5,0.0,0.0,1.5,0.0,CE,130.96,132.5
+2026-10-01,BPCL,BEARISH,F,True,297.6,1.809,7.222,0.166168,0.035,False,no_gap,official gap 0.166 daily ATR its own way < 0.25 (daily_open),1d.S2 +0.31,1.5,0.0,0.0,1.5,0.0,CE,299.41,300.0
+2026-10-01,CGPOWER,BULLISH,F,True,883.5,6.767,24.109,0.282053,0.282,False,pivot_pin,"gap 0.282 pinned: 1d.R2 +0.12 ATR30 ahead (key pivots within 0.5) — in trend, B1x",1d.R2 +0.12; 1mo.TC +0.19,3.0,0.5,0.5,1.5,0.5,PE,876.73,880.0
+2026-10-01,HDFCLIFE,BULLISH,A,True,527.2,3.439,14.637,-0.218623,-0.26,False,no_gap,official gap -0.219 daily ATR its own way < 0.25 (daily_open),,0.0,0.0,0.0,0.0,0.0,PE,523.76,525.0
+2026-10-01,HEROMOTOCO,BEARISH,F,True,5132.0,40.039,115.953,0.051745,0.017,False,no_gap,official gap 0.052 daily ATR its own way < 0.25 (daily_open),,1.5,0.0,0.5,1.0,0.0,CE,5172.04,5150.0
+2026-10-01,IOC,BEARISH,F,True,131.97,0.673,2.618,0.355245,0.413,False,pivot_pin,"gap 0.355 pinned: 1d.S2 +0.20 ATR30 ahead (key pivots within 0.5) — in trend, B1x",1d.S2 +0.20,2.5,0.5,0.5,1.5,0.0,CE,132.64,132.5
+2026-10-01,JSWSTEEL,BEARISH,A,True,1240.0,7.402,24.443,0.016365,-0.123,False,no_gap,official gap 0.016 daily ATR its own way < 0.25 (daily_open),1d.S2 +0.22,1.5,0.0,0.0,1.5,0.0,CE,1247.4,1250.0
+2026-10-01,PFC,BEARISH,F,True,322.55,2.055,6.978,-0.050158,-0.143,False,no_gap,official gap -0.050 daily ATR its own way < 0.25 (daily_open),,1.5,0.0,0.0,1.5,0.0,CE,324.6,325.0
+2026-10-01,SHRIRAMFIN,BEARISH,B,True,963.85,6.593,24.198,0.380193,0.318,False,pivot_pin,"gap 0.380 pinned: 1wk.S2 +0.09 ATR30 ahead (key pivots within 0.5) — in trend, B1x",1wk.S2 +0.09,2.0,0.5,0.0,1.5,0.0,CE,970.44,980.0
+2026-10-01,SONACOMS,BEARISH,C,True,814.2,6.565,22.54,0.088732,0.069,False,no_gap,official gap 0.089 daily ATR its own way < 0.25 (daily_open),,1.0,0.0,0.0,0.5,0.5,CE,820.76,820.0
+2026-10-01,SUPREMEIND,BEARISH,F,True,3397.8,26.36,91.717,0.152644,0.263,False,no_gap,official gap 0.153 daily ATR its own way < 0.25 (daily_open),,2.0,0.0,0.0,1.5,0.5,CE,3424.16,3400.0
+2026-10-01,TATASTEEL,BEARISH,B,True,183.3,1.171,4.38,-0.015983,-0.135,False,no_gap,official gap -0.016 daily ATR its own way < 0.25 (daily_open),,1.0,0.0,0.0,1.0,0.0,CE,184.47,185.0
+2026-10-01,TRENT,BEARISH,F,True,2603.2,15.99,60.982,0.108229,0.108,False,no_gap,official gap 0.108 daily ATR its own way < 0.25 (daily_open),1d.S1 +0.01,1.5,0.0,0.0,1.5,0.0,CE,2619.19,2650.0
+2026-10-01,TVSMOTOR,BEARISH,C,True,4016.1,27.64,93.145,0.171775,0.064,False,no_gap,official gap 0.172 daily ATR its own way < 0.25 (daily_open),,1.5,0.0,0.5,1.0,0.0,CE,4043.74,4050.0
+2026-10-01,UNOMINDA,BEARISH,F,True,1149.6,9.52,32.934,-0.0,-0.0,False,no_gap,official gap -0.000 daily ATR its own way < 0.25 (daily_open),1d.S2 +0.37,1.5,0.0,0.0,1.5,0.0,CE,1159.12,1160.0
+2026-10-05,BAJAJFINSV,BULLISH,F,True,1746.4,10.888,37.45,0.325765,0.288,True,,"official gap 0.326 daily ATR its own way (≥ 0.25), no key pivot within 0.5 ATR30 nor R3/S3/R4/S4 within 0.25",,1.5,0.5,0.0,1.0,0.0,PE,1735.51,1740.0
+2026-10-05,BAJFINANCE,BULLISH,C,True,985.95,7.442,24.415,0.583661,0.758,True,,"official gap 0.584 daily ATR its own way (≥ 0.25), no key pivot within 0.5 ATR30 nor R3/S3/R4/S4 within 0.25",,3.5,1.0,1.0,1.5,0.0,PE,978.51,980.0
+2026-10-05,BANKBARODA,BULLISH,A,True,236.25,1.642,4.479,0.511232,0.511,False,pivot_pin,"gap 0.511 pinned: 1wk.R1 +0.10 ATR30 ahead (key pivots within 0.5) — in trend, B1x",1wk.R1 +0.10,1.5,1.0,0.5,0.0,0.0,PE,234.61,235.0
+2026-10-05,BANKINDIA,BULLISH,B,True,134.81,1.273,3.126,0.834819,1.03,False,pivot_pin,"gap 0.835 pinned: 1mo.PIVOT +0.13 ATR30 ahead (key pivots within 0.5) — in trend, B1x",1mo.PIVOT +0.13,3.5,1.0,1.0,1.5,0.0,PE,133.54,132.5
+2026-10-05,CAMS,BULLISH,A,True,690.35,5.415,17.766,0.098504,0.169,False,no_gap,official gap 0.099 daily ATR its own way < 0.25 (daily_open),1d.R2 +0.20,0.0,0.0,0.0,0.0,0.0,PE,684.94,680.0
+2026-10-05,FEDERALBNK,BULLISH,F,True,323.75,2.414,7.435,0.100868,0.679,False,no_gap,official gap 0.101 daily ATR its own way < 0.25 (daily_open),1mo.BC +0.10,1.5,0.0,0.0,1.0,0.5,PE,321.34,320.0
+2026-10-05,KEI,BULLISH,F,True,4617.5,39.447,136.901,0.270268,0.435,False,pivot_pin,"gap 0.270 pinned: 1d.R2 +0.28 ATR30 ahead (key pivots within 0.5) — in trend, B1x",1d.R2 +0.28,3.0,0.5,0.5,1.5,0.5,PE,4578.05,4600.0
+2026-10-05,MAHABANK,BULLISH,A,True,81.96,0.636,2.405,0.212015,0.212,False,no_gap,official gap 0.212 daily ATR its own way < 0.25 (daily_open),1mo.PIVOT +0.08,0.5,0.0,0.0,0.5,0.0,PE,81.32,81.0
+2026-10-05,MFSL,BEARISH,A,True,1357.9,11.186,52.377,0.127918,0.401,False,no_gap,official gap 0.128 daily ATR its own way < 0.25 (daily_open),,1.5,0.0,0.0,1.5,0.0,CE,1369.09,1360.0
+2026-10-05,NAUKRI,BULLISH,F,True,1235.0,10.907,38.601,0.525887,0.526,True,,"official gap 0.526 daily ATR its own way (≥ 0.25), no key pivot within 0.5 ATR30 nor R3/S3/R4/S4 within 0.25",,3.0,1.0,0.5,1.0,0.5,PE,1224.09,1220.0
+2026-10-05,NYKAA,BULLISH,F,True,338.45,3.464,8.789,1.143444,1.371,True,,"official gap 1.143 daily ATR its own way (≥ 0.25), no key pivot within 0.5 ATR30 nor R3/S3/R4/S4 within 0.25",,3.5,1.5,1.0,1.0,0.0,PE,334.99,335.0
+2026-10-05,PAGEIND,BULLISH,A,True,37065.0,252.671,878.763,0.386908,-0.159,False,pivot_pin,"gap 0.387 pinned: 1d.R1 +0.45 ATR30 ahead (key pivots within 0.5) — in trend, B1x",1d.R1 +0.45,1.5,0.5,0.0,1.0,0.0,PE,36812.33,37000.0
+2026-10-05,PETRONET,BULLISH,F,True,292.25,1.836,6.047,0.330743,0.372,True,,"official gap 0.331 daily ATR its own way (≥ 0.25), no key pivot within 0.5 ATR30 nor R3/S3/R4/S4 within 0.25",,2.5,0.5,0.5,1.5,0.0,PE,290.41,290.0
+2026-10-05,TECHM,BULLISH,F,True,1551.0,12.369,38.391,0.278709,-0.362,False,pivot_pin,"gap 0.279 pinned: 1d.R1 +0.29 ATR30 ahead (key pivots within 0.5) — in trend, B1x",1d.R1 +0.29; 1mo.PIVOT +0.49,2.0,0.5,0.0,1.0,0.5,PE,1538.63,1540.0
+2026-10-05,WIPRO,BULLISH,F,True,163.97,1.155,3.626,1.006652,0.899,True,,"official gap 1.007 daily ATR its own way (≥ 0.25), no key pivot within 0.5 ATR30 nor R3/S3/R4/S4 within 0.25",,3.5,1.5,0.5,1.5,0.0,PE,162.82,162.5
+2026-10-06,ANANDRATHI,BULLISH,F,True,2161.0,13.169,53.191,0.03948,0.094,False,no_gap,official gap 0.039 daily ATR its own way < 0.25 (daily_open),1wk.R1 +0.45,1.5,0.0,0.0,1.5,0.0,PE,2147.83,2140.0
+2026-10-06,BDL,BULLISH,F,True,1104.0,7.894,34.634,0.0,-0.095,False,no_gap,official gap 0.000 daily ATR its own way < 0.25 (daily_open),1d.R1 +0.16; 1wk.TC +0.26,1.5,0.0,0.0,1.0,0.5,PE,1096.11,1100.0
+2026-10-06,DELHIVERY,BULLISH,A,True,405.2,2.807,11.493,0.0,0.165,False,no_gap,official gap 0.000 daily ATR its own way < 0.25 (daily_open),1wk.PIVOT +0.39,0.5,0.0,0.0,0.5,0.0,PE,402.39,400.0
+2026-10-06,FORTIS,BEARISH,F,True,761.5,6.012,24.987,-0.248134,-0.112,False,no_gap,official gap -0.248 daily ATR its own way < 0.25 (daily_open),,1.5,0.0,0.0,1.5,0.0,CE,767.51,770.0
+2026-10-06,GODREJCP,BULLISH,F,True,854.55,5.242,16.879,0.556908,0.071,True,,"official gap 0.557 daily ATR its own way (≥ 0.25), no key pivot within 0.5 ATR30 nor R3/S3/R4/S4 within 0.25",,3.0,1.0,0.5,1.0,0.5,PE,849.31,850.0
+2026-10-06,HINDUNILVR,BULLISH,A,True,1857.8,9.083,31.309,0.303431,0.067,False,pivot_pin,"gap 0.303 pinned: 1d.R2 +0.10 ATR30 ahead (key pivots within 0.5) — in trend, B1x",1d.R2 +0.10,1.0,0.5,0.0,0.5,0.0,PE,1848.72,1840.0
+2026-10-06,IDEA,BULLISH,F,True,13.18,0.142,0.512,0.058616,0.039,False,no_gap,official gap 0.059 daily ATR its own way < 0.25 (daily_open),,2.0,0.0,0.5,1.5,0.0,PE,13.04,13.0
+2026-10-06,INDUSINDBK,BULLISH,A,True,899.25,6.119,21.724,-0.027619,0.09,False,no_gap,official gap -0.028 daily ATR its own way < 0.25 (daily_open),,0.0,0.0,0.0,0.0,0.0,PE,893.13,890.0
+2026-10-06,JIOFIN,BULLISH,F,True,216.32,1.415,4.668,0.192798,0.21,False,no_gap,official gap 0.193 daily ATR its own way < 0.25 (daily_open),,0.5,0.0,0.5,0.0,0.0,PE,214.91,215.0
+2026-10-06,JUBLFOOD,BULLISH,A,True,451.2,3.131,13.271,-0.011303,-0.015,False,no_gap,official gap -0.011 daily ATR its own way < 0.25 (daily_open),,0.5,0.0,0.0,0.5,0.0,PE,448.07,450.0
+2026-10-06,KOTAKBANK,BULLISH,F,True,433.5,3.686,9.065,0.661853,0.723,True,,"official gap 0.662 daily ATR its own way (≥ 0.25), no key pivot within 0.5 ATR30 nor R3/S3/R4/S4 within 0.25",,3.5,1.0,1.0,1.5,0.0,PE,429.81,430.0
+2026-10-06,MAXHEALTH,BEARISH,F,True,903.8,10.023,29.411,-0.154707,-0.156,False,no_gap,official gap -0.155 daily ATR its own way < 0.25 (daily_open),,1.5,0.0,0.0,1.5,0.0,CE,913.82,910.0
+2026-10-06,SAIL,BULLISH,B,True,179.1,1.714,6.398,0.054704,0.067,False,no_gap,official gap 0.055 daily ATR its own way < 0.25 (daily_open),1wk.TC +0.20,1.0,0.0,0.0,1.0,0.0,PE,177.39,177.5
+2026-10-06,TECHM,BEARISH,A,True,1509.5,10.92,39.313,-0.002544,-0.099,False,no_gap,official gap -0.003 daily ATR its own way < 0.25 (daily_open),1wk.S1 +0.03,0.0,0.0,0.0,0.0,0.0,CE,1520.42,1520.0
+2026-10-06,TRENT,BULLISH,F,True,2828.5,38.12,60.304,3.648202,3.65,False,pivot_pin,"gap 3.648 pinned: 1mo.R1 +0.01 ATR30 ahead (key pivots within 0.5) — in trend, B1x",1mo.R1 +0.01,5.0,2.0,1.5,1.5,0.0,PE,2790.38,2800.0
+2026-10-06,WAAREEENER,BULLISH,A,True,2369.5,14.539,59.6,0.0,0.047,False,no_gap,official gap 0.000 daily ATR its own way < 0.25 (daily_open),,0.5,0.0,0.0,0.0,0.5,PE,2354.96,2350.0
+2026-10-06,ZYDUSLIFE,BULLISH,F,True,1157.6,8.89,30.526,0.196555,0.482,False,no_gap,official gap 0.197 daily ATR its own way < 0.25 (daily_open),1mo.BC +0.16; 1mo.PIVOT +0.27; 1mo.TC +0.38,2.0,0.0,0.0,1.5,0.5,PE,1148.71,1150.0
+2026-10-07,BANKBARODA,BEARISH,A,True,231.28,1.136,4.508,0.206312,0.164,False,no_gap,official gap 0.206 daily ATR its own way < 0.25 (daily_open),,0.0,0.0,0.0,0.0,0.0,CE,232.42,232.5
+2026-10-07,BANKINDIA,BEARISH,F,True,130.63,0.806,3.296,-0.130457,0.258,False,no_gap,official gap -0.130 daily ATR its own way < 0.25 (daily_open),1d.S2 +0.29; 1wk.BC +0.34,1.0,0.0,0.0,0.5,0.5,CE,131.44,132.5
+2026-10-07,BDL,BEARISH,A,True,1085.5,6.912,33.503,-0.092529,-0.036,False,no_gap,official gap -0.093 daily ATR its own way < 0.25 (daily_open),1d.S2 +0.38,1.0,0.0,0.0,1.0,0.0,CE,1092.41,1100.0
+2026-10-07,CANBK,BEARISH,B,True,117.09,0.617,2.416,-0.053797,0.211,False,no_gap,official gap -0.054 daily ATR its own way < 0.25 (daily_open),,1.0,0.0,0.0,1.0,0.0,CE,117.71,117.5
+2026-10-07,DLF,BEARISH,F,True,659.7,3.884,17.074,0.067356,0.123,False,no_gap,official gap 0.067 daily ATR its own way < 0.25 (daily_open),1mo.PIVOT +0.33; 1d.S2 +0.36,1.0,0.0,0.0,0.5,0.5,CE,663.58,660.0
+2026-10-07,DRREDDY,BULLISH,F,True,1216.6,6.487,24.475,0.0,0.192,False,no_gap,official gap 0.000 daily ATR its own way < 0.25 (daily_open),1wk.PIVOT +0.21; 1mo.TC +0.39,1.5,0.0,0.0,1.0,0.5,PE,1210.11,1210.0
+2026-10-07,GODREJPROP,BEARISH,A,True,1589.3,9.668,49.396,0.105272,0.146,False,no_gap,official gap 0.105 daily ATR its own way < 0.25 (daily_open),1d.S1 +0.02,1.0,0.0,0.0,1.0,0.0,CE,1598.97,1600.0
+2026-10-07,HDFCAMC,BEARISH,F,True,2331.3,12.825,54.463,0.135872,0.099,False,no_gap,official gap 0.136 daily ATR its own way < 0.25 (daily_open),,1.5,0.0,0.0,1.0,0.5,CE,2344.13,2340.0
+2026-10-07,HINDALCO,BEARISH,F,True,924.3,4.768,21.376,0.486524,0.124,True,,"official gap 0.487 daily ATR its own way (≥ 0.25), no key pivot within 0.5 ATR30 nor R3/S3/R4/S4 within 0.25",,2.0,0.5,0.0,1.5,0.0,CE,929.07,930.0
+2026-10-07,IEX,BULLISH,F,True,106.53,0.619,2.362,0.22434,-0.072,False,no_gap,official gap 0.224 daily ATR its own way < 0.25 (daily_open),1wk.BC +0.48,2.0,0.0,0.0,1.5,0.5,PE,105.91,106.0
+2026-10-07,KEI,BEARISH,F,True,4549.5,29.837,133.873,-0.020915,-0.025,False,no_gap,official gap -0.021 daily ATR its own way < 0.25 (daily_open),1wk.TC +0.11,2.0,0.0,0.0,1.5,0.5,CE,4579.34,4600.0
+2026-10-07,MANAPPURAM,BULLISH,F,True,314.55,2.407,10.016,0.0,0.065,False,no_gap,official gap 0.000 daily ATR its own way < 0.25 (daily_open),,2.0,0.0,0.0,1.5,0.5,PE,312.14,310.0
+2026-10-07,PNBHOUSING,BULLISH,F,True,1118.8,7.959,33.29,0.090118,0.388,False,no_gap,official gap 0.090 daily ATR its own way < 0.25 (daily_open),,2.0,0.0,0.0,1.5,0.5,PE,1110.84,1100.0
+2026-10-07,SHRIRAMFIN,BEARISH,F,True,957.95,5.193,25.277,0.239351,0.269,False,no_gap,official gap 0.239 daily ATR its own way < 0.25 (daily_open),1d.S1 +0.04; 1wk.PIVOT +0.10,1.5,0.0,0.0,1.0,0.5,CE,963.14,960.0
+2026-10-07,SUZLON,BEARISH,C,True,38.69,0.232,1.108,-0.0,-0.009,False,no_gap,official gap -0.000 daily ATR its own way < 0.25 (daily_open),,1.5,0.0,0.0,1.5,0.0,CE,38.92,39.0
+2026-10-07,TITAN,BEARISH,F,True,4362.8,32.043,93.038,1.193066,1.291,True,,"official gap 1.193 daily ATR its own way (≥ 0.25), no key pivot within 0.5 ATR30 nor R3/S3/R4/S4 within 0.25",,4.0,1.5,1.0,1.5,0.0,CE,4394.84,4400.0
+2026-10-07,TMPV,BEARISH,F,True,284.0,1.841,8.043,0.024867,0.087,False,no_gap,official gap 0.025 daily ATR its own way < 0.25 (daily_open),1d.S1 +0.11,1.0,0.0,0.0,1.0,0.0,CE,285.84,285.0
+2026-10-08,AMBER,BEARISH,F,True,6654.5,53.9,198.18,0.431426,0.621,True,,"official gap 0.431 daily ATR its own way (≥ 0.25), no key pivot within 0.5 ATR30 nor R3/S3/R4/S4 within 0.25",,2.5,0.5,0.5,1.5,0.0,CE,6708.4,6700.0
+2026-10-08,APLAPOLLO,BEARISH,F,True,2092.3,13.384,60.071,0.16647,0.255,False,no_gap,official gap 0.166 daily ATR its own way < 0.25 (daily_open),,1.5,0.0,0.0,1.5,0.0,CE,2105.68,2100.0
+2026-10-08,CAMS,BEARISH,F,True,679.1,4.491,17.264,0.173775,0.377,False,no_gap,official gap 0.174 daily ATR its own way < 0.25 (daily_open),,1.0,0.0,0.5,0.5,0.0,CE,683.59,680.0
+2026-10-08,CONCOR,BEARISH,A,True,437.8,2.556,12.198,-0.168067,-0.127,False,no_gap,official gap -0.168 daily ATR its own way < 0.25 (daily_open),1d.S1 +0.15,1.5,0.0,0.0,1.5,0.0,CE,440.36,440.0
+2026-10-08,CUMMINSIND,BEARISH,F,True,4831.2,31.768,114.338,-0.0,-0.042,False,no_gap,official gap -0.000 daily ATR its own way < 0.25 (daily_open),1d.S1 +0.14,0.0,0.0,0.0,0.0,0.0,CE,4862.97,4850.0
+2026-10-08,EICHERMOT,BEARISH,A,True,6917.5,37.157,132.144,0.181621,0.076,False,no_gap,official gap 0.182 daily ATR its own way < 0.25 (daily_open),1d.S2 +0.47,1.5,0.0,0.0,1.5,0.0,CE,6954.66,7000.0
+2026-10-08,ETERNAL,BEARISH,F,True,324.5,2.224,8.873,-0.0,-0.045,False,no_gap,official gap -0.000 daily ATR its own way < 0.25 (daily_open),1d.S1 +0.15,1.5,0.0,0.0,1.0,0.5,CE,326.72,325.0
+2026-10-08,HCLTECH,BULLISH,A,True,1208.4,7.247,34.622,0.0,0.058,False,no_gap,official gap 0.000 daily ATR its own way < 0.25 (daily_open),,1.0,0.0,0.0,1.0,0.0,PE,1201.15,1200.0
+2026-10-08,ICICIPRULI,BEARISH,F,True,451.85,2.57,13.05,-0.038313,-0.042,False,no_gap,official gap -0.038 daily ATR its own way < 0.25 (daily_open),1d.S2 +0.16; 1wk.PIVOT +0.19,1.0,0.0,0.0,0.5,0.5,CE,454.42,455.0
+2026-10-08,INDHOTEL,BEARISH,F,True,722.65,4.332,15.888,0.018883,0.079,False,no_gap,official gap 0.019 daily ATR its own way < 0.25 (daily_open),1wk.TC +0.44,1.5,0.0,0.0,1.0,0.5,CE,726.98,730.0
+2026-10-08,INDIGO,BEARISH,F,True,4919.0,34.094,110.114,0.136223,0.057,False,no_gap,official gap 0.136 daily ATR its own way < 0.25 (daily_open),1d.S2 +0.16; 1mo.BC +0.44,0.5,0.0,0.0,0.0,0.5,CE,4953.09,4950.0
+2026-10-08,ITC,BEARISH,A,True,258.3,1.836,5.44,0.312507,0.533,False,pivot_pin,"gap 0.313 pinned: 1wk.BC +0.20 ATR30 ahead (key pivots within 0.5) — in trend, B1x",1wk.BC +0.20,2.0,0.5,0.5,1.0,0.0,CE,260.14,260.0
+2026-10-08,JIOFIN,BEARISH,F,True,213.8,1.146,4.765,0.134308,0.092,False,no_gap,official gap 0.134 daily ATR its own way < 0.25 (daily_open),1d.S2 +0.09,1.5,0.0,0.0,1.5,0.0,CE,214.95,215.0
+2026-10-08,JUBLFOOD,BEARISH,F,True,440.35,5.133,13.846,0.296119,0.404,True,,"official gap 0.296 daily ATR its own way (≥ 0.25), no key pivot within 0.5 ATR30 nor R3/S3/R4/S4 within 0.25",,2.5,0.5,0.5,1.0,0.5,CE,445.48,445.0
+2026-10-08,KAYNES,BEARISH,F,True,3291.3,29.15,136.542,-0.043943,-0.076,False,no_gap,official gap -0.044 daily ATR its own way < 0.25 (daily_open),1mo.S1 +0.24,1.5,0.0,0.0,1.5,0.0,CE,3320.45,3300.0
+2026-10-08,KFINTECH,BEARISH,F,True,852.65,6.0,25.434,-0.233942,-0.155,False,no_gap,official gap -0.234 daily ATR its own way < 0.25 (daily_open),,0.0,0.0,0.0,0.0,0.0,CE,858.65,860.0
+2026-10-08,MIDCPNIFTY,BEARISH,F,True,13589.15,51.554,185.887,0.163271,0.163,False,no_gap,official gap 0.163 daily ATR its own way < 0.25 (daily_open),,1.0,0.0,0.5,0.5,0.0,CE,13640.7,13650.0
+2026-10-08,MOTILALOFS,BEARISH,C,True,1045.1,10.721,32.278,0.030981,0.09,False,no_gap,official gap 0.031 daily ATR its own way < 0.25 (daily_open),1d.S2 +0.28,1.5,0.0,0.0,1.5,0.0,CE,1055.82,1060.0
+2026-10-08,NAUKRI,BEARISH,F,True,1193.5,14.168,39.329,0.109334,-0.264,False,no_gap,official gap 0.109 daily ATR its own way < 0.25 (daily_open),1d.S2 +0.39,1.0,0.0,0.5,0.5,0.0,CE,1207.67,1200.0
+2026-10-08,NBCC,BEARISH,F,True,75.92,0.512,2.021,-0.0,-0.03,False,no_gap,official gap -0.000 daily ATR its own way < 0.25 (daily_open),,1.0,0.0,0.0,1.0,0.0,CE,76.43,76.0
+2026-10-08,PAYTM,BEARISH,B,True,1599.3,23.941,59.315,1.028411,1.281,True,,"official gap 1.028 daily ATR its own way (≥ 0.25), no key pivot within 0.5 ATR30 nor R3/S3/R4/S4 within 0.25",,4.0,1.5,1.0,1.5,0.0,CE,1623.24,1620.0
+2026-10-08,PETRONET,BEARISH,A,True,290.4,1.894,6.268,0.167521,0.231,False,no_gap,official gap 0.168 daily ATR its own way < 0.25 (daily_open),,1.0,0.0,0.5,0.5,0.0,CE,292.29,292.5
+2026-10-08,PGEL,BEARISH,A,True,512.6,4.264,17.756,0.101375,0.099,False,no_gap,official gap 0.101 daily ATR its own way < 0.25 (daily_open),1d.S2 +0.08,1.5,0.0,0.0,1.5,0.0,CE,516.86,520.0
+2026-10-08,RELIANCE,BEARISH,C,True,1196.0,5.774,21.378,-0.0,-0.0,False,no_gap,official gap -0.000 daily ATR its own way < 0.25 (daily_open),1d.S2 +0.46,1.5,0.0,0.0,1.5,0.0,CE,1201.77,1200.0
+2026-10-08,TECHM,BULLISH,C,True,1518.1,8.935,38.85,0.100387,0.201,False,no_gap,official gap 0.100 daily ATR its own way < 0.25 (daily_open),,1.0,0.0,0.0,1.0,0.0,PE,1509.16,1500.0
+2026-10-08,UNOMINDA,BEARISH,F,True,1094.1,7.753,34.589,0.138774,0.168,False,no_gap,official gap 0.139 daily ATR its own way < 0.25 (daily_open),,1.5,0.0,0.0,1.5,0.0,CE,1101.85,1100.0
+2026-10-08,VMM,BEARISH,F,True,98.01,0.684,3.079,0.12991,0.114,False,no_gap,official gap 0.130 daily ATR its own way < 0.25 (daily_open),,2.0,0.0,0.5,1.5,0.0,CE,98.69,99.0
+2026-10-08,VOLTAS,BEARISH,C,True,1045.4,7.076,30.005,0.126647,-0.047,False,no_gap,official gap 0.127 daily ATR its own way < 0.25 (daily_open),,1.5,0.0,0.0,1.5,0.0,CE,1052.48,1060.0
+2026-10-08,ZYDUSLIFE,BEARISH,F,True,1138.0,8.66,29.446,-0.407522,-0.472,False,no_gap,official gap -0.408 daily ATR its own way < 0.25 (daily_open),1d.S2 +0.21,1.5,0.0,0.0,1.5,0.0,CE,1146.66,1150.0
+2026-10-09,ANANDRATHI,BEARISH,F,True,2050.4,23.741,54.685,0.254182,0.071,True,,"official gap 0.254 daily ATR its own way (≥ 0.25), no key pivot within 0.5 ATR30 nor R3/S3/R4/S4 within 0.25",,3.0,0.5,1.0,1.5,0.0,CE,2074.14,2080.0
+2026-10-09,COLPAL,BULLISH,F,True,1841.3,15.35,43.377,0.011527,0.277,False,no_gap,official gap 0.012 daily ATR its own way < 0.25 (daily_open),1d.R3 +0.16,3.0,0.0,1.0,1.5,0.5,PE,1825.95,1820.0
+2026-10-09,FORTIS,BULLISH,F,True,790.15,6.783,23.982,1.042466,1.222,False,pivot_pin,"gap 1.042 pinned: 1wk.PIVOT +0.00 ATR30 ahead (key pivots within 0.5) — in trend, B1x",1wk.PIVOT +0.00; 1wk.TC +0.39; 1mo.BC +0.44,4.0,1.5,0.5,1.5,0.5,PE,783.37,780.0
+2026-10-09,ICICIPRULI,BULLISH,A,True,461.5,3.15,12.782,-0.226874,-0.113,False,no_gap,official gap -0.227 daily ATR its own way < 0.25 (daily_open),,0.5,0.0,0.0,0.0,0.5,PE,458.35,460.0
+2026-10-09,MANAPPURAM,BULLISH,A,True,312.3,2.413,9.592,0.187654,0.287,False,no_gap,official gap 0.188 daily ATR its own way < 0.25 (daily_open),,0.5,0.0,0.5,0.0,0.0,PE,309.89,310.0
+2026-10-09,TCS,BULLISH,F,True,2169.7,20.441,57.908,0.172688,0.397,False,no_gap,official gap 0.173 daily ATR its own way < 0.25 (daily_open),1d.R2 +0.21,2.5,0.0,1.0,1.5,0.0,PE,2149.26,2140.0
+2026-10-12,ABB,BULLISH,A,True,6859.5,48.841,190.066,0.107857,0.474,False,no_gap,official gap 0.108 daily ATR its own way < 0.25 (daily_open),1d.R1 +0.02; 1mo.BC +0.45,0.0,0.0,0.0,0.0,0.0,PE,6810.66,6800.0
+2026-10-12,AMBUJACEM,BULLISH,F,True,353.8,2.792,9.629,0.051929,0.203,False,no_gap,official gap 0.052 daily ATR its own way < 0.25 (daily_open),1wk.PIVOT +0.14; 1d.R1 +0.39,2.0,0.0,0.0,1.5,0.5,PE,351.01,350.0
+2026-10-12,ANGELONE,BULLISH,F,True,299.2,2.871,9.345,0.240769,0.519,False,no_gap,official gap 0.241 daily ATR its own way < 0.25 (daily_open),,1.5,0.0,0.0,1.5,0.0,PE,296.33,295.0
+2026-10-12,ASHOKLEY,BULLISH,F,True,147.64,0.927,4.09,0.437642,0.369,True,,"official gap 0.438 daily ATR its own way (≥ 0.25), no key pivot within 0.5 ATR30 nor R3/S3/R4/S4 within 0.25",,2.0,0.5,0.0,1.5,0.0,PE,146.71,147.5
+2026-10-12,BAJAJHLDNG,BULLISH,B,True,10913.0,71.297,256.623,0.0,-0.234,False,no_gap,official gap 0.000 daily ATR its own way < 0.25 (daily_open),,0.5,0.0,0.0,0.0,0.5,PE,10841.7,10800.0
+2026-10-12,BANKBARODA,BEARISH,A,True,234.09,1.238,4.714,-0.417868,-0.286,False,no_gap,official gap -0.418 daily ATR its own way < 0.25 (daily_open),1mo.TC +0.08,0.0,0.0,0.0,0.0,0.0,CE,235.33,235.0
+2026-10-12,BEL,BULLISH,F,True,373.5,2.067,7.817,0.236659,0.365,False,no_gap,official gap 0.237 daily ATR its own way < 0.25 (daily_open),1wk.TC +0.28,0.5,0.0,0.0,0.0,0.5,PE,371.43,370.0
+2026-10-12,BPCL,BULLISH,F,True,289.1,1.604,7.656,0.261237,-0.137,True,,"official gap 0.261 daily ATR its own way (≥ 0.25), no key pivot within 0.5 ATR30 nor R3/S3/R4/S4 within 0.25",,2.0,0.5,0.0,1.0,0.5,PE,287.5,285.0
+2026-10-12,CAMS,BULLISH,F,True,679.65,4.514,18.062,0.21869,0.41,False,no_gap,official gap 0.219 daily ATR its own way < 0.25 (daily_open),1wk.PIVOT +0.03,2.0,0.0,0.0,1.5,0.5,PE,675.14,670.0
+2026-10-12,CGPOWER,BULLISH,F,True,873.3,6.312,25.342,0.325553,0.434,False,pivot_pin,"gap 0.326 pinned: 1mo.PIVOT +0.20 ATR30 ahead (key pivots within 0.5) — in trend, B1x",1mo.PIVOT +0.20,2.0,0.5,0.0,1.0,0.5,PE,866.99,870.0
+2026-10-12,DELHIVERY,BULLISH,F,True,420.6,4.149,11.24,0.040035,0.236,False,no_gap,official gap 0.040 daily ATR its own way < 0.25 (daily_open),,1.5,0.0,1.0,0.5,0.0,PE,416.45,415.0
+2026-10-12,FORCEMOT,BULLISH,F,True,17047.0,98.298,440.502,0.074915,0.102,False,no_gap,official gap 0.075 daily ATR its own way < 0.25 (daily_open),,1.5,0.0,0.0,1.5,0.0,PE,16948.7,17000.0
+2026-10-12,IREDA,BULLISH,A,True,105.77,0.641,2.877,0.121655,0.153,False,no_gap,official gap 0.122 daily ATR its own way < 0.25 (daily_open),1d.R2 +0.09,1.5,0.0,0.0,1.5,0.0,PE,105.13,105.0
+2026-10-12,IRFC,BULLISH,A,True,76.27,0.43,1.7,0.088246,0.088,False,no_gap,official gap 0.088 daily ATR its own way < 0.25 (daily_open),,0.5,0.0,0.5,0.0,0.0,PE,75.84,76.0
+2026-10-12,JINDALSTEL,BULLISH,A,True,1033.5,7.674,33.737,0.27566,0.299,True,,"official gap 0.276 daily ATR its own way (≥ 0.25), no key pivot within 0.5 ATR30 nor R3/S3/R4/S4 within 0.25",,1.0,0.5,0.0,0.5,0.0,PE,1025.83,1020.0
+2026-10-12,JSWENERGY,BULLISH,F,True,471.0,2.958,12.451,0.257009,0.185,False,pivot_pin,"gap 0.257 pinned: 1d.R2 +0.33 ATR30 ahead (key pivots within 0.5) — in trend, B1x",1d.R2 +0.33,2.0,0.5,0.0,1.5,0.0,PE,468.04,470.0
+2026-10-12,KEI,BULLISH,C,True,4687.8,35.954,135.649,0.305937,0.368,True,,"official gap 0.306 daily ATR its own way (≥ 0.25), no key pivot within 0.5 ATR30 nor R3/S3/R4/S4 within 0.25",,2.0,0.5,0.0,1.5,0.0,PE,4651.85,4600.0
+2026-10-12,MAZDOCK,BULLISH,C,True,2050.5,14.674,56.716,0.264478,0.18,True,,"official gap 0.264 daily ATR its own way (≥ 0.25), no key pivot within 0.5 ATR30 nor R3/S3/R4/S4 within 0.25",,1.5,0.5,0.0,1.0,0.0,PE,2035.83,2040.0
+2026-10-12,NAM-INDIA,BULLISH,F,True,1056.6,8.039,31.515,0.003173,0.362,False,no_gap,official gap 0.003 daily ATR its own way < 0.25 (daily_open),,0.0,0.0,0.0,0.0,0.0,PE,1048.56,1040.0
+2026-10-12,NBCC,BULLISH,F,True,76.4,0.52,2.029,0.246473,0.133,False,no_gap,official gap 0.246 daily ATR its own way < 0.25 (daily_open),,2.0,0.0,0.5,1.5,0.0,PE,75.88,76.0
+2026-10-12,OBEROIRLTY,BULLISH,F,True,1708.0,11.744,48.739,-0.016414,-0.018,False,no_gap,official gap -0.016 daily ATR its own way < 0.25 (daily_open),1wk.BC +0.06,1.5,0.0,0.0,1.0,0.5,PE,1696.26,1700.0
+2026-10-12,POLYCAB,BULLISH,F,True,8427.5,58.085,191.144,0.235424,0.212,False,no_gap,official gap 0.235 daily ATR its own way < 0.25 (daily_open),1d.R2 +0.20; 1wk.R1 +0.21,2.5,0.0,0.5,1.5,0.5,PE,8369.41,8400.0
+2026-10-12,POWERINDIA,BULLISH,B,True,31190.0,271.052,928.352,0.436257,0.372,False,pivot_pin,"gap 0.436 pinned: 1mo.PIVOT +0.19 ATR30 ahead (key pivots within 0.5) — in trend, B1x",1mo.PIVOT +0.19,1.0,0.5,0.0,0.5,0.0,PE,30918.95,31000.0
+2026-10-12,TECHM,BEARISH,F,True,1464.2,13.171,38.705,0.415965,0.736,True,,"official gap 0.416 daily ATR its own way (≥ 0.25), no key pivot within 0.5 ATR30 nor R3/S3/R4/S4 within 0.25",,2.5,0.5,0.5,1.5,0.0,CE,1477.37,1480.0
+2026-10-12,TRENT,BULLISH,F,True,2954.7,17.631,75.808,0.129274,0.15,False,no_gap,official gap 0.129 daily ATR its own way < 0.25 (daily_open),,1.5,0.0,0.0,1.5,0.0,PE,2937.07,2950.0
+2026-10-12,YESBANK,BEARISH,B,True,20.3,0.103,0.504,-0.039662,0.02,False,no_gap,official gap -0.040 daily ATR its own way < 0.25 (daily_open),1d.S2 +0.33,1.5,0.0,0.0,1.5,0.0,CE,20.4,21.0
+2026-10-13,ADANIGREEN,BULLISH,F,True,1279.3,10.379,44.758,-0.049153,-0.257,False,no_gap,official gap -0.049 daily ATR its own way < 0.25 (daily_open),1wk.PIVOT +0.12; 1d.R1 +0.41,1.0,0.0,0.0,0.5,0.5,PE,1268.92,1260.0
+2026-10-13,CGPOWER,BEARISH,F,True,845.1,6.639,25.135,0.656455,0.619,True,,"official gap 0.656 daily ATR its own way (≥ 0.25), no key pivot within 0.5 ATR30 nor R3/S3/R4/S4 within 0.25",,3.0,1.0,0.5,1.5,0.0,CE,851.74,850.0
+2026-10-13,CUMMINSIND,BEARISH,F,True,4787.9,33.706,119.178,0.117472,0.115,False,no_gap,official gap 0.117 daily ATR its own way < 0.25 (daily_open),1d.S2 +0.15,1.0,0.0,0.0,1.0,0.0,CE,4821.61,4800.0
+2026-10-13,HDFCBANK,BULLISH,F,True,714.95,3.189,14.816,0.141734,0.142,False,no_gap,official gap 0.142 daily ATR its own way < 0.25 (daily_open),1mo.TC +0.20,1.5,0.0,0.0,1.0,0.5,PE,711.76,710.0
+2026-10-13,IOC,BEARISH,A,True,125.4,0.598,2.784,-0.179608,-0.183,False,no_gap,official gap -0.180 daily ATR its own way < 0.25 (daily_open),,1.5,0.0,0.0,1.5,0.0,CE,126.0,126.0
+2026-10-13,KALYANKJIL,BULLISH,F,True,562.75,4.007,20.861,-0.148601,-0.127,False,no_gap,official gap -0.149 daily ATR its own way < 0.25 (daily_open),1mo.BC +0.37,1.5,0.0,0.0,1.0,0.5,PE,558.74,560.0
+2026-10-13,PAYTM,BULLISH,A,True,1672.1,11.195,65.623,-0.266674,-0.244,False,no_gap,official gap -0.267 daily ATR its own way < 0.25 (daily_open),1d.PIVOT +0.03,0.5,0.0,0.0,0.5,0.0,PE,1660.9,1660.0
+2026-10-13,POWERINDIA,BEARISH,F,True,30090.0,287.689,929.541,0.839124,0.753,True,,"official gap 0.839 daily ATR its own way (≥ 0.25), no key pivot within 0.5 ATR30 nor R3/S3/R4/S4 within 0.25",,3.0,1.0,0.5,1.5,0.0,CE,30377.69,30500.0
+2026-10-13,PRESTIGE,BULLISH,A,True,1438.5,11.835,45.941,0.0,0.002,False,no_gap,official gap 0.000 daily ATR its own way < 0.25 (daily_open),,0.0,0.0,0.0,0.0,0.0,PE,1426.67,1420.0
+2026-10-13,RBLBANK,BEARISH,F,True,390.3,4.588,11.143,1.588497,1.499,True,,"official gap 1.588 daily ATR its own way (≥ 0.25), no key pivot within 0.5 ATR30 nor R3/S3/R4/S4 within 0.25",,4.5,2.0,1.0,1.5,0.0,CE,394.89,395.0
+2026-10-13,TATACONSUM,BULLISH,F,True,971.9,4.829,18.053,0.343439,0.191,False,pivot_pin,"gap 0.343 pinned: 1wk.R1 +0.09 ATR30 ahead (key pivots within 0.5) — in trend, B1x",1wk.R1 +0.09,1.5,0.5,0.0,1.0,0.0,PE,967.07,970.0
+2026-10-13,TCS,BULLISH,F,True,2204.6,19.722,63.721,0.500623,0.614,True,,"official gap 0.501 daily ATR its own way (≥ 0.25), no key pivot within 0.5 ATR30 nor R3/S3/R4/S4 within 0.25",,3.5,1.0,0.5,1.5,0.5,PE,2184.88,2180.0
+2026-10-13,TRENT,BULLISH,F,True,2960.0,17.386,75.0,0.008,0.093,False,no_gap,official gap 0.008 daily ATR its own way < 0.25 (daily_open),,1.0,0.0,0.0,1.0,0.0,PE,2942.61,2950.0
+2026-10-13,VEDL,BEARISH,F,True,258.85,1.67,7.691,0.234046,0.117,False,no_gap,official gap 0.234 daily ATR its own way < 0.25 (daily_open),,1.0,0.0,0.0,1.0,0.0,CE,260.52,260.0
+2026-10-14,ADANIGREEN,BULLISH,A,True,1296.0,10.473,43.833,-0.136885,-0.121,False,no_gap,official gap -0.137 daily ATR its own way < 0.25 (daily_open),1d.R1 +0.18,1.0,0.0,0.0,1.0,0.0,PE,1285.53,1280.0
+2026-10-14,BANKBARODA,BEARISH,F,True,232.36,1.338,4.698,0.538564,0.911,False,pivot_pin,"gap 0.539 pinned: 1d.S2 +0.12 ATR30 ahead (key pivots within 0.5) — in trend, B1x",1d.S2 +0.12; 1mo.BC +0.50,3.5,1.0,0.5,1.5,0.5,CE,233.7,232.5
+2026-10-14,BRITANNIA,BULLISH,A,True,4838.3,23.224,90.805,0.051759,0.154,False,no_gap,official gap 0.052 daily ATR its own way < 0.25 (daily_open),,0.5,0.0,0.0,0.5,0.0,PE,4815.08,4800.0
+2026-10-14,DABUR,BULLISH,F,True,379.6,1.782,8.345,-0.035951,-0.096,False,no_gap,official gap -0.036 daily ATR its own way < 0.25 (daily_open),,2.0,0.0,0.0,1.5,0.5,PE,377.82,375.0
+2026-10-14,ICICIGI,BULLISH,F,True,1712.2,13.069,44.288,-0.135477,-0.233,False,no_gap,official gap -0.135 daily ATR its own way < 0.25 (daily_open),,1.5,0.0,0.0,1.5,0.0,PE,1699.13,1700.0
+2026-10-14,INDUSTOWER,BULLISH,F,True,379.05,1.936,9.945,-0.100554,0.065,False,no_gap,official gap -0.101 daily ATR its own way < 0.25 (daily_open),,1.5,0.0,0.0,1.5,0.0,PE,377.11,375.0
+2026-10-14,JSWENERGY,BULLISH,F,True,477.7,3.981,12.296,0.052863,0.268,False,no_gap,official gap 0.053 daily ATR its own way < 0.25 (daily_open),,1.0,0.0,0.5,0.5,0.0,PE,473.72,470.0
+2026-10-14,LICHSGFIN,BEARISH,F,True,542.6,4.236,17.824,0.11221,0.393,False,no_gap,official gap 0.112 daily ATR its own way < 0.25 (daily_open),,2.0,0.0,0.5,1.5,0.0,CE,546.84,545.0
+2026-10-14,OIL,BULLISH,A,True,448.6,2.039,10.49,0.081033,0.086,False,no_gap,official gap 0.081 daily ATR its own way < 0.25 (daily_open),,0.0,0.0,0.0,0.0,0.0,PE,446.56,445.0
+2026-10-14,PIIND,BULLISH,A,True,2164.0,13.524,61.208,0.120899,0.018,False,no_gap,official gap 0.121 daily ATR its own way < 0.25 (daily_open),1mo.S1 +0.02; 1wk.PIVOT +0.35,0.0,0.0,0.0,0.0,0.0,PE,2150.48,2150.0
+2026-10-14,TATASTEEL,BULLISH,F,True,175.2,0.94,4.64,0.107755,0.004,False,no_gap,official gap 0.108 daily ATR its own way < 0.25 (daily_open),,1.0,0.0,0.0,0.5,0.5,PE,174.26,175.0
+2026-10-15,AXISBANK,BULLISH,A,True,1281.5,7.126,25.664,0.093517,0.284,False,no_gap,official gap 0.094 daily ATR its own way < 0.25 (daily_open),,0.5,0.0,0.0,0.5,0.0,PE,1274.37,1270.0
+2026-10-15,BANKINDIA,BEARISH,F,True,129.01,1.093,3.343,-0.0,-0.09,False,no_gap,official gap -0.000 daily ATR its own way < 0.25 (daily_open),1d.S3 +0.20,2.5,0.0,1.0,1.5,0.0,CE,130.1,130.0
+2026-10-15,BHARTIARTL,BULLISH,F,True,1832.6,9.603,35.698,0.014007,0.426,False,no_gap,official gap 0.014 daily ATR its own way < 0.25 (daily_open),1d.R2 +0.17,2.0,0.0,0.5,1.5,0.0,PE,1823.0,1820.0
+2026-10-15,CGPOWER,BEARISH,F,True,826.55,7.16,25.218,0.713785,0.672,False,pivot_pin,"gap 0.714 pinned: 1wk.S1 +0.07 ATR30 ahead (key pivots within 0.5) — in trend, B1x",1wk.S1 +0.07,3.0,1.0,0.5,1.5,0.0,CE,833.71,830.0
+2026-10-15,COCHINSHIP,BEARISH,A,True,1241.3,8.043,41.661,0.055208,0.01,False,no_gap,official gap 0.055 daily ATR its own way < 0.25 (daily_open),1wk.BC +0.41,0.0,0.0,0.0,0.0,0.0,CE,1249.34,1260.0
+2026-10-15,ENRIN,BEARISH,F,True,3046.9,25.835,115.03,0.450319,0.36,True,,"official gap 0.450 daily ATR its own way (≥ 0.25), no key pivot within 0.5 ATR30 nor R3/S3/R4/S4 within 0.25",,2.5,0.5,0.5,1.5,0.0,CE,3072.74,3050.0
+2026-10-15,GVT&D,BEARISH,F,True,4032.5,35.494,138.634,0.619618,0.607,True,,"official gap 0.620 daily ATR its own way (≥ 0.25), no key pivot within 0.5 ATR30 nor R3/S3/R4/S4 within 0.25",,3.0,1.0,0.5,1.5,0.0,CE,4067.99,4100.0
+2026-10-15,LUPIN,BULLISH,B,True,1967.8,10.19,38.659,-0.263843,-0.091,False,no_gap,official gap -0.264 daily ATR its own way < 0.25 (daily_open),,0.5,0.0,0.0,0.0,0.5,PE,1957.61,1960.0
+2026-10-15,NATIONALUM,BEARISH,F,True,312.0,2.426,10.337,0.783598,0.73,False,pivot_pin,"gap 0.784 pinned: 1mo.S2 +0.45 ATR30 ahead (key pivots within 0.5) — in trend, B1x",1mo.S2 +0.45,3.0,1.0,0.5,1.5,0.0,CE,314.43,315.0
+2026-10-15,OBEROIRLTY,BEARISH,F,True,1679.5,9.932,45.806,0.229228,0.146,False,no_gap,official gap 0.229 daily ATR its own way < 0.25 (daily_open),1d.S2 +0.16,1.5,0.0,0.0,1.5,0.0,CE,1689.43,1680.0
+2026-10-15,TMPV,BEARISH,F,True,281.8,1.321,7.601,0.092089,0.112,False,no_gap,official gap 0.092 daily ATR its own way < 0.25 (daily_open),1wk.TC +0.08,1.5,0.0,0.0,1.0,0.5,CE,283.12,285.0
+2026-10-15,UNIONBANK,BEARISH,F,True,167.79,1.502,4.817,-0.180616,-0.1,False,no_gap,official gap -0.181 daily ATR its own way < 0.25 (daily_open),1wk.S1 +0.28,2.0,0.0,0.5,1.5,0.0,CE,169.29,170.0
+2026-10-16,ABCAPITAL,BEARISH,A,True,376.85,2.42,9.522,-0.026254,0.194,False,no_gap,official gap -0.026 daily ATR its own way < 0.25 (daily_open),1wk.BC +0.08,0.0,0.0,0.0,0.0,0.0,CE,379.27,380.0
+2026-10-16,ASTRAL,BEARISH,F,True,1429.1,8.141,33.74,0.088916,0.041,False,no_gap,official gap 0.089 daily ATR its own way < 0.25 (daily_open),,1.5,0.0,0.0,1.5,0.0,CE,1437.24,1440.0
+2026-10-16,BLUESTARCO,BEARISH,B,True,1568.6,11.847,48.404,-0.0,0.215,False,no_gap,official gap -0.000 daily ATR its own way < 0.25 (daily_open),1d.S2 +0.47,1.5,0.0,0.0,1.5,0.0,CE,1580.45,1580.0
+2026-10-16,CDSL,BEARISH,A,True,1278.0,7.919,29.934,-0.10022,-0.254,False,no_gap,official gap -0.100 daily ATR its own way < 0.25 (daily_open),,0.0,0.0,0.0,0.0,0.0,CE,1285.92,1280.0
+2026-10-16,COALINDIA,BEARISH,F,True,413.45,1.903,8.564,-0.0,-0.047,False,no_gap,official gap -0.000 daily ATR its own way < 0.25 (daily_open),1d.S2 +0.48,1.0,0.0,0.0,0.5,0.5,CE,415.35,415.0
+2026-10-16,GODREJCP,BEARISH,A,True,849.0,5.236,18.605,0.612754,0.521,True,,"official gap 0.613 daily ATR its own way (≥ 0.25), no key pivot within 0.5 ATR30 nor R3/S3/R4/S4 within 0.25",,2.0,1.0,0.5,0.5,0.0,CE,854.24,850.0
+2026-10-16,HDFCLIFE,BEARISH,F,True,537.7,4.125,14.678,0.034065,-0.041,False,no_gap,official gap 0.034 daily ATR its own way < 0.25 (daily_open),,1.5,0.0,0.5,1.0,0.0,CE,541.82,540.0
+2026-10-16,JIOFIN,BEARISH,F,True,215.2,1.436,4.913,0.612698,0.643,False,pivot_pin,"gap 0.613 pinned: 1wk.TC +0.25 ATR30 ahead (key pivots within 0.5) — in trend, B1x",1wk.TC +0.25; 1wk.PIVOT +0.30; 1wk.BC +0.35,3.0,1.0,0.0,1.5,0.5,CE,216.64,217.5
+2026-10-16,LTF,BEARISH,F,True,251.75,2.767,8.279,-0.241581,-0.199,False,no_gap,official gap -0.242 daily ATR its own way < 0.25 (daily_open),,1.5,0.0,0.5,1.0,0.0,CE,254.52,255.0
+2026-10-16,PETRONET,BEARISH,A,True,291.4,1.27,6.094,-0.0,0.131,False,no_gap,official gap -0.000 daily ATR its own way < 0.25 (daily_open),,1.0,0.0,0.0,1.0,0.0,CE,292.67,292.5
+2026-10-16,VOLTAS,BEARISH,C,True,1032.1,7.698,29.194,0.325411,0.267,True,,"official gap 0.325 daily ATR its own way (≥ 0.25), no key pivot within 0.5 ATR30 nor R3/S3/R4/S4 within 0.25",,1.0,0.5,0.0,0.5,0.0,CE,1039.8,1040.0
+2026-10-19,AXISBANK,BEARISH,F,True,1235.6,10.322,25.694,0.976888,1.362,True,,"official gap 0.977 daily ATR its own way (≥ 0.25), no key pivot within 0.5 ATR30 nor R3/S3/R4/S4 within 0.25",,4.0,1.0,1.0,1.5,0.5,CE,1245.92,1250.0
+2026-10-19,BANKBARODA,BULLISH,F,True,234.12,1.151,4.902,-0.020398,0.02,False,no_gap,official gap -0.020 daily ATR its own way < 0.25 (daily_open),,1.0,0.0,0.0,1.0,0.0,PE,232.97,232.5
+2026-10-19,BANKINDIA,BULLISH,F,True,135.72,0.891,3.455,0.231571,0.156,False,no_gap,official gap 0.232 daily ATR its own way < 0.25 (daily_open),1d.R3 +0.24; 1wk.R1 +0.41,2.5,0.0,0.5,1.5,0.5,PE,134.83,135.0
+2026-10-19,BDL,BEARISH,F,True,1106.0,6.794,31.952,0.084501,0.016,False,no_gap,official gap 0.085 daily ATR its own way < 0.25 (daily_open),,0.5,0.0,0.0,0.5,0.0,CE,1112.79,1120.0
+2026-10-19,CAMS,BEARISH,F,True,696.05,3.859,17.302,-0.0,-0.038,False,no_gap,official gap -0.000 daily ATR its own way < 0.25 (daily_open),1d.S1 +0.06; 1wk.PIVOT +0.14,2.0,0.0,0.0,1.5,0.5,CE,699.91,700.0
+2026-10-19,CANBK,BULLISH,F,True,122.0,0.893,3.175,0.286634,0.488,False,pivot_pin,"gap 0.287 pinned: 1mo.PIVOT +0.06 ATR30 ahead (key pivots within 0.5) — in trend, B1x",1mo.PIVOT +0.06,2.0,0.5,0.5,1.0,0.0,PE,121.11,121.0
+2026-10-19,GRASIM,BULLISH,F,True,2939.3,19.0,61.751,0.0,0.143,False,no_gap,official gap 0.000 daily ATR its own way < 0.25 (daily_open),1d.R1 +0.49; 1wk.R1 +0.49,1.5,0.0,0.0,1.0,0.5,PE,2920.3,2920.0
+2026-10-19,HDFCBANK,BEARISH,F,True,719.75,4.068,14.236,-0.319604,-0.169,False,no_gap,official gap -0.320 daily ATR its own way < 0.25 (daily_open),1d.S2 +0.25,1.5,0.0,0.0,1.0,0.5,CE,723.82,720.0
+2026-10-19,IEX,BEARISH,A,True,106.52,0.625,2.395,-0.0,0.1,False,no_gap,official gap -0.000 daily ATR its own way < 0.25 (daily_open),1wk.PIVOT +0.15,0.0,0.0,0.0,0.0,0.0,CE,107.15,107.0
+2026-10-19,KFINTECH,BEARISH,F,True,874.4,5.855,24.696,-0.080986,-0.121,False,no_gap,official gap -0.081 daily ATR its own way < 0.25 (daily_open),1wk.BC +0.18,1.5,0.0,0.0,1.0,0.5,CE,880.26,880.0
+2026-10-19,MAHABANK,BULLISH,A,True,81.24,0.55,2.431,0.028799,0.029,False,no_gap,official gap 0.029 daily ATR its own way < 0.25 (daily_open),1wk.TC +0.25,0.5,0.0,0.0,0.5,0.0,PE,80.69,81.0
+2026-10-19,PGEL,BEARISH,F,True,515.1,3.696,15.691,0.003187,-0.099,False,no_gap,official gap 0.003 daily ATR its own way < 0.25 (daily_open),,1.0,0.0,0.0,1.0,0.0,CE,518.8,520.0
+2026-10-19,PNB,BULLISH,F,True,123.88,1.257,2.89,1.581554,1.668,True,,"official gap 1.582 daily ATR its own way (≥ 0.25), no key pivot within 0.5 ATR30 nor R3/S3/R4/S4 within 0.25",,4.5,2.0,1.5,1.0,0.0,PE,122.62,123.0
+2026-10-19,POLICYBZR,BEARISH,F,True,1041.4,10.258,71.238,0.05615,0.056,False,no_gap,official gap 0.056 daily ATR its own way < 0.25 (daily_open),1d.S2 +0.19,1.0,0.0,0.0,1.0,0.0,CE,1051.66,1060.0
+2026-10-19,PREMIERENE,BULLISH,F,True,929.75,6.248,27.226,0.255273,0.147,True,,"official gap 0.255 daily ATR its own way (≥ 0.25), no key pivot within 0.5 ATR30 nor R3/S3/R4/S4 within 0.25",,2.5,0.5,0.5,1.5,0.0,PE,923.5,920.0
+2026-10-19,SBICARD,BULLISH,A,True,576.75,3.707,15.506,0.13543,0.326,False,no_gap,official gap 0.135 daily ATR its own way < 0.25 (daily_open),,2.0,0.0,0.5,1.5,0.0,PE,573.04,570.0
+2026-10-19,UNIONBANK,BULLISH,F,True,177.22,1.398,4.882,0.249891,0.453,False,no_gap,official gap 0.250 daily ATR its own way < 0.25 (daily_open),,1.5,0.0,0.5,1.0,0.0,PE,175.82,175.0
+2026-10-19,UNITDSPR,BEARISH,A,True,1371.4,7.608,31.46,0.254291,0.013,True,,"official gap 0.254 daily ATR its own way (≥ 0.25), no key pivot within 0.5 ATR30 nor R3/S3/R4/S4 within 0.25",,0.5,0.5,0.0,0.0,0.0,CE,1379.01,1380.0
+2026-10-19,WAAREEENER,BULLISH,F,True,2546.3,22.2,70.963,-0.710232,-0.71,False,no_gap,official gap -0.710 daily ATR its own way < 0.25 (daily_open),1d.TC +0.08,0.5,0.0,0.0,0.5,0.0,PE,2524.1,2520.0
