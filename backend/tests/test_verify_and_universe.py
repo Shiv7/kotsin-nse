@@ -12,7 +12,7 @@ from kotsin_nse.bars.store import BarStore
 from kotsin_nse.bars.unified import BarSource
 from kotsin_nse.bars.verify import BarReconciler
 from kotsin_nse.config import Segment
-from kotsin_nse.domain import InstrumentKind, OptionType
+from kotsin_nse.domain import Instrument, InstrumentKind, OptionType
 from kotsin_nse.instrument.catalogue import Catalogue, parse_master
 from kotsin_nse.instrument.universe import UniverseBuilder, UniversePolicy
 from kotsin_nse.market.session import ist_hm, session_close_ts
@@ -346,3 +346,49 @@ async def test_partial_bars_are_corrections_not_fidelity_measurements(equity):
     assert (s.compared, s.exact, s.partial_replaced) == (0, 0, 1)
     assert s.to_json()["exact_pct"] is None
     assert store.last("RELIANCE", "30m").volume == 500
+
+
+def _mcx_gold() -> Catalogue:
+    """GOLD as listed on 2026-10-20: futures Dec and Feb; options 23 Oct (3 days out), 27 Nov, 31 Dec."""
+    cat = Catalogue()
+
+    def inst(code: str, kind: InstrumentKind, expiry: str, strike: float = 0.0, ot: OptionType = OptionType.FUT) -> Instrument:
+        return Instrument(
+            scrip_code=code, symbol="GOLD", segment=Segment.MCX_FO, kind=kind, name=f"GOLD {expiry} {ot.value} {strike}",
+            expiry=expiry, strike=strike, option_type=ot, underlying="GOLD",
+        )
+
+    cat.futures_by_symbol["GOLD"] = [inst("F12", InstrumentKind.FUTURE, "2026-12-04"), inst("F02", InstrumentKind.FUTURE, "2027-02-05")]
+    opts = []
+    for expiry in ("2026-10-23", "2026-11-27", "2026-12-31"):
+        for k in range(140_000, 153_000, 1_000):
+            for ot in (OptionType.CE, OptionType.PE):
+                opts.append(inst(f"{expiry}{ot.value}{k}", InstrumentKind.OPTION, expiry, float(k), ot))
+    cat.options_by_symbol["GOLD"] = opts
+    return cat
+
+
+def test_mcx_takes_the_next_expiry_too_when_the_nearest_is_days_away_and_wider_strikes():
+    b = UniverseBuilder(_mcx_gold(), UniversePolicy(mcx_strikes_per_side=4, mcx_next_expiry_days=7))
+    g = b.build_underlyings([Segment.MCX_FO], date(2026, 10, 20))["GOLD"]
+    b.select_strikes(g, 146_458.0, date(2026, 10, 20))
+    assert g.option_expiries == ["2026-10-23", "2026-11-27"] and g.option_expiry == "2026-10-23"
+    assert len([o for o in g.options if o.expiry == "2026-10-23" and o.option_type is OptionType.CE]) == 4
+    # far from expiry: only the nearest
+    b.select_strikes(g, 146_458.0, date(2026, 11, 1))
+    assert g.option_expiries == ["2026-11-27"]
+
+
+def test_an_option_is_priced_on_the_future_expiring_on_or_after_it():
+    b = UniverseBuilder(_mcx_gold())
+    g = b.build_underlyings([Segment.MCX_FO], date(2026, 10, 20))["GOLD"]
+    assert g.future_for("2026-11-27").scrip_code == "F12"
+    assert g.future_for("2026-12-31").scrip_code == "F02", "December's options sit on the February future"
+    assert g.future_for("2027-03-31") is None
+
+
+def test_mcx_subscribes_every_listed_future_even_when_nse_keeps_only_the_front():
+    b = UniverseBuilder(_mcx_gold())
+    g = b.build_underlyings([Segment.MCX_FO], date(2026, 10, 20))["GOLD"]
+    subs = UniverseBuilder.subscriptions([g], futures_months=1)
+    assert {i.scrip_code for i in subs["oi"]} >= {"F12", "F02"}

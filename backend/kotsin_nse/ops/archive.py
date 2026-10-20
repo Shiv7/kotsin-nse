@@ -41,6 +41,7 @@ KEYS: dict[str, tuple[str, ...]] = {
     "ticks": ("source", "scrip_code", "recv_ts"),
     "depth": ("scrip_code", "ts"),
     "flow": ("code", "ts"),
+    "fno": ("symbol", "ts"),
 }
 
 
@@ -121,6 +122,10 @@ class DailyArchive:
     def flow(self, row: Mapping[str, Any]) -> None:
         self._add("flow", float(row["ts"]), dict(row))
 
+    def fno(self, row: Mapping[str, Any]) -> None:
+        """One minute's futures-and-options reading of one root, flat — the forward test's input."""
+        self._add("fno", float(row["ts"]), dict(row))
+
     # -- read back ------------------------------------------------------------------------------
 
     def closing_oi(self, day: str, codes: Iterable[str], not_before_ts: float) -> dict[str, float]:
@@ -166,7 +171,8 @@ class DailyArchive:
                     self.last_error = f"{kind}/{day}: {exc}"[:200]
                     by_day[day].extend(rows)  # keep them for the next attempt
                     log.warning("archive.write_failed", kind=kind, day=day, error=str(exc))
-        self.rows_buffered = sum(len(r) for by_day in self._rows.values() for r in by_day.values())
+        # list(): rows are added from the loop and from the scan's worker thread while this runs
+        self.rows_buffered = sum(len(r) for by_day in self._rows.values() for r in list(by_day.values()))
         self.flushes += 1
         self.last_flush_ts = time.time()
         if written:

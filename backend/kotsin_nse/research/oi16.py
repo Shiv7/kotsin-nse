@@ -21,6 +21,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from ..fno.positioning import CALL_SCORE, LONG, PUT_SCORE, SHORT, bias, premium_signal
+from ..fno.positioning import FUT_SCORE as _FUT_SCORE
+from ..fno.positioning import leg_state as _state
 from ..market.fo_bhavcopy import OiDailyStore
 from .oi_daily import futures_table
 
@@ -112,38 +115,8 @@ def previous_state(table: pd.DataFrame, symbol: str, day: date) -> int | None:
 # puts near the money. Score: futures LB +2 / SC +1 / SB −2 / LU −1; calls LB +1 / SC +0.5 / SB −1 /
 # LU −0.5 (calls bullish when bought); puts the reverse (SB +1 / LU +0.5 / LB −1 / SC −0.5).
 
-FUT_SCORE = {"LONG BUILD-UP": 2.0, "SHORT COVERING": 1.0, "SHORT BUILD-UP": -2.0, "LONG UNWINDING": -1.0}
-CALL_SCORE = {"LB": 1.0, "SC": 0.5, "SB": -1.0, "LU": -0.5}
-PUT_SCORE = {"LB": -1.0, "SC": -0.5, "SB": 1.0, "LU": 0.5}
-SHORT = {"LONG BUILD-UP": "LB", "SHORT COVERING": "SC", "SHORT BUILD-UP": "SB", "LONG UNWINDING": "LU"}
-
-
-def _state(price_up: bool, oi_up: bool) -> str:
-    return ("LB" if oi_up else "SC") if price_up else ("SB" if oi_up else "LU")
-
-
-def bias(score: float) -> str:
-    if score >= 3:
-        return "Strong Bull"
-    if score >= 1.5:
-        return "Bull"
-    if score > 0:
-        return "Mild Bull"
-    if score == 0:
-        return "Neutral"
-    if score > -1.5:
-        return "Mild Bear"
-    if score > -3:
-        return "Bear"
-    return "Strong Bear"
-
-
-def premium_signal(fut_up: bool, call_up: bool, put_up: bool) -> str:
-    if call_up and put_up:
-        return "IV↑ big move"
-    if not call_up and not put_up:
-        return "IV↓ range"
-    return "Normal" if call_up == fut_up else "Divergence"
+# The scoring itself lives in ``fno/positioning.py`` — the live panel and this study must not drift.
+FUT_SCORE = {LONG[k]: v for k, v in _FUT_SCORE.items()}
 
 
 def options64_table(store: OiDailyStore, fut: pd.DataFrame, cache: Path | None = None) -> pd.DataFrame:

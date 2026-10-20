@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import replace
 from datetime import date, timedelta
 from typing import Any
 
@@ -41,6 +42,9 @@ from .exec.paper import BookSnapshot, PaperMatcher
 from .feed import build_source
 from .feed.base import Channel, DepthMsg, OIMsg, TickMsg
 from .feed.rate import FeedRateMeter
+from .fno.chain import YEAR_S, OptQuote, StrikeRow, leg_of, read_chain
+from .fno.positioning import WEAK_OI_PCT, Leg
+from .fno.positioning import read as read_positioning
 from .instrument.catalogue import CatalogueLoader
 from .instrument.quote import Quote
 from .instrument.universe import ScripGroup, UniverseBuilder, UniversePolicy
@@ -133,6 +137,12 @@ class Engine:
         self._mcx_oi_ref_day: str | None = None
         #: underlying → when its OI reference was taken, where it is not the previous close
         self.oi_ref_since: dict[str, float] = {}
+        #: contract → when its OI reference was taken, where it is not the previous close
+        self.oi_ref_ts: dict[str, float] = {}
+        #: contract → its latest OI (futures and options alike)
+        self.oi_live: dict[str, float] = {}
+        #: contract → the exchange's previous close, as every quote frame carries it (PClose)
+        self.prev_close_by_code: dict[str, float] = {}
         self.reconciler = BarReconciler(self.rest, self.store, lambda sym: self.underlyings.get(sym))
         self.groups: dict[str, ScripGroup] = {}
         self.universe_builder: UniverseBuilder | None = None
@@ -140,6 +150,7 @@ class Engine:
         self._bg_tasks: set[asyncio.Task[Any]] = set()
         self._sweep_task: asyncio.Task[Any] | None = None
         self._intraday_rebuild_day: str = ""
+        self._rewarm_ts = 0.0
         self.matcher = PaperMatcher(self.costs)
         self.live_exec: LiveExecutor | None = None
         self.reconciler_ready = False
@@ -474,6 +485,9 @@ class Engine:
             )
         elif code in self._option_tick_codes and self.s.archive_ticks:
             self.archive.tick(tick)
+        pc = float(tick.get("prev_close") or 0)
+        if pc > 0:
+            self.prev_close_by_code[code] = pc
         ltp = float(tick.get("ltp") or 0)
         if ltp > 0:
             self.ltps[code] = ltp
@@ -497,50 +511,60 @@ class Engine:
                 self.archive.depth(code, ts, depth["bids"], depth["asks"])
 
     async def _on_oi(self, oi: OIMsg) -> None:
-        fut_code = str(oi["scrip_code"])
+        code = str(oi["scrip_code"])
+        ts = float(oi.get("recv_ts") or time.time())
+        now_oi = float(oi["open_interest"])
         self.archive.oi(
-            fut_code,
-            float(oi.get("recv_ts") or time.time()),
-            float(oi["open_interest"]),
-            float(oi["oi_change_pct"]) if oi.get("oi_change_pct") is not None else None,
+            code, ts, now_oi, float(oi["oi_change_pct"]) if oi.get("oi_change_pct") is not None else None
         )
-        if fut_code in self._front_future:
-            self.flow.on_oi(fut_code, float(oi.get("recv_ts") or time.time()), float(oi["open_interest"]))
-        symbol = self._future_to_underlying.get(fut_code)
+        self.oi_live[code] = now_oi
+        if code in self._front_future:
+            self.flow.on_oi(code, ts, now_oi)
+        ref = self._oi_reference(code, now_oi, ts)
+        chg = (now_oi / ref - 1) * 100 if ref else None
+        symbol = self._future_to_underlying.get(code)
         if symbol is None:
-            # Not a future we map to an underlying → an option strike. Keep its OI; the Options
-            # page reads it from here.
-            self.option_oi[fut_code] = {
-                "oi": float(oi["open_interest"]),
-                "change_pct": float(oi["oi_change_pct"]),
-                "ts": float(oi.get("recv_ts") or time.time()),
+            # Not a future we map to an underlying → an option strike. The Options page and the
+            # F&O panel read it from here; the change is ours, 5paisa's field is 0.0 on every frame.
+            self.option_oi[code] = {
+                "oi": now_oi,
+                "change_pct": chg if chg is not None else float(oi["oi_change_pct"]),
+                "ts": ts,
             }
             return
         inst = self.underlyings.get(symbol)
         if inst is None:
             return
-        if fut_code not in self._front_future:
+        if code not in self._front_future:
             # the next-month future: its OI is archived above, but stamping it on the bars made
             # every underlying's bar OI flip between two contracts (RELIANCE 139.8M ↔ 27.4M)
             return
-        ref = self.oi_ref.get(fut_code) or self.mcx_oi_ref.get(fut_code)
-        if (
-            not ref
-            and inst.segment is Segment.MCX_FO
-            and self._mcx_oi_ref_day == ist_day(time.time()).isoformat()
-            and float(oi["open_interest"]) > 0
-        ):
-            # no closing OI on record: measure from the first OI seen this session, and say so
-            ref = self.mcx_oi_ref[fut_code] = float(oi["open_interest"])
-            self.oi_ref_since[symbol] = float(oi.get("recv_ts") or time.time())
-        if ref:
-            self.fut_oi_change[symbol] = (float(oi["open_interest"]) / ref - 1) * 100
+        if chg is not None:
+            self.fut_oi_change[symbol] = chg
+            if code in self.oi_ref_ts:
+                self.oi_ref_since[symbol] = self.oi_ref_ts[code]
         self.aggregator.set_oi(
             inst.scrip_code,
-            oi=int(oi["open_interest"]),
+            oi=int(now_oi),
             change_pct=float(oi["oi_change_pct"]),
-            fut_code=fut_code,
+            fut_code=code,
         )
+
+    def _oi_reference(self, code: str, oi: float = 0.0, ts: float | None = None) -> float | None:
+        """What a contract's OI change is measured from: NSE's official closing OI (bhavcopy), the
+        previous MCX session's close as we recorded it, else — MCX, once the archive was consulted
+        today — the first OI seen this session (``oi_ref_ts`` says when)."""
+        ref = self.oi_ref.get(code) or self.mcx_oi_ref.get(code)
+        if (
+            not ref
+            and oi > 0
+            and ts is not None
+            and self._segment_by_code.get(code) is Segment.MCX_FO
+            and self._mcx_oi_ref_day == ist_day(ts).isoformat()
+        ):
+            ref = self.mcx_oi_ref[code] = oi
+            self.oi_ref_ts[code] = ts
+        return ref or None
 
     def book_for(self, scrip_code: str) -> BookSnapshot | None:
         return self.books.get(scrip_code)
@@ -626,6 +650,8 @@ class Engine:
             now = time.time()
 
             def _run() -> None:
+                if self.s.archive_enabled:
+                    self._record_fno(now)
                 board = self.scanner.scan(self.scan_symbols(), now, oi, commodities=self.commodities())
 
                 attach_setups(board, lambda sym: structure_from_store(self.store, sym, now))
@@ -646,7 +672,8 @@ class Engine:
                     if df is not None and not df.empty:
                         await asyncio.to_thread(self.oi_daily.write, d, df)
                 if self.oi_daily.has(d):
-                    codes = list(self._front_future)
+                    # the strikes' closing OI too: the F&O panel measures every leg from it
+                    codes = [*self._front_future, *(o.scrip_code for g in self.groups.values() for o in g.options)]
                     self.oi_ref = await asyncio.to_thread(self.oi_daily.closes, d, codes)
                     self.oi_ref_day = d
                     log.info("oi.reference", day=d.isoformat(), futures=len(self.oi_ref), of=len(codes))
@@ -656,11 +683,16 @@ class Engine:
         return False
 
     async def _load_mcx_oi_reference(self, day: str) -> None:
-        """The previous MCX session's closing OI per front future, from our own archive — kept
-        only where the engine was still recording in the last 15 minutes of that session. Where
-        there is none, today's first recorded OI stands in (and the board says since when)."""
+        """The previous MCX session's closing OI of every MCX future and option, from our own
+        archive — kept only where the engine was still recording in the last 15 minutes of that
+        session. Where there is none, today's first recorded OI stands in (and says since when)."""
         prev = self.calendar.previous_trading_day(date.fromisoformat(day), Segment.MCX_FO)
-        codes = [c for c, r in self._front_future.items() if self.groups[r].segment is Segment.MCX_FO]
+        codes = [
+            i.scrip_code
+            for g in self.groups.values()
+            if g.segment is Segment.MCX_FO
+            for i in (*g.futures, *g.options)
+        ]
         not_before = session_close_ts(Segment.MCX_FO, prev) - 900
         refs: dict[str, float] = {}
         first: dict[str, tuple[float, float]] = {}
@@ -673,9 +705,17 @@ class Engine:
         self.mcx_oi_ref = dict(refs)
         for code, (ts, oi) in first.items():
             self.mcx_oi_ref[code] = oi
-            self.oi_ref_since[self._front_future[code]] = ts
+            self.oi_ref_ts[code] = ts
+            if code in self._front_future:
+                self.oi_ref_since[self._front_future[code]] = ts
         self._mcx_oi_ref_day = day
         log.info("oi.mcx_reference", day=prev.isoformat(), closes=len(refs), today_first=len(first), of=len(codes))
+
+    async def _rewarm(self) -> None:
+        cold = [g.underlying for g in self.groups.values() if self._prev_close(g.underlying.symbol) is None]
+        log.info("engine.rewarm", underlyings=len(cold))
+        await self._backfill(cold)
+        await self._intraday_universe_rebuild()
 
     async def _intraday_universe_rebuild(self) -> None:
         if self.universe_builder is None:
@@ -689,9 +729,11 @@ class Engine:
             for o in fresh:
                 self._segment_by_code[o.scrip_code] = o.segment
                 self._inst_by_code[o.scrip_code] = o
+                self._option_tick_codes.add(o.scrip_code)
             if fresh:
                 await self.feed.subscribe(Channel.QUOTES, fresh)
-                await self.feed.subscribe(Channel.DEPTH, fresh)
+                if self.s.universe_depth and self.s.universe_option_depth:
+                    await self.feed.subscribe(Channel.DEPTH, fresh)
                 await self.feed.subscribe(Channel.OI, fresh)
             log.info("universe.intraday_rebuild", new_strikes=len(fresh))
         except Exception as exc:  # noqa: BLE001 - a failed rebuild keeps the overnight universe
@@ -726,6 +768,7 @@ class Engine:
                     self.feed_rate.reset()
                     self.oi_ref, self.oi_ref_day, self.fut_oi_change = {}, None, {}
                     self.mcx_oi_ref, self._mcx_oi_ref_day, self.oi_ref_since = {}, None, {}
+                    self.oi_ref_ts = {}
                 if (
                     self._mcx_oi_ref_day != day
                     and self._front_future
@@ -768,6 +811,18 @@ class Engine:
                         self.reconciler.sweep(list(self.underlyings))
                     )
 
+                # A boot whose broker login failed (2026-10-20: a restart reused a spent TOTP) backfilled
+                # nothing, so no previous close and no strikes — and nothing ever retried. Retry here.
+                if (
+                    self.reconciler_ready
+                    and now - self._rewarm_ts > 120
+                    and self.auth.session is not None
+                    and self.auth.session.usable
+                    and any(self._prev_close(g.underlying.symbol) is None for g in self.groups.values())
+                ):
+                    self._rewarm_ts = now
+                    self._bg_tasks.add(asyncio.create_task(self._rewarm()))
+
                 # scripFinder's 09:20 IST intraday rebuild: refetch the master, re-pick strikes,
                 # subscribe anything new. Strikes listed 09:00–09:15 are not in an overnight master.
                 if self.reconciler_ready and ist_hm(now) >= "09:20" and self._intraday_rebuild_day != day:
@@ -784,6 +839,153 @@ class Engine:
     # -- state -----------------------------------------------------------------------------------------
 
     # -- introspection -------------------------------------------------------------------------------
+
+    def fno_snapshot(self, symbol: str, now: float | None = None) -> dict[str, Any] | None:
+        """Futures and options read together for one underlying: each leg's move since its
+        reference, the 64-state reading, and every selected expiry's chain. None when the root
+        has no future (cash-only, or not in the universe)."""
+        g = self.groups.get(symbol)
+        if g is None or not g.futures:
+            return None
+        now = now or time.time()
+        today = ist_day(now)
+        fut = g.futures[0]
+        missing: list[str] = []
+        used_refs: list[str] = [fut.scrip_code]
+
+        f_px = self.ltps.get(fut.scrip_code)
+        f_prev = self.prev_close_by_code.get(fut.scrip_code)
+        f_oi = self.oi_live.get(fut.scrip_code)
+        f_ref = self._oi_reference(fut.scrip_code)
+        fut_leg: Leg | None = None
+        if f_px and f_prev and f_oi is not None and f_ref:
+            fut_leg = Leg(price_chg_pct=(f_px / f_prev - 1) * 100, oi_chg=f_oi - f_ref, oi_chg_pct=(f_oi / f_ref - 1) * 100)
+        else:
+            missing.append("futures: " + ", ".join(
+                n for n, ok in (("price", f_px), ("previous close", f_prev), ("OI", f_oi is not None), ("OI reference", f_ref)) if not ok
+            ))
+
+        prev_day = self.calendar.previous_trading_day(today, g.segment)
+        prev_close_ts = session_close_ts(g.segment, prev_day)
+        expiries: list[dict[str, Any]] = []
+        near_calls: list[OptQuote] = []
+        near_puts: list[OptQuote] = []
+        for e in g.option_expiries:
+            und = g.future_for(e) or fut
+            fx = self.ltps.get(und.scrip_code)
+            if not fx:
+                missing.append(f"{e}: no price for its future {und.name or und.scrip_code}")
+                continue
+            by_strike: dict[float, dict[str, OptQuote]] = {}
+            for o in g.options:
+                if o.expiry != e:
+                    continue
+                used_refs.append(o.scrip_code)
+                by_strike.setdefault(o.strike, {})[o.option_type.value] = OptQuote(
+                    ltp=self.ltps.get(o.scrip_code),
+                    prev_close=self.prev_close_by_code.get(o.scrip_code),
+                    oi=self.oi_live.get(o.scrip_code),
+                    oi_ref=self._oi_reference(o.scrip_code),
+                )
+            rows = [StrikeRow(k, v.get("CE"), v.get("PE")) for k, v in by_strike.items()]
+            exp_ts = session_close_ts(g.segment, date.fromisoformat(e))
+            cr = read_chain(
+                rows,
+                future=fx,
+                future_prev=self.prev_close_by_code.get(und.scrip_code),
+                t=max(exp_ts - now, 60.0) / YEAR_S,
+                t_prev=max(exp_ts - prev_close_ts, 60.0) / YEAR_S,
+            )
+            near_calls += cr.near_calls
+            near_puts += cr.near_puts
+            expiries.append(
+                {
+                    "expiry": e,
+                    "days": (date.fromisoformat(e) - today).days,
+                    "future": {"code": und.scrip_code, "name": und.name, "expiry": und.expiry, "ltp": fx},
+                    **cr.view,
+                }
+            )
+
+        calls, puts = leg_of(near_calls), leg_of(near_puts)
+        # an options leg counts only if its OI moved by a material share of the futures' own OI
+        material = (f_oi or 0) * WEAK_OI_PCT / 100
+        calls = replace(calls, min_contracts=material) if calls else None
+        puts = replace(puts, min_contracts=material) if puts else None
+        if calls is None:
+            missing.append("calls: no priced near-the-money strike with OI")
+        if puts is None:
+            missing.append("puts: no priced near-the-money strike with OI")
+        reading = read_positioning(fut_leg, calls, puts) if fut_leg and calls and puts else None
+        since = [self.oi_ref_ts[c] for c in used_refs if c in self.oi_ref_ts]
+        return {
+            "symbol": symbol,
+            "segment": g.segment.value,
+            "ts": now,
+            "future": {
+                "code": fut.scrip_code,
+                "name": fut.name,
+                "expiry": fut.expiry,
+                "ltp": f_px,
+                "prev_close": f_prev,
+                "oi": f_oi,
+                "oi_ref": f_ref,
+            },
+            "legs": {
+                "futures": fut_leg.to_json() if fut_leg else None,
+                "calls": calls.to_json() if calls else None,
+                "puts": puts.to_json() if puts else None,
+            },
+            "reading": reading.to_json() if reading else None,
+            #: the latest moment an OI reference was taken at, when any is not a previous close
+            "oi_since": max(since) if since else None,
+            "missing": missing,
+            "expiries": expiries,
+        }
+
+    @staticmethod
+    def fno_row(snap: dict[str, Any]) -> dict[str, Any]:
+        """``fno_snapshot`` flattened for the archive: the reading, each leg, the nearest expiry."""
+        r = snap.get("reading") or {}
+        legs = snap.get("legs") or {}
+        e = (snap.get("expiries") or [{}])[0]
+        row: dict[str, Any] = {
+            "symbol": snap["symbol"],
+            "ts": int(snap["ts"] // 60 * 60),
+            "fut_ltp": snap["future"].get("ltp"),
+            "fut_oi": snap["future"].get("oi"),
+            "row": r.get("row"),
+            "score": r.get("score"),
+            "bias": r.get("bias"),
+            "premium": r.get("premium"),
+            "weak": ",".join(r.get("weak") or []),
+            "oi_since": snap.get("oi_since"),
+        }
+        for name in ("futures", "calls", "puts"):
+            leg = legs.get(name) or {}
+            row[f"{name}_state"] = leg.get("state")
+            row[f"{name}_px_chg"] = leg.get("price_chg_pct")
+            row[f"{name}_oi_chg"] = leg.get("oi_chg")
+            row[f"{name}_oi_chg_pct"] = leg.get("oi_chg_pct")
+        for k in ("expiry", "atm", "straddle", "implied_move_pct", "iv", "iv_prev", "pcr_oi", "pcr_oi_chg"):
+            row[f"x_{k}"] = e.get(k)
+        for k in ("call_wall", "put_wall", "call_add", "put_add"):
+            row[f"x_{k}"] = (e.get(k) or {}).get("strike")
+        return row
+
+    def _record_fno(self, now: float) -> None:
+        """Worker thread: read every root with options and archive the minute's row. It only reads
+        engine state (dict lookups, list walks), never iterates a dict the feed is writing."""
+        for sym, g in list(self.groups.items()):
+            if not g.options:
+                continue
+            try:
+                snap = self.fno_snapshot(sym, now)
+            except Exception as exc:  # noqa: BLE001 - one root's failure never costs the others
+                log.warning("fno.snapshot_failed", symbol=sym, error=str(exc))
+                continue
+            if snap is not None:
+                self.archive.fno(self.fno_row(snap))
 
     def market_open_now(self) -> bool:
         now = time.time()

@@ -50,6 +50,12 @@ class UniversePolicy:
     include_indices: bool = True
     #: MCX bands are wider (scripFinder passed caller-supplied factors for commodities)
     mcx_band_pct: float = 20.0
+    #: MCX: more strikes — "per side" is per option type, so 20 calls and 20 puts nearest the
+    #: money ≈ ±10 strikes; ±5 (crude: ±250) was too narrow to see a wall — and, when the nearest
+    #: expiry is this close, the next one too: NATURALGAS's options expire 3 days out on 2026-10-20,
+    #: all expiry noise. Cheap there: ten roots, against NSE's two hundred.
+    mcx_strikes_per_side: int = 20
+    mcx_next_expiry_days: int = 7
 
 
 @dataclass(slots=True)
@@ -63,12 +69,20 @@ class ScripGroup:
     futures: list[Instrument] = field(default_factory=list)
     options: list[Instrument] = field(default_factory=list)
     close: float | None = None
-    option_expiry: str | None = None
+    option_expiry: str | None = None  # the nearest selected
+    option_expiries: list[str] = field(default_factory=list)  # every selected, nearest first
     note: str = ""
 
     @property
     def front_future(self) -> Instrument | None:
         return self.futures[0] if self.futures else None
+
+    def future_for(self, expiry: str) -> Instrument | None:
+        """The future an option of ``expiry`` is priced on: the nearest one expiring on or after
+        it. MCX GOLD's 31 Dec options sit on the February future (December's expires 4 Dec);
+        NATURALGAS's 23 Oct options on the October future (27 Oct)."""
+        later = [f for f in self.futures if f.expiry >= expiry]
+        return min(later, key=lambda f: f.expiry) if later else None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -148,6 +162,7 @@ class UniverseBuilder:
         group.close = close
         group.options = []
         group.option_expiry = None
+        group.option_expiries = []
         if not close or close <= 0:
             group.note = (group.note + "; " if group.note else "") + "no close — strikes not selected"
             return
@@ -158,16 +173,22 @@ class UniverseBuilder:
         ]
         if not expiries:
             return
-        expiry = expiries[0]
-        band = self.policy.mcx_band_pct if group.segment is Segment.MCX_FO else self.policy.band_pct
+        mcx = group.segment is Segment.MCX_FO
+        chosen_expiries = expiries[:1]
+        if mcx and len(expiries) > 1 and (date.fromisoformat(expiries[0]) - today).days <= self.policy.mcx_next_expiry_days:
+            chosen_expiries = expiries[:2]
+        band = self.policy.mcx_band_pct if mcx else self.policy.band_pct
+        per_side = self.policy.mcx_strikes_per_side if mcx else self.policy.strikes_per_side
         lo, hi = close * (1 - band / 100), close * (1 + band / 100)
         chosen: list[Instrument] = []
-        for otype in (OptionType.CE, OptionType.PE):
-            rows = [i for i in self.cat.chain(group.root, expiry, otype) if lo <= i.strike <= hi]
-            rows.sort(key=lambda i: abs(i.strike - close))
-            chosen += rows[: self.policy.strikes_per_side]
-        group.options = sorted(chosen, key=lambda i: (i.option_type.value, i.strike))
-        group.option_expiry = expiry
+        for expiry in chosen_expiries:
+            for otype in (OptionType.CE, OptionType.PE):
+                rows = [i for i in self.cat.chain(group.root, expiry, otype) if lo <= i.strike <= hi]
+                rows.sort(key=lambda i: abs(i.strike - close))
+                chosen += rows[:per_side]
+        group.options = sorted(chosen, key=lambda i: (i.expiry, i.option_type.value, i.strike))
+        group.option_expiry = chosen_expiries[0]
+        group.option_expiries = chosen_expiries
 
     def select_all(self, groups: dict[str, ScripGroup], close_for: Callable[[str], float | None], today: date) -> int:
         n = 0
@@ -198,7 +219,8 @@ class UniverseBuilder:
         for g in groups:
             quotes[g.underlying.scrip_code] = g.underlying
             depth[g.underlying.scrip_code] = g.underlying
-            for f in g.futures[:futures_months]:
+            # MCX keeps every listed month (two): its options can sit on the second (GOLD Dec → Feb)
+            for f in g.futures[: None if g.segment is Segment.MCX_FO else futures_months]:
                 quotes[f.scrip_code] = f
                 oi[f.scrip_code] = f
             for o in g.options:

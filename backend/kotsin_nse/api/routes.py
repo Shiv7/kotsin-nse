@@ -218,6 +218,17 @@ def build_app(engine: Engine) -> FastAPI:
             "forming": _bar_view(forming) if forming else None,
         }
 
+    @api.get("/fno/{symbol}")
+    async def fno(symbol: str) -> dict[str, Any]:
+        """Futures and options read together: each leg's state since its reference, the 64-state
+        reading (score, bias, premium signal), and per expiry the walls, put-call ratio, straddle
+        and IV. ``missing`` names whatever kept a part of it from being computed."""
+        # on the loop, not a worker thread: it reads dicts the feed is writing (~15 ms of IV maths)
+        out = engine.fno_snapshot(symbol.upper())
+        if out is None:
+            raise HTTPException(404, f"{symbol.upper()} has no future in the universe")
+        return out
+
     @api.get("/chain/{symbol}")
     async def chain(symbol: str, expiry: str | None = None) -> dict[str, Any]:
         """The option chain for one expiry (default: the nearest), with the live quotes we hold."""
