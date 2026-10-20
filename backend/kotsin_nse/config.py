@@ -289,11 +289,13 @@ class Settings(BaseSettings):
     record5_enabled: bool = True
     #: KN_RECORD_BAND — the record band: subscribe calls and puts within ``record5_band_strikes`` strikes of each NSE
     #: name's LIVE spot (from the 09:07 pre-open price, sticky for the day) and each 30m bar's wall candidates, for the
-    #: recorder alone (their frames never reach the engine's quotes, OI, books or strike chooser). OFF by default
-    #: (operator's decision 20 Oct): its one effect on the engine is that a band strike a book later selects is already
-    #: streaming (primed from the pool, as a code the twin holds is since 5 Oct). Without it the legs read only what
+    #: recorder alone (their frames never reach the engine's quotes, OI, books or strike chooser). OFF until the
+    #: operator says otherwise — an OPEN decision, not one taken (review, 20 Oct): without it the legs read only what
     #: the engine subscribes anyway (all four legs on prices at the candle start on 43 % of 14-19 Oct's triggers;
-    #: 97 % with the band at 3 strikes).
+    #: 97 % with the band at 3 strikes), so the 19 Oct gaps (PNB, CANBK, AXISBANK, BANKNIFTY) come back. On, an engine
+    #: subscribe of a band strike is answered as the broker answers a fresh one — its current state now, live from now
+    #: (``FivePaisaFeed._snapshot_from_pool``) — so a book reads what it would without the band, up to one broker
+    #: round trip sooner; the reader carries ~45 % more quote codes. Set it on BOTH engines or neither.
     record_band: bool = False
     record5_band_strikes: int = 3
     #: the band on the price channel too (False: OI only — no quote effect, price reads for 43 % of triggers)
@@ -303,8 +305,13 @@ class Settings(BaseSettings):
     #: hard caps on the band's codes the engine does not itself hold (nearest strikes first; health says ``capped``)
     record5_max_extra_mf: int = 2000
     record5_max_extra_oi: int = 1000
-    #: calendar days of per-minute option volume part files kept (``archive/option_volume``; ~60 sessions)
-    record5_volume_keep_days: int = 90
+    #: calendar days of per-minute option volume part files kept (``archive/option_volume``; ~20 sessions, ~8 MB a
+    #: session, written by the socket's owner alone — review, 20 Oct, the disk 98 % full)
+    record5_volume_keep_days: int = 30
+    #: calendar days of the reads' full records kept (``archive/read5_detail/<day>.jsonl``; 12-25 KB a trigger)
+    record5_detail_keep_days: int = 90
+    #: nothing of the record's own files (minute volumes, the detail lines) is written below this much free disk
+    record5_min_free_gb: float = 2.0
 
     # ---- cost model ----------------------------------------------------------------------------
     # SUPERSEDED 2026-09-26: every rate below now comes from <data_dir>/charges.toml (risk/charge_rates.py,

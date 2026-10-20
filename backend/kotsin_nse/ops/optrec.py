@@ -5,7 +5,7 @@ only, so CT-B1 and later B2 can use them". Nothing here is read by a gate, a boo
 import-linter contract keeps ``strategy``, ``risk``, ``exec``, ``venue`` and ``feed`` from importing it).
 
 The feed hands every market-feed and OI row it reads to ``OptionRecorder.on_frame`` — the rows this engine asked for
-and the ones the socket carries for the twin or the record band alike (``FivePaisaFeed.on_record``) — before, and
+and the ones the socket carries for the twin or the record band alike (``FivePaisaFeed.on_record``) — after, and
 apart from, the engine's own handlers. A row of a code the recorder does not watch costs a dict lookup.
 
 What it keeps, per watched code (the options of each name's legs' expiry, its front future and its cash/index code):
@@ -26,12 +26,14 @@ What it keeps, per watched code (the options of each name's legs' expiry, its fr
   **unverified** — research's ``c.bad`` session: the VOL read does not use it.
 
 Archived: the minute volumes as part files under ``archive/option_volume/<day>/`` (rows ADD UP on (code, minute): a
-frame whose minute was already written comes as a second row), and every covered code's 30m bar to
-``option_volume_30m`` through the daily archive.
+frame whose minute was already written comes as a second row) — by the engine that owns the broker socket alone, kept
+30 days, never below the disk floor — and every covered code's 30m bar to ``option_volume_30m`` through the daily
+archive. The reads' whole records go to ``archive/read5_detail/<day>.jsonl`` (``DetailLog``).
 """
 
 from __future__ import annotations
 
+import json
 import math
 import shutil
 import threading
@@ -230,6 +232,12 @@ class OptionRecorder:
         self._ring: dict[str, _Ring] = {}
         self._mins: dict[str, _MinuteStates] = {}
         self._first: dict[str, tuple[float, float, float]] = {}  # code -> (t, ltp, run) of the first entry >= 09:15
+        #: code -> its first price-feed frame of the day (any price, pooled or not): the opening baseline's "first print
+        #: at or after 09:15" is the open only for a code that was streaming by 09:15 (review, 20 Oct: a subscription
+        #: snapshot landing 63 ms before the signal read as the 09:15 open). Kept apart from the ring, never trimmed
+        self._seen: dict[str, float] = {}
+        #: the first frame this recorder read (this process): a baseline before it is not on record (a restart)
+        self.started: float | None = None
         self._oi: dict[str, _Oi] = {}
         self.oi_prev: dict[str, float] = {}
         #: (code, previous session) -> the as-of OI at OI_GRID — the walls' oiChangePct windows
@@ -240,6 +248,11 @@ class OptionRecorder:
         self._minutes_from = 0.0
         #: (code, day, bar start) -> (volume, verified, covered since) — today's closed bars and the loaded history
         self._b30: dict[tuple[str, str, str], tuple[float, bool, float | None]] = {}
+        #: today's bars in ``_b30`` and how many are verified — kept as they change, so ``stats()`` (every /api/health
+        #: call, on the trading loop) never walks ``_b30`` (review, 20 Oct: 39-67 ms a call at 3.5-6k codes)
+        self._day_s = ""
+        self._bars_today = 0
+        self._bars_verified_today = 0
         self._bars_closed: set[str] = set()
         self._rows30: list[dict[str, Any]] = []
         self.gaps: list[tuple[float, float, str]] = []
@@ -268,12 +281,14 @@ class OptionRecorder:
             keep = {self.day.isoformat()}
             self._b30 = {k: v for k, v in self._b30.items() if k[1] in keep}
         self.day = d
+        self._day_s = d.isoformat()
         self._day0 = day_start(d)
         self._open = at_ist(d, "09:15")
         self._close = at_ist(d, "15:30")
         self._ring.clear()
         self._mins.clear()
         self._first.clear()
+        self._seen.clear()
         self._oi.clear()
         self._vol.clear()
         self._pend.clear()
@@ -281,7 +296,25 @@ class OptionRecorder:
         self._bars_closed.clear()
         self.gaps = []
         self._last_frame = None
+        self._recount_bars()
         return True
+
+    def _recount_bars(self) -> None:
+        """Today's bar counters from ``_b30`` — once a day (the roll), never per health call."""
+        today = [v for k, v in self._b30.items() if k[1] == self._day_s]
+        self._bars_today = len(today)
+        self._bars_verified_today = sum(1 for v in today if v[1])
+
+    def _put_bar(self, key: tuple[str, str, str], val: tuple[float, bool, float | None]) -> None:
+        if key[1] == self._day_s:
+            old = self._b30.get(key)
+            if old is None:
+                self._bars_today += 1
+            elif old[1]:
+                self._bars_verified_today -= 1
+            if val[1]:
+                self._bars_verified_today += 1
+        self._b30[key] = val
 
     def set_watch(self, watch: Mapping[str, str]) -> None:
         self.watch = {str(c): r for c, r in watch.items() if r in ROLES}
@@ -311,6 +344,9 @@ class OptionRecorder:
                 return
             if channel != "mf":
                 return
+            seen = self._seen.get(code)
+            if seen is None or arrived < seen:
+                self._seen[code] = arrived
             ltp = _num(row.get("LastRate"))
             if ltp > 0:
                 self._take_quote(code, role, arrived, ltp, _num(row.get("BidRate")), _num(row.get("OffRate")))
@@ -322,6 +358,8 @@ class OptionRecorder:
 
     def _arrival(self, arrived: float) -> None:
         self.frames += 1
+        if self.started is None:
+            self.started = arrived
         last = self._last_frame
         if (self.silence_s is not None and last is not None and arrived - last > self.silence_s
                 and self._open <= arrived and last <= self._close):
@@ -332,8 +370,14 @@ class OptionRecorder:
     def note_gap(self, a: float, b: float, why: str) -> None:
         """A stretch the volume record cannot vouch for (a reconnect, a silence): every 30m bar it touches is
         unverified."""
-        if b > a:
-            self.gaps.append((a, b, why))
+        if b <= a:
+            return
+        if self.gaps and a <= self.gaps[-1][1] + 1.0 and b >= self.gaps[-1][0] - 1.0:
+            # the same hole seen twice (the hub's #down/#up and the reconnect it repairs): one gap, the wider span
+            g0, g1, w = self.gaps[-1]
+            self.gaps[-1] = (min(a, g0), max(b, g1), w)
+            return
+        self.gaps.append((a, b, why))
 
     def note_reconnect(self, now: float) -> None:
         self.note_gap(self._last_frame if self._last_frame is not None else now, now, "feed reconnect")
@@ -398,6 +442,31 @@ class OptionRecorder:
     def first_after_open(self, code: str) -> tuple[float, float, float] | None:
         """The code's first entry at or after 09:15 today: (time, last price, its run start)."""
         return self._first.get(code)
+
+    def first_frame(self, code: str) -> float | None:
+        """When the code's first price-feed frame of the day arrived (None: none today)."""
+        return self._seen.get(code)
+
+    def first_after(self, code: str, x: float, within: float) -> dict[str, Any] | None:
+        """The code's first quote entry AFTER ``x`` and at most ``within`` seconds after it — the ring, else the minute
+        states — shaped as ``quote``'s, its ``age`` negative (how far after ``x``). None when there is none."""
+        ring = self._ring.get(code)
+        if ring is not None:
+            j = bisect_right(ring.t, x)
+            if j < len(ring.t) and ring.t[j] <= x + within:
+                return self._q(x, ring.t[j], ring.ltp[j], ring.bid[j], ring.ask[j], ring.run[j], "ring", within)
+        ms = self._mins.get(code)
+        if ms is not None:
+            k = bisect_right(ms.t, x)
+            if k < len(ms.t) and ms.t[k] <= x + within:
+                return self._q(x, ms.t[k], ms.ltp[k], ms.bid[k], ms.ask[k], ms.run[k], "minute", within)
+        return None
+
+    @staticmethod
+    def _q(x: float, t: float, ltp: float, bid: float, ask: float, run: float, src: str, fresh_s: float) -> dict[str, Any]:
+        two = bid > 0 and ask > 0 and ask >= bid
+        return {"eff": t, "ltp": ltp, "bid": bid, "ask": ask, "two": two, "fresh": abs(x - t) <= fresh_s,
+                "mid": (bid + ask) / 2 if two else math.nan, "age": x - t, "run": run, "src": src}
 
     def streaming_since(self, code: str) -> float | None:
         ring = self._ring.get(code)
@@ -546,7 +615,7 @@ class OptionRecorder:
                 ok, _ = self.covered(code, a, b)
                 i, j = bisect_left(vs.m, a), bisect_right(vs.m, b - 60)
                 v = float(sum(vs.v[i:j]))
-                self._b30[(code, d, start)] = (v, ok, vs.since)
+                self._put_bar((code, d, start), (v, ok, vs.since))
                 self._rows30.append({"scrip_code": code, "bucket_ts": int(a), "v": v, "verified": ok, "from_ts": float(vs.since)})
                 n += 1
         return n
@@ -568,36 +637,26 @@ class OptionRecorder:
     def load_bars(self, rows: Iterable[Mapping[str, Any]]) -> int:
         """30m bars from the archive (the previous session, and today's after a restart): kept unless today's
         own closed bar is already held."""
-        n = 0
-        for r in rows:
-            a = float(r["bucket_ts"])
-            d = ist_day(a).isoformat()
-            start = datetime.fromtimestamp(a, IST).strftime("%H:%M")
-            key = (str(r["scrip_code"]), d, start)
-            if key in self._b30:
-                continue
-            since = r.get("from_ts")
-            self._b30[key] = (float(r["v"]), bool(r["verified"]), float(since) if since is not None and since == since else None)
-            n += 1
-        return n
+        return self.merge_bars(parse_bars(rows))
+
+    def merge_bars(self, bars: Mapping[tuple[str, str, str], tuple[float, bool, float | None]]) -> int:
+        """``parse_bars``' output (built in a worker thread) into the record: dict work only, on the loop."""
+        b30 = self._b30
+        new = {k: v for k, v in bars.items() if k not in b30}
+        b30.update(new)
+        today = [v for k, v in new.items() if k[1] == self._day_s]
+        self._bars_today += len(today)
+        self._bars_verified_today += sum(1 for v in today if v[1])
+        return len(new)
 
     # -- the walls' previous sessions ----------------------------------------------------------------
 
     def set_oi_grid(self, day: str, frame: pd.DataFrame) -> int:
         """A previous session's OI prints (scrip_code, ts, oi) → each code's as-of OI at ``OI_GRID`` (no previous-day
         fallback: research ``OIDay.at(..., allow_prev=False)``)."""
-        if frame is None or not len(frame):
-            return 0
-        times = [at_ist(day, hm) for hm in OI_GRID]
-        df = frame[frame.oi > 0].sort_values(["scrip_code", "ts"], kind="stable")
-        n = 0
-        for code, g in df.groupby(df.scrip_code.astype(str), sort=False):
-            ts = g.ts.to_numpy(float)
-            oi = g.oi.to_numpy(float)
-            idx = np.searchsorted(ts, times, "right") - 1
-            self.oi_grid_prev[(str(code), day)] = tuple(float(oi[j]) if j >= 0 else math.nan for j in idx)
-            n += 1
-        return n
+        grid = oi_grid(day, frame)
+        self.oi_grid_prev.update(grid)
+        return len(grid)
 
     def oi_windows(self, code: str, c0: float, prev_days: list[str]) -> list[tuple[float, float]]:
         """The (OI at start, OI at end) of the 30m bars before the trigger candle, newest first: today's finished
@@ -627,10 +686,9 @@ class OptionRecorder:
         oi_entries = sum(len(o.t) for o in self._oi.values())
         vol_minutes = sum(len(v.m) for v in self._vol.values())
         covered = sum(1 for v in self._vol.values() if v.since is not None)
-        verified = sum(1 for k, v in self._b30.items() if self.day is not None and k[1] == self.day.isoformat() and v[1])
-        today_bars = sum(1 for k in self._b30 if self.day is not None and k[1] == self.day.isoformat())
+        verified, today_bars = self._bars_verified_today, self._bars_today
         return {
-            "day": self.day.isoformat() if self.day else None, "watched": len(self.watch), "frames": self.frames,
+            "day": self._day_s or None, "watched": len(self.watch), "frames": self.frames, "started": hms(self.started),
             "frames_watched": self.frames_watched, "frames_pooled": self.frames_pooled, "codes_quoted": len(self._ring),
             "ring_entries": ring_entries, "oi_codes": len(self._oi), "oi_entries": oi_entries, "oi_prev": len(self.oi_prev),
             "volume_codes": covered, "volume_minutes_held": vol_minutes, "minutes_waiting": len(self._pend),
@@ -643,23 +701,77 @@ class OptionRecorder:
         }
 
 
+def parse_bars(rows: Iterable[Mapping[str, Any]]) -> dict[tuple[str, str, str], tuple[float, bool, float | None]]:
+    """Archived 30m bar rows → ``(code, day, bar start) -> (volume, verified, covered since)``. Pure: a worker thread
+    builds it (review, 20 Oct: 0.2 s for 91k bars on the loop), ``OptionRecorder.merge_bars`` takes it in. A row
+    repeated later in the rows (a restart's re-closed bar) does not replace the first, as ``load_bars`` never did."""
+    out: dict[tuple[str, str, str], tuple[float, bool, float | None]] = {}
+    for r in rows:
+        a = float(r["bucket_ts"])
+        dt = datetime.fromtimestamp(a, IST)
+        key = (str(r["scrip_code"]), dt.date().isoformat(), dt.strftime("%H:%M"))
+        if key in out:
+            continue
+        since = r.get("from_ts")
+        out[key] = (float(r["v"]), bool(r["verified"]), float(since) if since is not None and since == since else None)
+    return out
+
+
+def oi_grid(day: str, frame: pd.DataFrame | None) -> dict[tuple[str, str], tuple[float, ...]]:
+    """A previous session's OI prints (scrip_code, ts, oi) → ``(code, day) -> the as-of OI at OI_GRID``. Pure: a worker
+    thread builds it (review, 20 Oct: 0.61 s on the loop for a real day), the loop only merges the dict."""
+    if frame is None or not len(frame):
+        return {}
+    times = [at_ist(day, hm) for hm in OI_GRID]
+    df = frame[frame.oi > 0].sort_values(["scrip_code", "ts"], kind="stable")
+    out: dict[tuple[str, str], tuple[float, ...]] = {}
+    for code, g in df.groupby(df.scrip_code.astype(str), sort=False):
+        ts = g.ts.to_numpy(float)
+        oi = g.oi.to_numpy(float)
+        idx = np.searchsorted(ts, times, "right") - 1
+        out[(str(code), day)] = tuple(float(oi[j]) if j >= 0 else math.nan for j in idx)
+    return out
+
+
 class VolumeTape:
     """The per-minute option volumes as part files, ``<root>/<day>/<HHMMSS>.parquet`` (nothing is re-read; a reader
     concatenates a day's parts and SUMS ``v`` on (scrip_code, ts)). Day folders older than ``keep_days`` calendar
-    days are deleted after each write."""
+    days are deleted after each write.
 
-    def __init__(self, root: Path, *, keep_days: int = 90) -> None:
+    Written by ONE engine: the one that owns the broker socket (``enabled``; the twin reading the hub sees the same
+    frames, so its copy was a duplicate — review, 20 Oct: ~8 MB a day each). Nothing is written while the disk has
+    less than ``min_free_gb`` free: the rows are counted as skipped (research's, never the engine's)."""
+
+    def __init__(self, root: Path, *, keep_days: int = 30, min_free_gb: float = 2.0) -> None:
         self.root = root
         self.keep_days = max(1, int(keep_days))
+        self.min_free = max(0.0, float(min_free_gb)) * 1e9
+        #: False on the engine that reads its twin's socket (the hub): the socket's owner writes the same rows
+        self.enabled = True
         self._lock = threading.Lock()
         self.rows_written = 0
         self.files_written = 0
+        self.bytes_written = 0
+        self.rows_skipped = 0
+        self.skipped_why = ""
         self.errors = 0
         self.last_error = ""
+
+    def _room(self) -> bool:
+        return disk_room(self.root, self.min_free)
 
     def write(self, rows: list[tuple[str, int, float, float]], *, now: float | None = None) -> int:
         """Blocking — a worker thread."""
         if not rows:
+            return 0
+        if not self.enabled:
+            self.rows_skipped += len(rows)
+            self.skipped_why = "not the socket's owner: the twin serving the hub writes these rows"
+            return 0
+        if not self._room():
+            self.rows_skipped += len(rows)
+            self.skipped_why = f"less than {self.min_free / 1e9:g} GB free on the disk"
+            log.warning("option_volume.skipped_low_disk", rows=len(rows), min_free_gb=self.min_free / 1e9)
             return 0
         with self._lock:
             by_day: dict[str, list[tuple[str, int, float, float]]] = {}
@@ -679,6 +791,7 @@ class VolumeTape:
                     tmp.replace(path)
                     n += len(part)
                     self.files_written += 1
+                    self.bytes_written += path.stat().st_size
                 except Exception as exc:  # noqa: BLE001 - the recorder must never take the engine down
                     self.errors += 1
                     self.last_error = f"{day}: {exc}"[:200]
@@ -707,8 +820,81 @@ class VolumeTape:
         return removed
 
     def stats(self) -> dict[str, Any]:
-        return {"keep_days": self.keep_days, "rows_written": self.rows_written, "files_written": self.files_written,
-                "errors": self.errors, "last_error": self.last_error}
+        return {"enabled": self.enabled, "keep_days": self.keep_days, "min_free_gb": self.min_free / 1e9,
+                "rows_written": self.rows_written, "files_written": self.files_written,
+                "mb_written": round(self.bytes_written / 1e6, 2), "rows_skipped": self.rows_skipped,
+                "skipped_why": self.skipped_why, "errors": self.errors, "last_error": self.last_error}
+
+
+def disk_room(root: Path, min_free: float) -> bool:
+    """At least ``min_free`` bytes free where ``root`` lives (an unreadable disk is not a reason to stop)."""
+    if min_free <= 0:
+        return True
+    p = root
+    while not p.exists() and p != p.parent:
+        p = p.parent
+    try:
+        return shutil.disk_usage(p).free >= min_free
+    except OSError:
+        return True
+
+
+class DetailLog:
+    """The 5-read's full records — the legs' snapshots at both moments, the sixteen follow-up stages, the walls' whole
+    reads — one JSON line each in ``<root>/<day>.jsonl``. The ledger keeps a compact copy (``read5rec.compact_*``): its
+    day of events is json-loaded whole by every reader, the 09:15 carry load among them (review, 20 Oct: 4-6 KB a
+    trigger and 7-19 KB a follow-up). Appended from a worker thread; day files older than ``keep_days`` calendar days
+    are deleted; nothing is written below ``min_free_gb`` free."""
+
+    def __init__(self, root: Path, *, keep_days: int = 90, min_free_gb: float = 2.0) -> None:
+        self.root = root
+        self.keep_days = max(1, int(keep_days))
+        self.min_free = max(0.0, float(min_free_gb)) * 1e9
+        self._lock = threading.Lock()
+        self._pruned = ""
+        self.lines = 0
+        self.bytes_written = 0
+        self.skipped = 0
+        self.errors = 0
+        self.last_error = ""
+
+    def write(self, kind: str, ts: float, record: Mapping[str, Any]) -> bool:
+        """Blocking — a worker thread. One line ``{"kind", "ts", "record"}`` to ``ts``'s IST day file."""
+        if not disk_room(self.root, self.min_free):
+            self.skipped += 1
+            return False
+        day = ist_day(ts).isoformat()
+        try:
+            line = json.dumps({"kind": kind, "ts": ts, "record": record}, separators=(",", ":"), default=str) + "\n"
+            with self._lock:
+                self.root.mkdir(parents=True, exist_ok=True)
+                with (self.root / f"{day}.jsonl").open("a", encoding="utf-8") as fh:
+                    fh.write(line)
+                self.lines += 1
+                self.bytes_written += len(line)
+                if self._pruned != day:
+                    self._pruned = day
+                    cutoff = (ist_day(ts) - timedelta(days=self.keep_days)).isoformat()
+                    for f in self.root.glob("*.jsonl"):
+                        if f.stem < cutoff:
+                            f.unlink(missing_ok=True)
+            return True
+        except Exception as exc:  # noqa: BLE001 - research's record, never the engine's
+            self.errors += 1
+            self.last_error = str(exc)[:200]
+            return False
+
+    def stats(self) -> dict[str, Any]:
+        return {"keep_days": self.keep_days, "lines": self.lines, "mb_written": round(self.bytes_written / 1e6, 2),
+                "skipped_low_disk": self.skipped, "errors": self.errors, "last_error": self.last_error}
+
+
+def read_detail_day(root: Path, day: str) -> list[dict[str, Any]]:
+    """A day's detail lines (``DetailLog``), in the order written."""
+    f = root / f"{day}.jsonl"
+    if not f.exists():
+        return []
+    return [json.loads(x) for x in f.read_text(encoding="utf-8").splitlines() if x.strip()]
 
 
 def read_volume_day(root: Path, day: str) -> pd.DataFrame:
@@ -721,4 +907,5 @@ def read_volume_day(root: Path, day: str) -> pd.DataFrame:
     return df.groupby(["scrip_code", "ts"], as_index=False).agg(v=("v", "sum"), cum=("cum", "max"))
 
 
-__all__ = ["OI_GRID", "RING_S", "OptionRecorder", "VolumeTape", "broker_ts", "day_start", "hms", "read_volume_day"]
+__all__ = ["OI_GRID", "RING_S", "DetailLog", "OptionRecorder", "VolumeTape", "broker_ts", "day_start", "disk_room", "hms",
+           "oi_grid", "parse_bars", "read_detail_day", "read_volume_day"]

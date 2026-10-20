@@ -180,8 +180,10 @@ from .ops import read5rec
 from .ops.archive import DailyArchive
 from .ops.fulltape import FullTape
 from .ops.health import Check, HealthMonitor
-from .ops.optrec import OptionRecorder, VolumeTape
+from .ops.optrec import DetailLog, OptionRecorder, VolumeTape
 from .ops.optrec import hms as rec_hms
+from .ops.optrec import oi_grid as rec_oi_grid
+from .ops.optrec import parse_bars as rec_parse_bars
 from .ops.tape import ROLE_EQUITY, ROLE_FUTURE, ROLE_INDEX, ROLE_OPTION, Tape
 from .ops.telegram import Telegram
 from .research.read5 import FOLLOW_MIN as READ5_FOLLOW_MIN
@@ -312,6 +314,8 @@ BAR_AUDIT_ALERT_SHARE, BAR_AUDIT_ALERT_MIN = 0.01, 5
 FEED_SILENCE_S = 15.0
 #: how long a counter-trend button's plan preview is reused before it is quoted again
 COUNTER_PREVIEW_S = 15.0
+#: RECORD-ONLY (KN_RECORD_BAND): the record band's wall candidates are picked this long before each 30m bar starts
+REC_WALL_LEAD_S = 60.0
 
 BOOK_LABELS = {
     "FUDKII": "FUDKII", "FUDKII_RT_X": "RT-X", "FUDKII_RT_N": "RT-N", "FUDKII_RT_Y": "RT-Y",
@@ -670,16 +674,24 @@ class Engine:
         # or an exit: the recorder sees the feed's rows through its own tap, the reads run as their own tasks after
         # the trigger is handed off, and they write only the ledger events ``read5.*``, the archive and the card text.
         self.recorder: OptionRecorder | None = OptionRecorder() if settings.record5_enabled else None
-        self.volume_tape = VolumeTape(settings.data_dir / "archive" / "option_volume", keep_days=settings.record5_volume_keep_days)
+        self.volume_tape = VolumeTape(settings.data_dir / "archive" / "option_volume", keep_days=settings.record5_volume_keep_days,
+                                      min_free_gb=settings.record5_min_free_gb)
+        #: the reads' full records (legs' snapshots, the sixteen stages, the walls' whole reads); the ledger keeps them compact
+        self.read5_detail_log = DetailLog(settings.data_dir / "archive" / "read5_detail", keep_days=settings.record5_detail_keep_days,
+                                          min_free_gb=settings.record5_min_free_gb)
         if self.recorder is not None:
             self.feed.on_record = self._on_record_frame
+            # reading the hub: its broker socket down and up again is a hole in this recorder's volume record, whatever
+            # repair KN_HUB_RECONNECT_REPAIR runs (review, 20 Oct)
+            self.feed.on_broker_gap = lambda down, up: (
+                self.recorder.note_gap(down, up, "hub broker socket down") if self.recorder is not None else None)
         #: the reads run once this process decides live (``start_market``); a test switches them on itself
         self._read5_live = False
         self._read5_tasks: set[asyncio.Task[Any]] = set()
         self._read5_running: set[str] = set()
         self._read5_seen: set[str] = set()
-        #: signal id -> the 5-read at its trigger, compact (the card's and health's; never a decision's)
-        self._read5_at: dict[str, dict[str, Any]] = {}
+        #: the IST day ``_read5_seen`` is for: emptied at any day change (``_rec_tick``), however the recorder rolled
+        self._read5_day = ""
         self.read5_stats: dict[str, Any] = {"triggers": 0, "read": 0, "excluded": 0, "follow_done": 0, "errors": 0,
                                             "last_error": "", "legs_missing_last": None}
         #: the record band (KN_RECORD_BAND): each NSE name's band for the day, the day it is for, its last sync
@@ -1878,10 +1890,7 @@ class Engine:
         rec = self.recorder
         if rec is None:
             return
-        if rec.roll(today):
-            # a new day's reads start afresh (yesterday's follow-ups ended by 15:31)
-            self._read5_seen.clear()
-            self._read5_at.clear()
+        rec.roll(today)
         watch = self._rec_watch(today)
         rec.set_watch(watch)
         self._rec_prepared_day = today.isoformat()
@@ -1889,7 +1898,9 @@ class Engine:
         prev2 = self.calendar.previous_trading_day(prev, Segment.NSE_FO)
         opts = {c for c, r in watch.items() if r == "opt"}
 
-        def load() -> tuple[dict[str, float], list[Any], dict[str, Any]]:
+        def load() -> tuple[dict[str, float], dict[Any, Any], dict[Any, Any]]:
+            """The files read AND turned into the recorder's own dicts here, in the worker thread: the loop only merges
+            them (review, 20 Oct: the grids and the bars took 0.8 s on the loop at boot and at midnight)."""
             import pandas as pd
 
             bars: list[Any] = []
@@ -1897,18 +1908,19 @@ class Engine:
                 p = self.s.data_dir / "archive" / "option_volume_30m" / f"{d.isoformat()}.parquet"
                 if p.exists():
                     bars.extend(pd.read_parquet(p).to_dict("records"))
-            grids: dict[str, Any] = {}
+            grids: dict[Any, Any] = {}
+            last: dict[str, float] = {}
             for d in (prev, prev2):  # each OI day file read once: the grids, and the previous session's last prints
                 p = self.s.data_dir / "archive" / "oi" / f"{d.isoformat()}.parquet"
                 if p.exists():
                     df = pd.read_parquet(p, columns=["scrip_code", "ts", "oi"])
                     df = df[df.scrip_code.astype(str).isin(opts) & (df.oi > 0)]
-                    grids[d.isoformat()] = df.assign(scrip_code=df.scrip_code.astype(str))
-            last: dict[str, float] = {}
-            if prev.isoformat() in grids:
-                g = grids[prev.isoformat()].sort_values("ts", kind="stable")
-                last = {str(c): float(v) for c, v in g.groupby("scrip_code").oi.last().items()}
-            return last, bars, grids
+                    df = df.assign(scrip_code=df.scrip_code.astype(str))
+                    grids.update(rec_oi_grid(d.isoformat(), df))
+                    if d == prev:
+                        g = df.sort_values("ts", kind="stable")
+                        last = {str(c): float(v) for c, v in g.groupby("scrip_code").oi.last().items()}
+            return last, rec_parse_bars(bars), grids
 
         try:
             last, bars, grids = await asyncio.to_thread(load)
@@ -1916,9 +1928,9 @@ class Engine:
             log.warning("read5.prepare_failed", error=str(exc)[:160])
             return
         rec.oi_prev.update({c: v for c, v in last.items() if c not in rec.oi_prev})
-        n_bars = rec.load_bars(bars)
-        n_grid = sum(rec.set_oi_grid(d, df) for d, df in grids.items())
-        log.info("read5.prepared", day=today.isoformat(), watched=len(watch), oi_prev=len(last), bars=n_bars, oi_grids=n_grid)
+        n_bars = rec.merge_bars(bars)
+        rec.oi_grid_prev.update(grids)
+        log.info("read5.prepared", day=today.isoformat(), watched=len(watch), oi_prev=len(last), bars=n_bars, oi_grids=len(grids))
 
     async def _on_tick(self, tick: dict[str, Any]) -> None:
         code = str(tick["scrip_code"])
@@ -2806,9 +2818,9 @@ class Engine:
 
     async def _read5_record(self, sig: Signal, s: float) -> None:
         """The 5-read at the trigger (over the trigger candle, as of the signal), the walls at signal + 10 s, then each
-        minute to +16 min and the first 2 / 3 / 4 of 5 — to the ledger (``read5.trigger``, ``read5.follow``), the
-        archive (``read5``) and the card. Every value is read AS OF its moment from the recorder's history, so when
-        this task runs changes nothing. Never raises."""
+        minute to +16 min and the first 2 / 3 / 4 of 5 — to the ledger (``read5.trigger``, ``read5.follow``, compact),
+        the detail file (``archive/read5_detail``, whole), the archive (``read5``) and the card. Every value is read AS
+        OF its moment from the recorder's history, so when this task runs changes nothing. Never raises."""
         rec = self.recorder
         if rec is None:
             return
@@ -2820,6 +2832,12 @@ class Engine:
         try:
             why = self._read5_excluded(sig, s)
             today = ist_day(s)
+            # nothing is computed or written before signal + 10 s — the decision path's own work and ledger writes go
+            # first (the chain's legs too: review, 20 Oct, 2.2 ms for a 40-trigger burst at _decide's first await) — and
+            # a burst (forty triggers at 09:45) is spread over three seconds, each read yielding between its steps:
+            # every value is as of its own moment, so when it is computed changes nothing
+            spread = (zlib.crc32(sid.encode()) % 3000) / 1000.0
+            await self._read5_wait(s + 10 + spread)
             c = None
             if why is None:
                 c, why_c = read5rec.contracts(self.catalogue_loader.catalogue, sig.symbol, float(sig.entry), today,
@@ -2830,11 +2848,6 @@ class Engine:
                     gone = [k for k, v in (*c.legs.items(), ("FUT0", c.fut), ("EQ", c.eq)) if v is None]
                     if gone:
                         why = f"contracts missing: {', '.join(gone)} not listed"
-            # nothing is written before signal + 10 s — the decision path's own ledger writes go first — and a burst
-            # (forty triggers at 09:45) is spread over three seconds, each read yielding between its steps: every value
-            # is as of its own moment, so when it is computed changes nothing
-            spread = (zlib.crc32(sid.encode()) % 3000) / 1000.0
-            await self._read5_wait(s + 10 + spread)
             if why is not None or c is None:
                 self.read5_stats["excluded"] += 1
                 rec5 = {**base, "excluded": why}
@@ -2850,11 +2863,10 @@ class Engine:
             await asyncio.sleep(0)
             picked = read5rec.pick_walls(rec, c, float(sig.entry), s + 10)
             record["walls"] = read5rec.walls(rec, c, picked, s, float(sig.ts), prev_days, float(sig.entry), s + 10)
-            self._read5_at[sid] = {"split": record["split"], "lead": record["lead"], "basis": record["basis"],
-                                   "missing": record["missingReads"], "walls": record["walls"]["overall"]}
             self.read5_stats["read"] += 1
             self.read5_stats["legs_missing_last"] = {"symbol": sig.symbol, "legs": record["legsNoPriceAtSignal"]}
-            await self.ledger.event("read5.trigger", record)
+            await self.ledger.event("read5.trigger", read5rec.compact_trigger(record))
+            await asyncio.to_thread(self.read5_detail_log.write, "read5.trigger", s, record)
             self.archive.record5("read5", s, read5rec.flat_row(record, None))
             self._read5_running.add(sid)
             stages = [record["stage0"]]
@@ -2868,7 +2880,8 @@ class Engine:
                     walls_f3 = read5rec.walls(rec, c, picked, st["x"], float(sig.ts), prev_days, float(sig.entry), s + 10)
             follow = {"signal_id": sid, "symbol": sig.symbol, **read5rec.first_calls(stages, direction),
                       "rows": stages[1:], "wallsAtF3": walls_f3, "complete": True, "stoppedAt": stages[-1]["t"]}
-            await self.ledger.event("read5.follow", follow)
+            await self.ledger.event("read5.follow", read5rec.compact_follow(follow))
+            await asyncio.to_thread(self.read5_detail_log.write, "read5.follow", s, follow)
             self.archive.record5("read5", s, read5rec.flat_row(record, follow))
             self.read5_stats["follow_done"] += 1
         except asyncio.CancelledError:
@@ -2956,15 +2969,18 @@ class Engine:
         return added
 
     async def _rec_wall_candidates(self, now: float, anchor: dict[str, float]) -> int:
-        """At each 30m bar's start, every name's largest recorded OI call at or above its price and put at or below,
-        on the record price channel: the wall's premium change is read 30 minutes later."""
+        """A minute before each 30m bar's start (HH:14, HH:44 — a missed one as soon as it can), every name's largest
+        recorded OI call at or above its price and put at or below, on the record price channel: the wall's premium
+        change is read from that bar's start 30 minutes later, so it must be streaming by then; and the pick (32 ms on
+        the loop, a 110-146-code subscribe) stays out of the decision burst at HH:15:00 / HH:45:00 (review, 20 Oct)."""
         rec = self.recorder
         if rec is None:
             return 0
-        if ist_hm(now) < "09:15":
-            return 0  # the walls are read from the session's OI: from the first bar's start
-        day = ist_day(now).isoformat()
-        slot = ist_hm(bucket_start(Segment.NSE_EQ, now, DECISION_TF))
+        ahead = now + REC_WALL_LEAD_S
+        if ist_hm(ahead) < "09:15":
+            return 0  # the first bar's candidates from 09:14, on the OI the pre-open's subscriptions printed
+        day = ist_day(ahead).isoformat()
+        slot = ist_hm(bucket_start(Segment.NSE_EQ, ahead, DECISION_TF))
         key = f"{day} {slot}"
         if key in self._rec_wall_slots:
             return 0
@@ -2995,6 +3011,10 @@ class Engine:
             return
         try:
             today = ist_day(now)
+            if self._read5_day != today.isoformat():
+                # a new day's reads start afresh, however the recorder rolled (a frame may roll it first)
+                self._read5_day = today.isoformat()
+                self._read5_seen.clear()
             if self._rec_prepared_day != today.isoformat() and self.groups and (
                     self._rec_prep_task is None or self._rec_prep_task.done()):
                 self._rec_prep_task = asyncio.create_task(self._rec_prepare(today), name="read5-prepare")
@@ -3014,6 +3034,9 @@ class Engine:
                 self._rec_last_minutes = now
                 rows = rec.take_minute_rows(now)
                 if rows:
+                    # the minute volumes are the socket's: written by the engine that owns it, not by the twin reading
+                    # the hub, which carries the same frames (review, 20 Oct: one copy, not two)
+                    self.volume_tape.enabled = self.feed.hub is None
                     await asyncio.to_thread(self.volume_tape.write, rows)
             if self.s.record_band and now - self._rec_last_sync >= 15.0:
                 await self._rec_sync(now)
@@ -3034,7 +3057,10 @@ class Engine:
             "recorder": rec.stats() if rec is not None else None,
             "reads": {**self.read5_stats, "live": self._read5_live, "followups_running": len(self._read5_running)},
             "volume_tape": self.volume_tape.stats(),
+            "detail": self.read5_detail_log.stats(),
             "tap_errors": self.feed.record_tap_errors,
+            # an engine subscribe of a band-only code answered as a fresh broker snapshot (the band's one effect)
+            "band_snapshots": getattr(self.feed, "pool_snapshots", 0),
         }
 
     async def _fukaa_shadow(self, sig: Signal) -> None:

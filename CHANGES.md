@@ -8,13 +8,25 @@ CT-B1's conviction keeps `read5: None`. Write-up: `staging/next_record5/BUILD_re
 | `backend/kotsin_nse/research/read5.py` (new) | the research arithmetic, ported unchanged: legs, `opt_px`, Black-76 `iv76`, the five reads and votes, `decide`, `first_n`, the label, the VOL baseline, the walls' state / reading / overall / oiChangePct |
 | `backend/kotsin_nse/ops/optrec.py` (new) | the recorder: as-of quotes (40-min ring, futures' minute states), OI of the day, per-minute option volume from `TotalQty`, coverage and gaps, 30m bars; minute part files `archive/option_volume/<day>/` |
 | `backend/kotsin_nse/ops/read5rec.py` (new) | the trigger read, each follow-up minute, the first 2/3/4 of 5, the walls, the archive row, the card text |
-| `backend/kotsin_nse/instrument/recband.py` (new) | the record band (KN_RECORD_BAND, default OFF): both types within K strikes of the day's prices, the cap |
-| `backend/kotsin_nse/venue/fivepaisa/ws.py` | the record set and the `on_record` tap; a record-only row never reaches the engine's handlers; a band-held code is held at the broker like a twin-held one |
+| `backend/kotsin_nse/instrument/recband.py` (new) | the record band (KN_RECORD_BAND, OFF until the operator decides): both types within K strikes of the day's prices, the cap |
+| `backend/kotsin_nse/venue/fivepaisa/ws.py`, `hub.py` | the record set and the `on_record` tap; a record-only row never reaches the engine's handlers; an engine subscribe of a band-only code is answered as a fresh broker snapshot; the twin's band pinned apart at the hub |
 | `backend/kotsin_nse/ops/archive.py` | streams `option_volume_30m`, `read5` |
 | `backend/kotsin_nse/engine.py` | recorder wiring, `_read5_note` in `_decide` (no await), the read task, the band sync, health `record5`, the card's `read5` |
 | `backend/kotsin_nse/config.py` | `record5_enabled` (on), `record_band` (KN_RECORD_BAND, off), band K 3, caps 2000 / 1000 |
 | `backend/pyproject.toml` | import-linter: strategy / risk / exec / venue / feed may not import the recorder, the reads or the band |
 | `frontend/src/types.ts`, `components/BookCards.tsx` | the read-only "5-read · strike walls (recorded only)" text on every card |
+
+**Review fixes (20 Oct, third commit).** With KN_RECORD_BAND on, an engine subscribe of a code only a record set streams
+(this engine's band or the twin's) is answered as the broker answers a fresh subscribe — the code's current state, a
+plain frame now, live from now — never primed and "live since the band"; the twin's band is pinned at the hub apart from
+its engine's codes (frame marker `Record`), so neither engine's band changes the other's reading; reconnects send the
+engines' codes before the bands'. The 09:15 open is a first print only for a code streaming by 09:15; the time-matched
+IV takes the future's first quote up to 5 s after the option's price time when it has none before it; an OI that is only
+the previous close is not read; a moment before a restart says so. `stats()` keeps its counts (no walk per health call);
+the boot / midnight history is built in the worker thread; the ledger's `read5.*` events are compact (the whole record
+in `archive/read5_detail/<day>.jsonl`); the chain is read after the read's wait; the recorder's tap runs after the
+engine's dispatch; wall candidates are picked a minute before each bar; minute volumes are written by the socket's owner
+alone, kept 30 days, never below 2 GB free; the hub's #down/#up is a volume gap whatever the repair switch.
 
 ---
 
