@@ -179,12 +179,18 @@ class UniverseBuilder:
     # -- what to subscribe -------------------------------------------------------------------------
 
     @staticmethod
-    def subscriptions(groups: Iterable[ScripGroup]) -> dict[str, list[Instrument]]:
+    def subscriptions(
+        groups: Iterable[ScripGroup], *, futures_months: int | None = None, option_depth: bool = True
+    ) -> dict[str, list[Instrument]]:
         """``getDesiredWebSocket``: quotes + depth on what we decide and trade, OI on what has it.
         Keys are the generic channel names of ``feed/base.py`` (``quotes``, ``depth``, ``oi``).
 
         Cash equity has no open interest, so it is never put on the ``oi`` channel — reading OI off
         the cash segment is the defect that pinned MicroAlpha's OI term at zero for its whole life.
+
+        ``futures_months`` keeps only the nearest N futures and ``option_depth=False`` drops the
+        options' order books: on 2026-10-19 the 2,751 books were 88 % of all 5paisa messages while
+        near futures got ~2 quote frames a minute (``docs/FIVEPAISA_FACTS.md``).
         """
         quotes: dict[str, Instrument] = {}
         depth: dict[str, Instrument] = {}
@@ -192,12 +198,13 @@ class UniverseBuilder:
         for g in groups:
             quotes[g.underlying.scrip_code] = g.underlying
             depth[g.underlying.scrip_code] = g.underlying
-            for f in g.futures:
+            for f in g.futures[:futures_months]:
                 quotes[f.scrip_code] = f
                 oi[f.scrip_code] = f
             for o in g.options:
                 quotes[o.scrip_code] = o
-                depth[o.scrip_code] = o
+                if option_depth:
+                    depth[o.scrip_code] = o
                 oi[o.scrip_code] = o
         return {"quotes": list(quotes.values()), "depth": list(depth.values()), "oi": list(oi.values())}
 

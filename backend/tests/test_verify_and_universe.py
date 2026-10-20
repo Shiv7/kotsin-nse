@@ -249,6 +249,23 @@ def test_subscriptions_never_put_cash_equity_on_the_oi_channel():
     assert UniverseBuilder.summary(groups)["subscriptions"] == {k: len(v) for k, v in subs.items()}
 
 
+def test_subscriptions_can_keep_the_front_future_only_and_skip_option_books():
+    """The 5paisa diet: on 2026-10-19 option order books were 88 % of the messages."""
+    b = UniverseBuilder(_catalogue(), UniversePolicy(strikes_per_side=2))
+    groups = b.build_underlyings([Segment.NSE_FO], TODAY)
+    b.select_all(groups, lambda s: 1500.0, TODAY)
+    full = UniverseBuilder.subscriptions(groups.values())
+    diet = UniverseBuilder.subscriptions(groups.values(), futures_months=1, option_depth=False)
+    fronts = {g.futures[0].scrip_code for g in groups.values() if g.futures}
+    later = {f.scrip_code for g in groups.values() for f in g.futures[1:]}
+    codes = lambda subs, ch: {i.scrip_code for i in subs[ch]}  # noqa: E731
+    assert later and later <= codes(full, "quotes") and not later & codes(diet, "quotes")
+    assert fronts <= codes(diet, "quotes") and fronts <= codes(diet, "oi")
+    assert not any(i.kind is InstrumentKind.OPTION for i in diet["depth"])
+    assert any(i.kind is InstrumentKind.OPTION for i in diet["quotes"])
+    assert any(i.kind is InstrumentKind.OPTION for i in full["depth"])
+
+
 # ---------------------------------------------------------------------------------------------------
 # aggregator: session bounds, day extremes, live 1d
 # ---------------------------------------------------------------------------------------------------

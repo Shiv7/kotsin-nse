@@ -114,8 +114,8 @@ class Settings(BaseSettings):
     #: keep the live session: per-IST-day Parquet of 1m bars and OI for every subscribed code
     #: (``ops/archive.py``). The REST history has no OI, so what is not archived is gone.
     archive_enabled: bool = True
-    #: also keep every quote frame of the underlyings and their futures (not options): the raw
-    #: material for volume-at-price and for judging a source's resolution after the fact
+    #: also keep every quote frame of the underlyings, futures and option strikes: the raw
+    #: material for volume-at-price, intraday option premiums, and judging a source's resolution
     archive_ticks: bool = True
     #: one top-5 depth snapshot per contract at most this often (underlyings + front futures)
     archive_depth_every_s: float = 5.0
@@ -146,6 +146,16 @@ class Settings(BaseSettings):
     universe_band_pct: float = 12.0
     universe_strikes_per_side: int = 5
     universe_include_indices: bool = True
+    #: how many futures per root to stream (None = every unexpired month); OI history of the rest
+    #: comes from the daily bhavcopy
+    universe_futures_months: int | None = 1
+    #: order books on the option strikes too (each book is a heavy stream on 5paisa)
+    universe_option_depth: bool = False
+    #: order books at all; False leaves only quotes and OI. Measured 2026-10-19: with no books at
+    #: all near futures rose only 2.45 → 3.11 frames/min — 5paisa itself caps the futures rate
+    universe_depth: bool = True
+    #: the front futures' books too (their order flow is noise at ~3 frames/min anyway)
+    universe_future_depth: bool = False
 
     # ---- LIVE_CAPPED caps ----------------------------------------------------------------------
     # Mode is state (R9); these only bound what an *armed* engine may do.
@@ -182,7 +192,7 @@ class Settings(BaseSettings):
     cost_gst_pct: float = 18.0
     slippage_bps_default: float = 5.0
 
-    @field_validator("max_universe", mode="before")
+    @field_validator("max_universe", "universe_futures_months", mode="before")
     @classmethod
     def _uncapped_is_blank(cls, v: object) -> object:
         """``KN_MAX_UNIVERSE=`` means no cap.

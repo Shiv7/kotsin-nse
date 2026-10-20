@@ -24,6 +24,9 @@ CONTENDERS = 20
 PICKS_PER_SIDE = 3
 MAX_PER_SECTOR = 2
 EVENT_RISK_ADRS = 3.0
+#: a futures OI move smaller than this (% vs the previous session) is no build-up at all: on
+#: 2026-10-19 a +0.05 % change labelled TECHM "SHORT BUILD-UP" along with 90 other stocks
+OI_NEUTRAL_PCT = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +36,8 @@ class OIRead:
 
     @property
     def build_up(self) -> str:
+        if abs(self.oi_change_pct) < OI_NEUTRAL_PCT:
+            return "NEUTRAL"
         up, more = self.price_change_pct >= 0, self.oi_change_pct >= 0
         if up and more:
             return "LONG BUILD-UP"

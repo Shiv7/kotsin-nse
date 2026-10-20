@@ -82,6 +82,13 @@ def test_oi_build_up_labels_the_four_quadrants():
     assert OIRead(-5, -1).build_up == "LONG UNWINDING"
 
 
+def test_a_tiny_oi_change_is_no_build_up():
+    """TECHM +0.05 % OI was labelled SHORT BUILD-UP on 2026-10-19."""
+    assert OIRead(0.05, -0.2).build_up == "NEUTRAL"
+    assert OIRead(-0.9, 2.0).build_up == "NEUTRAL"
+    assert OIRead(1.0, -0.2).build_up == "SHORT BUILD-UP"
+
+
 def test_vwap_side_is_reported():
     b = build_board(0, [st("A", h=104, lo=99.9, last=103, vw=102)], {})
     assert b.rows[0].above_vwap is True

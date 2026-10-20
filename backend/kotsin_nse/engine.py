@@ -106,6 +106,8 @@ class Engine:
         self._inst_by_code: dict[str, Instrument] = {}
         #: quote frames worth archiving raw: the underlyings and their futures, never options
         self._tick_archive_codes: set[str] = set()
+        #: option strikes: their quote frames are archived (intraday premiums) but get no order flow
+        self._option_tick_codes: set[str] = set()
         self.feed_rate = FeedRateMeter()
         #: estimated order flow per minute for the underlyings and their front futures
         self.flow = FlowMeter()
@@ -268,15 +270,21 @@ class Engine:
         # Futures are OI sources, not bar sources: on NSE the front future's `symbol` is the cash
         # symbol, and tracking it wrote futures ticks into the equity's bars (found 2026-09-21).
         # `subscriptions()` puts them on mf+oi only; the aggregator ignores untracked codes.
-        subs = UniverseBuilder.subscriptions(groups.values())
+        subs = UniverseBuilder.subscriptions(
+            groups.values(),
+            futures_months=self.s.universe_futures_months,
+            option_depth=self.s.universe_option_depth,
+        )
         for g in groups.values():
             for inst in (g.underlying, *g.futures, *g.options):
                 self._inst_by_code[inst.scrip_code] = inst
             self._tick_archive_codes.update(i.scrip_code for i in (g.underlying, *g.futures))
+            self._option_tick_codes.update(o.scrip_code for o in g.options)
         await self.feed.subscribe(Channel.QUOTES, subs["quotes"])
         # the front future's book too: F&O order flow lives in the future as much as the cash
-        fronts = [g.futures[0] for g in groups.values() if g.futures]
-        await self.feed.subscribe(Channel.DEPTH, [*subs["depth"], *fronts])
+        fronts = [g.futures[0] for g in groups.values() if g.futures] if self.s.universe_future_depth else []
+        if self.s.universe_depth:
+            await self.feed.subscribe(Channel.DEPTH, [*subs["depth"], *fronts])
         await self.feed.subscribe(Channel.OI, subs["oi"])
         log.info(
             "engine.subscribed",
@@ -443,6 +451,8 @@ class Engine:
                 float(tick.get("bid") or 0),
                 float(tick.get("ask") or 0),
             )
+        elif code in self._option_tick_codes and self.s.archive_ticks:
+            self.archive.tick(tick)
         ltp = float(tick.get("ltp") or 0)
         if ltp > 0:
             self.ltps[code] = ltp
