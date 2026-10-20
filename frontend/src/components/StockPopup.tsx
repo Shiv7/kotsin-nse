@@ -1,7 +1,7 @@
 import { createChart, LineStyle, type UTCTimestamp } from 'lightweight-charts'
 import { useEffect, useRef } from 'react'
 import { FlowPanel } from './FlowPanel'
-import { cls, fmt, istChartOptions } from '../lib/api'
+import { cls, fmt, istChartOptions, istHm } from '../lib/api'
 import { usePoll } from '../lib/usePoll'
 import type { BoardRow, OHLCV, ProfileData, StructureData, VolumeProfileData } from '../types'
 
@@ -177,7 +177,14 @@ export function StockPopup({ row, day, at, trade, onClose }: Props) {
           <Cell k="STRENGTH" v={`${row.score >= 0 ? '+' : ''}${row.score.toFixed(2)}× day`} />
           <Cell k="PERCENTILE" v={row.percentile != null ? `p${row.percentile}` : '—'} />
           <Cell k="VWAP" v={row.above_vwap == null ? '—' : row.above_vwap ? '▲ above' : '▼ below'} />
-          <Cell k="OI" v={row.oi_build_up ? `${row.oi_build_up} ${fmt.pct(row.oi_change_pct)}` : '—'} />
+          <Cell
+            k="OI"
+            v={
+              row.oi_build_up
+                ? `${row.oi_build_up} ${fmt.pct(row.oi_change_pct)}${row.oi_since ? ` since ${istHm(row.oi_since)}` : ''}`
+                : '—'
+            }
+          />
           <Cell k="RULE" v={row.rule || '—'} wide />
         </div>
         {error && <div className="text-xs text-rose-400">{error}</div>}
@@ -191,9 +198,11 @@ export function StockPopup({ row, day, at, trade, onClose }: Props) {
             <span>
               market profile: <span className="text-slate-200">{profile.data.market.day_type.replace('_', ' ').toLowerCase()}</span>
             </span>
-            <span>
-              first hour {fmt.n(profile.data.market.ib_low)}–{fmt.n(profile.data.market.ib_high)}
-            </span>
+            {profile.data.market.ib_low != null && profile.data.market.ib_high != null && (
+              <span>
+                first hour {fmt.n(profile.data.market.ib_low)}–{fmt.n(profile.data.market.ib_high)}
+              </span>
+            )}
             <span>
               TPO value {fmt.n(profile.data.market.val)}–{fmt.n(profile.data.market.vah)} · POC {fmt.n(profile.data.market.poc)}
             </span>

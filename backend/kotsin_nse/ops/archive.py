@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -120,6 +120,32 @@ class DailyArchive:
 
     def flow(self, row: Mapping[str, Any]) -> None:
         self._add("flow", float(row["ts"]), dict(row))
+
+    # -- read back ------------------------------------------------------------------------------
+
+    def closing_oi(self, day: str, codes: Iterable[str], not_before_ts: float) -> dict[str, float]:
+        """Each contract's last recorded OI on ``day`` — only where that record is at or after
+        ``not_before_ts``. A session the engine left early has no closing OI, and a midday value
+        passed off as the close would mislabel every build-up the next day."""
+        path = self.root / "oi" / f"{day}.parquet"
+        wanted = set(codes)
+        if not wanted or not path.exists():
+            return {}
+        df = pd.read_parquet(path, columns=["scrip_code", "ts", "oi"])
+        df = df[df["scrip_code"].isin(wanted)].sort_values("ts").groupby("scrip_code").tail(1)
+        df = df[(df["ts"] >= not_before_ts) & (df["oi"] > 0)]
+        return {str(c): float(v) for c, v in zip(df["scrip_code"], df["oi"], strict=True)}
+
+    def first_oi(self, day: str, codes: Iterable[str]) -> dict[str, tuple[float, float]]:
+        """Each contract's first recorded OI on ``day`` as ``(ts, oi)`` — what a restart measures
+        from when there is no closing OI, so the reference does not move with every reboot."""
+        path = self.root / "oi" / f"{day}.parquet"
+        wanted = set(codes)
+        if not wanted or not path.exists():
+            return {}
+        df = pd.read_parquet(path, columns=["scrip_code", "ts", "oi"])
+        df = df[df["scrip_code"].isin(wanted) & (df["oi"] > 0)].sort_values("ts").groupby("scrip_code").head(1)
+        return {str(c): (float(t), float(v)) for c, t, v in zip(df["scrip_code"], df["ts"], df["oi"], strict=True)}
 
     # -- persist ---------------------------------------------------------------------------------
 

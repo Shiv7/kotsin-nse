@@ -155,3 +155,9 @@ def test_no_pick_symbols_rank_but_never_take_a_pick_slot() -> None:
     assert crude.rank == 1 and not crude.pick and crude.rule == "NOT PICKED · MCX"
     assert b.picks == ["A"]
     assert "Commodity" in {s["sector"] for s in b.sectors}
+
+
+def test_an_oi_reference_taken_mid_session_is_carried_to_the_row() -> None:
+    b = build_board(0, [st("CRUDEOIL", h=106, lo=99.9, last=105)], {}, {"CRUDEOIL": OIRead(2.0, -0.5, since=123.0)})
+    r = b.rows[0]
+    assert r.oi_build_up == "SHORT BUILD-UP" and r.oi_since == 123.0

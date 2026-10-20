@@ -191,7 +191,9 @@ def build_app(engine: Engine) -> FastAPI:
             "symbol": sym,
             "tf_minutes": tf,
             "estimate": "snapshot quote rule — no trade side on this feed",
-            "equity": rows(g.underlying.scrip_code),
+            # an MCX root has no cash leg: its underlying IS the front future, shown once
+            "has_cash": g.equity is not None,
+            "equity": rows(g.underlying.scrip_code) if g.equity is not None else [],
             "future": rows(fut),
             "future_code": fut,
         }
@@ -362,7 +364,13 @@ def build_app(engine: Engine) -> FastAPI:
                 from_history, HistoryStore(engine.s.data_dir / "history"), sym, d, ist_at(d, at), days
             )
         else:
-            out = from_store(engine.store, sym, time.time())
+            from ..market.session import ist_day, session_open_ts
+
+            g = engine.groups.get(sym)
+            now = time.time()
+            out = from_store(
+                engine.store, sym, now, session_open_ts(g.segment, ist_day(now)) if g else None
+            )
         if out is None:
             raise HTTPException(404, f"no 1m bars for {sym}{' on ' + day if day else ' today'}")
         return {"symbol": sym, "day": day, "at": at if day else None, **out}

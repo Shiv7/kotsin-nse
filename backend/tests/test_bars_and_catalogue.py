@@ -291,3 +291,22 @@ async def test_a_partial_bar_never_overwrites_the_brokers_own_candle(equity):
     r.source = BarSource.REST
     store2.close(r)
     assert store2.bars("RELIANCE", "30m")[0].volume == 714_679.0
+
+
+def test_seed_rolls_1m_rows_up_and_leaves_the_unfinished_bucket_to_the_live_build(mcx_future):
+    """A mid-session boot: today's 1m backfill also fills 5m from the open (2026-10-20 the 5m
+    chart was a 404 for MCX until five minutes after the restart)."""
+    from kotsin_nse.market.session import ist_naive_to_ts
+
+    store = BarStore()
+    agg = Aggregator(store, timeframes=("1m", "5m"))
+    rows = [
+        {"dt": f"2026-10-20 17:0{m}:00", "o": 100 + m, "h": 101 + m, "l": 99 + m, "c": 100.5 + m, "v": 10}
+        for m in range(7)
+    ]
+    agg.seed(mcx_future, "5m", rows, ts_of=ist_naive_to_ts, until=ist_ts("2026-10-20", "17:07"))
+    bars = store.bars("ALUMINI", "5m")
+    assert len(bars) == 1  # 17:05-17:10 has not ended at 17:07
+    b = bars[0]
+    assert b.ts == ist_ts("2026-10-20", "17:00")
+    assert (b.open, b.high, b.low, b.close, b.volume) == (100, 105, 99, 104.5, 50)

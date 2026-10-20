@@ -123,3 +123,9 @@ def test_synthetic_series_are_deterministic_not_wall_clock_anchored():
     assert [x.ts for x in a] == [x.ts for x in b]
     assert ist_hm(a[-1].ts) == ANCHOR_HM
     assert ist_day(a[-1].ts).isoformat() == ANCHOR_DAY
+
+
+def test_previous_trading_day_follows_the_segment_calendar() -> None:
+    cal = TradingCalendar(frozenset({date(2026, 10, 20)}))
+    assert cal.previous_trading_day(date(2026, 10, 21)) == date(2026, 10, 19)
+    assert cal.previous_trading_day(date(2026, 10, 21), Segment.MCX_FO) == date(2026, 10, 20)

@@ -36,6 +36,8 @@ COMMODITY = "Commodity"
 class OIRead:
     oi_change_pct: float
     price_change_pct: float
+    #: when the OI reference was taken, if not at the previous close (MCX without a recorded close)
+    since: float | None = None
 
     @property
     def build_up(self) -> str:
@@ -65,6 +67,7 @@ class Row:
     above_vwap: bool | None = None
     oi_build_up: str | None = None
     oi_change_pct: float | None = None
+    oi_since: float | None = None
     pick: bool = False
     rule: str = ""
     #: the four-point check for a contender: in the top 20, its sector leans its way, breadth
@@ -127,6 +130,7 @@ def build_board(
                 above_vwap=(d.last > d.vwap) if d.vwap else None,
                 oi_build_up=o.build_up if o else None,
                 oi_change_pct=round(o.oi_change_pct, 2) if o else None,
+                oi_since=o.since if o else None,
             )
         )
 

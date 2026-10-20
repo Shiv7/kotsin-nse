@@ -161,3 +161,32 @@ async def test_bar_oi_comes_from_the_front_future_only(settings, equity):
         assert round(e.fut_oi_change[equity.symbol], 1) == 39.8
     finally:
         await e.stop()
+
+
+def test_closing_oi_is_only_a_value_recorded_near_the_close(tmp_path):
+    """2026-10-19 the engine dropped MCX at midday: that OI is not the close and must not be used."""
+    from kotsin_nse.ops.archive import DailyArchive
+
+    from .conftest import ist_ts
+
+    arc = DailyArchive(tmp_path)
+    close = ist_ts("2026-10-19", "23:30")
+    arc.oi("A", close - 600, 1000.0, 0.0)  # recorded at 23:20
+    arc.oi("A", close - 60, 1010.0, 0.0)
+    arc.oi("B", close - 6 * 3600, 500.0, 0.0)  # last seen at 17:30
+    arc.flush(final=True)
+    assert arc.closing_oi("2026-10-19", ["A", "B", "C"], close - 900) == {"A": 1010.0}
+    assert arc.closing_oi("2026-10-18", ["A"], close - 900) == {}
+
+
+def test_first_oi_of_the_day_is_the_restart_reference(tmp_path):
+    from kotsin_nse.ops.archive import DailyArchive
+
+    from .conftest import ist_ts
+
+    arc = DailyArchive(tmp_path)
+    t = ist_ts("2026-10-20", "18:50")
+    arc.oi("A", t + 60, 1005.0, 0.0)
+    arc.oi("A", t, 1000.0, 0.0)
+    arc.flush(final=True)
+    assert arc.first_oi("2026-10-20", ["A", "B"]) == {"A": (t, 1000.0)}

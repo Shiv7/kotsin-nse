@@ -50,3 +50,25 @@ def test_neutral_day_extends_both_sides_of_the_first_hour():
     rows += [(T0 + 60 * (90 + k), 100.5, 99.0) for k in range(30)]
     mp = market_profile(rows, T0, step=0.5)
     assert mp is not None and mp.day_type == "NEUTRAL"
+
+
+def test_a_late_session_is_lettered_from_its_first_bar():
+    """MCX on 2026-10-20 traded only from 17:00: lettering from the 09:00 open left it with no
+    first hour, so the day type read UNKNOWN."""
+    from kotsin_nse.bars.store import BarStore
+    from kotsin_nse.config import Segment
+    from kotsin_nse.market.session import session_open_ts
+    from kotsin_nse.profile.service import from_store
+
+    from .conftest import bar, ist_ts
+
+    store = BarStore()
+    t0 = ist_ts("2026-10-20", "17:00")
+    for m in range(90):
+        store.close(bar(t0 + 60 * m, 100, 101 + m / 10, 99, 100, symbol="CRUDEOIL", tf="1m"))
+    from datetime import date
+
+    out = from_store(store, "CRUDEOIL", t0 + 91 * 60, session_open_ts(Segment.MCX_FO, date(2026, 10, 20)))
+    mp = out["market"]
+    assert mp["ib_high"] is not None and mp["day_type"] != "UNKNOWN"
+    assert mp["letters"][-1].startswith("C")  # the third period's high, not period Q

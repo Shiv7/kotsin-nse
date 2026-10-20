@@ -53,6 +53,7 @@ from .market.session import (
     ist_day,
     ist_hm,
     ist_naive_to_ts,
+    session_close_ts,
     session_open_ts,
 )
 from .market.session import (
@@ -126,6 +127,12 @@ class Engine:
         self.oi_ref_day: date | None = None
         self._front_future: dict[str, str] = {}  # front future code → underlying symbol
         self._oi_ref_checked = 0.0
+        #: MCX has no bhavcopy here and 5paisa's change field is 0.0 there too: the reference is
+        #: our own archive's closing OI of the previous MCX session, else the first OI seen today
+        self.mcx_oi_ref: dict[str, float] = {}
+        self._mcx_oi_ref_day: str | None = None
+        #: underlying → when its OI reference was taken, where it is not the previous close
+        self.oi_ref_since: dict[str, float] = {}
         self.reconciler = BarReconciler(self.rest, self.store, lambda sym: self.underlyings.get(sym))
         self.groups: dict[str, ScripGroup] = {}
         self.universe_builder: UniverseBuilder | None = None
@@ -358,8 +365,13 @@ class Engine:
                 if tf == "1d":
                     self._seed_daily(inst, rows)
                 else:
-                    # the other frames (2m … 15m) rebuild from live ticks; no extra REST calls
                     self.aggregator.seed(inst, tf, rows, ts_of=ist_naive_to_ts)
+                    if tf == "1m":
+                        # today's 2m … 15m from the same rows — no extra REST calls; before this
+                        # they began at the boot, and the chart's 5m was a 404 for five minutes
+                        for up in self.aggregator.timeframes:
+                            if up not in ("1m", "1d", PRIMARY_TF):
+                                self.aggregator.seed(inst, up, rows, ts_of=ist_naive_to_ts, until=now)
                 ok += 1
                 await asyncio.sleep(0.15)
         log.info("backfill.done", series_ok=ok, failed=failed)
@@ -511,7 +523,16 @@ class Engine:
             # the next-month future: its OI is archived above, but stamping it on the bars made
             # every underlying's bar OI flip between two contracts (RELIANCE 139.8M ↔ 27.4M)
             return
-        ref = self.oi_ref.get(fut_code)
+        ref = self.oi_ref.get(fut_code) or self.mcx_oi_ref.get(fut_code)
+        if (
+            not ref
+            and inst.segment is Segment.MCX_FO
+            and self._mcx_oi_ref_day == ist_day(time.time()).isoformat()
+            and float(oi["open_interest"]) > 0
+        ):
+            # no closing OI on record: measure from the first OI seen this session, and say so
+            ref = self.mcx_oi_ref[fut_code] = float(oi["open_interest"])
+            self.oi_ref_since[symbol] = float(oi.get("recv_ts") or time.time())
         if ref:
             self.fut_oi_change[symbol] = (float(oi["open_interest"]) / ref - 1) * 100
         self.aggregator.set_oi(
@@ -597,7 +618,11 @@ class Engine:
             for sym, chg in self.fut_oi_change.items():
                 st = self.scanner.state(sym, time.time())
                 if st is not None and st.prev_close > 0:
-                    oi[sym] = OIRead(oi_change_pct=chg, price_change_pct=(st.last / st.prev_close - 1) * 100)
+                    oi[sym] = OIRead(
+                        oi_change_pct=chg,
+                        price_change_pct=(st.last / st.prev_close - 1) * 100,
+                        since=self.oi_ref_since.get(sym),
+                    )
             now = time.time()
 
             def _run() -> None:
@@ -629,6 +654,28 @@ class Engine:
             d -= timedelta(days=1)
         log.warning("oi.no_reference", today=today.isoformat())
         return False
+
+    async def _load_mcx_oi_reference(self, day: str) -> None:
+        """The previous MCX session's closing OI per front future, from our own archive — kept
+        only where the engine was still recording in the last 15 minutes of that session. Where
+        there is none, today's first recorded OI stands in (and the board says since when)."""
+        prev = self.calendar.previous_trading_day(date.fromisoformat(day), Segment.MCX_FO)
+        codes = [c for c, r in self._front_future.items() if self.groups[r].segment is Segment.MCX_FO]
+        not_before = session_close_ts(Segment.MCX_FO, prev) - 900
+        refs: dict[str, float] = {}
+        first: dict[str, tuple[float, float]] = {}
+        try:
+            refs = await asyncio.to_thread(self.archive.closing_oi, prev.isoformat(), codes, not_before)
+            missing = [c for c in codes if c not in refs]
+            first = await asyncio.to_thread(self.archive.first_oi, day, missing)
+        except Exception as exc:  # noqa: BLE001 - no reference: the first OI seen live stands in
+            log.warning("oi.mcx_reference_failed", error=str(exc))
+        self.mcx_oi_ref = dict(refs)
+        for code, (ts, oi) in first.items():
+            self.mcx_oi_ref[code] = oi
+            self.oi_ref_since[self._front_future[code]] = ts
+        self._mcx_oi_ref_day = day
+        log.info("oi.mcx_reference", day=prev.isoformat(), closes=len(refs), today_first=len(first), of=len(codes))
 
     async def _intraday_universe_rebuild(self) -> None:
         if self.universe_builder is None:
@@ -678,6 +725,13 @@ class Engine:
                     last_day = day
                     self.feed_rate.reset()
                     self.oi_ref, self.oi_ref_day, self.fut_oi_change = {}, None, {}
+                    self.mcx_oi_ref, self._mcx_oi_ref_day, self.oi_ref_since = {}, None, {}
+                if (
+                    self._mcx_oi_ref_day != day
+                    and self._front_future
+                    and any(g.segment is Segment.MCX_FO for g in self.groups.values())
+                ):
+                    await self._load_mcx_oi_reference(day)
                 if (
                     self._front_future
                     and self.oi_ref_day is None

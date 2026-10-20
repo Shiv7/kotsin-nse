@@ -29,7 +29,14 @@ import structlog
 
 from ..config import Segment
 from ..domain import Instrument
-from ..market.session import TF_SECONDS, bucket_start, ist_day, session_close_ts, session_open_ts
+from ..market.session import (
+    TF_SECONDS,
+    bucket_end,
+    bucket_start,
+    ist_day,
+    session_close_ts,
+    session_open_ts,
+)
 from .store import BarStore
 from .unified import BarSource, UnifiedBar
 
@@ -294,9 +301,20 @@ class Aggregator:
     # -- backfill ----------------------------------------------------------------------------------
 
     def seed(
-        self, instrument: Instrument, tf: str, rows: list[dict[str, Any]], *, ts_of: Callable[[str], float]
+        self,
+        instrument: Instrument,
+        tf: str,
+        rows: list[dict[str, Any]],
+        *,
+        ts_of: Callable[[str], float],
+        until: float | None = None,
     ) -> int:
-        """Load REST history into the store. ``rows`` are the broker's oldest-first OHLCV dicts."""
+        """Load REST history into the store. ``rows`` are the broker's oldest-first OHLCV dicts.
+
+        Rows finer than ``tf`` roll up into its buckets (today's 1m backfill → 2m … 15m, so a
+        mid-session start has those frames from the open, not from the boot). With ``until``, a
+        bucket that has not ended by then is left out: the live build carries it on from ticks.
+        """
         self.track(instrument)
         segment = instrument.segment
         bars: list[UnifiedBar] = []
@@ -305,10 +323,17 @@ class Aggregator:
         for row in rows:
             ts = ts_of(row["dt"])
             bucket = int(bucket_start(segment, ts, tf))
+            if until is not None and bucket_end(segment, bucket, tf) > until:
+                continue
             day = ist_day(ts).isoformat()
             if last_day and day != last_day and bars:
                 prev_day_close = bars[-1].close
             last_day = day
+            if bars and bars[-1].ts == bucket:
+                b = bars[-1]
+                b.high, b.low = max(b.high, row["h"]), min(b.low, row["l"])
+                b.close, b.volume = row["c"], b.volume + row["v"]
+                continue
             bars.append(
                 UnifiedBar(
                     symbol=instrument.symbol,

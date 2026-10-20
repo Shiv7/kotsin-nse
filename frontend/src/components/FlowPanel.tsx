@@ -12,6 +12,8 @@ interface FlowRow {
 }
 
 interface FlowData {
+  /** false for an MCX root: its underlying is the front future, shown once */
+  has_cash: boolean
   equity: FlowRow[]
   future: FlowRow[]
   estimate: string
@@ -27,7 +29,7 @@ export function FlowPanel({ symbol }: { symbol: string }) {
   }
   return (
     <div className="mt-3 grid gap-3 md:grid-cols-2">
-      <Series title="Cash — estimated delta" rows={data.equity} />
+      {data.has_cash && <Series title="Cash — estimated delta" rows={data.equity} />}
       <Series title="Front future — estimated delta, OI" rows={data.future} showOi />
       <p className="text-[10px] text-slate-600 md:col-span-2">{data.estimate}: each snapshot's new volume is called a buy at or above the previous ask, a sell at or below the previous bid</p>
     </div>

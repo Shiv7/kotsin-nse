@@ -80,6 +80,9 @@ export const pnlColor = (v: number | null | undefined) =>
 /** lightweight-charts formats times in UTC; these render them in IST, the only clock a person reads. */
 const istTick = new Intl.DateTimeFormat('en-GB', { timeZone: IST, hour: '2-digit', minute: '2-digit', hour12: false })
 const istDay = new Intl.DateTimeFormat('en-GB', { timeZone: IST, day: '2-digit', month: 'short' })
+/** ``HH:MM`` IST of an epoch-seconds timestamp */
+export const istHm = (t: number) => istTick.format(new Date(t * 1000))
+
 export const istChartOptions = {
   localization: {
     timeFormatter: (t: number) => `${istDay.format(new Date(t * 1000))} ${istTick.format(new Date(t * 1000))}`,

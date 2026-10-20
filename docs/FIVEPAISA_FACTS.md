@@ -101,6 +101,15 @@ ScripCode`. That ordering is what the old `json-simple` implementation happened 
   **delta**; summing `LastQty` loses any dropped tick permanently.
 * **Cash equity has no open interest.** OI exists on futures and options only. Reading OI off the
   cash segment pinned 15% of one strategy's conviction score at exactly zero for its entire life.
+* **`OIChangePercent` is 0.0 on every frame, MCX included** (checked 2026-10-20 on all 110 MCX
+  contracts). The engine measures OI change itself: NSE against the bhavcopy's closing OI, MCX
+  against our archive's closing OI of the previous session (only if recorded in its last 15 min),
+  else today's first recorded OI — the board then shows "since HH:MM".
+* **Freshness on MCX, measured 2026-10-20 (10 futures, 100 strikes, evening session):** exchange
+  time → our receipt median 0.85 s, p90 1.4 s, p99 12 s (`TickDt` is whole seconds); quote frames
+  per contract every ~2–3 s (futures 12.4/min, options 9.4/min); OI frames whenever OI moves,
+  every few seconds on CRUDEOIL; the 20-level book ~6.5 snapshots/s per contract. NSE near futures
+  on 2026-10-19: ~3 frames/min.
 
 ## Orders
 

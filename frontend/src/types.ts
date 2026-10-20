@@ -102,6 +102,8 @@ export interface BoardRow {
   above_vwap: boolean | null
   oi_build_up: string | null
   oi_change_pct: number | null
+  /** when the OI reference was taken, if not at the previous close (MCX without a recorded close) */
+  oi_since?: number | null
   pick: boolean
   rule: string
   align: number | null

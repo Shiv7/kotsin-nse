@@ -11,7 +11,7 @@ import pandas as pd
 from ..bars.store import BarStore
 from ..market.session import ist_at, ist_day
 from ..research.history import HistoryStore, session_rows
-from .core import bin_size, market_profile, volume_profile
+from .core import TPO_MINUTES, bin_size, market_profile, volume_profile
 
 
 def from_history(store: HistoryStore, symbol: str, day: date, until_ts: int, days: int = 1) -> dict[str, Any] | None:
@@ -38,14 +38,19 @@ def from_history(store: HistoryStore, symbol: str, day: date, until_ts: int, day
     return out
 
 
-def from_store(bars: BarStore, symbol: str, now: float) -> dict[str, Any] | None:
+def from_store(bars: BarStore, symbol: str, now: float, open_ts: float | None = None) -> dict[str, Any] | None:
+    """``open_ts`` = the segment's session open today (default NSE's 09:15). A session that began
+    later than its first TPO period — MCX's evening-only session on an NSE holiday, 17:00 — is
+    lettered from its first bar, so A and B are its real first hour and the day type is known."""
     today = ist_day(now)
     m1 = [b for b in bars.bars(symbol, "1m") if ist_day(b.ts) == today and b.ts + 60 <= now]
     if not m1:
         return None
+    nominal = int(open_ts if open_ts is not None else ist_at(today, "09:15"))
+    anchor = nominal if m1[0].ts < nominal + TPO_MINUTES * 60 else int(m1[0].ts)
     step = bin_size(m1[-1].close)
     vp = volume_profile([(b.high, b.low, b.volume) for b in m1], step)
-    mp = market_profile([(int(b.ts), b.high, b.low) for b in m1], ist_at(today, "09:15"), step)
+    mp = market_profile([(int(b.ts), b.high, b.low) for b in m1], anchor, step)
     return {"volume": vp.to_json() if vp else None, "market": mp.to_json() if mp else None}
 
 

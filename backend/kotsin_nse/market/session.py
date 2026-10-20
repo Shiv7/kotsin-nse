@@ -102,10 +102,10 @@ class TradingCalendar:
             "Populate data/holidays.txt (one YYYY-MM-DD per line) from the exchange circular."
         )
 
-    def previous_trading_day(self, d: date) -> date:
+    def previous_trading_day(self, d: date, segment: Segment = Segment.NSE_EQ) -> date:
         cur = d - timedelta(days=1)
         for _ in range(30):
-            if self.is_trading_day(cur):
+            if self.is_trading_day(cur, segment):
                 return cur
             cur -= timedelta(days=1)
         return cur
