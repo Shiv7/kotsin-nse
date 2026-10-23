@@ -110,3 +110,17 @@ settlement if D + 1 is the expiry). Prices: the bhavcopy close (settle on expiry
 (2022-04 → 2023-12 / 2024-01 → 2025-09) positive; profit factor ≥ 1.2; still positive at 2 points of
 spread. Reported, not judged: the same trade on every day and in each other regime; the worst day, the
 worst month and the largest drawdown, in points and in ₹ for one lot.
+
+### 5b. Result of §5 and one follow-up variant (written before the variant was run)
+
+§5 failed (`condor-4ea7986b13`): +5.4 points a trade gross in the calm regime (65 % wins, PF 1.46), but
+12.1 points of costs — eight legs crossed every day — leave −6.7. Costs, not the edge, killed it.
+
+**Variant B — hold to expiry.** At the close of a calm-regime session D whose nearest weekly expiry is
+2–7 calendar days away, and with no position open: the same iron butterfly on that expiry, the wings 2σ
+of the move **to expiry** away (σ_d × √(business days to expiry)), held to the expiry's final settlement
+(intrinsic, no exit spread; charges on the in-the-money legs' settlement). One position at a time.
+Costs: 1 point of spread per leg on entry; charges at 1 lot and at 10 lots (brokerage is per order).
+**Pass:** the same as §5 (net > 0, t by week ≥ 2, ≥ 60 % months, both halves, PF ≥ 1.2, still positive at
+2 points), at **10 lots**; 1 lot reported. This is the last variant in the exploration window; the
+survivor of §5 / §5b, if any, goes to the holdout once.
