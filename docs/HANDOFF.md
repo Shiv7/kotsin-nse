@@ -249,7 +249,18 @@ The 64-state bias gate (`use_bias=true`) only has data from 2024, which left too
    Recorded NSE days: 19 Oct, 23 Oct, then every session. From 26 Oct: 20-level depth and the book's
    readings (OFI, queue, microprice, weighted imbalance). After ≥ 15 days: `kotsin-nse micro-ic` — keep
    a reading only with a stable IC (0.03–0.05) and a top-minus-bottom spread above costs.
-4. The 64-state gate can now be judged from 2021 (`oi_daily_legacy/`; join on symbol + expiry, there is
+4. **Parked (2026-10-23): a plain-language read per stock on the board** — "gap up and go / fading /
+   holding / filled", opened above yesterday's high, side of VWAP since when, futures OI behind the
+   move (fresh longs / shorts, covering, flat), CVD faded from its peak, rejected at yesterday's high,
+   the book flipping at the day's extreme, with or against its sector, the next pivot zone. Draft
+   rules in `docs/parked/story.py` (not wired, untested); meant for the stock popup ("What's
+   happening") and a tag per stock in the Opening gaps card. From the 23 Oct open analysis (SWIGGY,
+   INFY, COFORGE, TCS).
+5. **Board "Align" (x/4) does not separate stocks on a one-sided day:** three of its four points are
+   market-wide (sector lean, breadth) or nearly so, so on 23 Oct every bearish contender scored 4/4
+   and no bullish one could pass 2/4. Replace with stock-specific checks (own VWAP side, futures OI
+   in its direction, CVD/OFI its way, stronger than its sector) and show the market lean once.
+6. The 64-state gate can now be judged from 2021 (`oi_daily_legacy/`; join on symbol + expiry, there is
    no contract token before 2024).
 4. Owner's wishlist not yet done: one self-sufficient strategy with **sector-wise** layer and
    **PCR / option OI walls** (daily data exists in the bhavcopy); read the old repos
