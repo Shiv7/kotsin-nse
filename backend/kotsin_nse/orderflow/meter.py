@@ -8,6 +8,12 @@ which side initiated a trade. So each snapshot's NEW volume (the rise in the cum
 * at or below the previous snapshot's bid → seller-initiated;
 * in between → by the tick rule (price up = buy, down = sell, unchanged = as the last one).
 
+Before the open (``auction``) and whenever the book is crossed (best bid ≥ best ask) the new volume
+has no side: in NSE's pre-open the cumulative quantity grows with the auction's indicative matched
+quantity while the book shows market orders at the price bands (RELIANCE 2026-10-23 09:05: bid
+1302.9, ask 1066.1), and the quote rule had booked 10,364 of it as buying before a trade. It is
+counted as ``unknown`` and never enters the cumulative delta.
+
 This is the quote rule applied to batches. On a ~6-frames-a-minute feed many trades share one
 frame, so it is an ESTIMATE of delta, labelled as one everywhere it is shown; a 1-second vendor feed
 through the same code would sharpen it.
@@ -204,14 +210,16 @@ class FlowMeter:
                 del st.minutes[0]
         return st.minutes[-1]
 
-    def on_tick(self, code: str, ts: float, ltp: float, total_qty: int, bid: float, ask: float) -> None:
+    def on_tick(self, code: str, ts: float, ltp: float, total_qty: int, bid: float, ask: float, auction: bool = False) -> None:
         if ltp <= 0:
             return
         st = self._st.setdefault(code, _State())
         fm = self._minute(code, ts)
         fm.frames += 1
         new = total_qty - st.last_total if st.last_total else 0
-        if new > 0:
+        if new > 0 and (auction or (bid > 0 and ask > 0 and bid >= ask)):
+            fm.unknown += new
+        elif new > 0:
             side = classify(ltp, st.bid, st.ask, st.ltp, st.last_side)
             if side > 0:
                 fm.buy += new
@@ -228,6 +236,8 @@ class FlowMeter:
         st.bid, st.ask, st.ltp = bid, ask, ltp
 
     def on_depth(self, code: str, ts: float, bids: Sequence[tuple[float, int]], asks: Sequence[tuple[float, int]]) -> None:
+        if bids and asks and bids[0][0] >= asks[0][0]:
+            return  # a crossed book is the auction's, not a market anyone can trade against
         imb = imbalance(bids, asks)
         if imb is None:
             return

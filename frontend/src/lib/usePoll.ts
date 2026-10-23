@@ -29,6 +29,13 @@ export function usePoll<T>(path: string | null, intervalMs = 4000) {
     }
   }, [path])
 
+  // a new path is a different thing: the last good value of the old one must not stand in for it
+  // (switching the Board from Replay to Live kept 16 Oct's stocks on screen under a live 404)
+  useEffect(() => {
+    setData(null)
+    setError(null)
+  }, [path])
+
   useEffect(() => {
     alive.current = true
     if (!path) {

@@ -122,6 +122,7 @@ class Engine:
         #: estimated order flow per minute for the underlyings and their front futures
         self.flow = FlowMeter()
         self._depth_last: dict[str, float] = {}
+        self._open_cache: dict[tuple[Segment, date], float] = {}
         self.scanner = LiveScanner(self.store)
         self._scanned_minute = 0
         #: near-future OI change % by underlying symbol, for the board's build-up label
@@ -477,13 +478,15 @@ class Engine:
             if self.s.archive_ticks:
                 self.archive.tick(tick)
             ts = float(tick.get("ts") or recv)
+            t = ts if abs(ts - recv) < 120 else recv
             self.flow.on_tick(
                 code,
-                ts if abs(ts - recv) < 120 else recv,
+                t,
                 float(tick.get("ltp") or 0),
                 int(tick.get("total_qty") or 0),
                 float(tick.get("bid") or 0),
                 float(tick.get("ask") or 0),
+                auction=t < self._open_ts(inst.segment if inst else Segment.NSE_EQ, t),
             )
         elif code in self._option_tick_codes and self.s.archive_ticks:
             self.archive.tick(tick)
@@ -573,6 +576,14 @@ class Engine:
 
     def ltp_for(self, scrip_code: str) -> float | None:
         return self.ltps.get(scrip_code)
+
+    def _open_ts(self, segment: Segment, ts: float) -> float:
+        """The session open of ``ts``'s IST day, cached per segment and day (called on every tick)."""
+        key = (segment, ist_day(ts))
+        hit = self._open_cache.get(key)
+        if hit is None:
+            hit = self._open_cache[key] = session_open_ts(segment, key[1])
+        return hit
 
     def session_phase(self, symbol: str, ts: int) -> str:
         inst = self.underlyings.get(symbol)

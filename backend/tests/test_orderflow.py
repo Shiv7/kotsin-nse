@@ -76,3 +76,15 @@ def test_the_minute_keeps_the_book_readings_and_ofi_only_between_two_frames():
     assert j["ofi"] == 20 and j["ofi_deep"] == 20 and j["book_n"] == 2 and j["levels"] == 1
     assert j["qi"] == pytest.approx(((50 - 40) / 90 + (70 - 40) / 110) / 2, abs=1e-4) and j["mid"] == 100.25
     assert "qi_sum" not in j and j["bid_depth"] == 60
+
+
+def test_the_auction_and_a_crossed_book_give_volume_no_side():
+    m = FlowMeter()
+    # NSE pre-open, RELIANCE 2026-10-23: market orders shown at the bands, the quantity growing
+    m.on_tick("X", T0, 1184.5, 1_000, 1302.9, 1066.1, auction=True)
+    m.on_tick("X", T0 + 5, 1184.5, 10_000, 1302.9, 1066.1, auction=True)
+    m.on_tick("X", T0 + 10, 1184.5, 12_000, 1302.9, 1066.1)  # a crossed book even after the flag
+    fm = m.minutes("X")[-1]
+    assert (fm.buy, fm.sell, fm.unknown, fm.cum_delta) == (0, 0, 11_000, 0)
+    m.on_depth("X", T0 + 11, [(1302.9, 1479)], [(1066.1, 2824)])
+    assert m.minutes("X")[-1].imbalance is None and m.minutes("X")[-1].book_n == 0
