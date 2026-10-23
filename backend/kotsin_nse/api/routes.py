@@ -198,6 +198,24 @@ def build_app(engine: Engine) -> FastAPI:
             "future_code": fut,
         }
 
+    @api.get("/micro/{symbol}")
+    async def micro(symbol: str) -> dict[str, Any]:
+        """Microstructure of the stock and its front future (orderflow/micro.py): microprice, queue
+        imbalance, spread, book skew, Kyle's lambda, VPIN, efficiency ratio, realised volatility,
+        Roll's spread, Amihud, walls pulled/filled, absorption and vacuum events. Snapshot-based
+        estimates on a 5-level book."""
+        sym = symbol.upper()
+        g = engine.groups.get(sym)
+        if g is None:
+            raise HTTPException(404, f"{sym} is not in the universe")
+        fut = g.futures[0] if g.futures else None
+        return {
+            "symbol": sym,
+            "cash": engine.micro.snapshot(g.underlying.scrip_code) if g.equity is not None else None,
+            "future": engine.micro.snapshot(fut.scrip_code) if fut else None,
+            "future_name": fut.name if fut else None,
+        }
+
     @api.get("/fidelity")
     async def fidelity() -> dict[str, Any]:
         """How often the live bar build disagrees with the exchange's own candle, by timeframe."""

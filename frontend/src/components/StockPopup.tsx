@@ -1,7 +1,8 @@
-import { createChart, LineStyle, type ISeriesApi, type UTCTimestamp } from 'lightweight-charts'
-import { useEffect, useRef, useState } from 'react'
+import { createChart, LineStyle, type IChartApi, type IPriceLine, type ISeriesApi, type SeriesMarker, type Time, type UTCTimestamp } from 'lightweight-charts'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { FlowPanel } from './FlowPanel'
 import { FnoPanel } from './FnoPanel'
+import { MicroPanel } from './MicroPanel'
 import { cls, fmt, istChartOptions, istHm } from '../lib/api'
 import { usePoll } from '../lib/usePoll'
 import type { BoardRow, LevelsData, OHLCV, PivotCluster, ProfileData, StructureData, VolumeProfileData } from '../types'
@@ -25,6 +26,15 @@ interface Props {
   onClose: () => void
 }
 
+interface Forming {
+  ts: number
+  o: number
+  h: number
+  l: number
+  c: number
+  v: number
+}
+
 interface LiveBars {
   bars: { ts: number; o: number; h: number; l: number; c: number; v: number }[]
 }
@@ -34,7 +44,8 @@ export function StockPopup({ row, day, at, trade, onClose }: Props) {
   const path = day
     ? `/api/history/bars/${row.symbol}?day=${day}&tf=5m${at ? `&until=${at}` : ''}`
     : `/api/bars/${row.symbol}?tf=5m&n=80`
-  const { data, error } = usePoll<{ bars: OHLCV[] } | LiveBars>(path, day ? 600000 : 5000)
+  // live: the forming candle comes over /ws each second; the closed bars only need a slow poll
+  const { data, error } = usePoll<{ bars: OHLCV[] } | LiveBars>(path, day ? 600000 : 15000)
   const structure = usePoll<StructureData>(
     day
       ? `/api/structure/${encodeURIComponent(row.symbol)}?day=${day}&at=${trade?.signal_at ?? at ?? '15:30'}`
@@ -53,12 +64,48 @@ export function StockPopup({ row, day, at, trade, onClose }: Props) {
   )
   const [allPivots, setAllPivots] = useState(false)
   const box = useRef<HTMLDivElement>(null)
+  const chartRef = useRef<IChartApi | null>(null)
   const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const volRef = useRef<ISeriesApi<'Histogram'> | null>(null)
+  const vwapRef = useRef<ISeriesApi<'Line'> | null>(null)
+  const linesRef = useRef<IPriceLine[]>([])
+  const formingRef = useRef<Forming | null>(null)
+  const fittedRef = useRef(false)
   const [live, setLive] = useState<{ c: number; ts: number } | null>(null)
 
-  // live: the engine pushes every forming candle once a second on /ws — the popup's last candle
-  // and price follow it, instead of waiting for the 5-minute bar to close and the next poll
+  // The chart is built ONCE per popup and then only updated: closed bars with setData, the forming
+  // candle with update() each second, overlays swapped as price lines. It used to be torn down and
+  // rebuilt on every poll — a flicker every few seconds, the zoom reset, the live candle dropped.
+  useEffect(() => {
+    if (!box.current) return
+    const el = box.current
+    const c = createChart(el, {
+      layout: { background: { color: '#020617' }, textColor: '#94a3b8' },
+      grid: { vertLines: { color: '#0f172a' }, horzLines: { color: '#0f172a' } },
+      ...istChartOptions,
+      rightPriceScale: { borderColor: '#334155' },
+      height: 340,
+      width: el.clientWidth,
+    })
+    candleRef.current = c.addCandlestickSeries({
+      upColor: '#10b981', downColor: '#f43f5e', wickUpColor: '#10b981', wickDownColor: '#f43f5e', borderVisible: false,
+    })
+    volRef.current = c.addHistogramSeries({ priceFormat: { type: 'volume' }, priceScaleId: 'vol', lastValueVisible: false, priceLineVisible: false })
+    c.priceScale('vol').applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } })
+    vwapRef.current = c.addLineSeries({ color: '#38bdf8', lineWidth: 1, lineStyle: LineStyle.Dashed, priceLineVisible: false, lastValueVisible: true, title: 'VWAP' })
+    chartRef.current = c
+    const ro = new ResizeObserver(() => c.applyOptions({ width: el.clientWidth }))
+    ro.observe(el)
+    return () => {
+      ro.disconnect()
+      chartRef.current = candleRef.current = volRef.current = vwapRef.current = null
+      linesRef.current = []
+      fittedRef.current = false
+      c.remove()
+    }
+  }, [])
+
+  // live: the engine pushes every forming candle once a second on /ws
   useEffect(() => {
     if (day) return
     let ws: WebSocket | null = null
@@ -68,12 +115,12 @@ export function StockPopup({ row, day, at, trade, onClose }: Props) {
       ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`)
       ws.onmessage = (ev) => {
         try {
-          const msg = JSON.parse(ev.data as string) as { forming?: Record<string, { ts: number; o: number; h: number; l: number; c: number; v: number }> }
+          const msg = JSON.parse(ev.data as string) as { forming?: Record<string, Forming> }
           const f = msg.forming?.[`${row.symbol}:5m`]
           if (!f) return
-          setLive({ c: f.c, ts: Date.now() / 1000 })
-          candleRef.current?.update({ time: f.ts as UTCTimestamp, open: f.o, high: f.h, low: f.l, close: f.c })
-          volRef.current?.update({ time: f.ts as UTCTimestamp, value: f.v, color: f.c >= f.o ? 'rgba(16,185,129,0.35)' : 'rgba(244,63,94,0.35)' })
+          formingRef.current = f
+          setLive((prev) => (prev && prev.c === f.c ? prev : { c: f.c, ts: Date.now() / 1000 }))
+          drawForming(f)
         } catch {
           /* a malformed frame is skipped; the next comes in a second */
         }
@@ -90,38 +137,30 @@ export function StockPopup({ row, day, at, trade, onClose }: Props) {
     }
   }, [day, row.symbol])
 
+  const drawForming = (f: Forming) => {
+    const last = data?.bars?.[data.bars.length - 1]
+    if (last && f.ts < last.ts) return // older than the last closed bar: a stale frame
+    candleRef.current?.update({ time: f.ts as UTCTimestamp, open: f.o, high: f.h, low: f.l, close: f.c })
+    volRef.current?.update({ time: f.ts as UTCTimestamp, value: f.v, color: f.c >= f.o ? 'rgba(16,185,129,0.35)' : 'rgba(244,63,94,0.35)' })
+  }
+
+  // closed bars: replaced in place, the forming candle re-applied on top, zoom kept after the first fit
   useEffect(() => {
-    if (!box.current || !data?.bars?.length) return
-    const bars = data.bars
-    const c = createChart(box.current, {
-      layout: { background: { color: '#020617' }, textColor: '#94a3b8' },
-      grid: { vertLines: { color: '#0f172a' }, horzLines: { color: '#0f172a' } },
-      ...istChartOptions,
-      rightPriceScale: { borderColor: '#334155' },
-      height: 340,
-      width: box.current.clientWidth,
-    })
-    const candles = c.addCandlestickSeries({
-      upColor: '#10b981', downColor: '#f43f5e', wickUpColor: '#10b981', wickDownColor: '#f43f5e', borderVisible: false,
-    })
-    candles.setData(bars.map((b) => ({ time: b.ts as UTCTimestamp, open: b.o, high: b.h, low: b.l, close: b.c })))
-    candleRef.current = candles
-    const vol = c.addHistogramSeries({ priceFormat: { type: 'volume' }, priceScaleId: 'vol', lastValueVisible: false, priceLineVisible: false })
-    c.priceScale('vol').applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } })
-    vol.setData(bars.map((b) => ({ time: b.ts as UTCTimestamp, value: b.v, color: b.c >= b.o ? 'rgba(16,185,129,0.35)' : 'rgba(244,63,94,0.35)' })))
-    volRef.current = vol
+    const bars = data?.bars
+    if (!bars?.length || !candleRef.current || !volRef.current || !vwapRef.current) return
+    candleRef.current.setData(bars.map((b) => ({ time: b.ts as UTCTimestamp, open: b.o, high: b.h, low: b.l, close: b.c })))
+    volRef.current.setData(bars.map((b) => ({ time: b.ts as UTCTimestamp, value: b.v, color: b.c >= b.o ? 'rgba(16,185,129,0.35)' : 'rgba(244,63,94,0.35)' })))
     // session VWAP, typical price weighted by volume — the board's own definition. It restarts
     // each IST day: 80 five-minute bars reach into the previous session, and carrying its volume
     // over put GOLD's line at 146,837 on 2026-10-20 against a true session VWAP of 146,392
     let pv = 0
     let vv = 0
-    let day = -1
-    const vw = c.addLineSeries({ color: '#38bdf8', lineWidth: 1, lineStyle: LineStyle.Dashed, priceLineVisible: false, lastValueVisible: true, title: 'VWAP' })
-    vw.setData(
+    let d0 = -1
+    vwapRef.current.setData(
       bars.map((b) => {
         const d = Math.floor((b.ts + 19800) / 86400) // IST is UTC+5:30, no DST
-        if (d !== day) {
-          day = d
+        if (d !== d0) {
+          d0 = d
           pv = 0
           vv = 0
         }
@@ -130,12 +169,36 @@ export function StockPopup({ row, day, at, trade, onClose }: Props) {
         return vv > 0 ? { time: b.ts as UTCTimestamp, value: pv / vv } : { time: b.ts as UTCTimestamp }
       }),
     )
+    if (!day && formingRef.current) drawForming(formingRef.current)
+    if (!fittedRef.current) {
+      chartRef.current?.timeScale().fitContent()
+      fittedRef.current = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data])
+
+  // the price range the overlays are drawn within, rounded so a poll that changes nothing redraws nothing
+  const span = useMemo(() => {
+    const bars = data?.bars
+    if (!bars?.length) return null
+    return { lo: Math.min(...bars.map((b) => b.l)), hi: Math.max(...bars.map((b) => b.h)) }
+  }, [data])
+  const spanKey = span ? `${span.lo.toFixed(1)}-${span.hi.toFixed(1)}` : ''
+
+  // overlays: every price line removed and redrawn, markers replaced — the candles are untouched
+  useEffect(() => {
+    const candles = candleRef.current
+    if (!candles || !span) return
+    for (const l of linesRef.current) candles.removePriceLine(l)
+    linesRef.current = []
+    const add = (o: Parameters<typeof candles.createPriceLine>[0]) => linesRef.current.push(candles.createPriceLine(o))
+    const line = (price: number, color: string, title: string, style = LineStyle.Solid, width: 1 | 2 = 1) =>
+      add({ price, color, lineWidth: width, lineStyle: style, axisLabelVisible: true, title })
     // structure: the current setup's lines, its zone's edges, the liquidity met on the way, and
     // a marker at every break of structure and every sweep
     const st = structure.data
+    const marks: SeriesMarker<Time>[] = []
     if (st) {
-      const line = (price: number, color: string, title: string, style = LineStyle.Solid, width: 1 | 2 = 1) =>
-        candles.createPriceLine({ price, color, lineWidth: width, lineStyle: style, axisLabelVisible: true, title })
       const su = st.setup
       if (su) {
         const zn = st.zones[su.zone_index]
@@ -150,89 +213,74 @@ export function StockPopup({ row, day, at, trade, onClose }: Props) {
         if (su.r2 != null) line(su.r2, '#e2e8f0', 'R2', LineStyle.Dashed)
         for (const x of su.extra) line(x.price, 'rgba(245,158,11,0.6)', x.kind.toLowerCase(), LineStyle.SparseDotted)
       }
-      const marks = [
-        ...st.zones.map((z) => ({
+      for (const z of st.zones)
+        marks.push({
           time: z.bos_ts as UTCTimestamp,
-          position: (z.side === 'BULLISH' ? 'belowBar' : 'aboveBar') as 'belowBar' | 'aboveBar',
+          position: z.side === 'BULLISH' ? 'belowBar' : 'aboveBar',
           color: z.state === 'BROKEN' ? '#64748b' : z.side === 'BULLISH' ? '#10b981' : '#f43f5e',
-          shape: (z.side === 'BULLISH' ? 'arrowUp' : 'arrowDown') as 'arrowUp' | 'arrowDown',
+          shape: z.side === 'BULLISH' ? 'arrowUp' : 'arrowDown',
           text: `BOS${z.bos_kind === 'OPENING_RANGE' ? ' OR' : ''}${z.state === 'BROKEN' ? ' ✕' : ''}`,
-        })),
-        // one dot per bar that swept something; only the last three are labelled
-        ...[...new Map(st.sweeps.map((w) => [Math.floor(w.ts / 300) * 300, w])).values()].map((w, i, all) => ({
+        })
+      // one dot per bar that swept something; only the last three are labelled
+      const sw = [...new Map(st.sweeps.map((w) => [Math.floor(w.ts / 300) * 300, w])).values()]
+      sw.forEach((w, i) =>
+        marks.push({
           time: (Math.floor(w.ts / 300) * 300) as UTCTimestamp,
-          position: (w.side === 'BULLISH' ? 'belowBar' : 'aboveBar') as 'belowBar' | 'aboveBar',
+          position: w.side === 'BULLISH' ? 'belowBar' : 'aboveBar',
           color: '#a78bfa',
-          shape: 'circle' as const,
-          text: i >= all.length - 3 ? `sweep ${w.kind.toLowerCase().replace('_', ' ')}` : '',
-        })),
-        ...(trade
-          ? [
-              {
-                time: (Math.floor((trade.entry_ts - 60) / 300) * 300) as UTCTimestamp,
-                position: 'inBar' as const,
-                color: '#facc15',
-                shape: 'square' as const,
-                text: `IN ${trade.entry}`,
-              },
-              ...trade.exits.map((e) => ({
-                time: (Math.floor((e.ts - 60) / 300) * 300) as UTCTimestamp,
-                position: 'inBar' as const,
-                color: e.why === 'R1' || e.why === 'R2' ? '#22c55e' : e.why === 'EOD' ? '#94a3b8' : '#ef4444',
-                shape: 'square' as const,
-                text: `${e.why} ${e.price}`,
-              })),
-            ]
-          : []),
-      ].sort((a, b) => (a.time as number) - (b.time as number))
-      candles.setMarkers(marks)
+          shape: 'circle',
+          text: i >= sw.length - 3 ? `sweep ${w.kind.toLowerCase().replace('_', ' ')}` : '',
+        }),
+      )
     }
     if (trade) {
-      candles.createPriceLine({ price: trade.entry, color: '#facc15', lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: true, title: 'entry' })
-      for (const l of trade.lines ?? []) candles.createPriceLine({ price: l.price, color: l.color, lineWidth: 2, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: l.title })
+      marks.push({ time: (Math.floor((trade.entry_ts - 60) / 300) * 300) as UTCTimestamp, position: 'inBar', color: '#facc15', shape: 'square', text: `IN ${trade.entry}` })
+      for (const e of trade.exits)
+        marks.push({
+          time: (Math.floor((e.ts - 60) / 300) * 300) as UTCTimestamp,
+          position: 'inBar',
+          color: e.why === 'R1' || e.why === 'R2' ? '#22c55e' : e.why === 'EOD' ? '#94a3b8' : '#ef4444',
+          shape: 'square',
+          text: `${e.why} ${e.price}`,
+        })
+      add({ price: trade.entry, color: '#facc15', lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: true, title: 'entry' })
+      for (const l of trade.lines ?? []) add({ price: l.price, color: l.color, lineWidth: 2, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: l.title })
     }
+    candles.setMarkers(marks.sort((a, b) => (a.time as number) - (b.time as number)))
     // pivot clusters: the nearest three support and three resistance zones, line weight = zone
-    // weight (monthly 3, weekly 2, daily 1 per member); every single pivot only on request
+    // weight (monthly 3, weekly 2, daily 1 per member); every single pivot only on request.
     // A zone more than a normal day beyond the candles is listed above the chart, not drawn: a price
     // line pulls the scale with it, and a 6 % gap squashed WIPRO's whole session into a sliver.
     const lv = levels.data
     if (lv) {
       const pad = lv.adr ?? 0
-      const lo = Math.min(...bars.map((b) => b.l)) - pad
-      const hi = Math.max(...bars.map((b) => b.h)) + pad
+      const lo = span.lo - pad
+      const hi = span.hi + pad
       for (const z of nearestZones(lv.clusters).filter((z) => z.high >= lo && z.low <= hi)) {
         const tone = z.kind === 'SUPPORT' ? '16,185,129' : z.kind === 'RESISTANCE' ? '244,63,94' : '250,204,21'
         const width = (z.weight >= 6 ? 4 : z.weight >= 4 ? 3 : 2) as 2 | 3 | 4
-        candles.createPriceLine({
+        add({
           price: z.mid, color: `rgba(${tone},0.55)`, lineWidth: width, lineStyle: LineStyle.Solid, axisLabelVisible: true,
           title: `${z.kind === 'SUPPORT' ? 'S' : z.kind === 'RESISTANCE' ? 'R' : '='} ${z.members.join('·')}`,
         })
-        if (z.high - z.low > 0) {
-          for (const edge of [z.low, z.high])
-            candles.createPriceLine({ price: edge, color: `rgba(${tone},0.25)`, lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: false, title: '' })
-        }
+        if (z.high - z.low > 0)
+          for (const edge of [z.low, z.high]) add({ price: edge, color: `rgba(${tone},0.25)`, lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: false, title: '' })
       }
-      if (allPivots) {
+      if (allPivots)
         for (const p of lv.levels.filter((p) => p.price >= lo && p.price <= hi))
-          candles.createPriceLine({
+          add({
             price: p.price, color: p.frame === 'M' ? 'rgba(251,191,36,0.5)' : p.frame === 'W' ? 'rgba(148,163,184,0.5)' : 'rgba(100,116,139,0.35)',
             lineWidth: 1, lineStyle: LineStyle.SparseDotted, axisLabelVisible: false, title: p.name,
           })
-      }
     }
     const vp = profile.data?.volume
     if (vp) {
-      candles.createPriceLine({ price: vp.poc, color: '#c084fc', lineWidth: 2, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: 'POC' })
-      candles.createPriceLine({ price: vp.vah, color: 'rgba(192,132,252,0.6)', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: false, title: 'VAH' })
-      candles.createPriceLine({ price: vp.val, color: 'rgba(192,132,252,0.6)', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: false, title: 'VAL' })
+      add({ price: vp.poc, color: '#c084fc', lineWidth: 2, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: 'POC' })
+      add({ price: vp.vah, color: 'rgba(192,132,252,0.6)', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: false, title: 'VAH' })
+      add({ price: vp.val, color: 'rgba(192,132,252,0.6)', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: false, title: 'VAL' })
     }
-    c.timeScale().fitContent()
-    return () => {
-      candleRef.current = null
-      volRef.current = null
-      c.remove()
-    }
-  }, [data, structure.data, profile.data, levels.data, allPivots])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [structure.data, profile.data, levels.data, allPivots, trade, spanKey])
 
   const bull = row.side === 'BULLISH'
   return (
@@ -284,6 +332,7 @@ export function StockPopup({ row, day, at, trade, onClose }: Props) {
         </div>
         {!day && <FnoPanel symbol={row.symbol} />}
         {!day && <FlowPanel symbol={row.symbol} />}
+        {!day && <MicroPanel symbol={row.symbol} />}
         {profile.data?.market && (
           <div className="mt-2 flex flex-wrap gap-3 font-mono text-[11px] text-slate-400">
             <span>

@@ -97,3 +97,21 @@ def test_a_tiny_contract_count_is_weak_whatever_its_percentage():
     assert not Leg(-22.3, 7, 1.23).weak
     assert Leg(-22.3, 7, 1.23, min_contracts=167).weak
     assert not Leg(-16.8, 2_323, 15.5, min_contracts=143).weak
+
+
+def test_black76_greeks_match_parity_and_finite_differences():
+    import math
+
+    from kotsin_nse.fno.chain import RISK_FREE, black76, greeks76
+
+    f, k, t, s = 1193.2, 1190.0, 4 / 365, 0.225
+    c, p = greeks76(f, k, t, s, True), greeks76(f, k, t, s, False)
+    assert c is not None and p is not None
+    assert c["delta"] - p["delta"] == pytest.approx(math.exp(-RISK_FREE * t))  # put-call parity
+    assert c["gamma"] == pytest.approx(p["gamma"]) and c["vega"] == pytest.approx(p["vega"])
+    h = 0.01
+    assert c["delta"] == pytest.approx((black76(f + h, k, t, s, True) - black76(f - h, k, t, s, True)) / (2 * h), rel=1e-4)
+    assert c["vega"] == pytest.approx(black76(f, k, t, s + 0.005, True) - black76(f, k, t, s - 0.005, True), rel=1e-3)
+    dt = 0.001 / 365  # theta is the instantaneous decay per day: a tiny central step, not a whole day
+    assert c["theta"] == pytest.approx((black76(f, k, t - dt, s, True) - black76(f, k, t + dt, s, True)) / (2 * dt) / 365, rel=1e-3)
+    assert greeks76(f, k, 0.0, s, True) is None

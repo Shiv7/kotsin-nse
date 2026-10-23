@@ -67,6 +67,25 @@ def black76(f: float, k: float, t: float, sigma: float, call: bool, r: float = R
     return df * (k * _n(-d2) - f * _n(-d1))
 
 
+def greeks76(f: float, k: float, t: float, sigma: float, call: bool, r: float = RISK_FREE) -> dict[str, float] | None:
+    """Black-76 Greeks of an option on a future: delta, gamma (per ₹1 of the future), vega (₹ per
+    1 point of IV) and theta (₹ per calendar day, the premium's decay). None without a volatility
+    or time left."""
+    if sigma <= 0 or t <= 0 or f <= 0 or k <= 0:
+        return None
+    df = math.exp(-r * t)
+    sq = math.sqrt(t)
+    d1 = (math.log(f / k) + 0.5 * sigma * sigma * t) / (sigma * sq)
+    pdf = math.exp(-0.5 * d1 * d1) / math.sqrt(2 * math.pi)
+    price = black76(f, k, t, sigma, call, r)
+    return {
+        "delta": df * _n(d1) if call else -df * _n(-d1),
+        "gamma": df * pdf / (f * sigma * sq),
+        "vega": f * df * pdf * sq / 100,
+        "theta": (-f * df * pdf * sigma / (2 * sq) + r * price) / 365,
+    }
+
+
 def implied_vol(price: float | None, f: float, k: float, t: float, call: bool, r: float = RISK_FREE) -> float | None:
     """Annualised Black-76 IV by bisection, or None when the premium says nothing (at or below
     intrinsic, beyond a 500 % vol, or no time left)."""
@@ -188,13 +207,26 @@ def read_chain(
         if q is None:
             return None
         iv = implied_vol(q.ltp, future, k, t, call)
+        g = greeks76(future, k, t, iv, call) if iv is not None else None
         return {
             "ltp": q.ltp,
             "chg_pct": q.chg_pct,
             "oi": q.oi,
             "oi_chg": q.oi_chg,
             "iv": iv * 100 if iv is not None else None,
+            **({k2: round(v, 6 if k2 == "gamma" else 4) for k2, v in g.items()} if g else {}),
         }
 
-    out["rows"] = [{"strike": r.strike, "CE": view(r.ce, True, r.strike), "PE": view(r.pe, False, r.strike)} for r in rows]
+    # how far each strike is from the future: in % and in standard deviations of the move the ATM
+    # IV implies to expiry, ln(K/F) / (σ√t); beyond one is outside the expected range ("far")
+    sd_unit = (out["iv"] / 100) * math.sqrt(t) if out.get("iv") and t > 0 else None
+
+    def where(k: float) -> dict[str, Any]:
+        sd = math.log(k / future) / sd_unit if sd_unit else None
+        return {"dist_pct": round((k / future - 1) * 100, 3), "sd": round(sd, 2) if sd is not None else None,
+                "far": bool(sd is not None and abs(sd) > 1)}
+
+    out["rows"] = [
+        {"strike": r.strike, **where(r.strike), "CE": view(r.ce, True, r.strike), "PE": view(r.pe, False, r.strike)} for r in rows
+    ]
     return ChainRead(out, calls, puts, near_calls, near_puts)

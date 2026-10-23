@@ -70,6 +70,7 @@ from .ops.archive import DailyArchive
 from .ops.health import Check, HealthMonitor
 from .ops.telegram import Telegram
 from .orderflow.meter import FlowMeter
+from .orderflow.micro import MicroMeter
 from .risk.costs import CostModel
 from .scan.board import OIRead, attach_setups
 from .scan.live import LiveScanner
@@ -132,6 +133,7 @@ class Engine:
         self.feed_rate = FeedRateMeter()
         #: estimated order flow per minute for the underlyings and their front futures
         self.flow = FlowMeter()
+        self.micro = MicroMeter()  # microstructure of the underlyings and front futures (orderflow/micro.py)
         self._depth_last: dict[str, float] = {}
         self._open_cache: dict[tuple[Segment, date], float] = {}
         self.scanner = LiveScanner(self.store)
@@ -593,15 +595,17 @@ class Engine:
                 self.archive.tick(tick)
             ts = float(tick.get("ts") or recv)
             t = ts if abs(ts - recv) < 120 else recv
-            self.flow.on_tick(
+            args = (
                 code,
                 t,
                 float(tick.get("ltp") or 0),
                 int(tick.get("total_qty") or 0),
                 float(tick.get("bid") or 0),
                 float(tick.get("ask") or 0),
-                auction=t < self._open_ts(inst.segment if inst else Segment.NSE_EQ, t),
             )
+            auction = t < self._open_ts(inst.segment if inst else Segment.NSE_EQ, t)
+            self.flow.on_tick(*args, auction=auction)
+            self.micro.on_tick(*args, auction=auction)
         elif code in self._option_tick_codes and self.s.archive_ticks:
             self.archive.tick(tick)
         pc = float(tick.get("prev_close") or 0)
@@ -625,6 +629,8 @@ class Engine:
         self.books[code] = BookSnapshot(scrip_code=code, bids=depth["bids"], asks=depth["asks"], ts=ts)
         if code in self._tick_archive_codes or code in self._focus_option_codes:
             self.flow.on_depth(code, ts, depth["bids"], depth["asks"])
+            if code in self._tick_archive_codes:
+                self.micro.on_depth(code, ts, depth["bids"], depth["asks"])
             if ts - self._depth_last.get(code, 0.0) >= self.s.archive_depth_every_s:
                 self._depth_last[code] = ts
                 self.archive.depth(code, ts, depth["bids"], depth["asks"])

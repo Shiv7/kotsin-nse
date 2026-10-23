@@ -27,6 +27,11 @@ interface Side {
   oi: number | null
   oi_chg: number | null
   iv: number | null
+  /** Black-76 on this expiry's future: delta, gamma (per ₹1), vega (₹ per IV point), theta (₹ per day) */
+  delta?: number
+  gamma?: number
+  vega?: number
+  theta?: number
 }
 
 interface Wall {
@@ -57,7 +62,7 @@ interface Expiry {
   put_wall?: Wall | null
   call_add?: Wall | null
   put_add?: Wall | null
-  rows?: { strike: number; CE: Side | null; PE: Side | null }[]
+  rows?: { strike: number; dist_pct?: number; sd?: number | null; far?: boolean; CE: Side | null; PE: Side | null }[]
 }
 
 interface Fno {
@@ -94,6 +99,7 @@ function LegCard({ name, leg, priceWord }: { name: string; leg: Leg | null; pric
 }
 
 function Ladder({ x }: { x: Expiry }) {
+  const [view, setView] = useState<'market' | 'greeks'>('market')
   const rows = x.rows ?? []
   const maxOi = Math.max(1, ...rows.flatMap((r) => [r.CE?.oi ?? 0, r.PE?.oi ?? 0]))
   const bar = (v: number | null | undefined, right: boolean, color: string) => (
@@ -102,8 +108,78 @@ function Ladder({ x }: { x: Expiry }) {
     </div>
   )
   const chg = (v: number | null | undefined) => <span className={(v ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}>{signed(v)}</span>
+  const g = (v: number | undefined, d: number) => (v == null ? '—' : v.toFixed(d))
+  // the strike, and how far it is from the future: % and standard deviations of the move the ATM
+  // IV prices in to expiry — beyond 1σ is outside the expected range ("far")
+  const strikeCell = (r: (typeof rows)[number], atm: boolean) => (
+    <td className={cls('px-2 text-center', atm ? 'font-bold text-sky-300' : r.far ? 'text-slate-500' : 'text-slate-300')}>
+      {fmt.n(r.strike, 0)}
+      {r.dist_pct != null && (
+        <div className={cls('text-[9px] font-normal', r.far ? 'text-amber-600' : 'text-slate-500')}>
+          {r.dist_pct >= 0 ? '+' : ''}
+          {r.dist_pct.toFixed(1)}%{r.sd != null ? ` · ${Math.abs(r.sd).toFixed(1)}σ` : ''}
+          {r.far ? ' far' : ''}
+        </div>
+      )}
+    </td>
+  )
+  const toggle = (
+    <div className="mt-2 flex gap-1 text-[10px]">
+      {(['market', 'greeks'] as const).map((v) => (
+        <button key={v} onClick={() => setView(v)} className={cls('rounded px-2 py-0.5', view === v ? 'bg-sky-900 text-sky-100' : 'bg-slate-900 text-slate-400')}>
+          {v === 'market' ? 'OI · price · IV' : 'Greeks Δ Γ ν Θ'}
+        </button>
+      ))}
+      <span className="ml-2 self-center text-slate-600">σ = standard deviations of the move priced in to expiry; far = outside 1σ</span>
+    </div>
+  )
+  if (view === 'greeks')
+    return (
+      <>
+        {toggle}
+        <table className="mt-1 w-full font-mono text-[10px]">
+          <thead className="text-slate-500">
+            <tr>
+              <th className="text-right" title="change in premium per ₹1 of the future">call Δ</th>
+              <th className="px-1 text-right" title="change in delta per ₹1 of the future">Γ</th>
+              <th className="px-1 text-right" title="₹ change in premium per 1 point of IV">ν</th>
+              <th className="px-1 text-right" title="₹ of premium lost per calendar day">Θ/day</th>
+              <th className="px-1 text-right">LTP</th>
+              <th className="px-2 text-center text-slate-300">strike</th>
+              <th className="px-1 text-left">LTP</th>
+              <th className="px-1 text-left">Θ/day</th>
+              <th className="px-1 text-left">ν</th>
+              <th className="px-1 text-left">Γ</th>
+              <th className="text-left">put Δ</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => {
+              const atm = r.strike === x.atm
+              return (
+                <tr key={r.strike} className={cls(atm && 'bg-slate-800/60', r.far && 'opacity-60')}>
+                  <td className="py-0.5 text-right text-slate-200">{g(r.CE?.delta, 2)}</td>
+                  <td className="px-1 text-right text-slate-400">{g(r.CE?.gamma, 4)}</td>
+                  <td className="px-1 text-right text-slate-400">{g(r.CE?.vega, 2)}</td>
+                  <td className="px-1 text-right text-rose-300">{g(r.CE?.theta, 2)}</td>
+                  <td className="px-1 text-right text-slate-200">{fmt.n(r.CE?.ltp)}</td>
+                  {strikeCell(r, atm)}
+                  <td className="px-1 text-left text-slate-200">{fmt.n(r.PE?.ltp)}</td>
+                  <td className="px-1 text-left text-rose-300">{g(r.PE?.theta, 2)}</td>
+                  <td className="px-1 text-left text-slate-400">{g(r.PE?.vega, 2)}</td>
+                  <td className="px-1 text-left text-slate-400">{g(r.PE?.gamma, 4)}</td>
+                  <td className="py-0.5 text-left text-slate-200">{g(r.PE?.delta, 2)}</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </>
+    )
   return (
-    <table className="mt-2 w-full font-mono text-[10px]">
+    <>
+    {toggle}
+    <table className="mt-1 w-full font-mono text-[10px]">
       <thead className="text-slate-500">
         <tr>
           <th className="text-right">call OI</th>
@@ -123,7 +199,7 @@ function Ladder({ x }: { x: Expiry }) {
         {rows.map((r) => {
           const atm = r.strike === x.atm
           return (
-            <tr key={r.strike} className={cls(atm && 'bg-slate-800/60')}>
+            <tr key={r.strike} className={cls(atm && 'bg-slate-800/60', r.far && 'opacity-60')}>
               <td className="py-0.5">
                 <div className="flex items-center justify-end gap-1">
                   <span className={cls(r.strike === x.call_wall?.strike && 'text-rose-300')}>{fmt.int(r.CE?.oi)}</span>
@@ -134,7 +210,7 @@ function Ladder({ x }: { x: Expiry }) {
               <td className="px-1 text-right text-slate-400">{r.CE?.chg_pct != null ? fmt.pct(r.CE.chg_pct, 1) : '—'}</td>
               <td className="px-1 text-right text-slate-200">{fmt.n(r.CE?.ltp)}</td>
               <td className="px-1 text-right text-slate-500">{r.CE?.iv != null ? r.CE.iv.toFixed(1) : '—'}</td>
-              <td className={cls('px-2 text-center', atm ? 'font-bold text-sky-300' : 'text-slate-300')}>{fmt.n(r.strike, 0)}</td>
+              {strikeCell(r, atm)}
               <td className="px-1 text-left text-slate-500">{r.PE?.iv != null ? r.PE.iv.toFixed(1) : '—'}</td>
               <td className="px-1 text-left text-slate-200">{fmt.n(r.PE?.ltp)}</td>
               <td className="px-1 text-left text-slate-400">{r.PE?.chg_pct != null ? fmt.pct(r.PE.chg_pct, 1) : '—'}</td>
@@ -150,6 +226,7 @@ function Ladder({ x }: { x: Expiry }) {
         })}
       </tbody>
     </table>
+    </>
   )
 }
 
