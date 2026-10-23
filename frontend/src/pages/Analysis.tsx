@@ -47,6 +47,8 @@ interface Bundle {
   hedge?: { setups: Setup[]; lot: number; note: string } | null
 }
 interface Summary { text: string; model: string; created_ts: number; seconds: number; cached: boolean; usage: { input: number; output: number; cache_read: number } }
+/** what the summary route returns before anything was generated for the stock */
+interface NoSummary { none: true; calls_left_today: number }
 
 const BUILD: Record<string, [string, string]> = {
   LB: ['long build-up', 'bg-emerald-900/60 text-emerald-300'],
@@ -89,20 +91,28 @@ function Markdown({ text }: { text: string }) {
 function SummaryCard({ symbol }: { symbol: string }) {
   const [nonce, setNonce] = useState(0)
   const path = `/api/analysis/${encodeURIComponent(symbol)}/summary${nonce ? `?refresh=true&n=${nonce}` : ''}`
-  const { data, error, loading } = usePoll<Summary>(path, 600000)
+  // fetched once, never polled: only the button makes a paid call (the server enforces it too)
+  const { data: raw, error, loading } = usePoll<Summary | NoSummary>(path, 0)
+  const none = raw && 'none' in raw ? raw : null
+  const data = raw && !('none' in raw) ? raw : null
   return (
     <Card
       title="Claude's read"
       right={
         <span className="flex items-center gap-2">
           {data && <span>{data.model} · {istHm(data.created_ts)}{data.cached ? ' · cached' : ` · ${data.seconds}s`}</span>}
-          <button onClick={() => setNonce(Date.now())} className="rounded bg-slate-800 px-2 py-0.5 text-slate-200 hover:bg-slate-700" title="a new paid API call">
-            regenerate
+          <button onClick={() => setNonce(Date.now())} className="rounded bg-slate-800 px-2 py-0.5 text-slate-200 hover:bg-slate-700" title="one paid Anthropic API call (~$0.30 on Opus 5.5)">
+            {data ? 'regenerate' : 'generate'} (paid)
           </button>
         </span>
       }
     >
-      {loading && !data && <div className="text-xs text-slate-500">reading the whole page with Claude… (up to a minute)</div>}
+      {loading && nonce > 0 && !data && <div className="text-xs text-slate-500">reading the whole page with Claude… (up to two minutes)</div>}
+      {none && !loading && (
+        <div className="text-xs text-slate-500">
+          No summary yet. Press generate for one paid Anthropic call (~$0.30); nothing is called on its own. {none.calls_left_today} left today.
+        </div>
+      )}
       {error && <div className="text-xs text-amber-400">{error.includes('503') ? 'Summary off: add KN_ANTHROPIC_API_KEY to backend/.env and restart the engine.' : error}</div>}
       {data && <Markdown text={data.text} />}
       {data && (

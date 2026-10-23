@@ -6,7 +6,10 @@ which reads it the way the page is laid out and answers in a fixed set of short 
 * Server-side fallbacks on (``fallbacks="default"``, beta ``server-side-fallback-2026-07-01``):
   if a safety classifier declines, the API reruns on a fallback model inside the same call.
 * The system prompt is fixed and cached; only the data changes per call.
-* One summary per symbol is kept for ``CACHE_S``: every page view would otherwise be a paid call.
+* **No call is ever made on its own.** A summary is made only when the owner presses "generate" (the
+  route's ``refresh``); a page view, a poll or a reload only reads the last one, however old. At most
+  ``DAILY_CAP`` paid calls per day (IST), whatever asks. (2026-10-23: an Analysis tab left open re-read
+  the summary every 10 minutes against a 10-minute cache — 20 Opus calls for BEL, about $6, unasked.)
 
 The key comes from ``KN_ANTHROPIC_API_KEY`` in ``backend/.env`` (or ``ANTHROPIC_API_KEY`` in the
 environment). Without one the endpoint says so instead of failing.
@@ -24,7 +27,7 @@ import structlog
 log = structlog.get_logger(__name__)
 
 MODEL = "claude-opus-5-5"
-CACHE_S = 600.0
+DAILY_CAP = 20
 MAX_TOKENS = 64000
 
 SYSTEM = """You are a senior Indian equity-derivatives analyst writing for a discretionary trader who
@@ -69,6 +72,10 @@ or missing, say it is unavailable rather than guessing. This is analysis for an 
 not financial advice; keep that to one short line at the end. No tables wider than five columns."""
 
 
+class BudgetExceeded(RuntimeError):
+    """The day's cap of paid summary calls is used up."""
+
+
 class Summarizer:
     def __init__(self, api_key: str | None) -> None:
         # An explicit key from settings, else the SDK's own resolution (ANTHROPIC_API_KEY, profiles)
@@ -79,20 +86,33 @@ class Summarizer:
             self._client = None
         self._configured = self._client is not None and bool(api_key or self._client.api_key or self._client.auth_token)
         self._cache: dict[str, dict[str, Any]] = {}
+        self._day = ""
+        self._calls = 0
 
     @property
     def configured(self) -> bool:
         return self._configured
 
     def cached(self, symbol: str) -> dict[str, Any] | None:
-        hit = self._cache.get(symbol)
-        return hit if hit and time.time() - hit["created_ts"] < CACHE_S else None
+        """The last summary made for ``symbol`` — reused until the owner asks for a new one."""
+        return self._cache.get(symbol)
+
+    def calls_left(self) -> int:
+        day = time.strftime("%Y-%m-%d", time.gmtime(time.time() + 19_800))
+        if day != self._day:
+            self._day, self._calls = day, 0
+        return DAILY_CAP - self._calls
 
     async def summarize(self, symbol: str, bundle: dict[str, Any], *, refresh: bool = False) -> dict[str, Any]:
+        """A paid call — only when the owner pressed generate (``refresh``) or no summary exists and
+        the route was asked to make one. Raises ``BudgetExceeded`` past ``DAILY_CAP`` calls today."""
         if not refresh and (hit := self.cached(symbol)):
             return {**hit, "cached": True}
         if self._client is None:
             raise RuntimeError("no Anthropic credentials")
+        if self.calls_left() <= 0:
+            raise BudgetExceeded(f"{DAILY_CAP} summaries already made today — the cap stops further paid calls until tomorrow")
+        self._calls += 1
         data = json.dumps(bundle, default=float, separators=(",", ":"), sort_keys=True)
         t0 = time.time()
         async with self._client.beta.messages.stream(
@@ -120,4 +140,4 @@ class Summarizer:
         return {**out, "cached": False}
 
 
-__all__ = ["MODEL", "Summarizer"]
+__all__ = ["DAILY_CAP", "MODEL", "BudgetExceeded", "Summarizer"]

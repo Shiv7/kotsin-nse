@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { getJson } from './api'
 
 /** Poll a JSON endpoint. Keeps the last good value on error so a blip does not blank the page,
- * and surfaces the error alongside it rather than instead of it. */
+ * and surfaces the error alongside it rather than instead of it. ``intervalMs`` 0 = fetch once. */
 export function usePoll<T>(path: string | null, intervalMs = 4000) {
   const [data, setData] = useState<T | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -45,7 +45,7 @@ export function usePoll<T>(path: string | null, intervalMs = 4000) {
       }
     }
     void refresh()
-    const id = setInterval(() => void refresh(), intervalMs)
+    const id = intervalMs > 0 ? setInterval(() => void refresh(), intervalMs) : undefined
     return () => {
       alive.current = false
       clearInterval(id)

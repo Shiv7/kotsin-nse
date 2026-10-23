@@ -109,3 +109,20 @@ def test_the_last_15_minutes_read_the_turn_on_the_same_strikes():
 def test_no_futures_point_near_the_start_no_window():
     now = 1_000_000.0
     assert recent([(now - 5000, 100.0), (now, 101.0)], [(now - 5000, 1.0), (now, 2.0)], [], now) == []
+
+
+def test_the_summary_is_never_a_call_on_its_own_and_the_daily_cap_stops_paid_calls():
+    import asyncio
+    import time as _t
+
+    from kotsin_nse.analysis.llm import DAILY_CAP, BudgetExceeded, Summarizer
+
+    sm = Summarizer("sk-test-not-a-real-key")
+    sm._cache["BEL"] = {"symbol": "BEL", "text": "old", "created_ts": _t.time() - 86_400}
+    assert sm.cached("BEL")["text"] == "old", "a day-old summary is still served, not remade"
+    got = asyncio.run(sm.summarize("BEL", {}, refresh=False))
+    assert got["cached"] is True
+    sm.calls_left()
+    sm._calls = DAILY_CAP
+    with pytest.raises(BudgetExceeded):
+        asyncio.run(sm.summarize("BEL", {}, refresh=True))  # refused before any network call

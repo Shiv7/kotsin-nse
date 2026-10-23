@@ -222,12 +222,13 @@ def build_app(engine: Engine) -> FastAPI:
 
     @api.get("/analysis/{symbol}/summary")
     async def analysis_summary(symbol: str, refresh: bool = False) -> dict[str, Any]:
-        """Claude's written read of the same data, cached 10 minutes per symbol (``refresh`` forces
-        a new one — each is a paid API call)."""
+        """Claude's written read of the same data. Never a call on its own: without ``refresh`` (the
+        page's generate button) it only returns the last summary made, or ``{"none": true}``; with it,
+        one paid API call, within the daily cap."""
         import anthropic
 
         from ..analysis.bundle import build, compact
-        from ..analysis.llm import Summarizer
+        from ..analysis.llm import BudgetExceeded, Summarizer
 
         if not hasattr(app.state, "summarizer"):
             key = engine.s.anthropic_api_key.get_secret_value() if engine.s.anthropic_api_key else None
@@ -236,13 +237,16 @@ def build_app(engine: Engine) -> FastAPI:
         if not sm.configured:
             raise HTTPException(503, "no Anthropic API key: add KN_ANTHROPIC_API_KEY=… to backend/.env and restart the engine")
         sym = symbol.upper()
-        if not refresh and (hit := sm.cached(sym)):
-            return {**hit, "cached": True}
+        if not refresh:
+            hit = sm.cached(sym)
+            return {**hit, "cached": True} if hit else {"symbol": sym, "none": True, "calls_left_today": sm.calls_left()}
         bundle = build(engine, sym, time.time())
         if bundle is None:
             raise HTTPException(404, f"no daily history for {sym}")
         try:
             return await sm.summarize(sym, compact(bundle), refresh=refresh)
+        except BudgetExceeded as exc:
+            raise HTTPException(429, str(exc)) from exc
         except anthropic.AuthenticationError as exc:
             raise HTTPException(401, "the Anthropic API key was rejected") from exc
         except anthropic.RateLimitError as exc:
