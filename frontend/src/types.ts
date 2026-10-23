@@ -94,6 +94,8 @@ export interface BoardRow {
   sector: string
   last: number
   pct: number | null
+  /** the 09:15 open against yesterday's close, % (engines from 2026-10-23) */
+  gap_pct?: number | null
   score: number
   side: 'BULLISH' | 'BEARISH' | 'NONE'
   rank: number | null

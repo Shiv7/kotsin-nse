@@ -62,6 +62,7 @@ class Row:
     score: float
     side: str  # BULLISH | BEARISH | NONE
     rank: int | None = None  # 1 = strongest on its side
+    gap_pct: float | None = None  # the open against the previous close, %
     percentile: float | None = None  # across every scored stock, 0..100
     event_risk: bool = False
     above_vwap: bool | None = None
@@ -125,6 +126,7 @@ def build_board(
                 last=d.last,
                 pct=round(p, 3) if (p := pct_change(d)) is not None else None,
                 score=round(sc, 4),
+                gap_pct=round((d.open / d.prev_close - 1) * 100, 3) if d.prev_close > 0 and d.open > 0 else None,
                 side="BULLISH" if sc > 0 else "BEARISH" if sc < 0 else "NONE",
                 event_risk=drop_adrs <= -event_risk_adrs,
                 above_vwap=(d.last > d.vwap) if d.vwap else None,

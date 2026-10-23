@@ -24,28 +24,36 @@ interface UniverseRow {
 }
 
 /**
- * Before the first candle: every stock's price against yesterday's close. In the pre-open
- * (09:00–09:08) 5paisa moves only the indices; at ~09:08 the auction matches and each stock's price
- * becomes its opening price, so from then until 09:15 this is the day's gap, largest first.
+ * The day's opening gaps, kept on the board all day. Once the board has run, each row's own
+ * ``gap_pct`` (the 09:15 open against yesterday's close). Before that, from the live prices: in the
+ * pre-open (09:00–09:08) 5paisa moves only the indices; at ~09:08 the auction matches and each
+ * stock's price becomes its opening price, so until 09:15 the price IS the gap. An engine without
+ * ``gap_pct`` falls back to the live price, and the card then says it is the move so far.
  */
-function OpeningGaps({ onPick }: { onPick: (r: BoardRow) => void }) {
-  const { data } = usePoll<UniverseRow[]>('/api/universe', 5000)
-  const rows = (data ?? [])
-    .filter((r) => r.ltp && r.prev_close)
-    .map((r) => ({ ...r, gap: ((r.ltp as number) / (r.prev_close as number) - 1) * 100 }))
+function OpeningGaps({ rows: board, onPick }: { rows?: BoardRow[]; onPick: (r: BoardRow) => void }) {
+  const fromBoard = !!board?.some((r) => r.gap_pct != null)
+  const { data } = usePoll<UniverseRow[]>(fromBoard ? null : '/api/universe', 5000)
+  const preOpen = minuteOf(Date.now() / 1000) < 9 * 60 + 15
+  const rows = fromBoard
+    ? (board ?? []).filter((r) => r.gap_pct != null).map((r) => ({ symbol: r.symbol, kind: 'EQUITY', ltp: r.last, prev_close: null, gap: r.gap_pct as number }))
+    : (data ?? [])
+        .filter((r) => r.ltp && r.prev_close)
+        .map((r) => ({ ...r, gap: ((r.ltp as number) / (r.prev_close as number) - 1) * 100 }))
+  const what = fromBoard ? 'open vs previous close' : preOpen ? 'auction price vs previous close' : 'price now vs previous close (engine has no open yet)'
   // the universe files the indices as EQUITY rows on the cash feed (their 999920xx codes), so by name
   const idx = rows.filter((r) => INDICES.has(r.symbol))
   const eq = rows.filter((r) => r.kind === 'EQUITY' && !INDICES.has(r.symbol))
   const moved = eq.filter((r) => r.gap !== 0)
-  const up = [...moved].filter((r) => r.gap > 0).sort((a, b) => b.gap - a.gap).slice(0, 15)
-  const down = [...moved].filter((r) => r.gap < 0).sort((a, b) => a.gap - b.gap).slice(0, 15)
+  const up = [...moved].filter((r) => r.gap > 0).sort((a, b) => b.gap - a.gap)
+  const down = [...moved].filter((r) => r.gap < 0).sort((a, b) => a.gap - b.gap)
   const open = (r: (typeof rows)[number]) =>
-    onPick({ symbol: r.symbol, sector: '', last: r.ltp as number, pct: r.gap, score: 0, side: 'NONE' } as BoardRow)
+    onPick(board?.find((x) => x.symbol === r.symbol) ?? ({ symbol: r.symbol, sector: '', last: r.ltp as number, pct: r.gap, score: 0, side: 'NONE' } as BoardRow))
   const list = (title: string, xs: typeof rows, tone: string) => (
-    <Card title={title} right={`${xs.length}`}>
+    <Card title={title} right={what}>
       <div className="divide-y divide-slate-800 font-mono text-xs">
         {xs.length === 0 && <div className="px-3 py-2 text-slate-600">none yet — stock prices move when the auction matches, ~09:08</div>}
-        {xs.map((r) => (
+        {xs.length > 0 && <div className="px-3 py-1 text-[10px] text-slate-600">largest 10 of {xs.length}</div>}
+        {xs.slice(0, 10).map((r) => (
           <button key={r.symbol} onClick={() => open(r)} className="flex w-full justify-between px-3 py-1 hover:bg-slate-800/60">
             <span className="text-slate-200">{r.symbol}</span>
             <span className="text-slate-400">{fmt.n(r.ltp)}</span>
@@ -161,17 +169,16 @@ export function Board() {
         {data && <span className="ml-auto text-slate-500">{mode === 'live' ? `live · ${ist(data.ts, true)}` : `${data.symbols ?? 0} stocks · ${data.without_adr?.length ?? 0} without a clean 50-day range`}</span>}
       </div>
 
-      {mode === 'live' && !data && error?.includes('no scan yet') ? (
-        <>
-          <div className="rounded border border-slate-800 bg-slate-900/60 px-3 py-2 text-xs text-slate-300">
-            Live board appears with the first closed minute, 09:16 IST{untilBoard() > 0 ? ` (in ${untilBoard()} min)` : ''}; until 09:20 it is
-            flagged as the opening minutes. Until then: the auction's opening prices below.
-          </div>
-          <OpeningGaps onPick={setOpen} />
-        </>
+      {mode === 'live' && !data && error?.startsWith('404') ? (
+        <div className="rounded border border-slate-800 bg-slate-900/60 px-3 py-2 text-xs text-slate-300">
+          Live board appears with the first closed minute, 09:16 IST{untilBoard() > 0 ? ` (in ${untilBoard()} min)` : ''}; until 09:20 it is
+          flagged as the opening minutes. Until then: the auction&apos;s opening prices below.
+        </div>
       ) : (
         <ErrorLine error={error ?? days.error} />
       )}
+      {mode === 'live' && <OpeningGaps rows={data?.rows} onPick={setOpen} />}
+      {mode === 'replay' && data?.rows?.some((r) => r.gap_pct != null) && <OpeningGaps rows={data.rows} onPick={setOpen} />}
       {mode === 'live' && data && minuteOf(data.ts) < EARLY_UNTIL && (
         <div className="rounded border border-amber-900 bg-amber-950/40 px-3 py-1.5 text-xs text-amber-300">
           opening minutes (before 09:20): the first candles carry the auction&apos;s order imbalance — moves are real but noisy, ranks will shuffle

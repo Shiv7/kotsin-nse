@@ -161,3 +161,13 @@ def test_an_oi_reference_taken_mid_session_is_carried_to_the_row() -> None:
     b = build_board(0, [st("CRUDEOIL", h=106, lo=99.9, last=105)], {}, {"CRUDEOIL": OIRead(2.0, -0.5, since=123.0)})
     r = b.rows[0]
     assert r.oi_build_up == "SHORT BUILD-UP" and r.oi_since == 123.0
+
+
+def test_each_row_keeps_the_days_opening_gap():
+    from kotsin_nse.scan.board import build_board
+    from kotsin_nse.scan.strength import DayState
+
+    up = DayState("INFY", open=1029.2, high=1040.0, low=1025.0, last=1035.0, prev_close=1000.0, adr=20.0)
+    flat = DayState("ABB", open=0.0, high=0.0, low=0.0, last=0.0, prev_close=0.0, adr=None)
+    rows = {r.symbol: r for r in build_board(0, [up, flat], {}).rows}
+    assert rows["INFY"].gap_pct == 2.92 and rows["ABB"].gap_pct is None
