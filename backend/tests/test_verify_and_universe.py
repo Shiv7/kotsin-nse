@@ -392,3 +392,15 @@ def test_mcx_subscribes_every_listed_future_even_when_nse_keeps_only_the_front()
     g = b.build_underlyings([Segment.MCX_FO], date(2026, 10, 20))["GOLD"]
     subs = UniverseBuilder.subscriptions([g], futures_months=1)
     assert {i.scrip_code for i in subs["oi"]} >= {"F12", "F02"}
+
+
+def test_strikes_follow_the_live_price_and_the_focus_takes_atm_plus_minus_n():
+    """COFORGE 2026-10-23: strikes centred on yesterday's close all sat below a +3.5 % future."""
+    b = UniverseBuilder(_catalogue(), UniversePolicy(band_pct=12.0, strikes_per_side=3, min_days_to_expiry=2))
+    g = b.build_underlyings([Segment.NSE_FO], TODAY)["RELIANCE"]
+    b.select_strikes(g, 1500.0, TODAY, around=1545.0, each_side=1)
+    ce = [o.strike for o in g.options if o.option_type is OptionType.CE]
+    assert g.close == 1500.0 and g.center == 1545.0
+    assert 1550.0 in ce and 1500.0 in ce and len(ce) <= 3 and ce == sorted(ce)
+    b.select_strikes(g, 1500.0, TODAY)
+    assert g.center == 1500.0, "no live price: the close is the centre"

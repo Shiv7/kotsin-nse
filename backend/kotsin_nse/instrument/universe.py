@@ -69,6 +69,8 @@ class ScripGroup:
     futures: list[Instrument] = field(default_factory=list)
     options: list[Instrument] = field(default_factory=list)
     close: float | None = None
+    #: the price the strikes were last centred on (the previous close at boot, the live future after)
+    center: float | None = None
     option_expiry: str | None = None  # the nearest selected
     option_expiries: list[str] = field(default_factory=list)  # every selected, nearest first
     note: str = ""
@@ -156,14 +158,23 @@ class UniverseBuilder:
 
     # -- pass 2: which strikes -----------------------------------------------------------------
 
-    def select_strikes(self, group: ScripGroup, close: float | None, today: date) -> None:
+    def select_strikes(
+        self, group: ScripGroup, close: float | None, today: date, *, around: float | None = None, each_side: int | None = None
+    ) -> None:
         """``ScripGroupPopulator.selectStrikes``: strikes within the band around the previous
-        close, the N closest to ATM per side, nearest tradeable expiry."""
+        close, the N closest to ATM per side, nearest tradeable expiry.
+
+        ``around`` centres the choice on another price than the close — the live future, once the
+        day has moved (COFORGE 2026-10-23 gapped +3.5 %: five strikes picked around yesterday's
+        1,905 all sat below a 1,973 future). ``each_side`` takes exactly that many strikes below
+        and above the one nearest the centre, calls and puts alike (ATM ± N), band or no band."""
         group.close = close
         group.options = []
         group.option_expiry = None
         group.option_expiries = []
-        if not close or close <= 0:
+        ref = around if around and around > 0 else close
+        group.center = ref
+        if not ref or ref <= 0:
             group.note = (group.note + "; " if group.note else "") + "no close — strikes not selected"
             return
         expiries = [
@@ -179,12 +190,18 @@ class UniverseBuilder:
             chosen_expiries = expiries[:2]
         band = self.policy.mcx_band_pct if mcx else self.policy.band_pct
         per_side = self.policy.mcx_strikes_per_side if mcx else self.policy.strikes_per_side
-        lo, hi = close * (1 - band / 100), close * (1 + band / 100)
+        lo, hi = ref * (1 - band / 100), ref * (1 + band / 100)
         chosen: list[Instrument] = []
         for expiry in chosen_expiries:
             for otype in (OptionType.CE, OptionType.PE):
+                if each_side is not None:
+                    chain = sorted(self.cat.chain(group.root, expiry, otype), key=lambda i: i.strike)
+                    if chain:
+                        k = min(range(len(chain)), key=lambda j: abs(chain[j].strike - ref))
+                        chosen += chain[max(0, k - each_side) : k + each_side + 1]
+                    continue
                 rows = [i for i in self.cat.chain(group.root, expiry, otype) if lo <= i.strike <= hi]
-                rows.sort(key=lambda i: abs(i.strike - close))
+                rows.sort(key=lambda i: abs(i.strike - ref))
                 chosen += rows[:per_side]
         group.options = sorted(chosen, key=lambda i: (i.expiry, i.option_type.value, i.strike))
         group.option_expiry = chosen_expiries[0]

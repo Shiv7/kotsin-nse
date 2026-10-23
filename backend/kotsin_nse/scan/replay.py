@@ -18,6 +18,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from ..instrument.universe import INDEX_ROOTS
 from ..market.session import ist_at
 from ..research.history import HistoryStore, session_rows
 from ..structure.engine import Structure, analyze, resample_5m
@@ -117,7 +118,8 @@ class DayReplay:
 
     def __init__(self, store: HistoryStore, day: date, symbols: list[str] | None = None) -> None:
         self.day = day
-        names = symbols if symbols is not None else store.symbols("1m")
+        # the indices are the market, not candidates: they never rank among the stocks
+        names = symbols if symbols is not None else [s for s in store.symbols("1m") if s not in INDEX_ROOTS]
         self.days = {s: d for s in names if (d := load_day(store, s, day)) is not None}
         self.sectors = sectors()
 

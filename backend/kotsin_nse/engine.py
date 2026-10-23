@@ -24,6 +24,7 @@ import asyncio
 import time
 from dataclasses import replace
 from datetime import date, timedelta
+from itertools import pairwise
 from typing import Any
 
 import httpx
@@ -46,11 +47,13 @@ from .fno.chain import YEAR_S, OptQuote, StrikeRow, leg_of, read_chain
 from .fno.positioning import WEAK_OI_PCT, Leg
 from .fno.positioning import read as read_positioning
 from .instrument.catalogue import CatalogueLoader
+from .instrument.focus import focus_roots
 from .instrument.quote import Quote
-from .instrument.universe import ScripGroup, UniverseBuilder, UniversePolicy
+from .instrument.universe import INDEX_ROOTS, ScripGroup, UniverseBuilder, UniversePolicy
 from .ledger.db import Ledger
 from .market.fo_bhavcopy import OiDailyStore
 from .market.fo_bhavcopy import fetch_day as fetch_fo_bhavcopy
+from .market.fo_universe import SYMBOL_CHANGES_FILE, parse_symbol_changes
 from .market.session import (
     TradingCalendar,
     is_open,
@@ -78,6 +81,9 @@ log = structlog.get_logger(__name__)
 
 #: the frame backfilled at boot and checked against the exchange on every close
 PRIMARY_TF = "30m"
+#: a root whose strikes were just re-centred waits this long before the next (a churning price
+#: would otherwise re-subscribe its strikes every half minute)
+RECENTER_MIN_S = 120.0
 
 
 class Engine:
@@ -118,6 +124,11 @@ class Engine:
         self._tick_archive_codes: set[str] = set()
         #: option strikes: their quote frames are archived (intraday premiums) but get no order flow
         self._option_tick_codes: set[str] = set()
+        #: the focus list's roots (``instrument/focus.py``) and the option strikes whose books are kept
+        self.focus: list[str] = []
+        self._focus_option_codes: set[str] = set()
+        self._recentered_at: dict[str, float] = {}
+        self._recenter_checked = 0.0
         self.feed_rate = FeedRateMeter()
         #: estimated order flow per minute for the underlyings and their front futures
         self.flow = FlowMeter()
@@ -285,6 +296,13 @@ class Engine:
 
         # Pass 2 — which strikes, now that the previous close is known from the daily backfill.
         n_opts = self.universe_builder.select_all(groups, self._prev_close, date.today())
+        self.focus = [r for r in await asyncio.to_thread(self._focus_list) if r in groups]
+        for r in self.focus:
+            self._select_strikes(groups[r], None)
+        n_opts = sum(len(g.options) for g in groups.values())
+        self._focus_option_codes = {o.scrip_code for r in self.focus for o in groups[r].options}
+        log.info("universe.focus", roots=self.focus, strikes_each_side=self.s.focus_strikes_each_side,
+                 option_books=len(self._focus_option_codes))
         for g in groups.values():
             for o in g.options:
                 self._segment_by_code[o.scrip_code] = o.segment
@@ -307,8 +325,12 @@ class Engine:
         await self.feed.subscribe(Channel.QUOTES, subs["quotes"])
         # the front future's book too: F&O order flow lives in the future as much as the cash
         fronts = [g.futures[0] for g in groups.values() if g.futures] if self.s.universe_future_depth else []
+        # the focus list: its front future's book and its strikes' books
+        deep = [i for r in self.focus for i in (*groups[r].futures[:1], *groups[r].options)]
         if self.s.universe_depth:
-            await self.feed.subscribe(Channel.DEPTH, [*subs["depth"], *fronts])
+            books = {i.scrip_code: i for i in (*subs["depth"], *fronts, *deep)}
+            await self.feed.subscribe(Channel.DEPTH, list(books.values()))
+            self._tick_archive_codes.update(i.scrip_code for i in deep if i.kind is InstrumentKind.FUTURE)
         await self.feed.subscribe(Channel.OI, subs["oi"])
         log.info(
             "engine.subscribed",
@@ -316,6 +338,84 @@ class Engine:
             quotes=len(subs["quotes"]), depth=len(subs["depth"]), oi=len(subs["oi"]),
             options=n_opts, underlyings=len(universe),
         )
+
+    def _focus_list(self) -> list[str]:
+        """The last session's most traded option roots plus the configured indices (fixed for the day)."""
+        days = [d for d in self.oi_daily.days() if d < date.today()]
+        if not days or self.s.focus_top_n <= 0:
+            return []
+        bhav = self.oi_daily.load(days[-1], columns=("symbol", "kind", "close", "volume"))
+        f = self.s.data_dir / SYMBOL_CHANGES_FILE
+        renames = parse_symbol_changes(f.read_text(errors="replace")) if f.exists() else {}
+        indices = [x.strip().upper() for x in self.s.focus_indices.split(",") if x.strip()]
+        return focus_roots(bhav, self.s.focus_top_n, indices, renames=renames)
+
+    def _select_strikes(self, g: ScripGroup, around: float | None) -> None:
+        """One root's strikes: ATM ± ``focus_strikes_each_side`` for the focus list, the usual N
+        nearest otherwise; centred on ``around`` (the live future) or, without it, the close."""
+        if self.universe_builder is None:
+            return
+        self.universe_builder.select_strikes(
+            g, self._prev_close(g.underlying.symbol), date.today(), around=around,
+            each_side=self.s.focus_strikes_each_side if g.root in self.focus else None,
+        )
+
+    async def _apply_strike_changes(self, added: list[Instrument], dropped: list[Instrument]) -> None:
+        """Subscribe the strikes that came in, drop the ones that left; books only for the focus
+        list. New strikes take their official closing OI from the bhavcopy, like the boot's."""
+        for o in added:
+            self._segment_by_code[o.scrip_code] = o.segment
+            self._inst_by_code[o.scrip_code] = o
+            self._option_tick_codes.add(o.scrip_code)
+        focus_roots_ = set(self.focus)
+        add_books = [o for o in added if o.underlying in focus_roots_]
+        drop_books = [o for o in dropped if o.scrip_code in self._focus_option_codes]
+        self._focus_option_codes.update(o.scrip_code for o in add_books)
+        for o in dropped:
+            self._option_tick_codes.discard(o.scrip_code)
+            self._focus_option_codes.discard(o.scrip_code)
+        if added:
+            await self.feed.subscribe(Channel.QUOTES, added)
+            await self.feed.subscribe(Channel.OI, added)
+            if self.s.universe_depth and add_books:
+                await self.feed.subscribe(Channel.DEPTH, add_books)
+            if self.oi_ref_day is not None:
+                self.oi_ref.update(
+                    await asyncio.to_thread(self.oi_daily.closes, self.oi_ref_day, [o.scrip_code for o in added])
+                )
+        if dropped:
+            await self.feed.unsubscribe(Channel.QUOTES, dropped)
+            await self.feed.unsubscribe(Channel.OI, dropped)
+            if self.s.universe_depth and drop_books:
+                await self.feed.unsubscribe(Channel.DEPTH, drop_books)
+
+    async def _recenter_strikes(self, now: float) -> None:
+        """Every root whose live front future is a strike or more from its strikes' centre gets
+        them re-picked around it (at most once a root per ``RECENTER_MIN_S``)."""
+        added: list[Instrument] = []
+        dropped: list[Instrument] = []
+        moved: list[tuple[str, float, float]] = []
+        for g in self.groups.values():
+            if not g.options or not g.futures or g.segment is Segment.MCX_FO:
+                continue
+            ref = self.ltps.get(g.futures[0].scrip_code) or self.ltps.get(g.underlying.scrip_code)
+            strikes = sorted({o.strike for o in g.options})
+            steps = [b - a for a, b in pairwise(strikes) if b > a]
+            if not ref or not g.center or not steps or now - self._recentered_at.get(g.root, 0.0) < RECENTER_MIN_S:
+                continue
+            if abs(ref - g.center) < min(steps):
+                continue
+            before = {o.scrip_code: o for o in g.options}
+            was = g.center
+            self._select_strikes(g, ref)
+            after = {o.scrip_code: o for o in g.options}
+            added += [after[c] for c in after.keys() - before.keys()]
+            dropped += [before[c] for c in before.keys() - after.keys()]
+            self._recentered_at[g.root] = now
+            moved.append((g.root, round(was, 2), round(ref, 2)))
+        if moved:
+            await self._apply_strike_changes(added, dropped)
+            log.info("universe.recentered", roots=len(moved), added=len(added), dropped=len(dropped), sample=moved[:5])
 
     def _prev_close(self, symbol: str) -> float | None:
         bars = self.store.bars(symbol, "1d")
@@ -509,7 +609,7 @@ class Engine:
         code = str(depth["scrip_code"])
         ts = float(depth.get("recv_ts") or time.time())
         self.books[code] = BookSnapshot(scrip_code=code, bids=depth["bids"], asks=depth["asks"], ts=ts)
-        if code in self._tick_archive_codes:
+        if code in self._tick_archive_codes or code in self._focus_option_codes:
             self.flow.on_depth(code, ts, depth["bids"], depth["asks"])
             if ts - self._depth_last.get(code, 0.0) >= self.s.archive_depth_every_s:
                 self._depth_last[code] = ts
@@ -638,7 +738,9 @@ class Engine:
     def scan_symbols(self) -> list[str]:
         """The board's universe: NSE stocks with F&O and the MCX commodities — not indices."""
         return sorted(
-            r for r, g in self.groups.items() if g.equity is not None or g.segment is Segment.MCX_FO
+            r
+            for r, g in self.groups.items()
+            if r not in INDEX_ROOTS and (g.equity is not None or g.segment is Segment.MCX_FO)
         )
 
     def commodities(self) -> list[str]:
@@ -736,19 +838,14 @@ class Engine:
         try:
             cat = await self.catalogue_loader.ensure(force=True)
             self.universe_builder.cat = cat
-            before = {o.scrip_code for g in self.groups.values() for o in g.options}
-            self.universe_builder.select_all(self.groups, self._prev_close, date.today())
-            fresh = [o for g in self.groups.values() for o in g.options if o.scrip_code not in before]
-            for o in fresh:
-                self._segment_by_code[o.scrip_code] = o.segment
-                self._inst_by_code[o.scrip_code] = o
-                self._option_tick_codes.add(o.scrip_code)
-            if fresh:
-                await self.feed.subscribe(Channel.QUOTES, fresh)
-                if self.s.universe_depth and self.s.universe_option_depth:
-                    await self.feed.subscribe(Channel.DEPTH, fresh)
-                await self.feed.subscribe(Channel.OI, fresh)
-            log.info("universe.intraday_rebuild", new_strikes=len(fresh))
+            before = {o.scrip_code: o for g in self.groups.values() for o in g.options}
+            for g in self.groups.values():
+                self._select_strikes(g, g.center)  # the centre the strikes already follow, not the close
+            after = {o.scrip_code: o for g in self.groups.values() for o in g.options}
+            fresh = [after[c] for c in after.keys() - before.keys()]
+            gone = [before[c] for c in before.keys() - after.keys()]
+            await self._apply_strike_changes(fresh, gone)
+            log.info("universe.intraday_rebuild", new_strikes=len(fresh), dropped=len(gone))
         except Exception as exc:  # noqa: BLE001 - a failed rebuild keeps the overnight universe
             log.warning("universe.intraday_rebuild_failed", error=str(exc))
 
@@ -841,6 +938,15 @@ class Engine:
                 if self.reconciler_ready and ist_hm(now) >= "09:20" and self._intraday_rebuild_day != day:
                     self._intraday_rebuild_day = day
                     self._bg_tasks.add(asyncio.create_task(self._intraday_universe_rebuild()))
+
+                if (
+                    self.s.strike_recenter
+                    and self.reconciler_ready
+                    and now - self._recenter_checked > 30
+                    and any(is_open(g.segment, now, self.calendar) for g in self.groups.values() if g.segment is not Segment.MCX_FO)
+                ):
+                    self._recenter_checked = now
+                    await self._recenter_strikes(now)
 
                 if now - last_snapshot > 300:
                     last_snapshot = now

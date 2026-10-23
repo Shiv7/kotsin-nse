@@ -158,6 +158,14 @@ class Settings(BaseSettings):
     universe_depth: bool = True
     #: the front futures' books too (their order flow is noise at ~3 frames/min anyway)
     universe_future_depth: bool = False
+    #: the focus list (``instrument/focus.py``): the most traded option underlyings of the last
+    #: session plus these indices get the front future's book and ATM ± ``focus_strikes_each_side``
+    #: strikes with their books; everything else keeps quotes, the cash book and OI
+    focus_top_n: int = 10
+    focus_indices: str = "NIFTY,BANKNIFTY"
+    focus_strikes_each_side: int = 4
+    #: re-centre a root's strikes on its live future once it has moved a strike from the centre
+    strike_recenter: bool = True
 
     # ---- LIVE_CAPPED caps ----------------------------------------------------------------------
     # Mode is state (R9); these only bound what an *armed* engine may do.
