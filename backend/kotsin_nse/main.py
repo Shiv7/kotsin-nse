@@ -164,11 +164,16 @@ async def fetch_oi(settings: Settings, args: argparse.Namespace) -> None:
     """NSE's F&O bhavcopy for every weekday in range: the official closing OI of every contract."""
     import httpx
 
-    from .market.fo_bhavcopy import OiDailyStore, backfill
+    from .market.fo_bhavcopy import HEADERS, OiDailyStore, backfill
+    from .market.fo_universe import SYMBOL_CHANGES_FILE, SYMBOL_CHANGES_URL
 
-    store = OiDailyStore(settings.data_dir / "oi_daily")
+    store = OiDailyStore(settings.data_dir / ("oi_daily_legacy" if args.legacy else "oi_daily"))
     async with httpx.AsyncClient(timeout=60, follow_redirects=True) as http:
-        out = await backfill(http, store, date.fromisoformat(args.start), date.fromisoformat(args.end))
+        out = await backfill(http, store, date.fromisoformat(args.start), date.fromisoformat(args.end), legacy=args.legacy)
+        # NSE's ticker renames, so the F&O universe of an old file maps onto today's names
+        r = await http.get(SYMBOL_CHANGES_URL, headers=HEADERS)
+        if r.status_code == 200 and r.text.startswith("NAME OF THE COMPANY"):
+            (settings.data_dir / SYMBOL_CHANGES_FILE).write_text(r.text)
     print(f"bhavcopy: {out}  ({len(store.days())} sessions held)")
 
 
@@ -249,6 +254,22 @@ def run_swing(settings: Settings, args: argparse.Namespace) -> None:
           f"net ₹{sm['net_inr']:,}  t(by week) {sm['t_by_week']}  months +{sm['months_positive']}/-{sm['months_negative']}  "
           f"held {sm['avg_sessions_held']} sessions")
     print(f"  funnel {out['funnel']}\n  setups {sm['by_setup']}\n  exits {sm['by_exit']}\n  sides {sm['by_side']}")
+    if out.get("universe"):
+        print(f"  universe {out['universe']}")
+
+
+def run_micro_ic(settings: Settings, args: argparse.Namespace) -> None:
+    """Each recorded order-flow reading against the next 5/15/30 minutes (research/micro_ic.py)."""
+    from .research.micro_ic import MIN_DAYS, run
+
+    out = run(settings.data_dir, date.fromisoformat(args.start), date.fromisoformat(args.end))
+    print(f"days {len(out['days'])}: {', '.join(out['days'])}")
+    if not out["enough_days"]:
+        print(f"  fewer than {MIN_DAYS} days: the numbers below are not evidence yet")
+    print(f"  {'signal':<20}{'h':>4}{'days':>6}{'IC':>9}{'t(day)':>8}{'days+':>7}{'top-bot bps':>13}")
+    for r in out["rows"]:
+        print(f"  {r['signal']:<20}{r['horizon_min']:>4}{r['days']:>6}{r['ic']:>9}{r['t_by_day']!s:>8}{r['days_positive']:>7}"
+              f"{r['top_minus_bottom_bps']!s:>13}")
 
 
 def run_obtest(settings: Settings, args: argparse.Namespace) -> None:
@@ -324,9 +345,14 @@ def build_parser() -> argparse.ArgumentParser:
     sw.add_argument("--label", default="")
     sw.add_argument("--set", action="append", help="e.g. --set entry=1h --set use_bias=false --set sides=long")
 
+    mi = sub.add_parser("micro-ic", help="does the recorded order flow predict the next 5/15/30 minutes")
+    mi.add_argument("--start", required=True)
+    mi.add_argument("--end", default=today.isoformat())
+
     oi = sub.add_parser("fetch-oi", help="NSE's daily F&O bhavcopy (official OI of every contract)")
     oi.add_argument("--start", required=True)
     oi.add_argument("--end", default=today.isoformat())
+    oi.add_argument("--legacy", action="store_true", help="NSE's older file (to 2024-07-05) into oi_daily_legacy/")
 
     m = sub.add_parser("mtf-backtest", help="1h/4h sweeps timed on 15m/5m, over the 5m cache")
     m.add_argument("--start", required=True)
@@ -360,6 +386,8 @@ def cli() -> None:
         run_swing(settings, args)
     elif command == "fib-backtest":
         run_fib(settings, args)
+    elif command == "micro-ic":
+        run_micro_ic(settings, args)
     elif command == "fetch-oi":
         asyncio.run(fetch_oi(settings, args))
     elif command == "mtf-backtest":

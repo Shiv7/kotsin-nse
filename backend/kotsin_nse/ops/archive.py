@@ -7,8 +7,8 @@ Per IST day, Parquet files under ``data/archive/<kind>/<day>.parquet``:
 
 * ``bars`` — every closed 1m bar of every tracked underlying (symbol, ts, o/h/l/c/v, source, oi)
 * ``oi`` — every OI frame for every subscribed code (futures and option strikes)
-* ``depth`` — the top 5 bid/ask levels of the underlyings and their front futures, at most one
-  snapshot per ``archive_depth_every_s`` per contract
+* ``depth`` — the bid/ask levels of the underlyings and their front futures (``depth_levels``, 20
+  from 2026-10-26; 5 before), at most one snapshot per ``archive_depth_every_s`` per contract
 * ``flow`` — the per-minute order-flow estimate (``orderflow/meter.py``)
 * ``ticks`` — every quote frame of the underlyings and their futures (``archive_ticks``), with the
   data source that sent it: the raw material for volume-at-price, and for judging a source's
@@ -46,9 +46,10 @@ KEYS: dict[str, tuple[str, ...]] = {
 
 
 class DailyArchive:
-    def __init__(self, root: Path, *, enabled: bool = True) -> None:
+    def __init__(self, root: Path, *, enabled: bool = True, depth_levels: int = 20) -> None:
         self.root = root
         self.enabled = enabled
+        self.depth_levels = depth_levels
         self._rows: dict[str, dict[str, list[dict[str, Any]]]] = {k: defaultdict(list) for k in KEYS}
         self.rows_buffered = 0
         self.rows_written = 0
@@ -113,7 +114,7 @@ class DailyArchive:
     def depth(self, scrip_code: str, ts: float, bids: Any, asks: Any) -> None:
         row: dict[str, Any] = {"scrip_code": str(scrip_code), "ts": float(ts)}
         for side, book in (("b", bids), ("a", asks)):
-            for i in range(5):
+            for i in range(self.depth_levels):
                 p, q = book[i] if i < len(book) else (None, None)
                 row[f"{side}{i + 1}p"] = float(p) if p is not None else None
                 row[f"{side}{i + 1}q"] = float(q) if q is not None else None

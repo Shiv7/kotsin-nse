@@ -190,3 +190,18 @@ def test_first_oi_of_the_day_is_the_restart_reference(tmp_path):
     arc.oi("A", t, 1000.0, 0.0)
     arc.flush(final=True)
     assert arc.first_oi("2026-10-20", ["A", "B"]) == {"A": (t, 1000.0)}
+
+
+def test_depth_keeps_twenty_levels_a_side(tmp_path):
+    import pandas as pd
+
+    from kotsin_nse.ops.archive import DailyArchive
+
+    from .conftest import ist_ts
+
+    arc = DailyArchive(tmp_path)
+    t = ist_ts("2026-10-26", "10:00")
+    arc.depth("A", t, [(100 - i * 0.05, 10 + i) for i in range(20)], [(100.05 + i * 0.05, 20 + i) for i in range(3)])
+    arc.flush(final=True)
+    row = pd.read_parquet(next((tmp_path / "depth").glob("*.parquet"))).iloc[0]
+    assert row["b20q"] == 29 and row["a3q"] == 22 and pd.isna(row["a4p"])

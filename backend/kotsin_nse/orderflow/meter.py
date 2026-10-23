@@ -15,13 +15,39 @@ through the same code would sharpen it.
 Per minute and instrument: buy volume, sell volume, delta, the day's cumulative delta, frames,
 the average top-5 book imbalance (bid qty − ask qty) / (bid + ask) from depth snapshots, and the
 last OI seen (futures). Pure state; the engine feeds it, the archive keeps it.
+
+From every depth frame (20 levels, ~2–5 a second on active names), the book's own readings, kept
+per minute so they can be tested against the next 15–30 minutes before anything trades on them
+(``research/micro_ic.py``):
+
+* ``ofi`` — Cont–Kukanov–Stoikov order-flow imbalance at the best bid/ask, summed over the minute:
+  a bid that rises adds its new size, an unchanged bid adds its change in size, a bid that falls
+  takes away its old size; the ask is the mirror. ``ofi_deep`` sums the same level by level down
+  to ``OFI_LEVELS``. Both are in shares; divide by depth to compare stocks.
+* ``qi`` — level-1 queue imbalance (B1 − A1) / (B1 + A1), the minute's mean.
+* ``micro_bps`` — microprice (a1·B1 + b1·A1) / (B1 + A1) less the mid, in bps of the mid, mean.
+* ``wimb`` — every level's imbalance, each weighted by exp(−distance from the mid in bps /
+  ``DEPTH_DECAY_BPS``), mean.
+* ``spread_bps``, ``bid_depth``, ``ask_depth`` (visible size, all levels), means; ``levels`` the most
+  levels a frame had; ``mid`` the minute's last mid.
+
+Snapshots, not an order-by-order feed: an OFI between two frames nets everything that happened in
+between, and no order ID says whether a size was cancelled or filled. Estimates, labelled as such.
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any
+
+#: the distance from the mid (bps) over which a level's weight in ``wimb`` falls to 1/e
+DEPTH_DECAY_BPS = 5.0
+#: ``ofi_deep`` sums the level-by-level OFI down to this level
+OFI_LEVELS = 10
+
+Book = Sequence[tuple[float, int]]
 
 
 @dataclass(slots=True)
@@ -36,6 +62,17 @@ class FlowMinute:
     imb_sum: float = 0.0
     imb_n: int = 0
     oi: float | None = None
+    ofi: float = 0.0
+    ofi_deep: float = 0.0
+    book_n: int = 0
+    qi_sum: float = 0.0
+    micro_sum: float = 0.0
+    wimb_sum: float = 0.0
+    spread_sum: float = 0.0
+    bid_depth_sum: float = 0.0
+    ask_depth_sum: float = 0.0
+    levels: int = 0
+    mid: float | None = None
 
     @property
     def delta(self) -> float:
@@ -47,10 +84,17 @@ class FlowMinute:
 
     def to_json(self) -> dict[str, Any]:
         d = asdict(self)
-        d.pop("imb_sum")
-        d.pop("imb_n")
+        for k in ("imb_sum", "imb_n", "qi_sum", "micro_sum", "wimb_sum", "spread_sum", "bid_depth_sum", "ask_depth_sum"):
+            d.pop(k)
         d["delta"] = self.delta
         d["imbalance"] = round(self.imbalance, 4) if self.imbalance is not None else None
+        n = self.book_n
+        d["qi"] = round(self.qi_sum / n, 4) if n else None
+        d["micro_bps"] = round(self.micro_sum / n, 3) if n else None
+        d["wimb"] = round(self.wimb_sum / n, 4) if n else None
+        d["spread_bps"] = round(self.spread_sum / n, 3) if n else None
+        d["bid_depth"] = round(self.bid_depth_sum / n, 1) if n else None
+        d["ask_depth"] = round(self.ask_depth_sum / n, 1) if n else None
         return d
 
 
@@ -64,6 +108,8 @@ class _State:
     cum: float = 0.0
     day: int = -1
     minutes: list[FlowMinute] = field(default_factory=list)
+    bids: Book = ()
+    asks: Book = ()
 
 
 def classify(price: float, prev_bid: float, prev_ask: float, prev_ltp: float, last_side: int) -> int:
@@ -85,6 +131,57 @@ def imbalance(bids: Sequence[tuple[float, int]], asks: Sequence[tuple[float, int
     return (b - a) / (b + a) if b + a > 0 else None
 
 
+def ofi(prev_bids: Book, prev_asks: Book, bids: Book, asks: Book, levels: int = 1) -> float:
+    """Order-flow imbalance between two snapshots, level by level down to ``levels`` (level 1 alone
+    is Cont–Kukanov–Stoikov; deeper is the multi-level version). Positive = net buying pressure."""
+    e = 0.0
+    for k in range(min(levels, len(prev_bids), len(prev_asks), len(bids), len(asks))):
+        (pb, qb), (nb, nqb) = prev_bids[k], bids[k]
+        e += nqb if nb > pb else (nqb - qb) if nb == pb else -qb
+        (pa, qa), (na, nqa) = prev_asks[k], asks[k]
+        e += -nqa if na < pa else (qa - nqa) if na == pa else qa
+    return e
+
+
+@dataclass(frozen=True, slots=True)
+class BookRead:
+    mid: float
+    spread_bps: float
+    qi: float
+    micro_bps: float
+    wimb: float
+    bid_depth: float
+    ask_depth: float
+    levels: int
+
+
+def read_book(bids: Book, asks: Book, decay_bps: float = DEPTH_DECAY_BPS) -> BookRead | None:
+    """One snapshot's readings, or None for a one-sided, locked or crossed book."""
+    if not bids or not asks:
+        return None
+    (b1, q_b), (a1, q_a) = bids[0], asks[0]
+    if b1 <= 0 or a1 <= b1 or q_b + q_a <= 0:
+        return None
+    mid = (a1 + b1) / 2
+    micro = (a1 * q_b + b1 * q_a) / (q_b + q_a)
+    num = den = 0.0
+    for sign, book in ((1, bids), (-1, asks)):
+        for p, q in book:
+            w = math.exp(-abs(p - mid) / mid * 1e4 / decay_bps)
+            num += sign * w * q
+            den += w * q
+    return BookRead(
+        mid=mid,
+        spread_bps=(a1 - b1) / mid * 1e4,
+        qi=(q_b - q_a) / (q_b + q_a),
+        micro_bps=(micro - mid) / mid * 1e4,
+        wimb=num / den if den > 0 else 0.0,
+        bid_depth=float(sum(q for _p, q in bids)),
+        ask_depth=float(sum(q for _p, q in asks)),
+        levels=min(len(bids), len(asks)),
+    )
+
+
 class FlowMeter:
     """Feed it ticks, depth and OI for the codes it should watch; read minutes back per code."""
 
@@ -98,7 +195,7 @@ class FlowMeter:
         m = int(ts // 60) * 60
         day = m // 86400
         if st.day != day:  # a new UTC day — NSE's session never spans one
-            st.day, st.cum, st.minutes, st.last_total = day, 0.0, [], 0
+            st.day, st.cum, st.minutes, st.last_total, st.bids, st.asks = day, 0.0, [], 0, (), ()
         if not st.minutes or st.minutes[-1].ts != m:
             if st.minutes:
                 self.closed.append(st.minutes[-1])
@@ -137,6 +234,23 @@ class FlowMeter:
         fm = self._minute(code, ts)
         fm.imb_sum += imb
         fm.imb_n += 1
+        r = read_book(bids, asks)
+        if r is None:
+            return
+        st = self._st[code]
+        if st.bids and st.asks:
+            fm.ofi += ofi(st.bids, st.asks, bids, asks, 1)
+            fm.ofi_deep += ofi(st.bids, st.asks, bids, asks, OFI_LEVELS)
+        st.bids, st.asks = tuple(bids), tuple(asks)
+        fm.book_n += 1
+        fm.qi_sum += r.qi
+        fm.micro_sum += r.micro_bps
+        fm.wimb_sum += r.wimb
+        fm.spread_sum += r.spread_bps
+        fm.bid_depth_sum += r.bid_depth
+        fm.ask_depth_sum += r.ask_depth
+        fm.levels = max(fm.levels, r.levels)
+        fm.mid = r.mid
 
     def on_oi(self, code: str, ts: float, oi: float) -> None:
         self._minute(code, ts).oi = oi

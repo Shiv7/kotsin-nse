@@ -32,6 +32,7 @@ import math
 import statistics
 import time as _time
 import uuid
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import date
 from typing import Any
@@ -83,6 +84,9 @@ class SwingParams:
     #: only in strong ones, read on the confirmation day
     trend_filter: bool = False
     trend_filter_sides: str = "both"  # both | short | long
+    #: trade a stock only on days it had stock futures (read on the confirmation day, from NSE's
+    #: bhavcopies: market/fo_universe.py). Off trades today's F&O list on every day of history.
+    fo_members: bool = True
 
 
 @dataclass(slots=True)
@@ -329,7 +333,8 @@ def simulate(t: SwingTrade, d: pd.DataFrame, start_i: int, F: np.ndarray | None,
     t.r = round(t.net / (risk * t.qty), 3)
 
 
-def trades_for(symbol: str, d1: pd.DataFrame, df5: pd.DataFrame | None, p: SwingParams, start: date, end: date, costs: CostModel, bias: dict[str, str] | None) -> list[SwingTrade]:
+def trades_for(symbol: str, d1: pd.DataFrame, df5: pd.DataFrame | None, p: SwingParams, start: date, end: date, costs: CostModel, bias: dict[str, str] | None,
+               member: Callable[[date], bool] | None = None) -> list[SwingTrade]:
     if d1.empty:
         return []
     d = daily_frame(d1)
@@ -342,6 +347,11 @@ def trades_for(symbol: str, d1: pd.DataFrame, df5: pd.DataFrame | None, p: Swing
         cday = d["day"].iloc[conf]
         if cday < start or cday > end or conf <= busy_until:
             continue
+        if member is not None:
+            if not member(cday):
+                _f("3cx no stock futures on the decision day")
+                continue
+            _f("3c stock futures on the decision day")
         a = s["adr"]
         stop = s["extreme"] - sign * p.stop_buffer_adr * a
         if p.entry == "daily":
@@ -477,6 +487,7 @@ def summarize(trades: list[SwingTrade]) -> dict[str, Any]:
 
 def run(settings: Settings, start: date, end: date, p: SwingParams, *, symbols: list[str] | None = None, label: str = "") -> dict[str, Any]:
     from ..market.fo_bhavcopy import OiDailyStore
+    from ..market.fo_universe import load as load_members
     from .oi16 import state64_table
 
     store = HistoryStore(settings.data_dir / "history")
@@ -484,6 +495,10 @@ def run(settings: Settings, start: date, end: date, p: SwingParams, *, symbols: 
     names = symbols or store.symbols("1d")
     root = settings.data_dir / "oi_daily"
     st = state64_table(OiDailyStore(root), root) if p.use_bias and OiDailyStore(root).days() else None
+    fm, renames = load_members(settings.data_dir) if p.fo_members else (None, 0)
+    if fm is not None and not (fm.covers(start) and fm.covers(end)):
+        raise ValueError(f"F&O membership covers {fm.first} … {fm.last}, not {start} … {end}: "
+                         "fetch-oi --legacy (before 2024) / fetch-oi (from 2024)")
     t0 = _time.time()
     FUNNEL.clear()
     found: list[SwingTrade] = []
@@ -491,7 +506,8 @@ def run(settings: Settings, start: date, end: date, p: SwingParams, *, symbols: 
         bias = dict(zip(st[st["symbol"] == sym]["day"], st[st["symbol"] == sym]["bias"], strict=True)) if st is not None else None
         bias = {k if isinstance(k, str) else k.isoformat(): v for k, v in bias.items()} if bias else bias
         df5 = store.load(sym, "5m")  # fills from 5m wherever the cache has the day
-        found += trades_for(sym, store.load(sym, "1d"), df5, p, start, end, costs, bias)
+        member = (lambda d, s=sym: fm.member(s, d)) if fm is not None else None
+        found += trades_for(sym, store.load(sym, "1d"), df5, p, start, end, costs, bias, member)
     found.sort(key=lambda x: x.signal_ts)
     taken: list[SwingTrade] = []
     for t in found:
@@ -501,6 +517,8 @@ def run(settings: Settings, start: date, end: date, p: SwingParams, *, symbols: 
         "id": f"swing-{uuid.uuid4().hex[:10]}", "kind": "mtf", "label": label, "created_ts": _time.time(),
         "seconds": round(_time.time() - t0, 1), "params": asdict(p), "range": [start.isoformat(), end.isoformat()],
         "candidates": len(found), "funnel": dict(sorted(FUNNEL.items())), "summary": summarize(taken),
+        "universe": {"fo_members": True, "files": f"{fm.first} … {fm.last}", "renames_applied": renames,
+                     "held_after_leaving_fo": sum(1 for t in taken if fm.covers(ist_day(t.exit_ts)) and not fm.member(t.symbol, ist_day(t.exit_ts)))} if fm is not None else None,
         "trades": [asdict(t) for t in taken],
     }
     root2 = settings.data_dir / "obtests"

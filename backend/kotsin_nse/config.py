@@ -117,8 +117,10 @@ class Settings(BaseSettings):
     #: also keep every quote frame of the underlyings, futures and option strikes: the raw
     #: material for volume-at-price, intraday option premiums, and judging a source's resolution
     archive_ticks: bool = True
-    #: one top-5 depth snapshot per contract at most this often (underlyings + front futures)
+    #: one depth snapshot per contract at most this often (underlyings + front futures)
     archive_depth_every_s: float = 5.0
+    #: how many levels of each side that snapshot keeps (the feed sends up to 20)
+    archive_depth_levels: int = 20
     archive_flush_s: float = 300.0
 
     # ---- service ------------------------------------------------------------------------------

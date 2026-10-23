@@ -95,7 +95,9 @@ class Engine:
             settings.telegram_chat_id,
         )
         self.health = HealthMonitor()
-        self.archive = DailyArchive(settings.data_dir / "archive", enabled=settings.archive_enabled)
+        self.archive = DailyArchive(
+            settings.data_dir / "archive", enabled=settings.archive_enabled, depth_levels=settings.archive_depth_levels
+        )
 
         self.http = httpx.AsyncClient(timeout=30)
         self.auth = Authenticator(settings, self.http)

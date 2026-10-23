@@ -15,6 +15,12 @@ One row per contract (33,250 on 2026-10-01): ``FinInstrmId`` is NSE's contract t
 
 So this file is the previous close an OI change is measured from whenever the engine's own archive
 does not have it, and the daily OI history the backtests never had.
+
+Before 2024 NSE serves only its older file (``fo<DD><MON><YYYY>bhav.csv.zip``, published up to
+2024-07-05; this URL 404s for 2023 and earlier). It has the same contracts and the same OI in shares
+but no ``FinInstrmId``, and its volume is ``CONTRACTS``, not shares. :func:`parse_legacy` reads it
+into the same columns with an empty ``scrip_code``; it is kept in its own store
+(``oi_daily_legacy/``) so nothing that joins on the contract token ever meets a row without one.
 """
 
 from __future__ import annotations
@@ -50,21 +56,36 @@ COLUMNS = ("scrip_code", "symbol", "kind", "expiry", "strike", "option_type",
            "close", "settle", "oi", "oi_change", "volume")
 
 
+LEGACY_URL = "https://nsearchives.nseindia.com/content/historical/DERIVATIVES/{yyyy}/{mon}/fo{dd}{mon}{yyyy}bhav.csv.zip"
+
+#: the older file's instrument names are already the engine's
+LEGACY_KINDS = frozenset(KINDS.values())
+
+
 def url_for(day: date) -> str:
     return URL.format(yyyymmdd=day.strftime("%Y%m%d"))
 
 
-def parse(blob: bytes) -> pd.DataFrame:
-    """The zipped CSV → one row per contract, ``COLUMNS``. Raises ``ValueError`` on anything that is
-    not a bhavcopy (NSE serves an HTML page with a 200 on some failures)."""
+def legacy_url_for(day: date) -> str:
+    mon = day.strftime("%b").upper()
+    return LEGACY_URL.format(yyyy=day.year, mon=mon, dd=f"{day.day:02d}")
+
+
+def _csv(blob: bytes) -> pd.DataFrame:
     try:
         with zipfile.ZipFile(io.BytesIO(blob)) as z:
             name = next((n for n in z.namelist() if n.lower().endswith(".csv")), None)
             if name is None:
                 raise ValueError("no CSV in the archive")
-            raw = pd.read_csv(z.open(name), low_memory=False)
+            return pd.read_csv(z.open(name), low_memory=False)
     except zipfile.BadZipFile as exc:
         raise ValueError(f"not a zip: {exc}") from exc
+
+
+def parse(blob: bytes) -> pd.DataFrame:
+    """The zipped CSV → one row per contract, ``COLUMNS``. Raises ``ValueError`` on anything that is
+    not a bhavcopy (NSE serves an HTML page with a 200 on some failures)."""
+    raw = _csv(blob)
     need = {"FinInstrmId", "TckrSymb", "FinInstrmTp", "XpryDt", "OpnIntrst", "ChngInOpnIntrst"}
     if not need <= set(raw.columns):
         raise ValueError(f"not an F&O bhavcopy: missing {sorted(need - set(raw.columns))}")
@@ -81,6 +102,31 @@ def parse(blob: bytes) -> pd.DataFrame:
         "oi": pd.to_numeric(raw.OpnIntrst, errors="coerce").fillna(0.0).astype(float),
         "oi_change": pd.to_numeric(raw.ChngInOpnIntrst, errors="coerce").fillna(0.0).astype(float),
         "volume": pd.to_numeric(raw.get("TtlTradgVol"), errors="coerce").fillna(0.0).astype(float),
+    })
+    return out.reset_index(drop=True)
+
+
+def parse_legacy(blob: bytes) -> pd.DataFrame:
+    """The older zipped CSV (to 2024-07-05) → ``COLUMNS``, ``scrip_code`` empty, ``volume`` in
+    contracts. Raises ``ValueError`` on anything that is not one."""
+    raw = _csv(blob)
+    need = {"INSTRUMENT", "SYMBOL", "EXPIRY_DT", "OPEN_INT", "CHG_IN_OI"}
+    if not need <= set(raw.columns):
+        raise ValueError(f"not a legacy F&O bhavcopy: missing {sorted(need - set(raw.columns))}")
+    raw = raw[raw.INSTRUMENT.isin(LEGACY_KINDS)]
+    opt = raw.get("OPTION_TYP").fillna("").astype(str) if "OPTION_TYP" in raw else pd.Series("", index=raw.index)
+    out = pd.DataFrame({
+        "scrip_code": "",
+        "symbol": raw.SYMBOL.astype(str).str.strip(),
+        "kind": raw.INSTRUMENT.astype(str),
+        "expiry": pd.to_datetime(raw.EXPIRY_DT, format="%d-%b-%Y").dt.strftime("%Y-%m-%d"),
+        "strike": pd.to_numeric(raw.get("STRIKE_PR"), errors="coerce"),
+        "option_type": opt.where(opt != "XX", ""),
+        "close": pd.to_numeric(raw.get("CLOSE"), errors="coerce"),
+        "settle": pd.to_numeric(raw.get("SETTLE_PR"), errors="coerce"),
+        "oi": pd.to_numeric(raw.OPEN_INT, errors="coerce").fillna(0.0).astype(float),
+        "oi_change": pd.to_numeric(raw.CHG_IN_OI, errors="coerce").fillna(0.0).astype(float),
+        "volume": pd.to_numeric(raw.get("CONTRACTS"), errors="coerce").fillna(0.0).astype(float),
     })
     return out.reset_index(drop=True)
 
@@ -140,11 +186,12 @@ class OiDailyStore:
         return {str(c): float(v) for c, v in zip(df.scrip_code, df.oi, strict=True)}
 
 
-async def fetch_day(http: Any, day: date, *, wait_s: float = 45.0) -> pd.DataFrame | None:
+async def fetch_day(http: Any, day: date, *, wait_s: float = 45.0, legacy: bool = False) -> pd.DataFrame | None:
     """The bhavcopy of ``day``, or None when NSE has none (a holiday, a weekend, not yet published
-    — it appears in the evening) or answers with something that is not one."""
+    — it appears in the evening) or answers with something that is not one. ``legacy`` reads the
+    older file instead (:func:`parse_legacy`)."""
     try:
-        r = await http.get(url_for(day), headers=HEADERS, timeout=wait_s)
+        r = await http.get(legacy_url_for(day) if legacy else url_for(day), headers=HEADERS, timeout=wait_s)
     except Exception as exc:  # noqa: BLE001 - no file is no file; the caller decides what that means
         log.warning("fo_bhavcopy.fetch_failed", day=day.isoformat(), error=str(exc)[:120])
         return None
@@ -152,7 +199,7 @@ async def fetch_day(http: Any, day: date, *, wait_s: float = 45.0) -> pd.DataFra
         log.info("fo_bhavcopy.unavailable", day=day.isoformat(), status=r.status_code)
         return None
     try:
-        return parse(r.content)
+        return parse_legacy(r.content) if legacy else parse(r.content)
     except ValueError as exc:
         log.warning("fo_bhavcopy.unreadable", day=day.isoformat(), error=str(exc)[:120])
         return None
@@ -160,6 +207,7 @@ async def fetch_day(http: Any, day: date, *, wait_s: float = 45.0) -> pd.DataFra
 
 async def backfill(
     http: Any, store: OiDailyStore, start: date, end: date, *, pace_s: float = 0.4, refetch: bool = False,
+    legacy: bool = False,
 ) -> dict[str, int]:
     """Every weekday in ``[start, end]`` the store does not hold yet. NSE's own calendar decides
     which of them were sessions: a holiday simply has no file."""
@@ -170,7 +218,7 @@ async def backfill(
             if store.has(d) and not refetch:
                 out["held"] += 1
             else:
-                df = await fetch_day(http, d)
+                df = await fetch_day(http, d, legacy=legacy)
                 if df is None or df.empty:
                     out["missing"] += 1
                 else:
@@ -181,4 +229,4 @@ async def backfill(
     return out
 
 
-__all__ = ["COLUMNS", "KINDS", "OiDailyStore", "backfill", "fetch_day", "parse", "url_for"]
+__all__ = ["COLUMNS", "KINDS", "OiDailyStore", "backfill", "fetch_day", "legacy_url_for", "parse", "parse_legacy", "url_for"]

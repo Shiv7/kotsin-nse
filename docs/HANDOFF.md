@@ -1,6 +1,6 @@
 # Kotsin — handoff for a new session (Claude / Codex)
 
-Last updated **2026-10-19**, on branch `fresh-base` (commit `b961632` and later). Read this whole file
+Last updated **2026-10-23**, on branch `fresh-base`. Read this whole file
 before changing anything. It records what has been tried across every Kotsin module, what the data
 said, and where the work stands. Numbers are from backtests unless marked otherwise.
 
@@ -66,9 +66,10 @@ Built 2026-10-18 from `995a914` with every strategy removed, then rebuilt as a r
 | `scan/` | the minute **board**: strength = (last − open) ÷ 50-session avg range, zero unless one-sided (2×); top 20 a side, 3 picks, breadth, sectors (NSE Nifty-500 industry), VWAP, OI build-up; `DayReplay` rebuilds any cached day minute by minute |
 | `structure/` | 5m swings, BOS (close only), order blocks + life cycle, FVGs, liquidity, sweeps, Z/S1/R1/R2 |
 | `profile/` | volume profile (POC/VA/HVN/LVN) and market profile (TPO, IB, single prints, day type) |
-| `orderflow/` | per-minute **estimated** delta (quote rule on each snapshot's new volume), CVD, top-5 book imbalance, futures OI — live only, recorded from 2026-10-19 |
+| `orderflow/` | per-minute **estimated** delta (quote rule on each snapshot's new volume), CVD, top-5 book imbalance, futures OI — live only, recorded from 2026-10-19. From 2026-10-26 also the book's own readings from every 20-level depth frame: L1 and 10-level **OFI**, queue imbalance, microprice − mid, distance-weighted imbalance, spread, visible depth; the archive keeps 20 levels a side |
+| `market/fo_universe.py` | **F&O membership by date** from NSE's bhavcopies + NSE's symbol-change list: a stock is tradable as a future only on sessions its FUTSTK rows appear. `swing.py` uses it by default (`fo_members=true`) |
 | `market/fo_bhavcopy.py` | NSE daily F&O bhavcopy (official OI of every contract) |
-| `research/` | backtesters: `obtest.py` (order block), `playbooks.py` (5m sweep, value area), `mtf.py` (1h/4h sweep), `fibob.py` (Fib+pivot+OB), `swing.py` (**current candidate**), `oi_daily.py`, `oi16.py` (16 & 64 states), studies `oi16_study.py`, `oi64_study.py` |
+| `research/` | backtesters: `obtest.py` (order block), `playbooks.py` (5m sweep, value area), `mtf.py` (1h/4h sweep), `fibob.py` (Fib+pivot+OB), `swing.py` (dropped 2026-10-23, §5), `oi_daily.py`, `oi16.py` (16 & 64 states), studies `oi16_study.py`, `oi64_study.py`; `micro_ic.py` — each recorded order-flow reading against the next 5/15/30 min (IC by day) |
 | `exec/`, `risk/costs.py`, `ledger/` | order gateway (SHADOW/PAPER/LIVE, nothing submits), measured cost model (₹40/order flat, STT, GST…) |
 | UI | Overview, **Board** (live/replay), **Backtest** (every run, every trade opens on its chart), Chart, Options, Universe, System (feed rate) |
 
@@ -84,13 +85,15 @@ uv run pytest -q && uv run ruff check kotsin_nse tests && uv run lint-imports
 CLI (all read the cache in `backend/data-live/`, `KN_DATA_DIR` from `.env`):
 ```
 fetch-history --all-fo --tf 1m,5m,1d --start --end   # 5paisa history into data-live/history/<tf>/
-fetch-oi --start --end                               # NSE bhavcopies into data-live/oi_daily/
+fetch-oi --start --end [--legacy]                    # NSE bhavcopies into data-live/oi_daily/ (--legacy: the older file, to 2024-07-05, into oi_daily_legacy/) + NSE's symbol-change list
+micro-ic --start --end                               # does the recorded order flow predict (needs ≥ 15 recorded days)
 ob-backtest | pb-backtest | mtf-backtest | fib-backtest | swing-backtest  --start --end --set k=v --label
 ```
 Backtest results are JSON in `backend/data-live/obtests/` (git-ignored; visible on the Backtest page).
 
 Data held locally (git-ignored): 1m for 217 F&O stocks 2026-08-03→10-16; **5m 216 stocks 2024-04→2026-10**;
-**1d 217 stocks 2021→2026-10**; NSE bhavcopy 689 sessions 2024-01→2026-10-16 (futures + options OI and prices).
+**1d 217 stocks 2021→2026-10**; NSE bhavcopy 2024-01→ (`oi_daily/`) and **2021-01→2023-12** (`oi_daily_legacy/`,
+740 sessions, older format: no contract token, volume in contracts) — futures + options OI and prices.
 
 ---
 
@@ -140,7 +143,7 @@ R = multiples of the planned risk. "net" is after the measured cost model.
 | 6 | OI build-up (4 states, daily) | 18 months | filter only: **don't buy after short build-up / short after long build-up** (−0.20 / −0.18 R) | — |
 | 7 | 16 states (futures × call OI × put OI) | 63,576 stock-days | no prediction on its own | `research/oi16_study.py` |
 | 8 | **Owner's 64-state table** (futures/call/put each LB/SC/SB/LU; score ±4; premium signal) | 63,508 stock-days | no prediction alone; as a gate, longs after Bear days −0.19 R, shorts after Bull days −0.15 R | `research/oi64_study.py` |
-| 9 | **Swing reversal at price-action levels + structure trail** | **4.5 years daily** | **+0.32 R, +51 R, ₹2.56 L, 160 trades** — §5 | `swing-266ee719c5` and §5 |
+| 9 | Swing reversal at price-action levels + structure trail | 4.5 years daily | ~~+0.32 R, +51 R~~ — survivorship. **Only stocks with futures on the day: −0.32 R, −34.9 R, −₹1.73 L, 109 trades** — §5 | `swing-266ee719c5` → `swing-6f44d1bf43` |
 
 Tools built alongside: board/scanner, volume & market profile, order-flow recorder, vendor data seam,
 NSE OI pipeline, Gautam Jha's published strategy (1-minute PDH/PDL breakout) reviewed — it is the
@@ -162,7 +165,9 @@ intraday scale already shown to lose.
 3. **Indicators and positioning (Fibonacci, OI states, 64-state) don't predict on their own;** as filters
    they remove bad trades, they don't create good ones.
 4. **Shorts lost in every version until they got a fast exit and a weak-stock filter** (falls are fast).
-5. **The only positive result is slow:** daily reversals that let the trend run (§5).
+5. ~~The only positive result is slow~~ — it was survivorship (§5). **No strategy is positive today.**
+6. **Trade only what was tradable on the day.** A backtest over today's F&O list buys stocks NSE admitted
+   later, often because they had already risen. Every backtester must use `market/fo_universe.py`.
 
 ---
 
@@ -176,6 +181,8 @@ intraday scale already shown to lose.
   strategy (§5) the proposed criteria are: holdout total R > 0, profit factor ≥ 1.2, still positive
   after removing its single best trade, ≥ 15 trades. **Not yet run — awaiting the owner's go.**
 - Every backtester counts a **funnel** (how many setups survive each rule) — read it before changing rules.
+- **Point-in-time universe:** a stock is traded only on days it had stock futures (`market/fo_universe.py`,
+  from the bhavcopies). The other backtesters (`obtest`, `playbooks`, `mtf`, `fibob`) do not use it yet.
 - Known 5paisa history facts (`docs/FIVEPAISA_FACTS.md`): the latest session is returned only if the
   request's end runs past it (pad +2 days); finished days' 1m stops at 15:14; the latest session is
   provisional after 15:14 (lumped bars); recent days' 5m stop at 15:10 (2025 days run to 15:30);
@@ -184,7 +191,14 @@ intraday scale already shown to lose.
 
 ---
 
-## 5. Current candidate — the swing strategy (`research/swing.py`)
+## 5. The swing strategy (`research/swing.py`) — dropped 2026-10-23
+
+**Verdict:** the profit below was survivorship. The backtest traded today's 217 F&O stocks on every day
+since 2021. With only stocks that had stock futures on the decision day (`fo_members=true`, now the
+default), the same rules make **109 trades, 22 % win, −0.32 R avg, −34.9 R, −₹1.73 L, t(by week) −1.78**
+(`swing-6f44d1bf43`). The 51 trades in stocks not yet in F&O made +86.3 R (BDL +34 R in Nov 2023,
+HINDZINC +24 R in Apr 2024, DELHIVERY, KAYNES, ANGELONE…). By year: 2021 +4.1, 2022 −21.3, 2023 −16.0,
+2024 −2.7, 2025 +0.9 R. **Do not spend the holdout on it.** The original write-up is kept below.
 
 **Plain English:** wait for a stock to reject an important level, confirm the turn, enter, and let the
 market decide how far it runs.
@@ -225,13 +239,18 @@ The 64-state bias gate (`use_bias=true`) only has data from 2024, which left too
 
 ## 6. Open work / next steps
 
-1. **Decide the holdout run** for §5 with the criteria in §4 (owner's go needed).
-2. If it passes: wire the swing strategy as a **PAPER** book in the engine, then a capped live test.
-   Then the owner's **hedge overlay** idea (sell OTM calls/puts against open winners, e.g. only after
-   +2 R) — testable on bhavcopy daily option prices.
-3. **Live recording from 2026-10-19:** run `uv run kotsin-nse serve` before 09:15; read the System page
-   feed-rate table (5paisa NSE snapshot rate); the archive keeps quotes, top-5 depth, per-minute order
-   flow and every OI frame. After 2–4 weeks: test intraday order flow / intraday OI as filters.
+1. **No candidate.** The holdout (2025-10-01 → 2026-10-16) is still untouched; keep it for a strategy that
+   survives the point-in-time universe. Re-check the other backtesters with `fo_universe` too.
+2. Robustness block for every backtest report: top-5 share of profit, total without the best 1/3/5,
+   4-week block bootstrap, excess over drift / "just an up market" control, count of variants tried.
+3. **Live recording:** the launchd jobs start the engine at 08:55 and stop it at 16:00 on weekdays. They
+   never ran before 2026-10-23: macOS blocked launchd's zsh from ~/Downloads until /bin/zsh got Full
+   Disk Access; the scripts exist only on `fresh-base`, so keep it checked out in the main folder.
+   Recorded NSE days: 19 Oct, 23 Oct, then every session. From 26 Oct: 20-level depth and the book's
+   readings (OFI, queue, microprice, weighted imbalance). After ≥ 15 days: `kotsin-nse micro-ic` — keep
+   a reading only with a stable IC (0.03–0.05) and a top-minus-bottom spread above costs.
+4. The 64-state gate can now be judged from 2021 (`oi_daily_legacy/`; join on symbol + expiry, there is
+   no contract token before 2024).
 4. Owner's wishlist not yet done: one self-sufficient strategy with **sector-wise** layer and
    **PCR / option OI walls** (daily data exists in the bhavcopy); read the old repos
    (`fastAnalayticsKotsin`, `optionProducerJava`, kotsin-box) for PCR/OI logic.
