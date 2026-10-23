@@ -207,8 +207,18 @@ def build_app(engine: Engine) -> FastAPI:
 
         out = build(engine, symbol, time.time())  # on the loop: it reads the feed's dicts
         if out is None:
-            raise HTTPException(404, f"{symbol.upper()} is not in the universe")
+            raise HTTPException(404, f"no daily history for {symbol.upper()} — not an F&O stock we hold data for")
         return out
+
+    @api.get("/analysis-symbols")
+    async def analysis_symbols() -> list[dict[str, Any]]:
+        """Every stock the Analysis page can open: live ones first, then those with cached history."""
+        from ..instrument.universe import INDEX_ROOTS
+        from ..research.history import HistoryStore
+
+        live = sorted(engine.groups)
+        cached = [x for x in HistoryStore(engine.s.data_dir / "history").symbols("1d") if x not in engine.groups and x not in INDEX_ROOTS]
+        return [{"symbol": x, "live": True} for x in live] + [{"symbol": x, "live": False} for x in sorted(cached)]
 
     @api.get("/analysis/{symbol}/summary")
     async def analysis_summary(symbol: str, refresh: bool = False) -> dict[str, Any]:
@@ -230,7 +240,7 @@ def build_app(engine: Engine) -> FastAPI:
             return {**hit, "cached": True}
         bundle = build(engine, sym, time.time())
         if bundle is None:
-            raise HTTPException(404, f"{sym} is not in the universe")
+            raise HTTPException(404, f"no daily history for {sym}")
         try:
             return await sm.summarize(sym, compact(bundle), refresh=refresh)
         except anthropic.AuthenticationError as exc:

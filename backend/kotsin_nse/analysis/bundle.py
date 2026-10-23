@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
+from ..config import Segment
 from ..market.session import ist_day, session_open_ts
 from ..profile.service import from_store as profile_from_store
 from ..structure.service import from_store as structure_from_store
@@ -60,16 +61,43 @@ def _reaction(zones: list[dict[str, Any]], o: float, hi: float, lo: float, last:
     return out
 
 
+def build_offline(engine: Any, sym: str, now: float) -> dict[str, Any] | None:
+    """A stock the engine is not streaming (outside ``KN_UNIVERSE_FILE``): what the caches hold —
+    the daily history, NSE's bhavcopies and the pivots from them. The live parts are absent and
+    the bundle says so, with the date its history ends."""
+    from ..research.history import HistoryStore
+    from ..structure.service import levels_from_history
+
+    hist = HistoryStore(engine.s.data_dir / "history")
+    d1 = hist.load(sym, "1d")
+    if d1.empty:
+        return None
+    today = ist_day(now)
+    daily = list(d1.sort_values("ts")[["ts", "o", "h", "l", "c", "v"]].itertuples(index=False, name=None))
+    last_day = ist_day(int(daily[-1][0])).isoformat()
+    out: dict[str, Any] = {
+        "symbol": sym, "ts": now, "sector": engine.scanner.sectors.get(sym, ""), "live": False,
+        "note": f"not in the live universe — daily history to {last_day}, NSE OI files, pivots; "
+                "no today / microstructure / options / setups",
+        "big_picture": big_picture(daily, today),
+        "positioning": positioning(engine.oi_daily, sym, today, is_holiday=lambda d: not engine.calendar.is_trading_day(d, Segment.NSE_FO)),
+        "levels": levels_from_history(hist, sym, today, int(now)),
+    }
+    pos = out["positioning"]
+    out["buildup"] = mtf([], [], now, prev_close=None, oi_ref=None, sessions=(pos or {}).get("sessions", []))
+    return out
+
+
 def build(engine: Any, symbol: str, now: float) -> dict[str, Any] | None:
     sym = symbol.upper()
     g = engine.groups.get(sym)
     if g is None:
-        return None
+        return build_offline(engine, sym, now)
     today = ist_day(now)
     daily = [(b.ts, b.open, b.high, b.low, b.close, b.volume) for b in engine.store.bars(sym, "1d")]
     m1 = [b for b in engine.store.bars(sym, "1m") if ist_day(b.ts) == today and b.ts + 60 <= now]
     last = m1[-1].close if m1 else None
-    out: dict[str, Any] = {"symbol": sym, "ts": now, "sector": engine.scanner.sectors.get(sym, "")}
+    out: dict[str, Any] = {"symbol": sym, "ts": now, "sector": engine.scanner.sectors.get(sym, ""), "live": True}
 
     out["big_picture"] = big_picture(daily, today, last)
     pos = positioning(engine.oi_daily, sym, today, is_holiday=lambda d: not engine.calendar.is_trading_day(d, g.segment))

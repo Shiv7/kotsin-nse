@@ -38,7 +38,7 @@ interface BuildRow { window: string; price_chg_pct: number; oi_chg_pct: number; 
 interface Leg { action: string; type: string; strike: number; ltp: number; delta: number; theta: Num }
 interface Setup { name: string; why: string; legs: Leg[]; credit: number; width: number; max_loss: number; credit_lot: number; max_loss_lot: number; breakeven: number | number[]; pop_pct: number; theta_lot: number; reward_risk: Num }
 interface Bundle {
-  symbol: string; ts: number; sector: string
+  symbol: string; ts: number; sector: string; live?: boolean; note?: string
   big_picture: BigPicture | null; positioning: Positioning | null; buildup?: BuildRow[]; levels: Levels | null
   structure?: { setup: { side: string; z: number; s1: number; r1: Num; r2: Num; rr: Num; state: string } | null; zones: { side: string; low: number; high: number; state: string; bos_kind: string; retests: number }[]; sweeps: { ts: number; level: number; kind: string; side: string }[]; liquidity: { price: number; kind: string }[]; opening_range: number[] | null }
   profile?: { market: Record<string, unknown>; volume: Record<string, unknown> }
@@ -422,14 +422,19 @@ function HedgeCard({ h, bias }: { h: NonNullable<Bundle['hedge']>; bias: string 
 export function Analysis() {
   const { symbol: param } = useParams()
   const nav = useNavigate()
-  const universe = usePoll<{ symbol: string; kind: string }[]>('/api/universe', 60000)
-  const symbol = (param ?? universe.data?.find((u) => u.kind === 'EQUITY')?.symbol ?? '').toUpperCase()
+  const universe = usePoll<{ symbol: string; live: boolean }[]>('/api/analysis-symbols', 60000)
+  const symbol = (param ?? universe.data?.find((u) => u.live && !['NIFTY', 'BANKNIFTY'].includes(u.symbol))?.symbol ?? '').toUpperCase()
   const { data, error } = usePoll<Bundle>(symbol ? `/api/analysis/${encodeURIComponent(symbol)}` : null, 15000)
   return (
     <div className="space-y-4 p-4">
       <div className="flex flex-wrap items-center gap-3">
         <select value={symbol} onChange={(e) => nav(`/analysis/${e.target.value}`)} className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-sm">
-          {(universe.data ?? []).map((u) => <option key={u.symbol} value={u.symbol}>{u.symbol}</option>)}
+          <optgroup label="live">
+            {(universe.data ?? []).filter((u) => u.live).map((u) => <option key={u.symbol} value={u.symbol}>{u.symbol}</option>)}
+          </optgroup>
+          <optgroup label="history only (not streaming)">
+            {(universe.data ?? []).filter((u) => !u.live).map((u) => <option key={u.symbol} value={u.symbol}>{u.symbol}</option>)}
+          </optgroup>
         </select>
         {data && (
           <span className="font-mono text-sm text-slate-300">
@@ -438,17 +443,20 @@ export function Analysis() {
         )}
       </div>
       <ErrorLine error={error} />
+      {data && data.live === false && (
+        <div className="rounded border border-amber-900 bg-amber-950/40 px-3 py-2 text-xs text-amber-300">{data.note}</div>
+      )}
       {symbol && <SummaryCard symbol={symbol} />}
       {data?.big_picture && <BigPictureCard b={data.big_picture} />}
       {data?.positioning && <PositioningCard p={data.positioning} build={data.buildup} />}
       {data && <LevelsCard lv={data.levels} fib={data.big_picture?.fibonacci} structure={data.structure} profile={data.profile} />}
       {data?.today && <TodayCard t={data.today} />}
-      {symbol && (
+      {symbol && data?.live !== false && (
         <Card title="5 · Microstructure">
           <MicroPanel symbol={symbol} />
         </Card>
       )}
-      {symbol && (
+      {symbol && data?.live !== false && (
         <Card title="6 · Options">
           <FnoPanel symbol={symbol} />
         </Card>
