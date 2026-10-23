@@ -91,6 +91,8 @@ def stock_days(sym: str, m1: pd.DataFrame, start: date, end: date) -> list[dict[
             wp[dd[i]] = p
     keep = days >= start
     m1, mins, days = m1[keep], mins[keep], days[keep]
+    if not len(days):
+        return []
     mvol_hist: list[float] = []
     out = []
     Oo, Hh, Ll, Cc, V = (m1[x].to_numpy(float) for x in ("o", "h", "l", "c", "v"))
