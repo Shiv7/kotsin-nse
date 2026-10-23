@@ -59,3 +59,32 @@ trained on every month before, tested on the next.
 | D1 | Trade 11:00 → close in the predicted direction when the model's probability ≥ 0.6, a stock future | net bps after costs > 0, t ≥ 3 by week, ≥ 60 % months, both halves; and better than the two baselines (always follow the morning move; always fade it) |
 
 Recorded whatever the outcome: in `docs/HANDOFF.md` §3.4, with run ids.
+
+## 4. The power of each tool on its own (`research/power.py`) — added 2026-10-23, before any result
+
+Owner's ask: "test each indicator power — pivot, pivot cluster, fibo, SMC, liquidity sweep, double
+bottom, reversal — low and high timeframe; IBH role". Not strategies: each tool's raw prediction.
+
+**Outcome (every event).** From the close of the event bar, a race: does price go X in the tool's
+direction before X against it? (X = 0.25 ADR on 5m bars, rest of the session; X = 1 ADR on daily
+bars, 10 sessions.) A coin scores 50 %; a bar touching both counts ½. Also the signed move after 30
+and 60 minutes (5m) / 5 sessions (daily), in ADR.
+
+**Control.** Every level event has a placebo: the same level shifted by 0.15–0.35 ADR (random side,
+fixed seed) on the same stock-day, read by the same rules. Fibonacci ratios (38.2 / 50 / 61.8 / 78.6)
+are matched by non-Fibonacci ratios (30 / 45 / 56 / 70). Patterns (sweep, order block, double bottom,
+reversal candles) are compared with 50 % and with their opposite reading (a sweep vs a breakout that
+closes beyond).
+
+**Events.** Low timeframe (5m from the 1m cache, 2024-04 → 2025-09): first touch of each daily pivot
+(P, TC, BC, R1, S1, R2, S2, PDH, PDL), weekly (WP, WR1, WS1, PWH, PWL) and monthly (MP, MR1, MS1, PMH,
+PML) level from either side; clusters (levels within 0.1 ADR, weight M3/W2/D1); Fibonacci of the
+previous day's range; IBH / IBL (09:15–10:15) touches and breaks; liquidity sweeps of PDH/PDL and IBH/IBL;
+SMC order blocks (the last opposite 5m candle before a ≥ 1.5 ATR displacement) on their first retest;
+5m double bottoms/tops at the neckline break; hammer / shooting star / engulfing. High timeframe
+(daily cache 2021-04 → 2025-09): weekly and monthly pivots, Fibonacci of the 60-session swing, sweeps
+of the 20-session high/low, daily double bottoms/tops.
+
+**Counts as power:** real − placebo (or − 50 %) with t ≥ 3 by week, the same sign in both halves.
+**IBH role** is descriptive: how often the IB breaks up / down / both / neither, what follows a break
+or a failed break, and how the IB's size and the CPR's width change that.
