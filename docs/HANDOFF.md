@@ -144,6 +144,14 @@ R = multiples of the planned risk. "net" is after the measured cost model.
 | 7 | 16 states (futures × call OI × put OI) | 63,576 stock-days | no prediction on its own | `research/oi16_study.py` |
 | 8 | **Owner's 64-state table** (futures/call/put each LB/SC/SB/LU; score ±4; premium signal) | 63,508 stock-days | no prediction alone; as a gate, longs after Bear days −0.19 R, shorts after Bull days −0.15 R | `research/oi64_study.py` |
 | 9 | Swing reversal at price-action levels + structure trail | 4.5 years daily | ~~+0.32 R, +51 R~~ — survivorship. **Only stocks with futures on the day: −0.32 R, −34.9 R, −₹1.73 L, 109 trades** — §5 | `swing-266ee719c5` → `swing-6f44d1bf43` |
+| 10 | **Double bottom / top, entered on the first 5m close beyond the neckline**, measured-move target (`research/confirm.py`) | 2024-04 → 2025-09, 5m, point-in-time F&O | **0.009 R before slippage and charges, −0.205 R after**, 81,134 trades, every month negative. No filter changes it: lighter 2nd test, higher low vs undercut, at a daily pivot, 15m/1h Supertrend with or against, time of day — all −0.16…−0.24 R | `confirm-586c27cf99` |
+| 11 | **Owner's CPR retest**: 5m close beyond TC (BC), a later 5m bar back to it that closes beyond, 15m Supertrend(10,3) agreeing; target R1 (S1) (`research/confirm.py`) | same | **+0.061 R before slippage and charges, −0.508 R after**, 39,297 trades; median stop 22 bps, so 10 bps of slippage alone ≈ 0.5 R. Narrow/wide CPR, open beyond/inside, 1h with/against — all ≤ −0.45 R. (The rule's 1-minute step can't be tested: the 1m cache starts inside the holdout.) | `confirm-6b0db9921c` |
+| 12 | Same double bottom/top on **recorded 1m bars** with the futures-flow ("selling eased") and option-writer ("puts written") checks (`research/confirm_live.py`) | 19 + 23 Oct 2026 | 1,078 signals, −0.29 R before costs; neither check separates winners. Two days — re-run when ≥ 15 are recorded | — |
+
+Rows 10–11 came from a hand read of ETERNAL on 2026-10-23 (CPR retest at 12:05, R1 hit at 13:05; NIFTY's
+double bottom 11:00–11:05 with put writing under it): one good day, picked afterwards. The owner's
+point stands — **the first candle is an alert, the entry is the confirmation** — and the rules were
+built that way; over 18 months neither confirmation beats a random walk on the price path.
 
 Tools built alongside: board/scanner, volume & market profile, order-flow recorder, vendor data seam,
 NSE OI pipeline, Gautam Jha's published strategy (1-minute PDH/PDL breakout) reviewed — it is the
@@ -260,14 +268,19 @@ The 64-state bias gate (`use_bias=true`) only has data from 2024, which left too
    market-wide (sector lean, breadth) or nearly so, so on 23 Oct every bearish contender scored 4/4
    and no bullish one could pass 2/4. Replace with stock-specific checks (own VWAP side, futures OI
    in its direction, CVD/OFI its way, stronger than its sector) and show the market lean once.
-6. The 64-state gate can now be judged from 2021 (`oi_daily_legacy/`; join on symbol + expiry, there is
+6. **F&O panel: the last 15 minutes and the last hour** (`analysis/buildup.recent`, in `fno_snapshot` as
+   `recent`): futures build-up, and calls / puts OI change summed over the strikes that have a point at
+   both ends (so strike re-centring can't show as a jump — the since-open PCR flipped 0.61 ↔ 1.15 on
+   NIFTY for that reason). OI history per contract is kept in the engine (`oi_hist`) and refilled from
+   the archive at a restart. FLAT under 0.1 % (15 min) / 0.2 % (1 h) — display thresholds, untested.
+7. The 64-state gate can now be judged from 2021 (`oi_daily_legacy/`; join on symbol + expiry, there is
    no contract token before 2024).
-4. Owner's wishlist not yet done: one self-sufficient strategy with **sector-wise** layer and
+8. Owner's wishlist not yet done: one self-sufficient strategy with **sector-wise** layer and
    **PCR / option OI walls** (daily data exists in the bhavcopy); read the old repos
    (`fastAnalayticsKotsin`, `optionProducerJava`, kotsin-box) for PCR/OI logic.
-5. Data vendors: Accelpix API registration in review (personal use only); GFDL being registered. Buy only
+9. Data vendors: Accelpix API registration in review (personal use only); GFDL being registered. Buy only
    if a backtest shows order flow adds edge. Selling a board to others would need a redistribution licence.
-6. Devina's later feed fixes (Stage 0–5 on `phase10-13-consolidated`) are not on `fresh-base`; port one at
+10. Devina's later feed fixes (Stage 0–5 on `phase10-13-consolidated`) are not on `fresh-base`; port one at
    a time if needed. Known defects on the old branches (inverted option stop, dead held-quote refresh,
    corporate-action mismatch between daily and intraday caches) were found in the 2026-10-03 review.
-7. kotsin-crypto `main` has 6 unpushed commits (archive gzip, cross-asset); push only on the owner's word.
+11. kotsin-crypto `main` has 6 unpushed commits (archive gzip, cross-asset); push only on the owner's word.

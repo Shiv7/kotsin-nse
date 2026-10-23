@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import deque
 from dataclasses import replace
 from datetime import date, timedelta
 from itertools import pairwise
@@ -30,6 +31,7 @@ from typing import Any
 import httpx
 import structlog
 
+from .analysis.buildup import recent as recent_positioning
 from .bars.aggregator import Aggregator
 from .bars.store import BarStore
 from .bars.unified import BarSource, UnifiedBar
@@ -79,6 +81,9 @@ from .venue.fivepaisa.auth import Authenticator
 from .venue.fivepaisa.rest import FivePaisaREST
 
 log = structlog.get_logger(__name__)
+
+#: OI changes kept per contract — an option's OI changes a few hundred times a session
+OI_HIST_MAX = 600
 
 #: the frame backfilled at boot and checked against the exchange on every close
 PRIMARY_TF = "30m"
@@ -157,6 +162,8 @@ class Engine:
         self.oi_ref_ts: dict[str, float] = {}
         #: contract → its latest OI (futures and options alike)
         self.oi_live: dict[str, float] = {}
+        #: contract → (ts, OI) at each change today, for the last-15-minutes / last-hour reading
+        self.oi_hist: dict[str, deque[tuple[float, float]]] = {}
         #: contract → the exchange's previous close, as every quote frame carries it (PClose)
         self.prev_close_by_code: dict[str, float] = {}
         self.reconciler = BarReconciler(self.rest, self.store, lambda sym: self.underlyings.get(sym))
@@ -356,9 +363,12 @@ class Engine:
         task.add_done_callback(_done)
         return task
 
-    def _read_today(self, codes: set[str]) -> tuple[list[dict[str, Any]], list[tuple[float, int, tuple[Any, ...]]]]:
-        """Worker thread: today's archived flow minutes, and the last ``micro.window`` of quote and
-        depth frames as one time-ordered event list, for the codes the meters follow."""
+    def _read_today(
+        self, codes: set[str], oi_codes: set[str]
+    ) -> tuple[list[dict[str, Any]], list[tuple[float, int, tuple[Any, ...]]], dict[str, list[tuple[float, float]]]]:
+        """Worker thread: today's archived flow minutes, the last ``micro.window`` of quote and
+        depth frames as one time-ordered event list, for the codes the meters follow; and the OI
+        changes of ``oi_codes`` (futures and option strikes)."""
         import pandas as pd
 
         day = ist_day(time.time()).isoformat()
@@ -369,6 +379,14 @@ class Engine:
         if fp.exists():
             f = pd.read_parquet(fp)
             flow = f[f["code"].astype(str).isin(codes)].to_dict("records")
+        oi: dict[str, list[tuple[float, float]]] = {}
+        op = root / "oi" / f"{day}.parquet"
+        if op.exists():
+            o = pd.read_parquet(op, columns=["scrip_code", "ts", "oi"]).dropna()
+            o = o[o["scrip_code"].astype(str).isin(oi_codes)].sort_values("ts")
+            o = o[o.groupby("scrip_code")["oi"].diff().ne(0)]  # changes only, as the feed keeps them
+            for c, g in o.groupby(o["scrip_code"].astype(str)):
+                oi[c] = list(zip(g["ts"].astype(float), g["oi"].astype(float), strict=True))[-OI_HIST_MAX:]
         since = time.time() - self.micro.window
         tp = root / "ticks" / f"{day}.parquet"
         if tp.exists():
@@ -393,7 +411,7 @@ class Engine:
                 bids, asks = side("b"), side("a")
                 events.append((r["ts"], 1, (str(r["scrip_code"]), bids, asks)))
         events.sort(key=lambda e: e[0])
-        return flow, events
+        return flow, events, oi
 
     async def _restore_today(self) -> None:
         """After a restart: today's order flow back from the archive, and the microstructure window
@@ -402,8 +420,13 @@ class Engine:
         if not codes:
             return
         try:
-            flow, events = await asyncio.to_thread(self._read_today, codes)
+            oi_codes = codes | {o.scrip_code for g in self.groups.values() for o in g.options}
+            flow, events, oi = await asyncio.to_thread(self._read_today, codes, oi_codes)
             n = self.flow.restore(flow, int(time.time() // 86400))
+            for c, pts in oi.items():  # on the loop, as _on_oi: the archived points go before the live ones
+                live = self.oi_hist.get(c, deque())
+                first = live[0][0] if live else float("inf")
+                self.oi_hist[c] = deque([x for x in pts if x[0] < first] + list(live), maxlen=OI_HIST_MAX)
 
             def _replay() -> MicroMeter:
                 m = MicroMeter(self.micro.window)
@@ -416,7 +439,7 @@ class Engine:
 
             replayed = await asyncio.to_thread(_replay)
             self.micro = replayed  # frames that arrived during the replay (seconds) are the only loss
-            log.info("restore.today", flow_minutes=n, micro_events=len(events))
+            log.info("restore.today", flow_minutes=n, micro_events=len(events), oi_contracts=len(oi))
         except Exception as exc:  # noqa: BLE001 - a failed restore leaves the meters to fill from the feed
             log.warning("restore.today_failed", error=str(exc))
 
@@ -709,6 +732,9 @@ class Engine:
             code, ts, now_oi, float(oi["oi_change_pct"]) if oi.get("oi_change_pct") is not None else None
         )
         self.oi_live[code] = now_oi
+        hist = self.oi_hist.setdefault(code, deque(maxlen=OI_HIST_MAX))
+        if not hist or hist[-1][1] != now_oi:
+            hist.append((ts, now_oi))
         if code in self._front_future:
             self.flow.on_oi(code, ts, now_oi)
         ref = self._oi_reference(code, now_oi, ts)
@@ -1119,6 +1145,15 @@ class Engine:
             missing.append("puts: no priced near-the-money strike with OI")
         reading = read_positioning(fut_leg, calls, puts) if fut_leg and calls and puts else None
         since = [self.oi_ref_ts[c] for c in used_refs if c in self.oi_ref_ts]
+        near = g.option_expiries[0] if g.option_expiries else None
+        # tuple(deque) copies in one C call: safe while the feed appends (fno_snapshot also runs on
+        # the archive's worker thread)
+        recent = recent_positioning(
+            [(b.ts + 60, b.close) for b in self.store.bars(symbol, "1m") if ist_day(b.ts) == today and b.ts + 60 <= now],
+            [(m.ts + 60, m.oi) for m in self.flow.minutes(fut.scrip_code) if m.oi],
+            [(o.option_type.value, o.strike, tuple(self.oi_hist.get(o.scrip_code, ()))) for o in g.options if o.expiry == near],
+            now,
+        )
         return {
             "symbol": symbol,
             "segment": g.segment.value,
@@ -1140,6 +1175,8 @@ class Engine:
             "reading": reading.to_json() if reading else None,
             #: the latest moment an OI reference was taken at, when any is not a previous close
             "oi_since": max(since) if since else None,
+            #: the last 15 minutes and the last hour, beside the since-the-open legs above
+            "recent": recent,
             "missing": missing,
             "expiries": expiries,
         }

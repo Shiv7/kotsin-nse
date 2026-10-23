@@ -65,12 +65,29 @@ interface Expiry {
   rows?: { strike: number; dist_pct?: number; sd?: number | null; far?: boolean; CE: Side | null; PE: Side | null }[]
 }
 
+interface RecentLeg {
+  oi_chg: number
+  oi_chg_pct: number | null
+  strikes: number
+}
+
+/** The last 15 minutes / hour: futures build-up, and calls / puts OI change over the same strikes */
+interface Recent {
+  window: string
+  futures: { price_chg_pct: number; oi_chg_pct: number; oi_chg: number; build_up: 'LB' | 'SC' | 'SB' | 'LU' | 'FLAT' }
+  calls: RecentLeg | null
+  puts: RecentLeg | null
+  pcr_then?: number
+  pcr_now?: number
+}
+
 interface Fno {
   symbol: string
   future: { name: string; expiry: string; ltp: number | null; prev_close: number | null; oi: number | null; oi_ref: number | null }
   legs: { futures: Leg | null; calls: Leg | null; puts: Leg | null }
   reading: Reading | null
   oi_since: number | null
+  recent?: Recent[]
   missing: string[]
   expiries: Expiry[]
 }
@@ -78,6 +95,47 @@ interface Fno {
 const LONG: Record<string, string> = { LB: 'long build-up', SC: 'short covering', SB: 'short build-up', LU: 'long unwinding' }
 const biasColor = (b: string) => (b.includes('Bull') ? 'text-emerald-300' : b.includes('Bear') ? 'text-rose-300' : 'text-slate-300')
 const signed = (v: number | null | undefined) => (v == null ? 'DM' : `${v >= 0 ? '+' : ''}${fmt.int(v)}`)
+
+const writers = (leg: RecentLeg | null, word: string) =>
+  !leg ? `${word} —` : `${word} ${signed(leg.oi_chg)}${leg.oi_chg_pct != null ? ` (${fmt.pct(leg.oi_chg_pct, 1)})` : ''}`
+
+/** The turn a since-the-open label hides: who positioned in the last 15 minutes and the last hour. */
+function RecentStrip({ rows }: { rows: Recent[] }) {
+  if (!rows.length) return <div className="mt-2 text-[10px] text-slate-600">last 15 min / 1 hour: not enough data yet</div>
+  return (
+    <div className="mt-2 grid gap-2 md:grid-cols-2">
+      {rows.map((r) => {
+        const b = r.futures.build_up
+        const tone = b === 'LB' || b === 'SC' ? 'text-emerald-300' : b === 'FLAT' ? 'text-slate-400' : 'text-rose-300'
+        return (
+          <div key={r.window} className="rounded border border-slate-800 bg-slate-900/40 p-2 font-mono text-[11px]">
+            <div className="flex justify-between">
+              <span className="text-slate-400">last {r.window}</span>
+              <span className={tone}>
+                futures {b}
+                {b !== 'FLAT' && ` · ${LONG[b]}`}
+              </span>
+            </div>
+            <div className="mt-1 text-slate-300">
+              price {fmt.pct(r.futures.price_chg_pct)} · fut OI {fmt.pct(r.futures.oi_chg_pct, 2)}
+            </div>
+            <div className="text-slate-300">
+              <span className={cls((r.puts?.oi_chg ?? 0) > 0 && 'text-emerald-300')}>{writers(r.puts, 'puts')}</span>
+              {' · '}
+              <span className={cls((r.calls?.oi_chg ?? 0) > 0 && 'text-rose-300')}>{writers(r.calls, 'calls')}</span>
+              {r.pcr_then != null && r.pcr_now != null && (
+                <span className="text-slate-500">
+                  {' '}
+                  · PCR {r.pcr_then.toFixed(2)}→{r.pcr_now.toFixed(2)}
+                </span>
+              )}
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
 
 function LegCard({ name, leg, priceWord }: { name: string; leg: Leg | null; priceWord: string }) {
   if (!leg) return <div className="rounded border border-slate-800 p-2 text-[11px] text-slate-600">{name}: no data</div>
@@ -261,7 +319,9 @@ export function FnoPanel({ symbol }: { symbol: string }) {
         {data.oi_since != null && <span className="text-slate-500">OI change since {istHm(data.oi_since)} (no recorded close)</span>}
       </div>
       {data.missing.length > 0 && <div className="mt-1 text-[10px] text-amber-600">missing: {data.missing.join(' · ')}</div>}
-      <div className="mt-2 grid gap-2 md:grid-cols-3">
+      {data.recent && <RecentStrip rows={data.recent} />}
+      <div className="mt-2 text-[10px] text-slate-500">since the previous close</div>
+      <div className="mt-1 grid gap-2 md:grid-cols-3">
         <LegCard name={`Futures ${data.future.expiry.slice(5)}`} leg={data.legs.futures} priceWord="price" />
         <LegCard name="Calls near the money" leg={data.legs.calls} priceWord="premium" />
         <LegCard name="Puts near the money" leg={data.legs.puts} priceWord="premium" />

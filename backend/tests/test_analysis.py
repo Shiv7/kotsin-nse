@@ -8,7 +8,7 @@ from datetime import date, timedelta
 import pytest
 
 from kotsin_nse.analysis.bigpicture import big_picture, fibonacci
-from kotsin_nse.analysis.buildup import label, mtf
+from kotsin_nse.analysis.buildup import label, mtf, recent
 from kotsin_nse.analysis.hedge import setups
 from kotsin_nse.market.session import ist_at
 
@@ -85,3 +85,27 @@ def test_an_intraday_window_across_a_recording_gap_is_not_read():
     price = [(now - 7200, 100.0), (now - 60, 99.0), (now, 99.0)]  # nothing recorded for two hours before the last minute
     oi = [(now - 7200, 1000.0), (now - 60, 980.0), (now, 975.0)]
     assert [r["window"] for r in mtf(price, oi, now, prev_close=None, oi_ref=None)] == []
+
+
+def test_the_last_15_minutes_read_the_turn_on_the_same_strikes():
+    """A sell-off since the open, then the last 15 minutes: price up, futures OI up (fresh longs),
+    puts written; a strike subscribed mid-window (re-centring) must not count as new OI."""
+    now = 1_000_000.0
+    price = [(now - 3600, 100.0), (now - 900, 98.0), (now, 99.0)]
+    fut = [(now - 3600, 1000.0), (now - 900, 1000.0), (now, 1010.0)]
+    opts = [
+        ("PE", 95.0, [(now - 3600, 500.0), (now - 900, 500.0), (now - 300, 560.0)]),
+        ("PE", 100.0, [(now - 400, 9999.0)]),  # appeared 400 s ago: no point at the window's start
+        ("CE", 105.0, [(now - 3600, 400.0), (now - 900, 400.0), (now, 380.0)]),
+    ]
+    r15, r60 = recent(price, fut, opts, now)
+    assert r15["window"] == "15 min" and r15["futures"]["build_up"] == "LB"
+    assert r15["puts"] == {"oi_chg": 60.0, "oi_chg_pct": 12.0, "strikes": 1}
+    assert r15["calls"]["oi_chg"] == -20.0
+    assert (r15["pcr_then"], r15["pcr_now"]) == (1.25, round(560 / 380, 3))
+    assert r60["futures"]["build_up"] == "SB" and r60["futures"]["price_chg_pct"] == -1.0, "the hour still reads shorts adding"
+
+
+def test_no_futures_point_near_the_start_no_window():
+    now = 1_000_000.0
+    assert recent([(now - 5000, 100.0), (now, 101.0)], [(now - 5000, 1.0), (now, 2.0)], [], now) == []
