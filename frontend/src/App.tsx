@@ -2,6 +2,7 @@ import { BrowserRouter, NavLink, Route, Routes, useLocation } from 'react-router
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { ModeBanner } from './components/ModeBanner'
 import { usePoll } from './lib/usePoll'
+import { Analysis } from './pages/Analysis'
 import { Board } from './pages/Board'
 import { Chart } from './pages/Chart'
 import { ObBacktest } from './pages/ObBacktest'
@@ -14,6 +15,7 @@ import type { Health } from './types'
 const PAGES = [
   ['/', 'Overview'],
   ['/board', 'Board'],
+  ['/analysis', 'Analysis'],
   ['/backtest', 'Backtest'],
   ['/chart', 'Chart'],
   ['/options', 'Options'],
@@ -28,6 +30,8 @@ function Pages() {
       <Routes>
         <Route path="/" element={<Overview />} />
         <Route path="/board" element={<Board />} />
+        <Route path="/analysis" element={<Analysis />} />
+        <Route path="/analysis/:symbol" element={<Analysis />} />
         <Route path="/backtest" element={<ObBacktest />} />
         <Route path="/chart" element={<Chart />} />
         <Route path="/options" element={<Options />} />

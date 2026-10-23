@@ -98,6 +98,10 @@ class Settings(BaseSettings):
     fp_app_key: SecretStr | None = None  # "Key" in the request head
     fp_encrypt_key: SecretStr | None = None
     fp_pin: SecretStr | None = None
+
+    # ---- the Analysis page's written summary (analysis/llm.py) -------------------------------
+    #: Anthropic API key (KN_ANTHROPIC_API_KEY in .env); without it the summary says so
+    anthropic_api_key: SecretStr | None = None
     fp_totp_secret: SecretStr | None = None  # base32 seed; the engine derives the code itself
     fp_app_source: int = 23312
     fp_app_name: str | None = None

@@ -198,6 +198,52 @@ def build_app(engine: Engine) -> FastAPI:
             "future_code": fut,
         }
 
+    @api.get("/analysis/{symbol}")
+    async def analysis(symbol: str) -> dict[str, Any]:
+        """One stock end to end (analysis/bundle.py): big picture, positioning, build-up across
+        timeframes, levels and Fibonacci, structure and profile, today's reaction, microstructure,
+        options and two hedged option-selling setups."""
+        from ..analysis.bundle import build
+
+        out = build(engine, symbol, time.time())  # on the loop: it reads the feed's dicts
+        if out is None:
+            raise HTTPException(404, f"{symbol.upper()} is not in the universe")
+        return out
+
+    @api.get("/analysis/{symbol}/summary")
+    async def analysis_summary(symbol: str, refresh: bool = False) -> dict[str, Any]:
+        """Claude's written read of the same data, cached 10 minutes per symbol (``refresh`` forces
+        a new one — each is a paid API call)."""
+        import anthropic
+
+        from ..analysis.bundle import build, compact
+        from ..analysis.llm import Summarizer
+
+        if not hasattr(app.state, "summarizer"):
+            key = engine.s.anthropic_api_key.get_secret_value() if engine.s.anthropic_api_key else None
+            app.state.summarizer = Summarizer(key)
+        sm = app.state.summarizer
+        if not sm.configured:
+            raise HTTPException(503, "no Anthropic API key: add KN_ANTHROPIC_API_KEY=… to backend/.env and restart the engine")
+        sym = symbol.upper()
+        if not refresh and (hit := sm.cached(sym)):
+            return {**hit, "cached": True}
+        bundle = build(engine, sym, time.time())
+        if bundle is None:
+            raise HTTPException(404, f"{sym} is not in the universe")
+        try:
+            return await sm.summarize(sym, compact(bundle), refresh=refresh)
+        except anthropic.AuthenticationError as exc:
+            raise HTTPException(401, "the Anthropic API key was rejected") from exc
+        except anthropic.RateLimitError as exc:
+            raise HTTPException(429, "Anthropic rate limit — try again shortly") from exc
+        except anthropic.APIStatusError as exc:
+            raise HTTPException(502, f"Anthropic API error {exc.status_code}: {exc.message}"[:300]) from exc
+        except anthropic.APIConnectionError as exc:
+            raise HTTPException(502, "could not reach the Anthropic API") from exc
+        except RuntimeError as exc:
+            raise HTTPException(502, str(exc)) from exc
+
     @api.get("/micro/{symbol}")
     async def micro(symbol: str) -> dict[str, Any]:
         """Microstructure of the stock and its front future (orderflow/micro.py): microprice, queue

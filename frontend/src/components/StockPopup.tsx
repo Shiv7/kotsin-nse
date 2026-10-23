@@ -298,7 +298,10 @@ export function StockPopup({ row, day, at, trade, onClose }: Props) {
             </span>
           )}
           {row.event_risk && <span className="rounded bg-amber-900/60 px-2 py-0.5 text-[11px] text-amber-300">event risk</span>}
-          <button onClick={onClose} className="ml-auto rounded px-2 py-1 text-xs text-slate-400 hover:bg-slate-800">
+          <a href={`/analysis/${encodeURIComponent(row.symbol)}`} className="ml-auto rounded bg-sky-900/60 px-2 py-1 text-xs text-sky-200 hover:bg-sky-800">
+            full analysis →
+          </a>
+          <button onClick={onClose} className="rounded px-2 py-1 text-xs text-slate-400 hover:bg-slate-800">
             close ✕
           </button>
         </div>
