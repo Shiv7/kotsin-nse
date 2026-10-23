@@ -265,6 +265,51 @@ class FlowMeter:
     def on_oi(self, code: str, ts: float, oi: float) -> None:
         self._minute(code, ts).oi = oi
 
+    def restore(self, rows: Sequence[dict[str, Any]], day: int) -> int:
+        """Put back today's minutes from the archive (``FlowMinute.to_json`` rows, any order) after a
+        restart, ahead of whatever the live feed has added since; the running cumulative delta
+        continues from the last restored minute. Means come back as one-sample sums. Returns the
+        minutes restored."""
+        by: dict[str, dict[int, dict[str, Any]]] = {}
+        for r in rows:
+            cur = by.setdefault(str(r["code"]), {}).get(int(r["ts"]))
+            if cur is None or (r.get("frames") or 0) > (cur.get("frames") or 0):  # two runs' halves of a minute: the fuller
+                by[str(r["code"])][int(r["ts"])] = r
+        n = 0
+        for code, mins in by.items():
+            st = self._st.setdefault(code, _State())
+            live_from = st.minutes[0].ts if st.minutes else None
+            old = []
+            for ts in sorted(mins):
+                if live_from is not None and ts >= live_from:
+                    break
+                r = mins[ts]
+                g = lambda k, r=r: float(r.get(k) or 0.0)  # noqa: E731
+                bn = int(r.get("book_n") or 0)
+                fm = FlowMinute(code, ts, buy=g("buy"), sell=g("sell"), unknown=g("unknown"), frames=int(r.get("frames") or 0),
+                                cum_delta=g("cum_delta"), oi=r.get("oi") if r.get("oi") == r.get("oi") else None,
+                                ofi=g("ofi"), ofi_deep=g("ofi_deep"), book_n=bn, levels=int(r.get("levels") or 0),
+                                mid=r.get("mid") if r.get("mid") == r.get("mid") else None)
+                imb = r.get("imbalance")
+                if imb is not None and imb == imb:
+                    fm.imb_sum, fm.imb_n = float(imb), 1
+                for k, attr in (("qi", "qi_sum"), ("micro_bps", "micro_sum"), ("wimb", "wimb_sum"), ("spread_bps", "spread_sum"),
+                                ("bid_depth", "bid_depth_sum"), ("ask_depth", "ask_depth_sum")):
+                    v = r.get(k)
+                    if bn and v is not None and v == v:
+                        setattr(fm, attr, float(v) * bn)
+                old.append(fm)
+            if not old:
+                continue
+            st.minutes = old + st.minutes
+            if len(st.minutes) > self.keep:
+                del st.minutes[: len(st.minutes) - self.keep]
+            st.day = day
+            if live_from is None:
+                st.cum = old[-1].cum_delta
+            n += len(old)
+        return n
+
     def minutes(self, code: str) -> list[FlowMinute]:
         st = self._st.get(code)
         return list(st.minutes) if st else []

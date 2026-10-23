@@ -88,3 +88,17 @@ def test_the_auction_and_a_crossed_book_give_volume_no_side():
     assert (fm.buy, fm.sell, fm.unknown, fm.cum_delta) == (0, 0, 11_000, 0)
     m.on_depth("X", T0 + 11, [(1302.9, 1479)], [(1066.1, 2824)])
     assert m.minutes("X")[-1].imbalance is None and m.minutes("X")[-1].book_n == 0
+
+
+def test_restored_minutes_go_ahead_of_live_ones_and_the_cumulative_delta_continues():
+    m = FlowMeter()
+    t = int(T0 // 60) * 60
+    m.on_tick("X", t + 180 + 5, 100.0, 1_000, 99.9, 100.0)  # live, after the restart
+    rows = [{"code": "X", "ts": t, "buy": 50.0, "sell": 10.0, "frames": 3, "cum_delta": 40.0, "qi": 0.5, "book_n": 2, "imbalance": 0.2},
+            {"code": "X", "ts": t + 60, "buy": 5.0, "sell": 0.0, "frames": 1, "cum_delta": 45.0},
+            {"code": "X", "ts": t + 60, "buy": 30.0, "sell": 0.0, "frames": 4, "cum_delta": 70.0},  # the fuller half wins
+            {"code": "X", "ts": t + 240, "buy": 1.0, "sell": 0.0, "frames": 1, "cum_delta": 1.0}]  # not before the live minute
+    assert m.restore(rows, int(T0 // 86400)) == 2
+    mins = m.minutes("X")
+    assert [x.ts for x in mins] == [t, t + 60, t + 180]
+    assert mins[1].buy == 30 and mins[0].to_json()["qi"] == 0.5 and mins[0].imbalance == 0.2

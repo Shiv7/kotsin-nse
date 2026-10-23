@@ -334,6 +334,7 @@ class Engine:
             await self.feed.subscribe(Channel.DEPTH, list(books.values()))
             self._tick_archive_codes.update(i.scrip_code for i in deep if i.kind is InstrumentKind.FUTURE)
         await self.feed.subscribe(Channel.OI, subs["oi"])
+        self._spawn(self._restore_today(), "restore_today")
         log.info(
             "engine.subscribed",
             source=self.feed.capabilities.name,
@@ -354,6 +355,61 @@ class Engine:
 
         task.add_done_callback(_done)
         return task
+
+    def _read_today(self, codes: set[str]) -> tuple[list[dict[str, Any]], list[tuple[float, int, tuple[Any, ...]]]]:
+        """Worker thread: today's archived flow minutes, and the last ``micro.window`` of quote and
+        depth frames as one time-ordered event list, for the codes the meters follow."""
+        import pandas as pd
+
+        day = ist_day(time.time()).isoformat()
+        root = self.s.data_dir / "archive"
+        flow: list[dict[str, Any]] = []
+        events: list[tuple[float, int, tuple[Any, ...]]] = []
+        fp = root / "flow" / f"{day}.parquet"
+        if fp.exists():
+            f = pd.read_parquet(fp)
+            flow = f[f["code"].astype(str).isin(codes)].to_dict("records")
+        since = time.time() - self.micro.window
+        tp = root / "ticks" / f"{day}.parquet"
+        if tp.exists():
+            t = pd.read_parquet(tp, columns=["scrip_code", "ts", "recv_ts", "ltp", "total_qty", "bid", "ask"])
+            t = t[t["scrip_code"].astype(str).isin(codes) & (t["recv_ts"] >= since)]
+            events += [(r.recv_ts, 0, (str(r.scrip_code), r.ltp, int(r.total_qty), r.bid, r.ask)) for r in t.itertuples()]
+        dp = root / "depth" / f"{day}.parquet"
+        if dp.exists():
+            d = pd.read_parquet(dp)
+            d = d[d["scrip_code"].astype(str).isin(codes) & (d["ts"] >= since)]
+            for r in d.to_dict("records"):
+                bids = [(r[f"b{i}p"], int(r[f"b{i}q"])) for i in range(1, 21) if f"b{i}p" in r and r[f"b{i}p"] == r[f"b{i}p"] and r[f"b{i}p"]]
+                asks = [(r[f"a{i}p"], int(r[f"a{i}q"])) for i in range(1, 21) if f"a{i}p" in r and r[f"a{i}p"] == r[f"a{i}p"] and r[f"a{i}p"]]
+                events.append((r["ts"], 1, (str(r["scrip_code"]), bids, asks)))
+        events.sort(key=lambda e: e[0])
+        return flow, events
+
+    async def _restore_today(self) -> None:
+        """After a restart: today's order flow back from the archive, and the microstructure window
+        replayed from the archived quotes and books, so the day's readings do not start over."""
+        codes = set(self._tick_archive_codes)
+        if not codes:
+            return
+        try:
+            flow, events = await asyncio.to_thread(self._read_today, codes)
+            n = self.flow.restore(flow, int(time.time() // 86400))
+
+            def _replay() -> MicroMeter:
+                m = MicroMeter(self.micro.window)
+                for ts, kind, a in events:
+                    if kind == 0:
+                        m.on_tick(a[0], ts, a[1], a[2], a[3], a[4], auction=ts < self._open_ts(Segment.NSE_EQ, ts))
+                    else:
+                        m.on_depth(a[0], ts, a[1], a[2])
+                return m
+
+            replayed = await asyncio.to_thread(_replay)
+            self.micro = replayed  # frames that arrived during the replay (seconds) are the only loss
+            log.info("restore.today", flow_minutes=n, micro_events=len(events))
+        except Exception as exc:  # noqa: BLE001 - a failed restore leaves the meters to fill from the feed
+            log.warning("restore.today_failed", error=str(exc))
 
     def _focus_list(self) -> list[str]:
         """The last session's most traded option roots plus the configured indices (fixed for the day)."""

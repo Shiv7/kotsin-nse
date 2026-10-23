@@ -72,7 +72,7 @@ def build(engine: Any, symbol: str, now: float) -> dict[str, Any] | None:
     out: dict[str, Any] = {"symbol": sym, "ts": now, "sector": engine.scanner.sectors.get(sym, "")}
 
     out["big_picture"] = big_picture(daily, today, last)
-    pos = positioning(engine.oi_daily, sym, today)
+    pos = positioning(engine.oi_daily, sym, today, is_holiday=lambda d: not engine.calendar.is_trading_day(d, g.segment))
     out["positioning"] = pos
 
     lv = levels_from_store(engine.store, sym, now)
