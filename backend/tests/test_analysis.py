@@ -78,3 +78,10 @@ def test_a_bearish_bias_gets_a_bear_call_spread_above_resistance_and_both_get_a_
 
 def test_no_chain_no_setups():
     assert setups([], 1190.0, "Bull", 500, None, None, None, None)["setups"] == []
+
+
+def test_an_intraday_window_across_a_recording_gap_is_not_read():
+    now = 1_792_731_600.0
+    price = [(now - 7200, 100.0), (now - 60, 99.0), (now, 99.0)]  # nothing recorded for two hours before the last minute
+    oi = [(now - 7200, 1000.0), (now - 60, 980.0), (now, 975.0)]
+    assert [r["window"] for r in mtf(price, oi, now, prev_close=None, oi_ref=None)] == []

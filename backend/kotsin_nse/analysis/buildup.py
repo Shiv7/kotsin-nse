@@ -16,6 +16,10 @@ from typing import Any
 
 FLAT_OI_PCT = 0.3
 INTRADAY = ((15, "15 min"), (60, "1 hour"))
+#: an intraday window is read only if both series have a point this close to its start: across a
+#: recording gap the "value 15 minutes ago" is really the last one before the gap (HDFCBANK
+#: 2026-10-23: unsubscribed 09:44–10:42, so its 15-minute and 1-hour windows showed the same OI)
+EDGE_S = 180.0
 
 
 def label(price_chg: float, oi_chg_pct: float) -> str:
@@ -26,10 +30,12 @@ def label(price_chg: float, oi_chg_pct: float) -> str:
     return "SC" if price_chg >= 0 else "LU"
 
 
-def _at(series: Sequence[tuple[float, float]], ts: float) -> float | None:
-    """The last value at or before ``ts``."""
+def _at(series: Sequence[tuple[float, float]], ts: float, within: float | None = None) -> float | None:
+    """The last value at or before ``ts`` — no older than ``within`` seconds, when given."""
     i = bisect.bisect_right([t for t, _v in series], ts) - 1
-    return series[i][1] if i >= 0 else None
+    if i < 0 or (within is not None and ts - series[i][0] > within):
+        return None
+    return series[i][1]
 
 
 def mtf(
@@ -45,7 +51,7 @@ def mtf(
     out: list[dict[str, Any]] = []
     p_now, oi_now = (price[-1][1] if price else None), (oi[-1][1] if oi else None)
     for minutes, name in INTRADAY:
-        p0, o0 = _at(price, now - minutes * 60), _at(oi, now - minutes * 60)
+        p0, o0 = _at(price, now - minutes * 60, EDGE_S), _at(oi, now - minutes * 60, EDGE_S)
         if p_now and oi_now and p0 and o0:
             pc, oc = (p_now / p0 - 1) * 100, (oi_now / o0 - 1) * 100
             out.append({"window": name, "price_chg_pct": round(pc, 2), "oi_chg_pct": round(oc, 2), "oi_chg": oi_now - o0, "build_up": label(pc, oc)})
