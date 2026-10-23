@@ -40,6 +40,8 @@ of warm-up, so labels start 2022-04).
 | # | Test | Pass |
 |---|---|---|
 | R1 | NIFTY next-session realised move ÷ ATM-implied move, by regime | a regime ≤ 0.8 (sellers' regime) or ≥ 1.2 (buyers'), both halves |
+
+*Correction (2026-10-23, before any result was seen): for a fairly priced normal move E|r| = σ·√(2/π) ≈ 0.80σ, so R1's ratio is divided by √(2/π) — 1.0 = fair — and the 0.8 / 1.2 thresholds apply to that.*
 | R2 | The intraday rules already tested (`confirm-*`, `mtf-*`, `dbcpr-*`): average R by the regime known at the open | a regime with average R > 0 after costs at t ≥ 3 |
 | R3 | Next-session 1-day cross-sectional reversal (IC of −return D on return D+1) by regime | regime-dependent sign, both halves |
 
