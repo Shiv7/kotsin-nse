@@ -213,3 +213,22 @@ export interface ProfileData {
   composite?: VolumeProfileData | null
   composite_sessions?: number
 }
+
+export interface PivotCluster {
+  low: number
+  high: number
+  mid: number
+  weight: number
+  members: string[]
+  kind: 'SUPPORT' | 'RESISTANCE' | 'AT_PRICE'
+  distance_pct: number | null
+}
+
+export interface LevelsData {
+  symbol: string
+  adr: number | null
+  last: number | null
+  tolerance: number | null
+  levels: { name: string; price: number; frame: 'D' | 'W' | 'M' }[]
+  clusters: PivotCluster[]
+}

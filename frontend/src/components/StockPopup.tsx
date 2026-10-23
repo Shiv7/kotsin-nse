@@ -1,10 +1,10 @@
 import { createChart, LineStyle, type UTCTimestamp } from 'lightweight-charts'
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { FlowPanel } from './FlowPanel'
 import { FnoPanel } from './FnoPanel'
 import { cls, fmt, istChartOptions, istHm } from '../lib/api'
 import { usePoll } from '../lib/usePoll'
-import type { BoardRow, OHLCV, ProfileData, StructureData, VolumeProfileData } from '../types'
+import type { BoardRow, LevelsData, OHLCV, PivotCluster, ProfileData, StructureData, VolumeProfileData } from '../types'
 
 export interface TradeMarks {
   entry_ts: number
@@ -45,6 +45,13 @@ export function StockPopup({ row, day, at, trade, onClose }: Props) {
     day ? `/api/profile/${encodeURIComponent(row.symbol)}?day=${day}${at ? `&at=${at}` : ''}&days=5` : `/api/profile/${encodeURIComponent(row.symbol)}`,
     day ? 600000 : 30000,
   )
+  const levels = usePoll<LevelsData>(
+    day
+      ? `/api/levels/${encodeURIComponent(row.symbol)}?day=${day}&at=${trade?.signal_at ?? at ?? '15:30'}`
+      : `/api/levels/${encodeURIComponent(row.symbol)}`,
+    day ? 600000 : 60000,
+  )
+  const [allPivots, setAllPivots] = useState(false)
   const box = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -146,6 +153,35 @@ export function StockPopup({ row, day, at, trade, onClose }: Props) {
       candles.createPriceLine({ price: trade.entry, color: '#facc15', lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: true, title: 'entry' })
       for (const l of trade.lines ?? []) candles.createPriceLine({ price: l.price, color: l.color, lineWidth: 2, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: l.title })
     }
+    // pivot clusters: the nearest three support and three resistance zones, line weight = zone
+    // weight (monthly 3, weekly 2, daily 1 per member); every single pivot only on request
+    // A zone more than a normal day beyond the candles is listed above the chart, not drawn: a price
+    // line pulls the scale with it, and a 6 % gap squashed WIPRO's whole session into a sliver.
+    const lv = levels.data
+    if (lv) {
+      const pad = lv.adr ?? 0
+      const lo = Math.min(...bars.map((b) => b.l)) - pad
+      const hi = Math.max(...bars.map((b) => b.h)) + pad
+      for (const z of nearestZones(lv.clusters).filter((z) => z.high >= lo && z.low <= hi)) {
+        const tone = z.kind === 'SUPPORT' ? '16,185,129' : z.kind === 'RESISTANCE' ? '244,63,94' : '250,204,21'
+        const width = (z.weight >= 6 ? 4 : z.weight >= 4 ? 3 : 2) as 2 | 3 | 4
+        candles.createPriceLine({
+          price: z.mid, color: `rgba(${tone},0.55)`, lineWidth: width, lineStyle: LineStyle.Solid, axisLabelVisible: true,
+          title: `${z.kind === 'SUPPORT' ? 'S' : z.kind === 'RESISTANCE' ? 'R' : '='} ${z.members.join('·')}`,
+        })
+        if (z.high - z.low > 0) {
+          for (const edge of [z.low, z.high])
+            candles.createPriceLine({ price: edge, color: `rgba(${tone},0.25)`, lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: false, title: '' })
+        }
+      }
+      if (allPivots) {
+        for (const p of lv.levels.filter((p) => p.price >= lo && p.price <= hi))
+          candles.createPriceLine({
+            price: p.price, color: p.frame === 'M' ? 'rgba(251,191,36,0.5)' : p.frame === 'W' ? 'rgba(148,163,184,0.5)' : 'rgba(100,116,139,0.35)',
+            lineWidth: 1, lineStyle: LineStyle.SparseDotted, axisLabelVisible: false, title: p.name,
+          })
+      }
+    }
     const vp = profile.data?.volume
     if (vp) {
       candles.createPriceLine({ price: vp.poc, color: '#c084fc', lineWidth: 2, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: 'POC' })
@@ -154,7 +190,7 @@ export function StockPopup({ row, day, at, trade, onClose }: Props) {
     }
     c.timeScale().fitContent()
     return () => c.remove()
-  }, [data, structure.data, profile.data])
+  }, [data, structure.data, profile.data, levels.data, allPivots])
 
   const bull = row.side === 'BULLISH'
   return (
@@ -197,6 +233,7 @@ export function StockPopup({ row, day, at, trade, onClose }: Props) {
           />
           <Cell k="RULE" v={row.rule || '—'} wide />
         </div>
+        {levels.data && <LevelsStrip lv={levels.data} allPivots={allPivots} onToggle={() => setAllPivots((v) => !v)} />}
         {error && <div className="text-xs text-rose-400">{error}</div>}
         <div className="flex gap-2">
           <div ref={box} className="min-w-0 flex-1" />
@@ -229,8 +266,61 @@ export function StockPopup({ row, day, at, trade, onClose }: Props) {
         )}
         <p className="mt-2 text-[10px] text-slate-600">
           5-minute candles{day ? ` up to ${at ?? 'the close'} on ${day}` : ''} · blue dashed = VWAP · Z = where the setup acts, S1 = where it is wrong, R1/R2 =
-          liquidity ahead · ▲▼ = break of structure (✕ = zone since broken) · ● = sweep
+          liquidity ahead · ▲▼ = break of structure (✕ = zone since broken) · ● = sweep · thick green / red = pivot support /
+          resistance zone (where daily, weekly and monthly pivots meet; thicker = more and higher-timeframe pivots; a zone
+          more than a normal day away is listed above, not drawn)
         </p>
+      </div>
+    </div>
+  )
+}
+
+/** The three nearest support and resistance zones, plus any zone the price sits in. */
+function nearestZones(cl: PivotCluster[]): PivotCluster[] {
+  const by = (k: PivotCluster['kind']) => cl.filter((c) => c.kind === k).sort((a, b) => Math.abs(a.distance_pct ?? 0) - Math.abs(b.distance_pct ?? 0))
+  return [...by('AT_PRICE'), ...by('SUPPORT').slice(0, 3), ...by('RESISTANCE').slice(0, 3)]
+}
+
+/** Nearest zones as a line under the cells: resistance above, support below, distance from price. */
+function LevelsStrip({ lv, allPivots, onToggle }: { lv: LevelsData; allPivots: boolean; onToggle: () => void }) {
+  const zones = nearestZones(lv.clusters)
+  const res = zones.filter((z) => z.kind === 'RESISTANCE').sort((a, b) => b.mid - a.mid)
+  const at = zones.filter((z) => z.kind === 'AT_PRICE')
+  const sup = zones.filter((z) => z.kind === 'SUPPORT').sort((a, b) => b.mid - a.mid)
+  const zone = (z: PivotCluster, tone: string) => (
+    <span key={`${z.low}-${z.high}`} className={cls('rounded border px-2 py-0.5', tone)} title={`weight ${z.weight}`}>
+      {fmt.n(z.low)}{z.high > z.low ? `–${fmt.n(z.high)}` : ''} <span className="text-slate-400">{z.members.join('·')}</span>
+      {z.distance_pct != null && z.kind !== 'AT_PRICE' && <span className="text-slate-500"> {z.distance_pct > 0 ? '+' : ''}{z.distance_pct.toFixed(2)}%</span>}
+    </span>
+  )
+  // with no zone on a side, the nearest single pivot there is still the next level to watch
+  const last = lv.last ?? 0
+  const single = (above: boolean) => {
+    const p = lv.levels.filter((x) => (above ? x.price > last : x.price < last)).sort((a, b) => (above ? a.price - b.price : b.price - a.price))[0]
+    return (
+      <span className="text-slate-500">
+        no zone{p ? ` · next pivot ${p.name} ${fmt.n(p.price)} (${((p.price / last - 1) * 100).toFixed(2)}%)` : ''}
+      </span>
+    )
+  }
+  return (
+    <div className="mb-3 space-y-1 font-mono text-[11px]">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="w-24 text-slate-500">resistance</span>
+        {res.length ? res.map((z) => zone(z, 'border-rose-900 bg-rose-950/40 text-rose-300')) : single(true)}
+      </div>
+      {at.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="w-24 text-slate-500">at price</span>
+          {at.map((z) => zone(z, 'border-amber-900 bg-amber-950/40 text-amber-300'))}
+        </div>
+      )}
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="w-24 text-slate-500">support</span>
+        {sup.length ? sup.map((z) => zone(z, 'border-emerald-900 bg-emerald-950/40 text-emerald-300')) : single(false)}
+        <button onClick={onToggle} className="ml-auto rounded px-2 py-0.5 text-slate-400 hover:bg-slate-800">
+          {allPivots ? 'hide' : 'show'} every pivot
+        </button>
       </div>
     </div>
   )

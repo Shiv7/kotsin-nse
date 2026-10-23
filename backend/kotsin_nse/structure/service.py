@@ -11,6 +11,7 @@ from ..market.session import ist_at, ist_day
 from ..research.history import HistoryStore, session_rows
 from ..scan.replay import guarded_adr
 from .engine import Structure, analyze, resample_5m
+from .levels import clusters, pivot_levels, to_json
 
 
 def from_history(store: HistoryStore, symbol: str, day: date, until_ts: int) -> Structure | None:
@@ -47,4 +48,32 @@ def from_store(bars: BarStore, symbol: str, now: float) -> Structure | None:
     return analyze(resample_5m(rows, open_ts), prev_day=prev, adr=adr) if rows else None
 
 
-__all__ = ["date", "from_history", "from_store"]
+def levels_from_history(store: HistoryStore, symbol: str, day: date, until_ts: int) -> dict | None:
+    """Pivots and their clusters for a past ``day``, measured from the last price closed by ``until_ts``."""
+    d1 = store.load(symbol, "1d")
+    before = d1[d1["ts"] < ist_at(day, "00:00")].sort_values("ts")
+    if before.empty:
+        return None
+    m1 = store.load(symbol, "1m")
+    rows = session_rows(m1, day) if not m1.empty else m1
+    rows = rows[rows["ts"] + 60 <= until_ts] if not rows.empty else rows
+    last = float(rows["c"].iloc[-1]) if len(rows) else float(before["c"].iloc[-1])
+    adr = guarded_adr(before["h"].tolist(), before["l"].tolist(), before["c"].tolist())
+    lv = pivot_levels(list(before[["ts", "h", "l", "c"]].itertuples(index=False, name=None)), day)
+    return to_json(lv, clusters(lv, adr, last), adr, last)
+
+
+def levels_from_store(bars: BarStore, symbol: str, now: float) -> dict | None:
+    """Today's pivots and their clusters, measured from the last closed 1m bar."""
+    today = ist_day(now)
+    prior = [b for b in bars.bars(symbol, "1d") if ist_day(b.ts) < today]
+    if not prior:
+        return None
+    m1 = [b for b in bars.bars(symbol, "1m") if ist_day(b.ts) == today and b.ts + 60 <= now]
+    last = m1[-1].close if m1 else prior[-1].close
+    adr = guarded_adr([b.high for b in prior], [b.low for b in prior], [b.close for b in prior])
+    lv = pivot_levels([(int(b.ts), b.high, b.low, b.close) for b in prior], today)
+    return to_json(lv, clusters(lv, adr, last), adr, last)
+
+
+__all__ = ["date", "from_history", "from_store", "levels_from_history", "levels_from_store"]

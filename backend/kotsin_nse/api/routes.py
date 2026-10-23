@@ -359,6 +359,24 @@ def build_app(engine: Engine) -> FastAPI:
             raise HTTPException(404, f"no 5-minute bars for {sym}{' on ' + day if day else ' today'}")
         return {"symbol": sym, "day": day, "at": at if day else None, **st.to_json()}
 
+    @api.get("/levels/{symbol}")
+    async def levels(symbol: str, day: str | None = None, at: str = "15:30") -> dict[str, Any]:
+        """Daily, weekly and monthly pivots (classic, CPR, Camarilla) and where they cluster into
+        support and resistance zones — for a past ``day`` as of ``at``, or live when omitted."""
+        from ..market.session import ist_at
+        from ..research.history import HistoryStore
+        from ..structure.service import levels_from_history, levels_from_store
+
+        sym = symbol.upper()
+        if day:
+            d = date.fromisoformat(day)
+            out = await asyncio.to_thread(levels_from_history, HistoryStore(engine.s.data_dir / "history"), sym, d, ist_at(d, at))
+        else:
+            out = levels_from_store(engine.store, sym, time.time())
+        if out is None:
+            raise HTTPException(404, f"no daily bars for {sym} before {day or 'today'}")
+        return {"symbol": sym, "day": day, "at": at if day else None, **out}
+
     @api.get("/profile/{symbol}")
     async def profile(symbol: str, day: str | None = None, at: str = "15:30", days: int = Query(1, ge=1, le=20)) -> dict[str, Any]:
         """Volume profile (POC, value area, HVN/LVN) and market profile (TPO letters, initial
