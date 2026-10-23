@@ -22,7 +22,7 @@ Per minute and instrument: buy volume, sell volume, delta, the day's cumulative 
 the average top-5 book imbalance (bid qty − ask qty) / (bid + ask) from depth snapshots, and the
 last OI seen (futures). Pure state; the engine feeds it, the archive keeps it.
 
-From every depth frame (20 levels, ~2–5 a second on active names), the book's own readings, kept
+From every depth frame (5 levels a side on 5paisa), the book's own readings, kept
 per minute so they can be tested against the next 15–30 minutes before anything trades on them
 (``research/micro_ic.py``):
 

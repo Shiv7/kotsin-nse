@@ -156,7 +156,7 @@ function Ladder({ x }: { x: Expiry }) {
 /** Futures and options read together, live: each leg's build-up, the 64-state reading, and per
  * expiry the walls, put-call ratio, straddle (the move priced in) and IV, over a strike ladder. */
 export function FnoPanel({ symbol }: { symbol: string }) {
-  const { data, error } = usePoll<Fno>(`/api/fno/${encodeURIComponent(symbol)}`, 10000)
+  const { data, error } = usePoll<Fno>(`/api/fno/${encodeURIComponent(symbol)}`, 3000)
   const [pick, setPick] = useState(0)
   if (error) return <div className="mt-3 text-[11px] text-slate-600">futures & options: {error}</div>
   if (!data) return null

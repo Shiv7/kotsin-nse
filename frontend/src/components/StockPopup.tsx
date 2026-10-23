@@ -1,4 +1,4 @@
-import { createChart, LineStyle, type UTCTimestamp } from 'lightweight-charts'
+import { createChart, LineStyle, type ISeriesApi, type UTCTimestamp } from 'lightweight-charts'
 import { useEffect, useRef, useState } from 'react'
 import { FlowPanel } from './FlowPanel'
 import { FnoPanel } from './FnoPanel'
@@ -34,7 +34,7 @@ export function StockPopup({ row, day, at, trade, onClose }: Props) {
   const path = day
     ? `/api/history/bars/${row.symbol}?day=${day}&tf=5m${at ? `&until=${at}` : ''}`
     : `/api/bars/${row.symbol}?tf=5m&n=80`
-  const { data, error } = usePoll<{ bars: OHLCV[] } | LiveBars>(path, day ? 600000 : 10000)
+  const { data, error } = usePoll<{ bars: OHLCV[] } | LiveBars>(path, day ? 600000 : 5000)
   const structure = usePoll<StructureData>(
     day
       ? `/api/structure/${encodeURIComponent(row.symbol)}?day=${day}&at=${trade?.signal_at ?? at ?? '15:30'}`
@@ -53,6 +53,42 @@ export function StockPopup({ row, day, at, trade, onClose }: Props) {
   )
   const [allPivots, setAllPivots] = useState(false)
   const box = useRef<HTMLDivElement>(null)
+  const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
+  const volRef = useRef<ISeriesApi<'Histogram'> | null>(null)
+  const [live, setLive] = useState<{ c: number; ts: number } | null>(null)
+
+  // live: the engine pushes every forming candle once a second on /ws — the popup's last candle
+  // and price follow it, instead of waiting for the 5-minute bar to close and the next poll
+  useEffect(() => {
+    if (day) return
+    let ws: WebSocket | null = null
+    let retry: ReturnType<typeof setTimeout> | undefined
+    let closed = false
+    const open = () => {
+      ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`)
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data as string) as { forming?: Record<string, { ts: number; o: number; h: number; l: number; c: number; v: number }> }
+          const f = msg.forming?.[`${row.symbol}:5m`]
+          if (!f) return
+          setLive({ c: f.c, ts: Date.now() / 1000 })
+          candleRef.current?.update({ time: f.ts as UTCTimestamp, open: f.o, high: f.h, low: f.l, close: f.c })
+          volRef.current?.update({ time: f.ts as UTCTimestamp, value: f.v, color: f.c >= f.o ? 'rgba(16,185,129,0.35)' : 'rgba(244,63,94,0.35)' })
+        } catch {
+          /* a malformed frame is skipped; the next comes in a second */
+        }
+      }
+      ws.onclose = () => {
+        if (!closed) retry = setTimeout(open, 2000)
+      }
+    }
+    open()
+    return () => {
+      closed = true
+      if (retry) clearTimeout(retry)
+      ws?.close()
+    }
+  }, [day, row.symbol])
 
   useEffect(() => {
     if (!box.current || !data?.bars?.length) return
@@ -69,9 +105,11 @@ export function StockPopup({ row, day, at, trade, onClose }: Props) {
       upColor: '#10b981', downColor: '#f43f5e', wickUpColor: '#10b981', wickDownColor: '#f43f5e', borderVisible: false,
     })
     candles.setData(bars.map((b) => ({ time: b.ts as UTCTimestamp, open: b.o, high: b.h, low: b.l, close: b.c })))
+    candleRef.current = candles
     const vol = c.addHistogramSeries({ priceFormat: { type: 'volume' }, priceScaleId: 'vol', lastValueVisible: false, priceLineVisible: false })
     c.priceScale('vol').applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } })
     vol.setData(bars.map((b) => ({ time: b.ts as UTCTimestamp, value: b.v, color: b.c >= b.o ? 'rgba(16,185,129,0.35)' : 'rgba(244,63,94,0.35)' })))
+    volRef.current = vol
     // session VWAP, typical price weighted by volume — the board's own definition. It restarts
     // each IST day: 80 five-minute bars reach into the previous session, and carrying its volume
     // over put GOLD's line at 146,837 on 2026-10-20 against a true session VWAP of 146,392
@@ -189,7 +227,11 @@ export function StockPopup({ row, day, at, trade, onClose }: Props) {
       candles.createPriceLine({ price: vp.val, color: 'rgba(192,132,252,0.6)', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: false, title: 'VAL' })
     }
     c.timeScale().fitContent()
-    return () => c.remove()
+    return () => {
+      candleRef.current = null
+      volRef.current = null
+      c.remove()
+    }
   }, [data, structure.data, profile.data, levels.data, allPivots])
 
   const bull = row.side === 'BULLISH'
@@ -199,7 +241,8 @@ export function StockPopup({ row, day, at, trade, onClose }: Props) {
         <div className="mb-3 flex flex-wrap items-baseline gap-3">
           <span className="text-lg font-bold text-slate-100">{row.symbol}</span>
           <span className="text-xs text-slate-500">{row.sector}</span>
-          <span className="font-mono text-sm text-slate-200">{fmt.n(row.last)}</span>
+          <span className="font-mono text-sm text-slate-200">{fmt.n(live?.c ?? row.last)}</span>
+          {live && <span className="rounded bg-emerald-900/50 px-1.5 text-[10px] text-emerald-300">live</span>}
           <span className={cls('font-mono text-sm', (row.pct ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400')}>{fmt.pct(row.pct)}</span>
           {row.side !== 'NONE' && (
             <span className={cls('rounded px-2 py-0.5 text-[11px] font-semibold', bull ? 'bg-emerald-900/60 text-emerald-300' : 'bg-rose-900/60 text-rose-300')}>

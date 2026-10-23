@@ -339,6 +339,20 @@ class Engine:
             options=n_opts, underlyings=len(universe),
         )
 
+    def _spawn(self, coro: Any, name: str) -> asyncio.Task[Any]:
+        """A background task the engine keeps a reference to until it ends, whose exception is
+        logged (an unobserved task exception otherwise surfaces, if at all, at garbage collection)."""
+        task = asyncio.create_task(coro, name=name)
+        self._bg_tasks.add(task)
+
+        def _done(t: asyncio.Task[Any]) -> None:
+            self._bg_tasks.discard(t)
+            if not t.cancelled() and t.exception() is not None:
+                log.error("task.failed", task=name, error=repr(t.exception()))
+
+        task.add_done_callback(_done)
+        return task
+
     def _focus_list(self) -> list[str]:
         """The last session's most traded option roots plus the configured indices (fixed for the day)."""
         days = [d for d in self.oi_daily.days() if d < date.today()]
@@ -698,17 +712,13 @@ class Engine:
             minute = int(bar.ts) + 60
             if minute > self._scanned_minute:
                 self._scanned_minute = minute
-                task = asyncio.create_task(self._scan(minute))
-                self._bg_tasks.add(task)
-                task.add_done_callback(self._bg_tasks.discard)
+                self._spawn(self._scan(minute), "scan")
         if bar.tf != PRIMARY_TF:
             return
         # Off the tick path: at 15:15 IST two hundred 30m bars close in the same second and each
         # waits on a REST round trip. Awaiting that inside the feed handler would stall every
         # symbol's ticks. Concurrency is bounded by the reconciler's semaphore.
-        task = asyncio.create_task(self._reconcile(bar))
-        self._bg_tasks.add(task)
-        task.add_done_callback(self._bg_tasks.discard)
+        self._spawn(self._reconcile(bar), "reconcile")
 
     async def _reconcile(self, bar: UnifiedBar) -> None:
         """Install the exchange's own candle over the live build.
@@ -891,7 +901,7 @@ class Engine:
                     and now - self._oi_ref_checked > 1800
                 ):
                     self._oi_ref_checked = now
-                    self._bg_tasks.add(asyncio.create_task(self._ensure_oi_reference()))
+                    self._spawn(self._ensure_oi_reference(), "oi_reference")
                     if self.s.has_credentials and self.s.engine_enabled:
                         await self.catalogue_loader.ensure()
 
@@ -931,13 +941,13 @@ class Engine:
                     and any(self._prev_close(g.underlying.symbol) is None for g in self.groups.values())
                 ):
                     self._rewarm_ts = now
-                    self._bg_tasks.add(asyncio.create_task(self._rewarm()))
+                    self._spawn(self._rewarm(), "rewarm")
 
                 # scripFinder's 09:20 IST intraday rebuild: refetch the master, re-pick strikes,
                 # subscribe anything new. Strikes listed 09:00–09:15 are not in an overnight master.
                 if self.reconciler_ready and ist_hm(now) >= "09:20" and self._intraday_rebuild_day != day:
                     self._intraday_rebuild_day = day
-                    self._bg_tasks.add(asyncio.create_task(self._intraday_universe_rebuild()))
+                    self._spawn(self._intraday_universe_rebuild(), "intraday_rebuild")
 
                 if (
                     self.s.strike_recenter
@@ -1129,7 +1139,11 @@ class Engine:
                 "feed_fresh",
                 (fh.silence_s is None or fh.silence_s < 120) if open_now else True,
                 value=fh.silence_s,
-                detail="no message for over 2 minutes" if open_now else "market closed",
+                detail=(
+                    "market closed" if not open_now
+                    else "no message for over 2 minutes" if fh.silence_s is not None and fh.silence_s >= 120
+                    else ""
+                ),
             ),
             Check(
                 "broker_session",

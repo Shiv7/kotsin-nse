@@ -119,8 +119,10 @@ class Settings(BaseSettings):
     archive_ticks: bool = True
     #: one depth snapshot per contract at most this often (underlyings + front futures)
     archive_depth_every_s: float = 5.0
-    #: how many levels of each side that snapshot keeps (the feed sends up to 20)
-    archive_depth_levels: int = 20
+    #: how many levels of each side that snapshot keeps. 5paisa's MarketDepthService sends 5 (every
+    #: NSE frame on 2026-10-23 had at most 5); its 20-level feed is a separate gateway this account
+    #: is refused on ("Unauthorized exception", 2026-10-23)
+    archive_depth_levels: int = 5
     archive_flush_s: float = 300.0
 
     # ---- service ------------------------------------------------------------------------------

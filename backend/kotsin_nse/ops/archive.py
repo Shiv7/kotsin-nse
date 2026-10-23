@@ -7,8 +7,8 @@ Per IST day, Parquet files under ``data/archive/<kind>/<day>.parquet``:
 
 * ``bars`` — every closed 1m bar of every tracked underlying (symbol, ts, o/h/l/c/v, source, oi)
 * ``oi`` — every OI frame for every subscribed code (futures and option strikes)
-* ``depth`` — the bid/ask levels of the underlyings and their front futures (``depth_levels``, 20
-  from 2026-10-26; 5 before), at most one snapshot per ``archive_depth_every_s`` per contract
+* ``depth`` — the bid/ask levels (5, all 5paisa's MarketDepthService sends) of the underlyings, their
+  front futures and the focus list's strikes, at most one snapshot per ``archive_depth_every_s``
 * ``flow`` — the per-minute order-flow estimate (``orderflow/meter.py``)
 * ``ticks`` — every quote frame of the underlyings and their futures (``archive_ticks``), with the
   data source that sent it: the raw material for volume-at-price, and for judging a source's
@@ -21,6 +21,7 @@ ticks a minute they would be a gigabyte a day for information the 1m bar already
 
 from __future__ import annotations
 
+import threading
 import time
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
@@ -46,11 +47,16 @@ KEYS: dict[str, tuple[str, ...]] = {
 
 
 class DailyArchive:
-    def __init__(self, root: Path, *, enabled: bool = True, depth_levels: int = 20) -> None:
+    def __init__(self, root: Path, *, enabled: bool = True, depth_levels: int = 5) -> None:
         self.root = root
         self.enabled = enabled
         self.depth_levels = depth_levels
         self._rows: dict[str, dict[str, list[dict[str, Any]]]] = {k: defaultdict(list) for k in KEYS}
+        # Rows come from the event loop (ticks, depth, OI) and the scan's worker thread (fno); the
+        # flush runs in another worker. It swaps the whole buffer under this lock and then owns
+        # what it took — before 2026-10-23 it popped each day's list while the loop could still be
+        # appending to it, so a row added in that instant was written nowhere.
+        self._lock = threading.Lock()
         self.rows_buffered = 0
         self.rows_written = 0
         self.files_written = 0
@@ -64,8 +70,10 @@ class DailyArchive:
     def _add(self, kind: str, ts: float, row: dict[str, Any]) -> None:
         if not self.enabled:
             return
-        self._rows[kind][ist_day(ts).isoformat()].append(row)
-        self.rows_buffered += 1
+        day = ist_day(ts).isoformat()
+        with self._lock:
+            self._rows[kind][day].append(row)
+            self.rows_buffered += 1
 
     def bar(self, b: UnifiedBar) -> None:
         self._add(
@@ -160,9 +168,11 @@ class DailyArchive:
         if not self.enabled:
             return 0
         written = 0
-        for kind, by_day in self._rows.items():
-            for day in list(by_day):
-                rows = by_day.pop(day)
+        with self._lock:
+            taken, self._rows = self._rows, {k: defaultdict(list) for k in KEYS}
+            self.rows_buffered = 0
+        for kind, by_day in taken.items():
+            for day, rows in by_day.items():
                 if not rows:
                     continue
                 try:
@@ -170,10 +180,10 @@ class DailyArchive:
                 except Exception as exc:  # noqa: BLE001 - the archive must never take the engine down
                     self.errors += 1
                     self.last_error = f"{kind}/{day}: {exc}"[:200]
-                    by_day[day].extend(rows)  # keep them for the next attempt
+                    with self._lock:  # kept, ahead of anything newer, for the next attempt
+                        self._rows[kind][day][:0] = rows
+                        self.rows_buffered += len(rows)
                     log.warning("archive.write_failed", kind=kind, day=day, error=str(exc))
-        # list(): rows are added from the loop and from the scan's worker thread while this runs
-        self.rows_buffered = sum(len(r) for by_day in self._rows.values() for r in list(by_day.values()))
         self.flushes += 1
         self.last_flush_ts = time.time()
         if written:

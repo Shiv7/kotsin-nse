@@ -22,7 +22,7 @@ interface FlowData {
 /** Today's estimated delta (bars) and cumulative delta (line) for the stock and its future, plus
  * the future's OI — live only, recorded from the feed's snapshots. */
 export function FlowPanel({ symbol }: { symbol: string }) {
-  const { data, error } = usePoll<FlowData>(`/api/flow/${encodeURIComponent(symbol)}?tf=5`, 15000)
+  const { data, error } = usePoll<FlowData>(`/api/flow/${encodeURIComponent(symbol)}?tf=5`, 5000)
   if (error) return <div className="mt-2 text-[11px] text-slate-600">order flow: {error}</div>
   if (!data || (!data.equity.length && !data.future.length)) {
     return <div className="mt-2 text-[11px] text-slate-600">order flow: nothing recorded yet today — it builds from the live feed</div>

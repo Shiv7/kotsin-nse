@@ -199,9 +199,31 @@ def test_depth_keeps_twenty_levels_a_side(tmp_path):
 
     from .conftest import ist_ts
 
-    arc = DailyArchive(tmp_path)
+    arc = DailyArchive(tmp_path, depth_levels=20)
     t = ist_ts("2026-10-26", "10:00")
     arc.depth("A", t, [(100 - i * 0.05, 10 + i) for i in range(20)], [(100.05 + i * 0.05, 20 + i) for i in range(3)])
     arc.flush(final=True)
     row = pd.read_parquet(next((tmp_path / "depth").glob("*.parquet"))).iloc[0]
     assert row["b20q"] == 29 and row["a3q"] == 22 and pd.isna(row["a4p"])
+
+
+def test_rows_added_while_a_flush_runs_are_kept_for_the_next(tmp_path, monkeypatch):
+    """The flush swaps the buffer and owns what it took; a row the loop adds meanwhile waits."""
+    from kotsin_nse.ops.archive import DailyArchive
+
+    from .conftest import ist_ts
+
+    arc = DailyArchive(tmp_path)
+    t = ist_ts("2026-10-23", "10:00")
+    arc.oi("A", t, 1000.0, 0.0)
+    real_write = arc._write
+
+    def slow_write(kind, day, rows):
+        arc.oi("B", t + 1, 2000.0, 0.0)  # the loop adds a row while this flush is writing
+        return real_write(kind, day, rows)
+
+    monkeypatch.setattr(arc, "_write", slow_write)
+    assert arc.flush() == 1 and arc.rows_buffered == 1
+    monkeypatch.setattr(arc, "_write", real_write)
+    assert arc.flush() == 1
+    assert set(arc.first_oi("2026-10-23", ["A", "B"])) == {"A", "B"}

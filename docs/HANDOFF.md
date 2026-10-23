@@ -66,7 +66,7 @@ Built 2026-10-18 from `995a914` with every strategy removed, then rebuilt as a r
 | `scan/` | the minute **board**: strength = (last − open) ÷ 50-session avg range, zero unless one-sided (2×); top 20 a side, 3 picks, breadth, sectors (NSE Nifty-500 industry), VWAP, OI build-up; `DayReplay` rebuilds any cached day minute by minute |
 | `structure/` | 5m swings, BOS (close only), order blocks + life cycle, FVGs, liquidity, sweeps, Z/S1/R1/R2 |
 | `profile/` | volume profile (POC/VA/HVN/LVN) and market profile (TPO, IB, single prints, day type) |
-| `orderflow/` | per-minute **estimated** delta (quote rule on each snapshot's new volume), CVD, top-5 book imbalance, futures OI — live only, recorded from 2026-10-19. From 2026-10-26 also the book's own readings from every 20-level depth frame: L1 and 10-level **OFI**, queue imbalance, microprice − mid, distance-weighted imbalance, spread, visible depth; the archive keeps 20 levels a side |
+| `orderflow/` | per-minute **estimated** delta (quote rule on each snapshot's new volume), CVD, top-5 book imbalance, futures OI — live only, recorded from 2026-10-19. From 2026-10-23 also the book's own readings from every depth frame (5 levels — 5paisa's 20-level gateway refuses this account): L1 and multi-level **OFI** (all 5 levels), queue imbalance, microprice − mid, distance-weighted imbalance, spread, visible depth; the archive keeps the 5 levels a side |
 | `market/fo_universe.py` | **F&O membership by date** from NSE's bhavcopies + NSE's symbol-change list: a stock is tradable as a future only on sessions its FUTSTK rows appear. `swing.py` uses it by default (`fo_members=true`) |
 | `market/fo_bhavcopy.py` | NSE daily F&O bhavcopy (official OI of every contract) |
 | `research/` | backtesters: `obtest.py` (order block), `playbooks.py` (5m sweep, value area), `mtf.py` (1h/4h sweep), `fibob.py` (Fib+pivot+OB), `swing.py` (dropped 2026-10-23, §5), `oi_daily.py`, `oi16.py` (16 & 64 states), studies `oi16_study.py`, `oi64_study.py`; `micro_ic.py` — each recorded order-flow reading against the next 5/15/30 min (IC by day) |
@@ -246,7 +246,7 @@ The 64-state bias gate (`use_bias=true`) only has data from 2024, which left too
 3. **Live recording:** the launchd jobs start the engine at 08:55 and stop it at 16:00 on weekdays. They
    never ran before 2026-10-23: macOS blocked launchd's zsh from ~/Downloads until /bin/zsh got Full
    Disk Access; the scripts exist only on `fresh-base`, so keep it checked out in the main folder.
-   Recorded NSE days: 19 Oct, 23 Oct, then every session. From 26 Oct: 20-level depth and the book's
+   Recorded NSE days: 19 Oct, 23 Oct, then every session. From 23 Oct: the book's
    readings (OFI, queue, microprice, weighted imbalance). After ≥ 15 days: `kotsin-nse micro-ic` — keep
    a reading only with a stable IC (0.03–0.05) and a top-minus-bottom spread above costs.
 4. **Parked (2026-10-23): a plain-language read per stock on the board** — "gap up and go / fading /

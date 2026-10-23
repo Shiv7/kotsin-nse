@@ -168,13 +168,12 @@ class UniverseBuilder:
         day has moved (COFORGE 2026-10-23 gapped +3.5 %: five strikes picked around yesterday's
         1,905 all sat below a 1,973 future). ``each_side`` takes exactly that many strikes below
         and above the one nearest the centre, calls and puts alike (ATM ± N), band or no band."""
+        # Every field is assigned once, at the end: the scan's worker thread reads ``options`` while
+        # the loop re-centres, and an emptied list in between was a minute with no chain.
         group.close = close
-        group.options = []
-        group.option_expiry = None
-        group.option_expiries = []
         ref = around if around and around > 0 else close
-        group.center = ref
         if not ref or ref <= 0:
+            group.options, group.option_expiry, group.option_expiries, group.center = [], None, [], ref
             group.note = (group.note + "; " if group.note else "") + "no close — strikes not selected"
             return
         expiries = [
@@ -183,6 +182,7 @@ class UniverseBuilder:
             if (date.fromisoformat(e) - today).days >= self.policy.min_days_to_expiry
         ]
         if not expiries:
+            group.options, group.option_expiry, group.option_expiries, group.center = [], None, [], ref
             return
         mcx = group.segment is Segment.MCX_FO
         chosen_expiries = expiries[:1]
@@ -206,6 +206,7 @@ class UniverseBuilder:
         group.options = sorted(chosen, key=lambda i: (i.expiry, i.option_type.value, i.strike))
         group.option_expiry = chosen_expiries[0]
         group.option_expiries = chosen_expiries
+        group.center = ref
 
     def select_all(self, groups: dict[str, ScripGroup], close_for: Callable[[str], float | None], today: date) -> int:
         n = 0
