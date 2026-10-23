@@ -74,3 +74,20 @@ def test_day_rows_come_from_1m_levels_and_a_bonus_skips_the_sessions_after_it():
     after = [d.isoformat() for d in days[40 : 40 + BREAK_SKIP]]
     assert not got["day"].isin(after).any()
     assert math.isfinite(got["vs_p"].abs().max())
+
+
+def test_the_race_scores_who_gets_there_first():
+    from kotsin_nse.research.power import race
+
+    c = np.array([100.0, 100.5, 101.2, 99.0])
+    h, lo = c + 0.1, c - 0.1
+    assert race(h, lo, c, 0, +1, 1.0) == 1.0  # 101.3 ≥ 101 before any low ≤ 99
+    assert race(h, lo, c, 0, -1, 1.0) == 0.0
+    assert race(h, lo, c, 0, +1, 5.0) == 0.5, "neither by the end"
+
+
+def test_clusters_chain_levels_within_the_tolerance_and_weigh_them():
+    from kotsin_nse.research.power import _cluster_weight
+
+    w = _cluster_weight({"P": (100.0, "D"), "WP": (100.05, "W"), "MS1": (100.12, "M"), "R1": (105.0, "D")}, 0.1)
+    assert w == {"P": 6, "WP": 6, "MS1": 6, "R1": 1}

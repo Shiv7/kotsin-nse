@@ -305,6 +305,20 @@ def run_daytype(settings: Settings, args: argparse.Namespace) -> None:
             print(f"  {k}: {json.dumps(v, default=float)}")
 
 
+def run_power(settings: Settings, args: argparse.Namespace) -> None:
+    """Each tool's power on its own, low and high timeframe, and the IB's role (research/power.py)."""
+    from .research.power import run
+
+    def on_symbol(sym: str, n: int, of: int) -> None:
+        print(f"  {n}/{of} stocks", flush=True)
+
+    out = run(settings, label=args.label, on_symbol=on_symbol)
+    print(f"{out['id']}  {out['events']:,} events")
+    for r in out["table"]:
+        print(f"  {r}")
+    print(f"  IB: {json.dumps(out['ib'], default=float)}")
+
+
 def run_fib(settings: Settings, args: argparse.Namespace) -> None:
     """Trend pullbacks at Fibonacci + pivot + order-block confluence (research/fibob.py)."""
     from dataclasses import fields
@@ -509,6 +523,9 @@ def build_parser() -> argparse.ArgumentParser:
     dt.add_argument("--end", default="2025-09-30")
     dt.add_argument("--label", default="")
 
+    pw = sub.add_parser("power", help="each tool's power on its own (levels vs placebo, fib vs non-fib, patterns vs 50%%), IB role")
+    pw.add_argument("--label", default="")
+
     m = sub.add_parser("mtf-backtest", help="1h/4h sweeps timed on 15m/5m, over the 5m cache")
     m.add_argument("--start", required=True)
     m.add_argument("--end", required=True)
@@ -557,6 +574,8 @@ def cli() -> None:
         run_regimes(settings, args)
     elif command == "daytype":
         run_daytype(settings, args)
+    elif command == "power":
+        run_power(settings, args)
     elif command == "mtf-backtest":
         run_mtf(settings, args)
     else:  # pragma: no cover - argparse rejects anything else

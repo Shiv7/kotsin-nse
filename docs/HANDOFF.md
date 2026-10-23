@@ -160,6 +160,23 @@ built that way; over 18 months neither confirmation beats a random walk on the p
 - **Regimes** (`research/regimes.py`, `regime-b254ea133d`, GMM k = 4 fitted on the past only, 2022-04 → 2025-09): calm uptrend (346 sessions), quiet drift down (285), relief rally (158), fear (72). NIFTY's next-day move ÷ what its ATM IV priced (1.0 = fair): **0.88 overall; 0.77 in the calm uptrend (t −4.75, 33/39 months, both halves) — PASSES the pre-registered sellers'-regime test**; but 5.5 % of those days moved > 2× priced (worst 4.3×), so only hedged selling. No intraday rule is positive in any regime; the 1-day reversal is not regime-dependent. **Lead: hedged NIFTY weekly selling in the calm regime — backtest on bhavcopy prices, then the holdout.**
 - **Day types** (`research/daytype.py`, `daytype-7265de4ef6`, 57,849 stock-days): k-means finds grind up (22 %), grind down (26 %), range/chop with both extremes in the first hour (33 %), trend up (11 %), trend down (8 %). At 11:00 the type is predicted right 44 % of the time (vs 31 % for the commonest). Trading 11:00 → close on it: **+11 bps gross, −3.6 bps after 14.6 bps costs**, t −2.2, 5/12 months — fails; barely better than simply following the morning move (−4.2). The morning move continues a little (+4.8 bps gross on all days), never enough to pay.
 
+**Each tool's power on its own** (`research/power.py`, `power-fd1a17faa6`, 3.9 M events; prereg §4): a race — X in the
+tool's direction before X against (5m: 0.25 ADR, rest of day, 2024-04 → 2025-09; daily: 1 ADR, 10 sessions, 2021-04 → 2025-09);
+levels against **placebo levels** shifted 0.15–0.35 ADR on the same stock-day, Fibonacci against 30/45/56/70 %.
+- **Pivots / CPR / weekly / monthly / PDH-PDL levels = placebo**: 580 k intraday touches, real 50.0 % vs placebo 50.0 % (edge ≤ 0.3 pts
+  in every frame and side); daily: +0.3 pts (t < 2). **Clusters** (weight 2–3, 4+) no better than lone levels or placebos.
+- **Fibonacci = non-Fibonacci**: 5m 50.3 vs 50.2 % (221 k touches); daily 49.2 vs 49.2 %.
+- **SMC order block retests 49.7 %** — no better than an ordinary candle's retest (50.8 %). 5m double bottoms 50.2 %, tops 51.7 %;
+  hammers / engulfings within ±2 pts after drift.
+- **Sweeps** lean slightly to reversal (+1 to +3 pts, t < 3); **breaks of IBL / PDL fail slightly more than chance** (−2.9 / −3.1 pts
+  after drift, t −3.3 / −3.7) — real but ~0.01 ADR, untradable.
+- Drift matters: intraday, "up" races score 48 % (stocks drifted down intraday 2024-25), daily "up" 53 % (bull market). Raw
+  pattern win rates above 50 % are mostly this.
+- **IB (09:15–10:15)**: broken on 88 % of days (up only 35 %, down only 41 %, both 12 %, neither 12 %). After the first break the
+  day closes beyond it only ~51 %, back inside ~42 %; median extension 0.41 IB, a full 1× IB extension 17 %. Small IB → 96 % break,
+  60 % close outside, 0.68 IB extension; largest IB → 22 % never break, 0.21. CPR width barely matters (narrow 51.9 % vs wide 50.0 %
+  close outside the IB).
+
 Tools built alongside: board/scanner, volume & market profile, order-flow recorder, vendor data seam,
 NSE OI pipeline, Gautam Jha's published strategy (1-minute PDH/PDL breakout) reviewed — it is the
 intraday scale already shown to lose.
