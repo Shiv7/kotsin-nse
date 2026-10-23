@@ -75,3 +75,17 @@ def test_the_cpr_retest_enters_on_the_bar_that_holds_tc_with_the_15m_trend_up():
 def test_the_holdout_is_refused():
     with pytest.raises(ValueError, match="holdout"):
         run(Settings(_env_file=None), date(2025, 9, 1), date(2025, 10, 15), ConfirmParams())
+
+
+def test_the_cpr_rejection_enters_where_tc_rejects_with_the_stop_under_p_and_twice_the_risk_as_target():
+    d1 = _session(date(2024, 6, 3), list(np.linspace(100, 110, 75)))  # P 106.67, TC 108.33
+    today = [109.0 + 0.05 * i for i in range(20)] + [108.6, 109.4] + [109.6 + 0.25 * i for i in range(30)]
+    lows = [x - 0.2 for x in today]
+    lows[20] = 108.30  # into the CPR at TC, the bar closes back above it
+    d2 = _session(date(2024, 6, 4), today, lows)
+    p = ConfirmParams(setup="reject", first_entry="09:15")
+    (t,) = [x for x in trades_for("X", pd.concat([d1, d2]), p, date(2024, 6, 4), date(2024, 6, 4), CostModel(Settings(_env_file=None))) if x.side == "LONG"]
+    assert t.signal_ts == ist_at(date(2024, 6, 4), "09:15") + 300 * 21
+    assert 106.4 < t.stop < 106.667, "just under the pivot"
+    assert t.target == pytest.approx(t.entry + 2 * (t.entry - t.stop), abs=1e-3)
+    assert set(t.tags) >= {"struct60", "st60", "weekly", "depth", "cpr_width"}

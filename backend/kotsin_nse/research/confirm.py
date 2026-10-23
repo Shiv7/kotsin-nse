@@ -21,7 +21,17 @@ Supertrend(10, 3) is up. Entry at that close; stop under the retest low − ``st
 target R1 (R2 when R1 is under 1 R away). One trade per side per session. (The rule's 1-minute step
 cannot be tested: the 1m cache starts inside the holdout.)
 
-Both exit at the stop, the target, or the session's last bar — intraday only. A bar that touches the
+**CPR rejection, 1:2** (the owner's rule as he trades it, 2026-10-23; long, short mirrored). Price is
+above the CPR (the previous 5m close above TC), comes back into it — to TC or deeper toward P — and a
+5m bar CLOSES back above TC: TC rejected the move. Entry at that close; stop under P (−
+``stop_buffer_atr`` ATR) — the risk is about TC − P; target ``rr`` × the risk. Continuation or
+reversal alike, no Supertrend flip waited for. Recorded, and enforced by ``htf_align``: the 1h agrees —
+``structure`` = the last closed 1h bar's state, set up by a close above the previous 1h bar's high
+and down by a close below its low (ETERNAL 23 Oct turned up at the 10:15 hour's close, 309.35 >
+308.90); ``supertrend`` = the 1h Supertrend. Also recorded: a weekly pivot level inside the daily CPR
+zone (daily and weekly coincide), how deep the bar went, CPR width. One trade per side per session.
+
+All exit at the stop, the target, or the session's last bar — intraday only. A bar that touches the
 stop and the target is counted a stop.
 
 **What a hit rate means here.** The target and the stop are not equally far, so a coin would hit the
@@ -57,11 +67,12 @@ from .obtest import _fut
 
 HOLDOUT_START = date(2025, 10, 1)
 PIVOT_NAMES = ("P", "BC", "TC", "R1", "S1", "R2", "S2", "PDH", "PDL")
+WEEKLY_NAMES = ("P", "BC", "TC", "R1", "S1", "R2", "S2", "PDH", "PDL")  # of the previous week (PDH/PDL = its high/low)
 
 
 @dataclass(frozen=True, slots=True)
 class ConfirmParams:
-    setup: str = "double"  # double | cpr
+    setup: str = "double"  # double | cpr | reject
     side: int = 2
     min_gap: int = 3
     tol_atr: float = 0.5
@@ -73,6 +84,8 @@ class ConfirmParams:
     first_entry: str = "09:30"
     last_entry: str = "14:30"
     pivot_tol_atr: float = 0.5
+    rr: float = 2.0
+    htf_align: str = ""  # "" | structure | supertrend — reject only: take the trade only when the 1h agrees
     risk_inr: float = 5_000.0
     slip_bps: float = 5.0
     fo_members: bool = True
@@ -201,9 +214,17 @@ def make_trade(sym: str, day: date, setup: str, sign: int, k: int, close: float,
                         round(stop, 4), round(target, 4), max(1, int(p.risk_inr / risk)), round(risk / (risk + reward), 3), tags=tags)
 
 
-def _htf_dir(df5: pd.DataFrame, tf: str) -> tuple[np.ndarray, np.ndarray]:
+def structure(h: np.ndarray, lo: np.ndarray, c: np.ndarray) -> np.ndarray:
+    """+1 from a close above the previous bar's high until a close below the previous bar's low (−1)."""
+    d = np.zeros(len(c))
+    for i in range(1, len(c)):
+        d[i] = 1 if c[i] > h[i - 1] else -1 if c[i] < lo[i - 1] else d[i - 1]
+    return d
+
+
+def _htf_dir(df5: pd.DataFrame, tf: str, how: Any = supertrend) -> tuple[np.ndarray, np.ndarray]:
     b = resample(df5, tf)
-    d = supertrend(b["h"].to_numpy(float), b["l"].to_numpy(float), b["c"].to_numpy(float))
+    d = how(b["h"].to_numpy(float), b["l"].to_numpy(float), b["c"].to_numpy(float))
     return b["end"].to_numpy(np.int64), d
 
 
@@ -226,9 +247,16 @@ def trades_for(sym: str, df5: pd.DataFrame, p: ConfirmParams, start: date, end: 
     A = atr(H, L, C)
     e15, d15 = _htf_dir(df5, "15m")
     e60, d60 = _htf_dir(df5, "60m")
+    s60 = _htf_dir(df5, "60m", structure)[1]
     dkey = (T + 19_800) // 86_400  # the IST calendar day of each bar
     cut = np.flatnonzero(np.r_[True, dkey[1:] != dkey[:-1]])
     bounds = list(zip(cut, np.r_[cut[1:], len(T)], strict=True))
+    weeks: dict[tuple[int, int], tuple[float, float, float]] = {}  # ISO week → its high, low, last close
+    for a0, a1 in bounds:
+        wk = ist_day(int(T[a0])).isocalendar()[:2]
+        hi, low, _ = weeks.get(wk, (-np.inf, np.inf, 0.0))
+        weeks[wk] = (max(hi, H[a0:a1].max()), min(low, L[a0:a1].min()), float(C[a1 - 1]))
+    week_keys = sorted(weeks)
     out: list[ConfirmTrade] = []
     for n_s, (a0, a1) in enumerate(bounds):
         day = ist_day(int(T[a0]))
@@ -242,7 +270,8 @@ def trades_for(sym: str, df5: pd.DataFrame, p: ConfirmParams, start: date, end: 
         def tags(sign: int, k: int, extra: dict[str, str], a0: int = a0, day: date = day) -> dict[str, str]:
             t = int(T[a0 + k]) + 300
             with_ = lambda d: "with" if d == sign else "against"  # noqa: E731
-            return {"tod": _tod(t, day), "st15": with_(_dir_at(e15, d15, t)), "st60": with_(_dir_at(e60, d60, t)), **extra}
+            return {"tod": _tod(t, day), "st15": with_(_dir_at(e15, d15, t)), "st60": with_(_dir_at(e60, d60, t)),
+                    "struct60": with_(_dir_at(e60, s60, t)), **extra}
 
         if p.setup == "double":
             for sign in (1, -1):
@@ -285,6 +314,39 @@ def trades_for(sym: str, df5: pd.DataFrame, p: ConfirmParams, start: date, end: 
                             break
                     if sign * (c[k] - lvl) > 0:
                         beyond = True
+        elif p.setup == "reject":
+            wk = day.isocalendar()[:2]
+            prev_wk = [w for w in week_keys if w < wk]
+            wlv = cpr(*weeks[prev_wk[-1]]) if prev_wk else None
+            for sign in (1, -1):
+                edge = lv["TC"] if sign > 0 else lv["BC"]
+                for k in range(1, len(c)):
+                    if not ok[k] or sign * (c[k - 1] - edge) <= 0:  # price was beyond the CPR the bar before
+                        continue
+                    tol = p.retest_tol_atr * a[k]
+                    into = (lo[k] <= edge + tol) if sign > 0 else (h[k] >= edge - tol)
+                    stop = lv["P"] - sign * p.stop_buffer_atr * a[k]
+                    if not into or sign * (c[k] - edge) <= 0 or ((lo[k] <= stop) if sign > 0 else (h[k] >= stop)):
+                        continue  # not into the CPR, not closed back beyond it, or through the stop already
+                    t = int(T[a0 + k]) + 300
+                    want = {"structure": _dir_at(e60, s60, t), "supertrend": _dir_at(e60, d60, t)}.get(p.htf_align)
+                    if want is not None and want != sign:
+                        continue
+                    entry = C[a0 + k] * (1 + sign * p.slip_bps / 1e4)
+                    target = entry + p.rr * (entry - stop)
+                    zone = sorted((lv["P"], edge))
+                    pad = 0.25 * a[k]
+                    confl = [nm for nm in WEEKLY_NAMES if wlv and zone[0] - pad <= wlv[nm] <= zone[1] + pad]
+                    deep = (lo[k] <= (lv["P"] + edge) / 2) if sign > 0 else (h[k] >= (lv["P"] + edge) / 2)
+                    width = (lv["TC"] - lv["BC"]) / lv["P"]
+                    tr = make_trade(sym, day, "reject", sign, a0 + k, C[a0 + k], stop, target, T, p,
+                                    tags(sign, k, {"weekly": "weekly " + "+".join(confl) if confl else "no weekly level",
+                                                   "depth": "toward P" if deep else "at TC",
+                                                   "cpr_width": "<0.2%" if width < 0.002 else "0.2-0.5%" if width < 0.005 else ">0.5%"}))
+                    if tr:
+                        exit_trade(tr, Op, H, L, C, T, a0 + k, a1, p, costs)
+                        out.append(tr)
+                    break
     return out
 
 
@@ -361,5 +423,5 @@ def run(settings: Settings, start: date, end: date, p: ConfirmParams, *, symbols
     return out
 
 
-__all__ = ["ConfirmParams", "ConfirmTrade", "atr", "cpr", "doubles", "exit_trade", "make_trade", "run", "summarize", "supertrend", "trades_for"]
+__all__ = ["ConfirmParams", "ConfirmTrade", "atr", "cpr", "doubles", "exit_trade", "make_trade", "run", "structure", "summarize", "supertrend", "trades_for"]
 

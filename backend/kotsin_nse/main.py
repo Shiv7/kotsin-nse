@@ -414,7 +414,7 @@ def build_parser() -> argparse.ArgumentParser:
     oi.add_argument("--legacy", action="store_true", help="NSE's older file (to 2024-07-05) into oi_daily_legacy/")
 
     cf = sub.add_parser("confirm-backtest", help="double bottoms/tops and the CPR retest, entered on confirmation (5m cache)")
-    cf.add_argument("--setup", choices=["double", "cpr"], default="double")
+    cf.add_argument("--setup", choices=["double", "cpr", "reject"], default="double")
     cf.add_argument("--start", default="2024-04-01")
     cf.add_argument("--end", default="2025-09-30")
     cf.add_argument("--symbols", default="")
