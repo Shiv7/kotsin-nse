@@ -162,8 +162,9 @@ def _prices(store: HistoryStore, sym: str) -> pd.DataFrame | None:
     d1 = store.load(sym, "1d")
     if d1.empty:
         return None
-    d1 = d1.sort_values("ts").drop_duplicates("ts")
+    d1 = d1.sort_values("ts")
     d1["day"] = [(pd.Timestamp(t, unit="s") + pd.Timedelta(hours=5, minutes=30)).date().isoformat() for t in d1["ts"]]
+    d1 = d1.drop_duplicates("day", keep="last").reset_index(drop=True)  # a provisional bar shares its date
     o, c, v = d1["o"].to_numpy(float), d1["c"].to_numpy(float), d1["v"].to_numpy(float)
     nxt_o = np.r_[o[1:], np.nan]
     d1["fwd1"] = np.r_[c[1:], np.nan] / nxt_o - 1
@@ -207,7 +208,7 @@ def _weekly_t(by_day: pd.Series) -> tuple[float | None, int]:
     s = by_day.dropna()
     if s.empty:
         return None, 0
-    wk = s.groupby([date.fromisoformat(d).isocalendar()[:2] for d in s.index]).mean()
+    wk = s.groupby(["{}-W{:02d}".format(*date.fromisoformat(d).isocalendar()[:2]) for d in s.index]).mean()
     sd = wk.std(ddof=1)
     return (float(wk.mean() / (sd / math.sqrt(len(wk)))) if sd > 0 else None), len(wk)
 

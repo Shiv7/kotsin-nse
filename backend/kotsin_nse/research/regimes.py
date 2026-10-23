@@ -38,6 +38,13 @@ FEATURES = ("breadth_up", "above20", "dispersion", "mean_abs", "nifty_ret", "rv2
 FAIR = math.sqrt(2 / math.pi)
 
 
+def _daily(store: HistoryStore, sym: str) -> pd.DataFrame:
+    """The daily bars, one per IST date (the broker's provisional bar and the final one share a date)."""
+    d1 = store.load(sym, "1d").sort_values("ts")
+    d1["day"] = [(pd.Timestamp(t, unit="s") + pd.Timedelta(hours=5, minutes=30)).date().isoformat() for t in d1["ts"]]
+    return d1.drop_duplicates("day", keep="last").reset_index(drop=True)
+
+
 def market_table(settings: Settings) -> pd.DataFrame:
     """One row per session: the readings above and the next session's outcomes."""
     from ..market.fo_universe import load as load_members
@@ -48,10 +55,10 @@ def market_table(settings: Settings) -> pd.DataFrame:
     for sym in store.symbols("1d"):
         if sym in ("NIFTY", "BANKNIFTY"):
             continue
-        d1 = store.load(sym, "1d").sort_values("ts").drop_duplicates("ts")
+        d1 = _daily(store, sym)
         if len(d1) < 30:
             continue
-        day = [(pd.Timestamp(t, unit="s") + pd.Timedelta(hours=5, minutes=30)).date().isoformat() for t in d1["ts"]]
+        day = list(d1["day"])
         c, o = d1["c"].to_numpy(float), d1["o"].to_numpy(float)
         r = pd.Series(c / np.r_[np.nan, c[:-1]] - 1, index=day)
         mem = pd.Series([fm.covers(date.fromisoformat(x)) and fm.member(sym, date.fromisoformat(x)) for x in day], index=day)
@@ -61,8 +68,8 @@ def market_table(settings: Settings) -> pd.DataFrame:
     R, A, F = pd.concat(rets, axis=1), pd.concat(above, axis=1).astype(float), pd.concat(fwd, axis=1)
     m = pd.DataFrame({"breadth_up": (R > 0).sum(axis=1) / R.notna().sum(axis=1), "above20": A.mean(axis=1),
                       "dispersion": R.std(axis=1), "mean_abs": R.abs().mean(axis=1)})
-    nifty = store.load("NIFTY", "1d").sort_values("ts").drop_duplicates("ts")
-    nday = [(pd.Timestamp(t, unit="s") + pd.Timedelta(hours=5, minutes=30)).date().isoformat() for t in nifty["ts"]]
+    nifty = _daily(store, "NIFTY")
+    nday = list(nifty["day"])
     nc = pd.Series(nifty["c"].to_numpy(float), index=nday)
     lr = np.log(nc / nc.shift(1))
     m["nifty_ret"] = lr
