@@ -9,19 +9,22 @@ it). A fixed list for the day: changing it intraday would break each name's reco
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 
 import pandas as pd
 
 
 def focus_roots(
-    bhav: pd.DataFrame, top_n: int, indices: Iterable[str] = (), *, renames: Mapping[str, str] | None = None
+    bhav: pd.DataFrame, top_n: int, indices: Iterable[str] = (), *, renames: Mapping[str, str] | None = None,
+    among: Collection[str] | None = None,
 ) -> list[str]:
-    """The ``top_n`` stock roots by option premium turnover, then ``indices`` (in that order)."""
+    """The ``top_n`` stock roots by option premium turnover — only ``among`` these when given (the
+    loaded universe: a top ten of all F&O cut down to the Nifty 50 left six) — then ``indices``."""
     ren = dict(renames or {})
     opt = bhav[bhav["kind"] == "OPTSTK"]
     turnover = (opt["close"].fillna(0) * opt["volume"].fillna(0)).groupby(opt["symbol"].map(lambda s: ren.get(s, s))).sum()
-    stocks = [s for s in turnover.sort_values(ascending=False).index if turnover[s] > 0][:top_n]
+    ranked = [s for s in turnover.sort_values(ascending=False).index if turnover[s] > 0 and (among is None or s in among)]
+    stocks = ranked[:top_n]
     return [*stocks, *[i for i in indices if i not in stocks]]
 
 

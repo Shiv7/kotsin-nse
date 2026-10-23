@@ -270,10 +270,17 @@ class FlowMeter:
         restart, ahead of whatever the live feed has added since; the running cumulative delta
         continues from the last restored minute. Means come back as one-sample sums. Returns the
         minutes restored."""
+        def num(v: Any) -> float:
+            """A stored value, 0 when absent or NaN (minutes archived before a column existed)."""
+            return float(v) if v is not None and v == v else 0.0
+
+        def opt(v: Any) -> float | None:
+            return float(v) if v is not None and v == v else None
+
         by: dict[str, dict[int, dict[str, Any]]] = {}
         for r in rows:
             cur = by.setdefault(str(r["code"]), {}).get(int(r["ts"]))
-            if cur is None or (r.get("frames") or 0) > (cur.get("frames") or 0):  # two runs' halves of a minute: the fuller
+            if cur is None or num(r.get("frames")) > num(cur.get("frames")):  # two runs' halves of a minute: the fuller
                 by[str(r["code"])][int(r["ts"])] = r
         n = 0
         for code, mins in by.items():
@@ -284,20 +291,17 @@ class FlowMeter:
                 if live_from is not None and ts >= live_from:
                     break
                 r = mins[ts]
-                g = lambda k, r=r: float(r.get(k) or 0.0)  # noqa: E731
-                bn = int(r.get("book_n") or 0)
-                fm = FlowMinute(code, ts, buy=g("buy"), sell=g("sell"), unknown=g("unknown"), frames=int(r.get("frames") or 0),
-                                cum_delta=g("cum_delta"), oi=r.get("oi") if r.get("oi") == r.get("oi") else None,
-                                ofi=g("ofi"), ofi_deep=g("ofi_deep"), book_n=bn, levels=int(r.get("levels") or 0),
-                                mid=r.get("mid") if r.get("mid") == r.get("mid") else None)
-                imb = r.get("imbalance")
-                if imb is not None and imb == imb:
-                    fm.imb_sum, fm.imb_n = float(imb), 1
+                bn = int(num(r.get("book_n")))
+                fm = FlowMinute(code, ts, buy=num(r.get("buy")), sell=num(r.get("sell")), unknown=num(r.get("unknown")),
+                                frames=int(num(r.get("frames"))), cum_delta=num(r.get("cum_delta")), oi=opt(r.get("oi")),
+                                ofi=num(r.get("ofi")), ofi_deep=num(r.get("ofi_deep")), book_n=bn, levels=int(num(r.get("levels"))),
+                                mid=opt(r.get("mid")))
+                if (imb := opt(r.get("imbalance"))) is not None:
+                    fm.imb_sum, fm.imb_n = imb, 1
                 for k, attr in (("qi", "qi_sum"), ("micro_bps", "micro_sum"), ("wimb", "wimb_sum"), ("spread_bps", "spread_sum"),
                                 ("bid_depth", "bid_depth_sum"), ("ask_depth", "ask_depth_sum")):
-                    v = r.get(k)
-                    if bn and v is not None and v == v:
-                        setattr(fm, attr, float(v) * bn)
+                    if bn and (v := opt(r.get(k))) is not None:
+                        setattr(fm, attr, v * bn)
                 old.append(fm)
             if not old:
                 continue

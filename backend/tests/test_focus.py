@@ -13,3 +13,9 @@ def test_the_most_traded_option_roots_then_the_indices():
     bhav = pd.DataFrame(rows, columns=["kind", "symbol", "close", "volume"])
     assert focus_roots(bhav, 2, ["NIFTY", "BANKNIFTY"]) == ["BBB", "AAA", "NIFTY", "BANKNIFTY"]
     assert focus_roots(bhav, 3, [], renames={"OLDNAME": "NEWNAME"})[2] == "NEWNAME"
+
+
+def test_the_top_n_is_taken_within_the_loaded_universe():
+    rows = [("OPTSTK", "AAA", 10.0, 1000), ("OPTSTK", "BBB", 1.0, 50_000), ("OPTSTK", "CCC", 1.0, 100)]
+    bhav = pd.DataFrame(rows, columns=["kind", "symbol", "close", "volume"])
+    assert focus_roots(bhav, 2, [], among={"AAA", "CCC"}) == ["AAA", "CCC"]

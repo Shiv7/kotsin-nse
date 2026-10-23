@@ -298,7 +298,7 @@ class Engine:
 
         # Pass 2 — which strikes, now that the previous close is known from the daily backfill.
         n_opts = self.universe_builder.select_all(groups, self._prev_close, date.today())
-        self.focus = [r for r in await asyncio.to_thread(self._focus_list) if r in groups]
+        self.focus = [r for r in await asyncio.to_thread(self._focus_list, set(groups)) if r in groups]
         for r in self.focus:
             self._select_strikes(groups[r], None)
         n_opts = sum(len(g.options) for g in groups.values())
@@ -374,14 +374,23 @@ class Engine:
         if tp.exists():
             t = pd.read_parquet(tp, columns=["scrip_code", "ts", "recv_ts", "ltp", "total_qty", "bid", "ask"])
             t = t[t["scrip_code"].astype(str).isin(codes) & (t["recv_ts"] >= since)]
-            events += [(r.recv_ts, 0, (str(r.scrip_code), r.ltp, int(r.total_qty), r.bid, r.ask)) for r in t.itertuples()]
+            t = t.dropna(subset=["recv_ts", "ltp", "total_qty"])
+            events += [(r.recv_ts, 0, (str(r.scrip_code), r.ltp, int(r.total_qty), r.bid or 0.0, r.ask or 0.0)) for r in t.itertuples()]
         dp = root / "depth" / f"{day}.parquet"
         if dp.exists():
             d = pd.read_parquet(dp)
             d = d[d["scrip_code"].astype(str).isin(codes) & (d["ts"] >= since)]
             for r in d.to_dict("records"):
-                bids = [(r[f"b{i}p"], int(r[f"b{i}q"])) for i in range(1, 21) if f"b{i}p" in r and r[f"b{i}p"] == r[f"b{i}p"] and r[f"b{i}p"]]
-                asks = [(r[f"a{i}p"], int(r[f"a{i}q"])) for i in range(1, 21) if f"a{i}p" in r and r[f"a{i}p"] == r[f"a{i}p"] and r[f"a{i}p"]]
+                def side(x: str, r: dict[str, Any] = r) -> list[tuple[float, int]]:
+                    out = []
+                    for i in range(1, 21):
+                        p, q = r.get(f"{x}{i}p"), r.get(f"{x}{i}q")
+                        if p is None or q is None or p != p or q != q or not p:  # absent, or NaN
+                            break
+                        out.append((float(p), int(q)))
+                    return out
+
+                bids, asks = side("b"), side("a")
                 events.append((r["ts"], 1, (str(r["scrip_code"]), bids, asks)))
         events.sort(key=lambda e: e[0])
         return flow, events
@@ -411,8 +420,9 @@ class Engine:
         except Exception as exc:  # noqa: BLE001 - a failed restore leaves the meters to fill from the feed
             log.warning("restore.today_failed", error=str(exc))
 
-    def _focus_list(self) -> list[str]:
-        """The last session's most traded option roots plus the configured indices (fixed for the day)."""
+    def _focus_list(self, roots: set[str] | None = None) -> list[str]:
+        """The last session's most traded option roots among ``roots`` (the loaded universe) plus the
+        configured indices, fixed for the day."""
         days = [d for d in self.oi_daily.days() if d < date.today()]
         if not days or self.s.focus_top_n <= 0:
             return []
@@ -420,7 +430,7 @@ class Engine:
         f = self.s.data_dir / SYMBOL_CHANGES_FILE
         renames = parse_symbol_changes(f.read_text(errors="replace")) if f.exists() else {}
         indices = [x.strip().upper() for x in self.s.focus_indices.split(",") if x.strip()]
-        return focus_roots(bhav, self.s.focus_top_n, indices, renames=renames)
+        return focus_roots(bhav, self.s.focus_top_n, indices, renames=renames, among=roots)
 
     def _select_strikes(self, g: ScripGroup, around: float | None) -> None:
         """One root's strikes: ATM ± ``focus_strikes_each_side`` for the focus list, the usual N
