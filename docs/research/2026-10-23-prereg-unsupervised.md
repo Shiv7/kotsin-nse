@@ -88,3 +88,25 @@ of the 20-session high/low, daily double bottoms/tops.
 **Counts as power:** real − placebo (or − 50 %) with t ≥ 3 by week, the same sign in both halves.
 **IBH role** is descriptive: how often the IB breaks up / down / both / neither, what follows a break
 or a failed break, and how the IB's size and the CPR's width change that.
+
+## 5. Hedged NIFTY selling in the calm regime (`research/condor.py`) — 2026-10-23, before any result
+
+Follows R1 (passed: NIFTY's next-day move 0.77× what its IV priced in regime 3, the calm uptrend).
+**One primary rule, judged once here and once on the holdout.**
+
+**Trade (primary).** At the close of session D, when D's regime (`regimes.py`, fitted on the past) is
+the calm uptrend: sell a NIFTY **iron butterfly** on the nearest weekly expiry with ≥ 1 day to go —
+short the ATM call and put (the strike nearest F, F from put-call parity at the strike nearest the
+future), long the call and put **2 one-day σ** away (σ_d = ATM IV × F / √252, rounded to the nearest
+listed strike, at least one strike). Close all four legs at the close of D + 1 (the expiry's final
+settlement if D + 1 is the expiry). Prices: the bhavcopy close (settle on expiry day).
+
+**Costs.** Every leg, both ways: 1 index point of spread per transaction + the engine's charges
+(`risk/costs.py`, an option leg, NIFTY's lot). Sensitivity, not selection: 2 points.
+
+**Window.** 2022-04 → 2025-09 (regime labels start 2022-04). Holdout 2025-10-01 → 2026-10-16 untouched.
+
+**Pass.** Net points per trade > 0 with t(by week) ≥ 2.0; ≥ 60 % of months positive; both halves
+(2022-04 → 2023-12 / 2024-01 → 2025-09) positive; profit factor ≥ 1.2; still positive at 2 points of
+spread. Reported, not judged: the same trade on every day and in each other regime; the worst day, the
+worst month and the largest drawdown, in points and in ₹ for one lot.
