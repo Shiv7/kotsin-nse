@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import json
 import os
 import signal
 import sys
@@ -267,6 +268,43 @@ def run_dbcpr(settings: Settings, args: argparse.Namespace) -> None:
               f"win {sm.get('win')}%  avg {sm.get('avg_r')} R (before charges {sm.get('gross_r')} R)  months +{sm.get('months_positive')}/-{sm.get('months_negative')}")
 
 
+def run_optsig(settings: Settings, args: argparse.Namespace) -> None:
+    """Option signals → the next 1 / 5 sessions (research/optsignals.py, pre-registered)."""
+    from .research.optsignals import run
+
+    def on_day(d: date, n: int, of: int) -> None:
+        print(f"  features {n}/{of} sessions ({d})", flush=True)
+
+    out = run(settings, date.fromisoformat(args.start), date.fromisoformat(args.end), label=args.label, on_day=on_day)
+    print(f"{out['id']}  {out['rows']:,} stock-sessions over {out['days']} sessions  cost {out['cost_bps_round_trip']:.1f} bps a round trip")
+    for name, r in out["tests"].items():
+        print(f"  {name:28} {r}")
+
+
+def run_regimes(settings: Settings, args: argparse.Namespace) -> None:
+    """Market regimes (research/regimes.py, pre-registered); needs `optsig` run first (_market.parquet)."""
+    from .research.regimes import run
+
+    out = run(settings, date.fromisoformat(args.start), date.fromisoformat(args.end), label_=args.label)
+    print(out["id"])
+    for k in ("profile", "R1_all", "R1_nifty_move_vs_implied", "R3_reversal_ic", "R2_rules_by_regime"):
+        print(f"  {k}: {json.dumps(out[k], indent=1, default=float)}")
+
+
+def run_daytype(settings: Settings, args: argparse.Namespace) -> None:
+    """Day types and the 11:00 prediction (research/daytype.py, pre-registered)."""
+    from .research.daytype import run
+
+    def on_symbol(sym: str, n: int, of: int) -> None:
+        print(f"  {n}/{of} stocks", flush=True)
+
+    out = run(settings, date.fromisoformat(args.start), date.fromisoformat(args.end), label=args.label, on_symbol=on_symbol)
+    print(out["id"])
+    for k, v in out.items():
+        if k not in ("id", "kind", "label"):
+            print(f"  {k}: {json.dumps(v, default=float)}")
+
+
 def run_fib(settings: Settings, args: argparse.Namespace) -> None:
     """Trend pullbacks at Fibonacci + pivot + order-block confluence (research/fibob.py)."""
     from dataclasses import fields
@@ -456,6 +494,21 @@ def build_parser() -> argparse.ArgumentParser:
     db.add_argument("--label", default="")
     db.add_argument("--set", action="append", help="e.g. --set rr=3 --set touch_atr=0.5")
 
+    os2 = sub.add_parser("optsig", help="option signals (IV spread, skew, O/S, OTM build, anomaly) -> next 1/5 sessions")
+    os2.add_argument("--start", default="2021-04-01")
+    os2.add_argument("--end", default="2025-09-30")
+    os2.add_argument("--label", default="")
+
+    rg = sub.add_parser("regimes", help="market regimes (Gaussian mixture, fitted on the past) and what changes by regime")
+    rg.add_argument("--start", default="2022-04-01")
+    rg.add_argument("--end", default="2025-09-30")
+    rg.add_argument("--label", default="")
+
+    dt = sub.add_parser("daytype", help="day types (k-means) and predicting them at 11:00 (1m cache)")
+    dt.add_argument("--start", default="2024-04-01")
+    dt.add_argument("--end", default="2025-09-30")
+    dt.add_argument("--label", default="")
+
     m = sub.add_parser("mtf-backtest", help="1h/4h sweeps timed on 15m/5m, over the 5m cache")
     m.add_argument("--start", required=True)
     m.add_argument("--end", required=True)
@@ -498,6 +551,12 @@ def cli() -> None:
         run_confirm(settings, args)
     elif command == "dbcpr-backtest":
         run_dbcpr(settings, args)
+    elif command == "optsig":
+        run_optsig(settings, args)
+    elif command == "regimes":
+        run_regimes(settings, args)
+    elif command == "daytype":
+        run_daytype(settings, args)
     elif command == "mtf-backtest":
         run_mtf(settings, args)
     else:  # pragma: no cover - argparse rejects anything else
