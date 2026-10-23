@@ -160,6 +160,17 @@ built that way; over 18 months neither confirmation beats a random walk on the p
 - **Regimes** (`research/regimes.py`, `regime-b254ea133d`, GMM k = 4 fitted on the past only, 2022-04 → 2025-09): calm uptrend (346 sessions), quiet drift down (285), relief rally (158), fear (72). NIFTY's next-day move ÷ what its ATM IV priced (1.0 = fair): **0.88 overall; 0.77 in the calm uptrend (t −4.75, 33/39 months, both halves) — PASSES the pre-registered sellers'-regime test**; but 5.5 % of those days moved > 2× priced (worst 4.3×), so only hedged selling. No intraday rule is positive in any regime; the 1-day reversal is not regime-dependent. **Lead: hedged NIFTY weekly selling in the calm regime — backtest on bhavcopy prices, then the holdout.**
 - **Day types** (`research/daytype.py`, `daytype-7265de4ef6`, 57,849 stock-days): k-means finds grind up (22 %), grind down (26 %), range/chop with both extremes in the first hour (33 %), trend up (11 %), trend down (8 %). At 11:00 the type is predicted right 44 % of the time (vs 31 % for the commonest). Trading 11:00 → close on it: **+11 bps gross, −3.6 bps after 14.6 bps costs**, t −2.2, 5/12 months — fails; barely better than simply following the morning move (−4.2). The morning move continues a little (+4.8 bps gross on all days), never enough to pay.
 
+**Hedged NIFTY selling in the calm regime** (prereg §5 / §5b, `research/condor.py`, NIFTY weekly options from the bhavcopy,
+2022-04 → 2025-09; on expiry day the bhavcopy's option `settle` is the index's final settlement level — legs are valued at
+intrinsic from it):
+- **§5, one-day iron butterfly** (short ATM, wings 2 one-day σ): **+5.4 points gross a trade (65 % wins, PF 1.46) but 12.1 points
+  of costs** (8 legs crossed daily + charges) → **−6.7 net**, 13/39 months — fails (`condor-4ea7986b13`). Every day / other
+  regimes: worse. Brokerage is per order: at 1 lot it is 4.3 of the 5.4 points of charges, at 10 lots 0.4.
+- **§5b, held to expiry** (wings 2σ of the move to expiry, one at a time, 4 days on average): **−13.0 points gross**, −17.7 net
+  at 10 lots, PF 0.78, 129 trades — fails (`condorB-c7cd9eea63`). The next-day overpricing does not survive a multi-day hold;
+  the worst weeks (−515 points) outweigh it. **Option selling, as specified, is closed in the exploration window.**
+- Note: `cost_stt_pct_sell_option_premium` is 0.0625 in config; NSE's rate since 2024-10-01 is 0.1 % — update before any live use.
+
 **Each tool's power on its own** (`research/power.py`, `power-fd1a17faa6`, 3.9 M events; prereg §4): a race — X in the
 tool's direction before X against (5m: 0.25 ADR, rest of day, 2024-04 → 2025-09; daily: 1 ADR, 10 sessions, 2021-04 → 2025-09);
 levels against **placebo levels** shifted 0.15–0.35 ADR on the same stock-day, Fibonacci against 30/45/56/70 %.

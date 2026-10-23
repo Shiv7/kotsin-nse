@@ -319,6 +319,22 @@ def run_power(settings: Settings, args: argparse.Namespace) -> None:
     print(f"  IB: {json.dumps(out['ib'], default=float)}")
 
 
+def run_condor(settings: Settings, args: argparse.Namespace) -> None:
+    """Hedged NIFTY selling in the calm regime (research/condor.py, pre-registered §5)."""
+    from .research.condor import run, run_b
+
+    if args.hold == "expiry":
+        out = run_b(settings, date.fromisoformat(args.start), date.fromisoformat(args.end), label=args.label)
+        print(f"{out['id']}  calm regime = {out['calm_regime']}  unsettled skipped {out['unsettled_skipped']}  held {out['avg_bdays_held']} days")
+        for k in ("B_10_lots", "B_10_lots_2pts_spread", "B_1_lot", "B_gross"):
+            print(f"  {k}: {json.dumps(out[k], default=float)}")
+        return
+    out = run(settings, date.fromisoformat(args.start), date.fromisoformat(args.end), label=args.label)
+    print(f"{out['id']}  calm regime = {out['calm_regime']} ({out['regime_run']})")
+    for k in ("primary_calm", "primary_at_2pts_spread", "gross_calm", "every_day", "by_regime"):
+        print(f"  {k}: {json.dumps(out[k], default=float)}")
+
+
 def run_fib(settings: Settings, args: argparse.Namespace) -> None:
     """Trend pullbacks at Fibonacci + pivot + order-block confluence (research/fibob.py)."""
     from dataclasses import fields
@@ -526,6 +542,12 @@ def build_parser() -> argparse.ArgumentParser:
     pw = sub.add_parser("power", help="each tool's power on its own (levels vs placebo, fib vs non-fib, patterns vs 50%%), IB role")
     pw.add_argument("--label", default="")
 
+    cd = sub.add_parser("condor", help="hedged NIFTY weekly iron butterfly, one day, in the calm regime (bhavcopy prices)")
+    cd.add_argument("--start", default="2022-04-01")
+    cd.add_argument("--end", default="2025-09-30")
+    cd.add_argument("--label", default="")
+    cd.add_argument("--hold", choices=["1d", "expiry"], default="1d")
+
     m = sub.add_parser("mtf-backtest", help="1h/4h sweeps timed on 15m/5m, over the 5m cache")
     m.add_argument("--start", required=True)
     m.add_argument("--end", required=True)
@@ -576,6 +598,8 @@ def cli() -> None:
         run_daytype(settings, args)
     elif command == "power":
         run_power(settings, args)
+    elif command == "condor":
+        run_condor(settings, args)
     elif command == "mtf-backtest":
         run_mtf(settings, args)
     else:  # pragma: no cover - argparse rejects anything else
