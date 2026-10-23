@@ -239,6 +239,34 @@ def run_confirm(settings: Settings, args: argparse.Namespace) -> None:
             print(f"    {k:22} n={v.get('n'):>5}  hit {v.get('target_hit')}% vs {v.get('p_random')}%  avg {v.get('avg_r')} R  gross {v.get('gross_r')} R")
 
 
+def run_dbcpr(settings: Settings, args: argparse.Namespace) -> None:
+    """The owner's CPR sequence on 1m bars (research/dbcpr.py)."""
+    from dataclasses import fields
+
+    from .research.dbcpr import DbCprParams, run
+
+    known = {f.name for f in fields(DbCprParams)}
+    over: dict[str, object] = {}
+    for kv in args.set or []:
+        k, _, v = kv.partition("=")
+        if k not in known:
+            raise SystemExit(f"unknown parameter {k!r}; known: {', '.join(sorted(known))}")
+        cur = getattr(DbCprParams(), k)
+        over[k] = v if isinstance(cur, str) else (v.lower() == "true") if isinstance(cur, bool) else type(cur)(v)
+    syms = [x.strip().upper() for x in args.symbols.split(",") if x.strip()] or None
+
+    def on_symbol(sym: str, got: list, n: int, of: int) -> None:
+        if n % 25 == 0 or n == of:
+            print(f"  {n}/{of} stocks", flush=True)
+
+    out = run(settings, date.fromisoformat(args.start), date.fromisoformat(args.end), DbCprParams(**over),  # type: ignore[arg-type]
+              symbols=syms, label=args.label, on_symbol=on_symbol)
+    print(out["id"])
+    for stop, sm in out["summary"].items():
+        print(f"  stop {stop}: {sm.get('n', 0)} trades  target hit {sm.get('target_hit')}% (a random walk: {sm.get('p_random')}%)  "
+              f"win {sm.get('win')}%  avg {sm.get('avg_r')} R (before charges {sm.get('gross_r')} R)  months +{sm.get('months_positive')}/-{sm.get('months_negative')}")
+
+
 def run_fib(settings: Settings, args: argparse.Namespace) -> None:
     """Trend pullbacks at Fibonacci + pivot + order-block confluence (research/fibob.py)."""
     from dataclasses import fields
@@ -421,6 +449,13 @@ def build_parser() -> argparse.ArgumentParser:
     cf.add_argument("--label", default="")
     cf.add_argument("--set", action="append", help="e.g. --set tol_atr=0.3 --set max_wait=6")
 
+    db = sub.add_parser("dbcpr-backtest", help="the owner's CPR sequence: 5m double bottom under the CPR, 1m Supertrend, rejection at P/TC (1m cache)")
+    db.add_argument("--start", default="2024-04-01")
+    db.add_argument("--end", default="2025-09-30")
+    db.add_argument("--symbols", default="")
+    db.add_argument("--label", default="")
+    db.add_argument("--set", action="append", help="e.g. --set rr=3 --set touch_atr=0.5")
+
     m = sub.add_parser("mtf-backtest", help="1h/4h sweeps timed on 15m/5m, over the 5m cache")
     m.add_argument("--start", required=True)
     m.add_argument("--end", required=True)
@@ -461,6 +496,8 @@ def cli() -> None:
         asyncio.run(fetch_oi(settings, args))
     elif command == "confirm-backtest":
         run_confirm(settings, args)
+    elif command == "dbcpr-backtest":
+        run_dbcpr(settings, args)
     elif command == "mtf-backtest":
         run_mtf(settings, args)
     else:  # pragma: no cover - argparse rejects anything else
