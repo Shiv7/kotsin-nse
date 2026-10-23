@@ -258,6 +258,23 @@ def run_swing(settings: Settings, args: argparse.Namespace) -> None:
         print(f"  universe {out['universe']}")
 
 
+def run_optsim(settings: Settings, args: argparse.Namespace) -> None:
+    """Option buying on replayed sessions (sim/): the baselines, side by side."""
+    from .sim.policies import Flat, Momentum, Oracle, Random
+    from .sim.run import run
+
+    days = [date.fromisoformat(x) for x in args.days.split(",")]
+    roots = [x.strip().upper() for x in args.roots.split(",") if x.strip()] or None
+    hold = args.hold_min * 60
+    pols = [Flat(), *(Random(p_enter=0.01, hold_s=hold, seed=s, name=f"random #{s}") for s in range(3)),
+            Momentum(hold_s=hold), Oracle(edge_bps=args.oracle_bps, hold_s=hold)]
+    out = run(settings, days, roots, pols, start=args.start, end=args.end, step_s=args.step_s)
+    print("coverage:", ", ".join(f"{c['symbol']} {c['cash_frames']}f/{c['options']}opt" for c in out["coverage"]))
+    print(f"  {'policy':24}{'trades':>7}{'win%':>7}{'net ₹':>11}{'avg ₹':>9}{'charges ₹':>11}{'spread ₹':>10}")
+    for name, t in out["totals"].items():
+        print(f"  {name:24}{t['trades']:>7}{t['win_rate']!s:>7}{t['net']:>11,.0f}{t['avg_net']!s:>9}{t['charges']:>11,.0f}{t['spread_paid']:>10,.0f}")
+
+
 def run_micro_ic(settings: Settings, args: argparse.Namespace) -> None:
     """Each recorded order-flow reading against the next 5/15/30 minutes (research/micro_ic.py)."""
     from .research.micro_ic import MIN_DAYS, run
@@ -345,6 +362,15 @@ def build_parser() -> argparse.ArgumentParser:
     sw.add_argument("--label", default="")
     sw.add_argument("--set", action="append", help="e.g. --set entry=1h --set use_bias=false --set sides=long")
 
+    os_ = sub.add_parser("optsim", help="option buying on replayed sessions: baselines (flat, random, momentum, oracle)")
+    os_.add_argument("--days", required=True, help="YYYY-MM-DD[,…]")
+    os_.add_argument("--roots", default="")
+    os_.add_argument("--hold-min", type=float, default=5.0)
+    os_.add_argument("--oracle-bps", type=float, default=15.0)
+    os_.add_argument("--start", default="09:20")
+    os_.add_argument("--end", default="15:10")
+    os_.add_argument("--step-s", type=float, default=5.0)
+
     mi = sub.add_parser("micro-ic", help="does the recorded order flow predict the next 5/15/30 minutes")
     mi.add_argument("--start", required=True)
     mi.add_argument("--end", default=today.isoformat())
@@ -386,6 +412,8 @@ def cli() -> None:
         run_swing(settings, args)
     elif command == "fib-backtest":
         run_fib(settings, args)
+    elif command == "optsim":
+        run_optsim(settings, args)
     elif command == "micro-ic":
         run_micro_ic(settings, args)
     elif command == "fetch-oi":
