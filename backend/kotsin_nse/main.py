@@ -335,6 +335,28 @@ def run_condor(settings: Settings, args: argparse.Namespace) -> None:
         print(f"  {k}: {json.dumps(out[k], default=float)}")
 
 
+def run_chainscore(settings: Settings, args: argparse.Namespace) -> None:
+    """A combined option-chain score traded weekly (research/chainscore.py, pre-registered §6a)."""
+    from .research.chainscore import run
+
+    out = run(settings, date.fromisoformat(args.end), label=args.label)
+    print(f"{out['id']}  cost {out['cost_bps_round_trip']} bps a round trip  turnover weekly {out['avg_turnover_weekly']} daily {out['avg_turnover_daily']}")
+    for k in ("weekly_ls_net", "weekly_ls_gross", "weekly_long_gross", "weekly_short_gross", "daily_ls_net", "daily_ls_gross"):
+        print(f"  {k}: {json.dumps(out[k], default=float)}")
+    w = list(out["weights_by_month"].items())
+    print(f"  weights first/last month: {w[0]} … {w[-1]}")
+
+
+def run_overnight(settings: Settings, args: argparse.Namespace) -> None:
+    """Overnight vs intraday (research/overnight.py, pre-registered §6b)."""
+    from .research.overnight import run
+
+    out = run(settings, date.fromisoformat(args.start), date.fromisoformat(args.end), label=args.label)
+    print(out["id"])
+    for k in ("NIFTY", "BANKNIFTY", "stocks_cross_sectional_mean"):
+        print(f"  {k}: {json.dumps(out[k], default=float)}")
+
+
 def run_fib(settings: Settings, args: argparse.Namespace) -> None:
     """Trend pullbacks at Fibonacci + pivot + order-block confluence (research/fibob.py)."""
     from dataclasses import fields
@@ -548,6 +570,15 @@ def build_parser() -> argparse.ArgumentParser:
     cd.add_argument("--label", default="")
     cd.add_argument("--hold", choices=["1d", "expiry"], default="1d")
 
+    cs = sub.add_parser("chainscore", help="combined option-chain score, long-short top/bottom quintile, weekly (prereg 6a)")
+    cs.add_argument("--end", default="2025-09-30")
+    cs.add_argument("--label", default="")
+
+    ov = sub.add_parser("overnight", help="overnight vs intraday returns; long NIFTY future close->open (prereg 6b)")
+    ov.add_argument("--start", default="2021-04-01")
+    ov.add_argument("--end", default="2025-09-30")
+    ov.add_argument("--label", default="")
+
     m = sub.add_parser("mtf-backtest", help="1h/4h sweeps timed on 15m/5m, over the 5m cache")
     m.add_argument("--start", required=True)
     m.add_argument("--end", required=True)
@@ -600,6 +631,10 @@ def cli() -> None:
         run_power(settings, args)
     elif command == "condor":
         run_condor(settings, args)
+    elif command == "chainscore":
+        run_chainscore(settings, args)
+    elif command == "overnight":
+        run_overnight(settings, args)
     elif command == "mtf-backtest":
         run_mtf(settings, args)
     else:  # pragma: no cover - argparse rejects anything else

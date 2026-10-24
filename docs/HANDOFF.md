@@ -171,6 +171,23 @@ intrinsic from it):
   the worst weeks (−515 points) outweigh it. **Option selling, as specified, is closed in the exploration window.**
 - Note: `cost_stt_pct_sell_option_premium` is 0.0625 in config; NSE's rate since 2024-10-01 is 0.1 % — update before any live use.
 
+**Overnight vs intraday** (prereg §6b, `research/overnight.py`, `overnight-23c20be4e0`, daily cache 2021-04 → 2025-09): **the
+whole return is overnight; intraday drifts DOWN.** NIFTY: overnight (prev close → open) **+9.1 bps a night** (t 6.0, 71 % of weeks,
+every year positive), intraday (open → close) **−4.1 bps** (t −2.2), close-to-close +5.0. BANKNIFTY +6.8 / −1.7. F&O stocks
+(equal-weight cross-section, 193 names): **overnight +16.4 bps (t 10.8, 83 % of weeks, 96 % of stocks positive), intraday −8.4 bps
+(t −3.3, 91 % of stocks negative)** — about +41 % a year overnight against −21 % intraday. Mon→Tue the biggest night (14.5 bps),
+Fri→Mon the smallest (2.8). By regime at the close: relief rally 19.8, calm uptrend 9.7, drift down 2.3, fear 3.0. **As a trade it
+fails:** a NIFTY future close → open costs 12.8 bps a round trip (10 lots) against 9.1 gross → −3.7 net (`passes: false`); the
+intraday short −8.7 net. **What it means for everything intraday here:** every long-only intraday rule has fought a −8 bps/day
+headwind, the "up" races scoring 48 % in the power study is this, and a close→open hold captures what an intraday long never can.
+Next: the overnight premium as the *direction* inside a cheaper carrier (hold through the night, not the day; stock selection on
+the chain score's long leg, held overnight only) — write it up before running.
+
+**Weekly option-chain score** (prereg §6a, `research/chainscore.py`, `chainscore-0a17df1e73`): ridge weights walk-forward (12
+months), top − bottom quintile, weekly. **+11.8 bps a week gross (t 1.4, not significant), −9.3 net**: 72 % of each leg turns
+over every week, so the costs are nearly a full round trip anyway; the day-1 information (§1) fades by day 5. Daily rebalancing:
++4.9 gross (t 2.6), −13 net. The fitted signs stay as §1 found them (skew +, put build +, abnormal O/S −, call−put IV −). Fails.
+
 **Each tool's power on its own** (`research/power.py`, `power-fd1a17faa6`, 3.9 M events; prereg §4): a race — X in the
 tool's direction before X against (5m: 0.25 ADR, rest of day, 2024-04 → 2025-09; daily: 1 ADR, 10 sessions, 2021-04 → 2025-09);
 levels against **placebo levels** shifted 0.15–0.35 ADR on the same stock-day, Fibonacci against 30/45/56/70 %.

@@ -91,3 +91,31 @@ def test_clusters_chain_levels_within_the_tolerance_and_weigh_them():
 
     w = _cluster_weight({"P": (100.0, "D"), "WP": (100.05, "W"), "MS1": (100.12, "M"), "R1": (105.0, "D")}, 0.1)
     assert w == {"P": 6, "WP": 6, "MS1": 6, "R1": 1}
+
+
+def test_the_chain_score_portfolio_charges_both_legs_only_for_names_that_change():
+    from kotsin_nse.research.chainscore import portfolio
+
+    days = ["2024-06-07", "2024-06-14", "2024-06-21"]
+    syms = [f"S{i:02d}" for i in range(40)]
+    # scores: S00..S07 lowest, S32..S39 highest, the same every week → no turnover after the first week
+    scored = pd.DataFrame([{"day": d, "symbol": s, "score": float(i)} for d in days for i, s in enumerate(syms)])
+    closes = pd.DataFrame({s: [100.0, 100.0 + (i - 20) * 0.1, 100.0 + (i - 20) * 0.2] for i, s in enumerate(syms)}, index=days)
+    p = portfolio(scored, closes, days, cost_bps=10.0)
+    assert len(p) == 2
+    first, second = p.iloc[0], p.iloc[1]
+    assert first["cost_long"] == pytest.approx(5e-4) and first["cost_short"] == pytest.approx(5e-4), "every name entered: one fill each"
+    assert second["cost_long"] == 0 and second["cost_short"] == 0, "nothing changed: no cost"
+    assert first["ls_net"] == pytest.approx(first["ls_gross"] - 1e-3)
+    assert second["ls_net"] == pytest.approx(second["ls_gross"])
+    assert first["ls_gross"] > 0, "the top quintile rose more than the bottom"
+
+
+def test_the_overnight_split_adds_up_and_drops_split_days():
+    from kotsin_nse.research.overnight import split
+
+    d1 = pd.DataFrame({"day": ["2024-01-01", "2024-01-02", "2024-01-03"], "o": [100.0, 102.0, 51.0], "h": [101, 103, 52], "l": [99, 101, 50], "c": [100.0, 103.0, 51.5]})
+    x = split(d1)
+    assert list(x.index) == ["2024-01-02"], "no previous close for the first day; the 1:2 split day is dropped"
+    assert x.loc["2024-01-02", "overnight"] == pytest.approx(0.02)
+    assert (1 + x.loc["2024-01-02", "overnight"]) * (1 + x.loc["2024-01-02", "intraday"]) == pytest.approx(1 + x.loc["2024-01-02", "close_to_close"])

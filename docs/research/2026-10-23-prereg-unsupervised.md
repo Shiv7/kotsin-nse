@@ -152,3 +152,7 @@ Report means, t by week, both halves, by year, and for the stocks the cross-sect
 future's charges + 5 bp slippage per fill, round trip). **Pass**: net > 0, t(by week) ≥ 2.0, ≥ 55 % of
 weeks positive, both halves positive. Reported, not judged: the same on BANKNIFTY; intraday short
 (open → close) as the mirror; the overnight return by regime (`_regimes.parquet`); by weekday.
+
+**Results (2026-10-24):** §6a fails — +11.8 bps/week gross (t 1.4), −9.3 net at 72 % weekly turnover (`chainscore-0a17df1e73`).
+§6b fails as a trade — NIFTY overnight +9.1 bps gross (t 6.0) vs 12.8 bps costs → −3.7 net (`overnight-23c20be4e0`) — but the
+decomposition is the strongest fact found: stocks +16.4 bps overnight (t 10.8), −8.4 intraday (t −3.3), 96 % / 91 % of names.
