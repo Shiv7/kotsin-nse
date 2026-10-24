@@ -43,6 +43,9 @@ LISTING = "https://www.nseindia.com/companies-listing/corporate-filings-financia
 SOURCES: dict[str, tuple[str, date, date | None]] = {
     "results": ("https://www.nseindia.com/api/corporates-financial-results?index=equities&period=Quarterly&from_date={a}&to_date={b}",
                 date(2021, 1, 1), date(2025, 3, 31)),
+    # the audited Q4 + annual filing of a company that files it in place of a "Quarterly" Q4 (same toDate)
+    "annual": ("https://www.nseindia.com/api/corporates-financial-results?index=equities&period=Annual&from_date={a}&to_date={b}",
+               date(2021, 1, 1), date(2025, 3, 31)),
     "board": ("https://www.nseindia.com/api/corporate-board-meetings?index=equities&from_date={a}&to_date={b}", date(2021, 1, 1), None),
     # paginated (page / size / totalCount); one page of 5,000 holds any month (May 2025: 3,479 rows)
     "integrated": ("https://www.nseindia.com/api/integrated-filing-results?index=equities&from_date={a}&to_date={b}"
@@ -114,11 +117,12 @@ def build_tables(settings: Settings) -> tuple[pd.DataFrame, pd.DataFrame]:
     """``results.parquet`` and ``board.parquet`` from the raw files (see the module docstring)."""
     raw = settings.data_dir / "events" / "raw"
     res: list[dict[str, Any]] = []
-    for p in sorted(raw.glob("results_*.json")):
-        for x in _rows(p):
-            res.append({"symbol": x.get("symbol"), "broadcast_ts": _ts(x.get("broadCastDate")), "period_end": x.get("toDate"),
-                        "relating_to": x.get("relatingTo"), "audited": x.get("audited"), "consolidated": x.get("consolidated"),
-                        "source": "results"})
+    for src in ("results", "annual"):
+        for p in sorted(raw.glob(f"{src}_*.json")):
+            for x in _rows(p):
+                res.append({"symbol": x.get("symbol"), "broadcast_ts": _ts(x.get("broadCastDate")), "period_end": x.get("toDate"),
+                            "relating_to": x.get("relatingTo"), "audited": x.get("audited"), "consolidated": x.get("consolidated"),
+                            "source": src})
     for p in sorted(raw.glob("integrated_*.json")):
         for x in _rows(p):
             res.append({"symbol": x.get("symbol"), "broadcast_ts": _ts(x.get("broadcast_Date")), "period_end": x.get("qe_Date"),
@@ -310,17 +314,23 @@ def study(settings: Settings, end: date = date(2025, 9, 30), label: str = "") ->
     # the cross-check: board-meeting result dates of members with no filing within 3 sessions
     missing = None
     if len(board) and len(t):
-        have = {(s, e) for s, e in zip(t["symbol"], t["E"], strict=True)}
+        from ..market.fo_universe import load as load_members
+
+        fm, _ = load_members(settings.data_dir)
+        have = {(sym, e) for sym, e in zip(t["symbol"], t["E"], strict=True)}
         idx = pd.Index(sessions)
-        syms = set(t["symbol"])
-        b = board[(board["symbol"].isin(syms)) & (board["meeting_day"] >= "2021-04-01") & (board["meeting_day"] <= end.isoformat())]
-        miss = 0
+        b = board[(board["meeting_day"] >= "2021-04-01") & (board["meeting_day"] <= end.isoformat())]
+        n_member = miss = 0
         for x in b.itertuples():
+            d = date.fromisoformat(x.meeting_day)
+            if not (fm.covers(d) and fm.member(x.symbol, d)):
+                continue  # not in F&O on that day: no event was expected
+            n_member += 1
             p = idx.searchsorted(x.meeting_day)
             near = {sessions[j] for j in range(max(0, p - 1), min(len(sessions), p + 4))}
             if not any((x.symbol, e) in have for e in near):
                 miss += 1
-        missing = {"board_result_dates_of_members": len(b), "without_a_filing_nearby": miss}
+        missing = {"board_result_dates_of_members": n_member, "without_a_filing_nearby": miss}
     bins = {"1-2": t[(t["z"].abs() >= 1) & (t["z"].abs() < 2)], "2-3": t[(t["z"].abs() >= 2) & (t["z"].abs() < 3)], ">3": t[t["z"].abs() >= 3]}
     out: dict[str, Any] = {
         "id": f"events-{uuid.uuid4().hex[:10]}", "kind": "events", "label": label, "end": end.isoformat(), "cost_bps_round_trip": round(cost_bps, 2),

@@ -212,3 +212,21 @@ the mirror (fade the reaction); the realised |r_E| against the move the ATM IV a
 (`_optsignals.parquet`: iv × √(1/252)) — a sellers' question for a later pre-registration; by the regime
 at E (post-hoc, as in §6c). Before any holdout: the execution check at the 15:25 bar of E on the
 5m cache (2024-01 → 2025-09), as §6c taught.
+
+**§7 results (2026-10-25) — three runs, disclosed.** Run 1 (`events-6fe672b38a`) and run 2 (`events-95ed4d530a`,
+after adding NSE's "Annual" filings, which changed nothing) used the daily cache as it stood: the stocks in F&O
+*today*, membership point-in-time. 2,423 events, 780 with |z| ≥ 2: **+25.9 bps net, t 1.53, 62.7 % of weeks,
+halves +26.8 / +25.2 — fails on t.** The coverage cross-check then showed 29 % of members' result dates had no
+event, and 875 of those 1,000 were stocks that have since left F&O and had no daily data at all (survivorship
+in the data, not the membership). Daily history was fetched for the 72 that still trade (HDFC, MINDTREE, IDFC,
+GSPL, PEL are gone) and the study re-run with the rule untouched. **Run 3 (`events-f1042b6f6f`): 3,205 events,
+1,014 selected — +35.3 bps net per event, t 2.36 by week, 63.3 % of weeks positive, halves +35.6 / +35.1 —
+PASSES as registered** (gross +49.9, t 3.35; market-adjusted +42.4, t 3.15, 70 % of weeks; median +53.7;
+hit rate 55.5 %). Reported: by hold, net 1 d +23.9 (t 2.9), 3 d +35.8 (t 3.1), 10 d +29.7 (t 1.4), 20 d +74.4
+(t 2.8, halves +34 / +108); market-adjusted drift 31 → 42 → 92 bps from 1 to 20 sessions; |z| 1–2 / 2–3 / > 3
+at 5 d: 13 / 38 / 46 bps, at 20 d: 17 / 72 / 107; the mirror (fade) −64.6 (t −4.3); long leg +30 (t 1.2),
+short +40 (t 1.5); in-hours broadcasts +83.9 (t 2.7, n 220) vs after-hours +21.9 (t 1.4, n 794); run-up
++14 bps the right way; realised ÷ implied results move: median 0.90, 46 % above; by regime at E (post-hoc):
+drift-down +65, calm +42, relief rally −36, fear −64. Missing by construction: the four insurers (results filed
+under another NSE category, 64 dates) and ~160 postponed-meeting dates. **Not taken to the holdout.** First the
+15:25 execution check (selection and entry on the 15:25 bar, 5m cache, 2024-01 → 2025-09), then the owner's word.

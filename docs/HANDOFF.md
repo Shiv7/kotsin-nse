@@ -149,6 +149,7 @@ R = multiples of the planned risk. "net" is after the measured cost model.
 | 11b | **Owner's CPR rejection, 1:2** (as he trades it): price above the CPR comes back into it, a 5m bar closes back above TC; stop under P, target 2 × risk; no Supertrend flip waited for; 1h agreement recorded two ways | same | **+0.016 R before slippage and charges, −0.366 R after**, 46,803 trades, 0/18 months. 1h structure agreeing: +0.010 / −0.360 R; 1h Supertrend: −0.002 / −0.372; both + a weekly level inside the CPR: −0.017 / −0.313 (4,123 trades). Wider risk loses less (costs), never wins | `confirm-8e1152abae` |
 | 11c | **Owner's full CPR sequence** (1m, `research/dbcpr.py`): 5m double bottom under the CPR → 1m Supertrend turns → a 1m rejection at P/TC from above → the first close above that bar's high; 1:2 | 2024-04 → 2025-09, 1m, all F&O | **7,791 trades: +0.04 R before costs, −0.36 R after** (stop one CPR level beyond), −0.64 R with the stop under the rejection bar; 0/18 months. 1h agreeing, weekly level in the CPR, P vs TC, side, year — none turns it | `dbcpr-b31c1779f9` |
 | 12 | Same double bottom/top on **recorded 1m bars** with the futures-flow ("selling eased") and option-writer ("puts written") checks (`research/confirm_live.py`) | 19 + 23 Oct 2026 | 1,078 signals, −0.29 R before costs; neither check separates winners. Two days — re-run when ≥ 15 are recorded | — |
+| 13 | **Post-results drift** (`research/events.py`, prereg §7): NSE filings' broadcast time → event session E; reaction z = market-adjusted close-to-close move ÷ the stock's 60-session σ; **|z| ≥ 2 → with the move, close(E) → close(E+5)**, stock futures, 14.6 bps once | 2021-04 → 2025-09, daily, point-in-time F&O **including 72 stocks that later left F&O** | **+35.3 bps net per event, t 2.36 by week, 63 % of weeks, halves +35.6 / +35.1 — PASSES as registered** (gross +49.9, t 3.35; 1,014 events; median +54). Drift grows with \|z\| and with time: market-adjusted +31 (1 d) → +42 (5 d) → +92 (20 d); fading it loses −65 (t −4.3); in-hours broadcasts +84 (t 2.7) vs after-hours +22. Three runs: 1–2 on today's F&O list only (2,423 events, +25.9, t 1.53, fail), 3 after adding the dropped-out stocks (rule untouched). **Not yet on the holdout.** | `events-f1042b6f6f` (runs 1–2 `events-6fe672b38a`, `events-95ed4d530a`) |
 
 Rows 10–11 came from a hand read of ETERNAL on 2026-10-23 (CPR retest at 12:05, R1 hit at 13:05; NIFTY's
 double bottom 11:00–11:05 with put writing under it): one good day, picked afterwards. The owner's
@@ -195,6 +196,33 @@ auction, so the print cannot be sold; cash has one, but delivery STT (0.1 % each
 that fails on execution — do not spend the holdout on it.** What survives (the ~11 bps still there at 09:16) is about equal to a
 realistic round trip. The gap-and-first-minute-reversal is itself a structural fact worth knowing: a chain-picked name's open
 overshoots and fades at once.
+
+**Post-results drift** (prereg §7, `research/events.py`, `events-f1042b6f6f`; the calendar from NSE's corporate-filings APIs
+— `kotsin-nse fetch-results`: the financial-results filings with their broadcast timestamp to March 2025, the integrated filings
+after, board meetings as a cross-check; 91 k filings 2021 → 2026, the holdout part downloaded and not read). **The first lane where
+the cost wall does not bind**: a results move averages 290 bps (570 for the selected events) and 14.6 bps of costs are paid once
+against a multi-day drift. Event session E = the first session whose close follows the broadcast (21 % come in market hours);
+z = the market-adjusted close-to-close move ÷ the stock's 60-session σ.
+- **Rule as registered — |z| ≥ 2, with the move, close(E) → close(E+5): +35.3 bps net per event (t 2.36 by week, 63.3 % of weeks,
+  halves +35.6 / +35.1, hit rate 55.5 %, median +54) — passes.** Gross +49.9 (t 3.35); market-adjusted +42.4 (t 3.15, 70 % of weeks).
+  By year: +101 / +7 / +35 / +55 / −7 (2025 to September).
+- **The drift is monotonic in |z| and keeps going**: market-adjusted 1 d +31, 3 d +41, 5 d +42, 10 d +43, 20 d +92 bps; |z| > 3
+  reaches +107 at 20 d, 1–2 only +17. Net by hold: 1 d +24 (t 2.9), 3 d +36 (t 3.1), 20 d +74 (t 2.8, halves +34 / +108; every
+  year positive). Fading the move loses −65 (t −4.3). Both legs earn (long +30, short +40), neither alone significant.
+- **Broadcasts during market hours drift most**: +84 net (t 2.7, n 220, halves +88 / +78) vs +22 after hours (t 1.4) — the day's
+  close has priced only part of a mid-session release. The run-up leans the right way (+14 bps over E−5 → E−1). Options price the
+  results move about right (realised ÷ implied, median 0.90; 46 % above). By regime at E (post-hoc): drift-down +65, calm +42,
+  relief rally −36, fear −64.
+- **Three runs, all kept.** Runs 1–2 (`events-6fe672b38a`, `events-95ed4d530a`) used the daily cache of *today's* F&O stocks:
+  2,423 events, +25.9 net, t 1.53 — fail. The coverage check showed 875 of the 1,000 unmatched member result dates were stocks that
+  had left F&O and had **no daily data at all** — survivorship in the data, the §5 lesson again, in the other direction (the drift
+  is stronger in the names that were later dropped). 72 of them were fetched (HDFC, MINDTREE, IDFC, GSPL, PEL are gone); run 3 is
+  the same rule on 3,205 events. The four insurers (results filed under another NSE category) and ~160 postponed meetings are
+  missing by construction (227 of 3,388 member result dates).
+- **Before the holdout** (spent once, on the owner's word): the 15:25 execution check — select *and* enter on E's 15:25 bar from
+  the 5m cache (2024-01 → 2025-09; the 72 past members have no 5m data, so it is a check on the survivors); a 20-session hold
+  crosses a monthly expiry two times in three, so a roll (another round trip) must be charged before that hold is judged; the
+  position count in a result season (about 55 selected events a month in season, 20–40 open at once at the 5-day hold).
 
 **Weekly option-chain score** (prereg §6a, `research/chainscore.py`, `chainscore-0a17df1e73`): ridge weights walk-forward (12
 months), top − bottom quintile, weekly. **+11.8 bps a week gross (t 1.4, not significant), −9.3 net**: 72 % of each leg turns
@@ -312,8 +340,11 @@ The 64-state bias gate (`use_bias=true`) only has data from 2024, which left too
 
 ## 6. Open work / next steps
 
-1. **No candidate.** The holdout (2025-10-01 → 2026-10-16) is still untouched; keep it for a strategy that
-   survives the point-in-time universe. Re-check the other backtesters with `fo_universe` too.
+1. **One candidate (2026-10-25): post-results drift, §3.4 row 13** — passes as pre-registered on the exploration
+   window. Before the holdout (2025-10-01 → 2026-10-16, still untouched, spent once on the owner's word): the 15:25
+   execution check, the roll cost for holds across expiry, the position count in a result season. Re-check the other
+   backtesters with `fo_universe` too — and with the daily data of the stocks that left F&O (row 13 showed the cache
+   itself was a survivors' list).
 2. Robustness block for every backtest report: top-5 share of profit, total without the best 1/3/5,
    4-week block bootstrap, excess over drift / "just an up market" control, count of variants tried.
 3. **Live recording:** the launchd jobs start the engine at 08:55 and stop it at 16:00 on weekdays. They
