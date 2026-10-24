@@ -349,3 +349,9 @@ The 64-state bias gate (`use_bias=true`) only has data from 2024, which left too
    a time if needed. Known defects on the old branches (inverted option stop, dead held-quote refresh,
    corporate-action mismatch between daily and intraday caches) were found in the 2026-10-03 review.
 11. kotsin-crypto `main` has 6 unpushed commits (archive gzip, cross-asset); push only on the owner's word.
+12. **The call journal is live (2026-10-25, `journal.py`, Chart page → "Log a call", Journal page).** Every
+   mechanical form of the owner's method is zero before costs (rows 10–12); the only thing left to measure
+   is his discretion — which setups he takes. Log every call as it is seen (entry = would take it, alert =
+   watching; stop and target; the tags of the confirmation stack). The engine scores it from the 1m bars:
+   fill, stop before target, R at 15 / 30 / 60 min and at 15:25. Read nothing from it before ~30 calls;
+   then the Journal page's by-tag table says which confirmations carry weight, if any.

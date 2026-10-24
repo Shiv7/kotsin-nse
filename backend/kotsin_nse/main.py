@@ -357,6 +357,25 @@ def run_overnight(settings: Settings, args: argparse.Namespace) -> None:
         print(f"  {k}: {json.dumps(out[k], default=float)}")
 
 
+def run_fetch_results(settings: Settings, args: argparse.Namespace) -> None:
+    """NSE's results calendar (financial-results, integrated-filing, board meetings) into data-live/events/."""
+    from .research.events import build_tables, fetch
+
+    print(json.dumps({"fetched_files": fetch(settings, pause=args.pause)}))
+    r, b = build_tables(settings)
+    print(json.dumps({"results_rows": len(r), "results_symbols": int(r["symbol"].nunique()) if len(r) else 0,
+                      "by_year": r.groupby(r["broadcast_ist"].str[:4]).size().to_dict() if len(r) else {},
+                      "board_result_rows": len(b)}, default=int, indent=1))
+
+
+def run_events(settings: Settings, args: argparse.Namespace) -> None:
+    """Post-results drift (research/events.py, pre-registered §7)."""
+    from .research.events import study
+
+    out = study(settings, end=date.fromisoformat(args.end), label=args.label)
+    print(json.dumps(out, indent=1, default=float))
+
+
 def run_nightpick(settings: Settings, args: argparse.Namespace) -> None:
     """Overnight only, names picked by the chain score (research/nightpick.py, pre-registered §6c)."""
     from .research.nightpick import run
@@ -594,6 +613,13 @@ def build_parser() -> argparse.ArgumentParser:
     npk.add_argument("--end", default="2025-09-30")
     npk.add_argument("--label", default="")
 
+    fr = sub.add_parser("fetch-results", help="NSE's results calendar: financial-results + integrated-filing broadcasts, board meetings")
+    fr.add_argument("--pause", type=float, default=1.5)
+
+    evs = sub.add_parser("events", help="post-results drift: |z| >= 2 reaction, close(E) -> close(E+5), stock futures (prereg 7)")
+    evs.add_argument("--end", default="2025-09-30")
+    evs.add_argument("--label", default="")
+
     m = sub.add_parser("mtf-backtest", help="1h/4h sweeps timed on 15m/5m, over the 5m cache")
     m.add_argument("--start", required=True)
     m.add_argument("--end", required=True)
@@ -652,6 +678,10 @@ def cli() -> None:
         run_overnight(settings, args)
     elif command == "nightpick":
         run_nightpick(settings, args)
+    elif command == "fetch-results":
+        run_fetch_results(settings, args)
+    elif command == "events":
+        run_events(settings, args)
     elif command == "mtf-backtest":
         run_mtf(settings, args)
     else:  # pragma: no cover - argparse rejects anything else
