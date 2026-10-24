@@ -240,3 +240,44 @@ registered 5-session hold is flat: +1.8 bps net (daily rule, t 0.06, median +31)
 the registered rule. **Decision: the 5-day rule does not go to the holdout.** Next, if the owner agrees: §7b — the same selection
 held 20 sessions, charged a roll (a second round trip) whenever the hold crosses a monthly expiry, with the pass criteria of §7;
 one run.
+
+### 7b. The same selection held 20 sessions, as a book (`research/events.py study_book`) — 2026-10-25, before any result
+
+**Why, and what this is not.** The 20-session horizon was *chosen after looking* at §7's by-hold table and at the
+execution check (the only horizon positive in every cut). So this is a second look at the same 2021–2025 data, not a
+fresh hypothesis; the holdout is the only fresh data and it is not touched here. The pass bar is unchanged. If §7b
+fails, the lane closes. If it passes, the owner decides whether the holdout is spent on it.
+
+**Rule (the candidate strategy, end to end).**
+- **Selection exactly as §7:** event session E from the broadcast time; z = market-adjusted reaction / σ (60 sessions
+  ending E−1); |z| ≥ 2; point-in-time F&O member on E; |raw move| ≤ 50 %; a second filing within 3 sessions is the
+  same event. Side = sign(z). Window 2021-04-01 ≤ E ≤ 2025-09-30 − 20 sessions.
+- **Hold:** close(E) → close(E+20). Stock future, one unit of notional per name, no stop, no target, no early exit.
+- **Costs:** 14.62 bps per round trip (CostModel on a ₹5 lakh future + 10 bps slippage), **plus one more round trip
+  for every monthly stock-futures expiry strictly inside (E, E+20)** — the roll. Expiry = the last Thursday of the
+  month (the previous session if a holiday); from September 2025 the last Tuesday (NSE's move). Entering on an
+  expiry day or exiting on one needs no roll.
+- **The book:** at most **20 open positions**. At the close of E, positions whose E+20 is today exit first; then the
+  day's candidates are admitted **in descending |z|** while fewer than 20 are open. Turned-away candidates are
+  counted and reported, never traded.
+
+**Primary statistic and pass criteria (as §7):** the *admitted* events' net bps per event, grouped by the ISO week
+of E — mean > 0, t ≥ 2.0 by week, ≥ 55 % of weeks positive, both halves positive (2021-04-01 → 2023-06-30 and
+2023-07-01 → 2025-09-30, by E).
+
+**Reported beside it (not pass criteria, written down now so none is a post-hoc rescue):**
+1. The same without the cap (every selected event), with cap 10 and cap 40; the share of candidates turned away.
+2. Gross, market-adjusted; the long and short legs; in-hours vs after-hours; |z| 2–3 vs > 3; by year.
+3. **Carry sensitivity.** The study uses spot closes as the future's proxy. A stock future's premium decays into
+   spot by roughly 40–60 bps over 20 sessions: the long leg forgoes it, the short leg earns it. Reported: net with
+   −50 bps on every long and +50 on every short ("carry-adjusted"). If the carry-adjusted long leg is negative that
+   is written down as a fact about the long leg, not used to drop it from the rule.
+4. **The book as a P&L:** per session, the sum over open positions of side × the stock's daily return (one notional
+   unit each); weekly Sharpe, the worst peak-to-trough drawdown and the longest drawdown, the average and the peak
+   number of open positions, the share of sessions with an empty book.
+5. By regime at E (post-hoc, as in §7).
+6. The execution reference is §7's 15:25 check at hold 20 (+93.9 bps net, t 2.5, 2024-01 → 2025-09, survivors,
+   no cap, no roll). It is not re-run; a reader compares after subtracting one roll (14.6 bps).
+
+**One run** (`kotsin-nse events --book`), 2021-04-01 → 2025-09-30, cap 20. The result is appended here whatever it
+says. A second run happens only for a bug in the code, with the bug named.
