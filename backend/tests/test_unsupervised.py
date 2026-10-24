@@ -119,3 +119,16 @@ def test_the_overnight_split_adds_up_and_drops_split_days():
     assert list(x.index) == ["2024-01-02"], "no previous close for the first day; the 1:2 split day is dropped"
     assert x.loc["2024-01-02", "overnight"] == pytest.approx(0.02)
     assert (1 + x.loc["2024-01-02", "overnight"]) * (1 + x.loc["2024-01-02", "intraday"]) == pytest.approx(1 + x.loc["2024-01-02", "close_to_close"])
+
+
+def test_nightpick_nights_charge_a_round_trip_per_name_and_rank_within_the_session():
+    from kotsin_nse.research.nightpick import nights
+
+    rows = []
+    for i in range(40):
+        rows.append({"day": "2024-06-07", "symbol": f"S{i:02d}", "score": float(i), "overnight": 0.001 * (i - 20)})
+    n = nights(pd.DataFrame(rows), cost_bps=10.0).set_index("day")
+    r = n.loc["2024-06-07"]
+    # pct rank >= 0.8 of 40 names takes ranks 32..40: nine names (the boundary is inclusive), scores 31..39
+    assert r["n_top"] == 9 and r["top_gross"] == pytest.approx(0.015) and r["bottom_gross"] == pytest.approx(-0.0165)
+    assert r["top_net"] == pytest.approx(0.015 - 1e-3) and r["spread"] == pytest.approx(0.0315)

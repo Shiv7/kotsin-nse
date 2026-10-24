@@ -357,6 +357,17 @@ def run_overnight(settings: Settings, args: argparse.Namespace) -> None:
         print(f"  {k}: {json.dumps(out[k], default=float)}")
 
 
+def run_nightpick(settings: Settings, args: argparse.Namespace) -> None:
+    """Overnight only, names picked by the chain score (research/nightpick.py, pre-registered §6c)."""
+    from .research.nightpick import run
+
+    out = run(settings, date.fromisoformat(args.end), label=args.label)
+    print(f"{out['id']}  cost {out['cost_bps_per_name_per_night']} bps a name a night  {out['sessions']} nights  ~{out['avg_names_in_top']} names")
+    for k in ("top_quintile_net", "top_quintile_gross", "all_members_gross", "all_members_net", "bottom_quintile_gross",
+              "top_minus_bottom_gross", "by_regime_at_close_post_hoc", "nifty_future_same_nights_net_10_lots", "weights_first_last"):
+        print(f"  {k}: {json.dumps(out.get(k), default=float)}")
+
+
 def run_fib(settings: Settings, args: argparse.Namespace) -> None:
     """Trend pullbacks at Fibonacci + pivot + order-block confluence (research/fibob.py)."""
     from dataclasses import fields
@@ -579,6 +590,10 @@ def build_parser() -> argparse.ArgumentParser:
     ov.add_argument("--end", default="2025-09-30")
     ov.add_argument("--label", default="")
 
+    npk = sub.add_parser("nightpick", help="overnight only, long the chain score's top quintile close->open (prereg 6c)")
+    npk.add_argument("--end", default="2025-09-30")
+    npk.add_argument("--label", default="")
+
     m = sub.add_parser("mtf-backtest", help="1h/4h sweeps timed on 15m/5m, over the 5m cache")
     m.add_argument("--start", required=True)
     m.add_argument("--end", required=True)
@@ -635,6 +650,8 @@ def cli() -> None:
         run_chainscore(settings, args)
     elif command == "overnight":
         run_overnight(settings, args)
+    elif command == "nightpick":
+        run_nightpick(settings, args)
     elif command == "mtf-backtest":
         run_mtf(settings, args)
     else:  # pragma: no cover - argparse rejects anything else
