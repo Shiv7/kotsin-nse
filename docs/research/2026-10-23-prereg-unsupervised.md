@@ -178,3 +178,37 @@ result here; a 10-lot NIFTY future on the same nights as a cheaper carrier.
 **§6c result (2026-10-24):** passes as registered (`nightpick-e7c35211e4`: +7.5 bps net, t 3.5, both halves, Sharpe 1.85). The
 execution check with tradable prices: entry at the 15:25 bar holds (+8.6 net); exit at the 09:16 close −3.2, at 09:20 −5.0 — the
 edge is the opening print's overshoot, which futures cannot sell and cash cannot afford (delivery STT). Not taken to the holdout.
+
+## 7. Post-results drift (`research/events.py`) — 2026-10-25, before any result
+
+**Why this lane.** Every edge found so far is 5–25 bps against a 10–15 bps round trip. A quarterly
+result moves a stock by hundreds of bps and, in every market studied, the move continues for days
+(post-earnings-announcement drift). Costs are paid once against a multi-day move — the only lane where
+the cost wall does not bind. It needs one new input: *when* each company reported.
+
+**Data.** NSE's corporate-filings API: the financial-results filings with their **broadcast timestamp**
+(`kotsin-nse fetch-results`, kept under `data-live/events/`), 2021-01 → 2026-10 (the holdout part is
+downloaded, not read). The daily cache, NIFTY, the point-in-time F&O membership. Window 2021-04-01 →
+2025-09-30. A stock-quarter without a broadcast timestamp is dropped and counted (the board-meeting
+calendar is kept as a cross-check, not used to fill the gap: it has no time of day).
+
+**Definitions.**
+- **Event session E** = the first session whose close follows the broadcast: a broadcast before 15:30
+  IST on a session day is that day (flagged `in_hours` if after 09:15), otherwise the next session.
+- **Reaction** r_E = close(E) / close(E−1) − 1 minus NIFTY's same return. **z** = r_E / σ, σ the standard
+  deviation of the stock's market-adjusted daily returns over the 60 sessions ending E−1. The reaction
+  stands in for the earnings surprise (there is no consensus-estimate data here).
+- **Drift_k** = the market-adjusted return from close(E) to close(E+k), k ∈ {1, 2, 3, 5, 10, 20}.
+
+**Primary rule.** |z| ≥ 2: long the stock future if z > 0, short if z < 0, from close(E) to close(E+5),
+one unit per event, equal-weighted; costs 14.6 bps per round trip (the §1 figure). **Pass**: mean net
+per event > 0, t ≥ 2.0 by week (events cluster in result seasons, so the unit is the week of E, the
+per-event nets summed), ≥ 55 % of weeks with an event positive, both halves (2021-04 → 2023-06 /
+2023-07 → 2025-09) positive. One run, one rule.
+
+**Reported, not judged:** k = 1, 2, 3, 10, 20; the long and the short leg apart; |z| bins 1–2, 2–3, > 3;
+in-hours vs after-hours broadcasts; the run-up E−5 → E−1 (does the market lean the right way before);
+the mirror (fade the reaction); the realised |r_E| against the move the ATM IV at E−1 priced
+(`_optsignals.parquet`: iv × √(1/252)) — a sellers' question for a later pre-registration; by the regime
+at E (post-hoc, as in §6c). Before any holdout: the execution check at the 15:25 bar of E on the
+5m cache (2024-01 → 2025-09), as §6c taught.
