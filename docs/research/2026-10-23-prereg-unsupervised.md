@@ -281,3 +281,20 @@ of E — mean > 0, t ≥ 2.0 by week, ≥ 55 % of weeks positive, both halves po
 
 **One run** (`kotsin-nse events --book`), 2021-04-01 → 2025-09-30, cap 20. The result is appended here whatever it
 says. A second run happens only for a bug in the code, with the bug named.
+
+**§7b result (2026-10-25, one run, `kotsin-nse events --book`, `events7b-e7e5c86d8c`; 3,205 member events, 1,014 candidates, 466
+admitted to the 20-position book; 57 expiries, 0.87 rolls per trade on average). Primary — admitted events, net per event:
++89.5 bps, median +104, t 2.95 by week, 62 % of 100 weeks positive, halves +121 / +60, hit rate 55.6 %. PASSES as registered.**
+Gross +117 (t 3.8); market-adjusted +118 (t 3.8, 66 % of weeks); carry-adjusted +94.6 (t 3.1). By year +205 / +97 / **+0.4** / +142 /
+**+6** (2025 to September): two flat years in four and a half. The cap binds: 54 % of candidates are turned away, the book is at 20
+on 231 of 1,114 sessions and empty on 25 %; mean 8.4 open. Uncapped +61.5 (t 2.3, halves +21 / +96), cap 10 +127 (t 2.8), cap 40
++58 (t 2.2) — |z| priority is doing real work (|z| > 3: +110, t 2.4; 2–3: +57, t 1.3). **The legs are not alike at 20 sessions:
+long +209 net (t 3.4, carry-adjusted +159, t 2.6) — short −7.7 (t −0.15, halves +22 / −39).** Market-adjusted the short leg is
++100 (t 2.1): the shorts beat the market but NIFTY rose 80 bps on average over their holds and took it all. Written down as a
+fact about the legs, not a change to the rule (a hedged short leg would be a new registration). In-hours +61 (t 0.8, n 111, 2025
+−319) vs after-hours +98 (t 2.7) — the §7 ordering reversed at this horizon, on few events. The book: +35.6 bps-units a session,
+weekly Sharpe 0.97, 4.5 % a year on the full 20-unit notional (about 20–25 % on futures margin, before financing), worst drawdown
+−9,068 bps-units (0.45 of the cap notional), longest drawdown 317 sessions (Nov 2022 → early 2024). By regime at E (post-hoc):
+drift-down +109, calm +78, relief −4, fear −63. **Decision: the rule passed its one pre-registered run. Whether the holdout
+(2025-10-01 → 2026-10-16) is spent on it is the owner's call; the facts he should weigh are the flat 2023 and 2025, the
+long-only nature of the absolute return and the 15-month drawdown.**

@@ -149,7 +149,7 @@ R = multiples of the planned risk. "net" is after the measured cost model.
 | 11b | **Owner's CPR rejection, 1:2** (as he trades it): price above the CPR comes back into it, a 5m bar closes back above TC; stop under P, target 2 × risk; no Supertrend flip waited for; 1h agreement recorded two ways | same | **+0.016 R before slippage and charges, −0.366 R after**, 46,803 trades, 0/18 months. 1h structure agreeing: +0.010 / −0.360 R; 1h Supertrend: −0.002 / −0.372; both + a weekly level inside the CPR: −0.017 / −0.313 (4,123 trades). Wider risk loses less (costs), never wins | `confirm-8e1152abae` |
 | 11c | **Owner's full CPR sequence** (1m, `research/dbcpr.py`): 5m double bottom under the CPR → 1m Supertrend turns → a 1m rejection at P/TC from above → the first close above that bar's high; 1:2 | 2024-04 → 2025-09, 1m, all F&O | **7,791 trades: +0.04 R before costs, −0.36 R after** (stop one CPR level beyond), −0.64 R with the stop under the rejection bar; 0/18 months. 1h agreeing, weekly level in the CPR, P vs TC, side, year — none turns it | `dbcpr-b31c1779f9` |
 | 12 | Same double bottom/top on **recorded 1m bars** with the futures-flow ("selling eased") and option-writer ("puts written") checks (`research/confirm_live.py`) | 19 + 23 Oct 2026 | 1,078 signals, −0.29 R before costs; neither check separates winners. Two days — re-run when ≥ 15 are recorded | — |
-| 13 | **Post-results drift** (`research/events.py`, prereg §7): NSE filings' broadcast time → event session E; reaction z = market-adjusted close-to-close move ÷ the stock's 60-session σ; **|z| ≥ 2 → with the move, close(E) → close(E+5)**, stock futures, 14.6 bps once | 2021-04 → 2025-09, daily, point-in-time F&O **including 72 stocks that later left F&O** | **+35.3 bps net per event, t 2.36 by week, 63 % of weeks, halves +35.6 / +35.1 — PASSES as registered** (gross +49.9, t 3.35; 1,014 events; median +54). Drift grows with \|z\| and with time: market-adjusted +31 (1 d) → +42 (5 d) → +92 (20 d); fading it loses −65 (t −4.3); in-hours broadcasts +84 (t 2.7) vs after-hours +22. Three runs: 1–2 on today's F&O list only (2,423 events, +25.9, t 1.53, fail), 3 after adding the dropped-out stocks (rule untouched). **Not yet on the holdout.** | `events-f1042b6f6f` (runs 1–2 `events-6fe672b38a`, `events-95ed4d530a`) |
+| 13 | **Post-results drift** (`research/events.py`, prereg §7): NSE filings' broadcast time → event session E; reaction z = market-adjusted close-to-close move ÷ the stock's 60-session σ; **|z| ≥ 2 → with the move, close(E) → close(E+5)**, stock futures, 14.6 bps once | 2021-04 → 2025-09, daily, point-in-time F&O **including 72 stocks that later left F&O** | **+35.3 bps net per event, t 2.36 by week, 63 % of weeks, halves +35.6 / +35.1 — PASSES as registered** (gross +49.9, t 3.35; 1,014 events; median +54). Drift grows with \|z\| and with time: market-adjusted +31 (1 d) → +42 (5 d) → +92 (20 d); fading it loses −65 (t −4.3); in-hours broadcasts +84 (t 2.7) vs after-hours +22. Three runs: 1–2 on today's F&O list only (2,423 events, +25.9, t 1.53, fail), 3 after adding the dropped-out stocks (rule untouched). Execution check: the 5-day hold is flat on 2024–25 survivors; the 20-session hold holds up. **§7b (one run): the same selection held 20 sessions as a 20-position book, |z| priority, a roll at expiry — +89.5 bps net per event, t 2.95, 62 % of weeks, halves +121 / +60 — PASSES; but 2023 +0.4 and 2025 +6, the long leg carries it (+209 vs short −8 in absolute terms, short +100 market-adjusted), 15-month drawdown.** **Not yet on the holdout — the owner's call.** | `events-f1042b6f6f` (runs 1–2 `events-6fe672b38a`, `events-95ed4d530a`); §7b `events7b-e7e5c86d8c` |
 
 Rows 10–11 came from a hand read of ETERNAL on 2026-10-23 (CPR retest at 12:05, R1 hit at 13:05; NIFTY's
 double bottom 11:00–11:05 with put writing under it): one good day, picked afterwards. The owner's
@@ -224,9 +224,19 @@ z = the market-adjusted close-to-close move ÷ the stock's 60-session σ.
   recent survivors-only slice the registered 5-day hold is flat: +1.8 bps net (t 0.06; median +31) / +7.6 traded at 15:25.** 1 day
   +14 / +18 (t 1.1 / 1.7); **20 days +68 / +94 (t 1.45 / 2.5)** — the only horizon positive in every cut, and not the registered
   rule. The full-sample pass rests on 2021–2023 and on the stocks that later left F&O. **The 5-day rule does not go to the holdout.**
-- **Next (needs the owner's word, then one pre-registered run — §7b):** the same selection held 20 sessions, charged a roll (a
-  second round trip, ~15 bps) whenever the hold crosses a monthly expiry (two holds in three do); position count in a result
-  season (about 55 selected events a month in season). The holdout stays untouched until a rule passes that.
+- **§7b — the same selection held 20 sessions as a book (one run, `events --book`, `events7b-e7e5c86d8c`).** Rule written before the
+  run: |z| ≥ 2 as §7, close(E) → close(E+20), at most 20 open positions admitted in descending |z|, 14.6 bps once plus another
+  14.6 for every monthly expiry inside the hold (0.87 per trade). **Admitted events: +89.5 bps net per event (median +104,
+  t 2.95 by week, 62 % of weeks, halves +121 / +60, hit 55.6 %) — passes as registered.** Gross +117, market-adjusted +118,
+  carry-adjusted +94.6. Uncapped +61.5 (t 2.3), cap 10 +127, cap 40 +58: |z| priority earns its place (|z| > 3 +110, 2–3 +57).
+  **What the owner must weigh before the holdout:** by year +205 / +97 / **+0.4** / +142 / **+6** — two flat years; the long leg
+  carries the absolute return (+209, t 3.4; carry-adjusted +159) while the short leg is −8 (market-adjusted +100: the shorts beat
+  the market, NIFTY's +80 bps over their holds ate it); the cap binds (54 % of candidates turned away, book full on 231 of
+  1,114 sessions, empty on 25 %, mean 8.4 open); the book's weekly Sharpe is 0.97, about 4.5 % a year on the full 20-unit
+  notional (20–25 % on margin), worst drawdown 0.45 of that notional, longest 317 sessions (Nov 2022 → early 2024). In-hours
+  +61 (t 0.8) vs after-hours +98 (t 2.7) at this horizon. Regime at E (post-hoc): drift-down +109, calm +78, relief −4, fear −63.
+  **The holdout (2025-10-01 → 2026-10-16) is still untouched; spending it on this rule is the owner's decision.** If spent: one
+  run of the same code with `end` inside the holdout (the guard must be lifted deliberately), the result kept whatever it says.
 
 **Weekly option-chain score** (prereg §6a, `research/chainscore.py`, `chainscore-0a17df1e73`): ridge weights walk-forward (12
 months), top − bottom quintile, weekly. **+11.8 bps a week gross (t 1.4, not significant), −9.3 net**: 72 % of each leg turns
@@ -344,11 +354,13 @@ The 64-state bias gate (`use_bias=true`) only has data from 2024, which left too
 
 ## 6. Open work / next steps
 
-1. **One lead (2026-10-25): post-results drift, §3.4 row 13** — the 5-day rule passes as pre-registered over 2021–25
-   but is flat on 2024–25 survivors (execution check); the 20-session hold is positive in every cut and is the next
-   pre-registration (§7b, with a roll cost). The holdout (2025-10-01 → 2026-10-16) is untouched, spent once on the owner's word. Re-check the other
-   backtesters with `fo_universe` too — and with the daily data of the stocks that left F&O (row 13 showed the cache
-   itself was a survivors' list).
+1. **One lead (2026-10-25): post-results drift, §3.4 row 13** — the 5-day rule passed as pre-registered but was flat on
+   2024–25 survivors; **§7b (20-session hold, 20-position book, |z| priority, roll at expiry) passed its one run: +89.5 bps
+   net per event, t 2.95.** Facts to weigh: 2023 and 2025 flat, the long leg carries the absolute return, a 15-month drawdown.
+   **Next is the owner's call: spend the holdout (2025-10-01 → 2026-10-16) on §7b, once.** If it passes there: a 15:20 job in
+   the engine (the day's filings → z from live prices → paper trades in the ledger, SHADOW), one results season on paper, then
+   size. Re-check the other backtesters with `fo_universe` too — and with the daily data of the stocks that left F&O (row 13
+   showed the cache itself was a survivors' list).
 2. Robustness block for every backtest report: top-5 share of profit, total without the best 1/3/5,
    4-week block bootstrap, excess over drift / "just an up market" control, count of variants tried.
 3. **Live recording:** the launchd jobs start the engine at 08:55 and stop it at 16:00 on weekdays. They
