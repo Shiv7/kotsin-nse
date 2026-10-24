@@ -45,6 +45,19 @@ class HaltRequest(BaseModel):
     reason: str = ""
 
 
+class JournalCall(BaseModel):
+    """A discretionary call, logged as it is seen (``journal.py``)."""
+
+    symbol: str
+    side: str = Field(description="LONG or SHORT")
+    kind: str = Field(default="entry", description="entry (would take it) or alert (watching)")
+    entry: float | None = Field(default=None, description="defaults to the last price on the screen")
+    stop: float | None = None
+    target: float | None = None
+    tags: list[str] = Field(default_factory=list)
+    note: str = ""
+
+
 def build_app(engine: Engine) -> FastAPI:
     app = FastAPI(title="kotsin-nse", version="0.1.0", docs_url="/api/docs", openapi_url="/api/openapi.json")
     api = APIRouter(prefix="/api")
@@ -89,6 +102,34 @@ def build_app(engine: Engine) -> FastAPI:
     @api.get("/events")
     async def recent_events(limit: int = Query(100, le=500)) -> list[dict[str, Any]]:
         return await engine.ledger.recent(events, limit)
+
+    # -- the owner's call journal -------------------------------------------------------------------
+    # Scoring happens in the engine (``Engine._score_journal``), from the bars; these only store and read.
+
+    @api.get("/journal")
+    async def journal(day: str | None = None, limit: int = Query(300, le=2000)) -> dict[str, Any]:
+        return await engine.journal_view(day=day, limit=limit)
+
+    @api.post("/journal")
+    async def journal_add(req: JournalCall) -> dict[str, Any]:
+        try:
+            return await engine.journal_add(req.model_dump())
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @api.post("/journal/{call_id}/close")
+    async def journal_close(call_id: str, reason: str = "manual") -> dict[str, Any]:
+        row = await engine.journal_close(call_id, reason)
+        if row is None:
+            raise HTTPException(404, f"no open call {call_id}")
+        return row
+
+    @api.post("/journal/{call_id}/cancel")
+    async def journal_cancel(call_id: str) -> dict[str, Any]:
+        row = await engine.journal_close(call_id, "cancelled", cancel=True)
+        if row is None:
+            raise HTTPException(404, f"no open call {call_id}")
+        return row
 
     # -- market -----------------------------------------------------------------------------------
 

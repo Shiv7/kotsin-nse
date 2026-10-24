@@ -52,6 +52,10 @@ from .instrument.catalogue import CatalogueLoader
 from .instrument.focus import focus_roots
 from .instrument.quote import Quote
 from .instrument.universe import INDEX_ROOTS, ScripGroup, UniverseBuilder, UniversePolicy
+from .journal import TAGS as JOURNAL_TAGS
+from .journal import close_reason, new_call
+from .journal import score as score_call
+from .journal import summary as journal_summary
 from .ledger.db import Ledger
 from .market.fo_bhavcopy import OiDailyStore
 from .market.fo_bhavcopy import fetch_day as fetch_fo_bhavcopy
@@ -197,6 +201,7 @@ class Engine:
         self.books: dict[str, BookSnapshot] = {}
         self.quotes: dict[str, Quote] = {}
         self.ltps: dict[str, float] = {}
+        self._journal_scored = 0.0
         self._future_to_underlying: dict[str, str] = {}
         self._mode = Mode.SHADOW
         self._armed_until: float | None = None
@@ -1056,6 +1061,10 @@ class Engine:
                     self._recenter_checked = now
                     await self._recenter_strikes(now)
 
+                if now - self._journal_scored > 20:
+                    self._journal_scored = now
+                    await self._score_journal(now)
+
                 if now - last_snapshot > 300:
                     last_snapshot = now
                     await self.ledger.insert_health(self.health_snapshot())
@@ -1064,6 +1073,59 @@ class Engine:
             await asyncio.sleep(5.0)
 
     # -- state -----------------------------------------------------------------------------------------
+
+    # -- the owner's call journal (journal.py holds the rules; this only feeds it bars) -----------------
+
+    def _last_price(self, symbol: str) -> float | None:
+        inst = self.underlyings.get(symbol)
+        ltp = self.ltps.get(inst.scrip_code) if inst else None
+        if ltp is None:
+            b = self.store.forming(symbol, "1m") or self.store.last(symbol, "1m")
+            ltp = b.close if b else None
+        return ltp
+
+    def _journal_bars(self, symbol: str) -> list[tuple[float, float, float, float, float]]:
+        bars = [(float(b.ts), b.open, b.high, b.low, b.close) for b in self.store.bars(symbol, "1m")]
+        f = self.store.forming(symbol, "1m")
+        if f is not None:
+            bars.append((float(f.ts), f.open, f.high, f.low, f.close))
+        return bars
+
+    async def journal_add(self, req: dict[str, Any]) -> dict[str, Any]:
+        symbol = str(req["symbol"]).upper()
+        row = new_call(symbol, req["side"], req.get("kind") or "entry", price=self._last_price(symbol), entry=req.get("entry"),
+                       stop=req.get("stop"), target=req.get("target"), tags=list(req.get("tags") or []), note=req.get("note") or "")
+        row["outcome"] = score_call(row, self._journal_bars(symbol), time.time())
+        await self.ledger.upsert_journal(row)
+        await self.ledger.event("journal.call", {k: row[k] for k in ("id", "symbol", "side", "kind", "entry", "stop", "target", "tags")})
+        return row
+
+    async def journal_close(self, call_id: str, reason: str, *, cancel: bool = False) -> dict[str, Any] | None:
+        row = next((r for r in await self.ledger.journal_rows(limit=2000, status="OPEN") if r["id"] == call_id), None)
+        if row is None:
+            return None
+        now = time.time()
+        if not cancel:
+            out = score_call(row, self._journal_bars(row["symbol"]), now)
+            if out.get("filled_ts") is not None and out.get("hit") is None:
+                out["r_close"] = out["r_now"]  # a manual exit marks the call at the last price
+            row["outcome"] = out
+        row["status"], row["closed_ts"], row["close_reason"] = ("CANCELLED" if cancel else "CLOSED"), now, reason
+        await self.ledger.upsert_journal(row)
+        return row
+
+    async def _score_journal(self, now: float) -> None:
+        for row in await self.ledger.journal_rows(limit=500, status="OPEN"):
+            out = score_call(row, self._journal_bars(row["symbol"]), now)
+            row["outcome"] = out
+            if out["final"]:
+                row["status"], row["closed_ts"], row["close_reason"] = "CLOSED", now, close_reason(out)
+            await self.ledger.upsert_journal(row)
+
+    async def journal_view(self, *, day: str | None = None, limit: int = 300) -> dict[str, Any]:
+        rows = await self.ledger.journal_rows(limit=limit, day=day)
+        return {"rows": rows, "summary": journal_summary(rows), "tags": list(JOURNAL_TAGS),
+                "open": sum(1 for r in rows if r["status"] == "OPEN")}
 
     # -- introspection -------------------------------------------------------------------------------
 

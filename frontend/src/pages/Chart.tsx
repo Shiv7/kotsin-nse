@@ -1,5 +1,6 @@
 import { createChart, type IChartApi, type ISeriesApi, type UTCTimestamp } from 'lightweight-charts'
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { CallForm } from '../components/CallForm'
 import { Card, ErrorLine } from '../components/Ui'
 import { fmt, ist, istChartOptions } from '../lib/api'
 import { usePoll } from '../lib/usePoll'
@@ -130,6 +131,8 @@ export function Chart() {
       <Card title={`${active || '—'} ${tf}`} right={`${data?.bars?.length ?? 0} bars`}>
         <div ref={box} />
       </Card>
+
+      <CallForm symbol={active} price={live?.c ?? data?.bars?.[data.bars.length - 1]?.c ?? null} />
     </div>
   )
 }

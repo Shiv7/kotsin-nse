@@ -5,6 +5,7 @@ import { usePoll } from './lib/usePoll'
 import { Analysis } from './pages/Analysis'
 import { Board } from './pages/Board'
 import { Chart } from './pages/Chart'
+import { Journal } from './pages/Journal'
 import { ObBacktest } from './pages/ObBacktest'
 import { Options } from './pages/Options'
 import { Overview } from './pages/Overview'
@@ -18,6 +19,7 @@ const PAGES = [
   ['/analysis', 'Analysis'],
   ['/backtest', 'Backtest'],
   ['/chart', 'Chart'],
+  ['/journal', 'Journal'],
   ['/options', 'Options'],
   ['/universe', 'Universe'],
   ['/system', 'System'],
@@ -34,6 +36,7 @@ function Pages() {
         <Route path="/analysis/:symbol" element={<Analysis />} />
         <Route path="/backtest" element={<ObBacktest />} />
         <Route path="/chart" element={<Chart />} />
+        <Route path="/journal" element={<Journal />} />
         <Route path="/options" element={<Options />} />
         <Route path="/universe" element={<Universe />} />
         <Route path="/system" element={<System />} />

@@ -90,6 +90,20 @@ health = sa.Table(
     sa.Column("ts", sa.Float, nullable=False),
     sa.Column("json", sa.Text, nullable=False),
 )
+#: the owner's call journal — a discretionary call logged at the moment it is seen, scored by the
+#: engine from the bars that follow (``journal.py``). Columns for what the page filters on; the record
+#: itself is the JSON.
+journal = sa.Table(
+    "journal",
+    meta,
+    sa.Column("id", sa.String, primary_key=True),
+    sa.Column("ts", sa.Float, nullable=False),
+    sa.Column("day", sa.String, nullable=False),
+    sa.Column("symbol", sa.String, nullable=False),
+    sa.Column("status", sa.String, nullable=False),
+    sa.Column("json", sa.Text, nullable=False),
+    sa.Index("ix_journal_day", "day"),
+)
 
 
 def _j(obj: Any) -> str:
@@ -227,6 +241,27 @@ class Ledger:
         async with self.engine.begin() as conn:
             await conn.execute(health.insert().values(ts=time.time(), json=_j(data)))
 
+    # -- the call journal ----------------------------------------------------------------------------
+
+    async def upsert_journal(self, row: dict[str, Any]) -> None:
+        async with self.engine.begin() as conn:
+            values = {"ts": row["ts"], "day": row["day"], "symbol": row["symbol"], "status": row["status"], "json": _j(row)}
+            existing = (await conn.execute(sa.select(journal.c.id).where(journal.c.id == row["id"]))).first()
+            if existing:
+                await conn.execute(journal.update().where(journal.c.id == row["id"]).values(**values))
+            else:
+                await conn.execute(journal.insert().values(id=row["id"], **values))
+
+    async def journal_rows(self, limit: int = 500, *, day: str | None = None, status: str | None = None) -> list[dict[str, Any]]:
+        stmt = sa.select(journal.c.json).order_by(sa.desc(journal.c.ts)).limit(limit)
+        if day:
+            stmt = stmt.where(journal.c.day == day)
+        if status:
+            stmt = stmt.where(journal.c.status == status)
+        async with self.engine.begin() as conn:
+            rows = (await conn.execute(stmt)).all()
+        return [json.loads(r[0]) for r in rows]
+
     # -- reads ----------------------------------------------------------------------------------------
 
     async def recent(
@@ -242,7 +277,7 @@ class Ledger:
     async def counts(self) -> dict[str, int]:
         out: dict[str, int] = {}
         async with self.engine.begin() as conn:
-            for t in (orders, positions, trades, events):
+            for t in (orders, positions, trades, events, journal):
                 out[t.name] = int(
                     (await conn.execute(sa.select(sa.func.count()).select_from(t))).scalar() or 0
                 )

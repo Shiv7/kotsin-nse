@@ -67,7 +67,8 @@ All of it is **one asyncio process**, connected by bounded in-process queues (`b
 | `instrument/universe.py` | the scripFinder universe model: roots with derivatives → equity join → front/next future → ±12% strike shortlist, rebuilt at 09:20 IST |
 | `risk/costs.py` | the measured NSE/MCX charge model — used by paper and live alike |
 | `exec/gateway.py` · `paper.py` · `live.py` · `reconcile.py` | modes, book-walking fills, real orders, truth |
-| `ledger/db.py` | SQLite: control row, orders, positions, trades, events, health |
+| `ledger/db.py` | SQLite: control row, orders, positions, trades, events, health, the call journal |
+| `journal.py` | the owner's call journal: a discretionary call logged as it is seen (Chart page), scored by the engine from the 1m bars that follow — fill, stop before target, R at 15/30/60 min and at 15:25; the Journal page reads it by kind, side and tag |
 | `api/routes.py` | REST; computes nothing, reads engine state and ledger rows |
 | `research/history.py` | Parquet cache of broker history, merged on overlap |
 

@@ -234,3 +234,62 @@ export interface LevelsData {
   levels: { name: string; price: number; frame: 'D' | 'W' | 'M' }[]
   clusters: PivotCluster[]
 }
+
+// -- the owner's call journal (backend/kotsin_nse/journal.py) -------------------------------------
+
+export interface JournalOutcome {
+  bars: number
+  last_ts: number | null
+  filled_ts: number | null
+  hit: 'stop' | 'target' | null
+  hit_ts: number | null
+  r_now: number | null
+  mfe_r: number | null
+  mae_r: number | null
+  r_close: number | null
+  r_15m: number | null
+  r_30m: number | null
+  r_60m: number | null
+  final: boolean
+}
+
+export interface JournalCall {
+  id: string
+  ts: number
+  day: string
+  symbol: string
+  side: 'LONG' | 'SHORT'
+  kind: 'entry' | 'alert'
+  price_at_call: number | null
+  entry: number
+  stop: number | null
+  target: number | null
+  risk: number
+  risk_is_default: boolean
+  tags: string[]
+  note: string
+  status: 'OPEN' | 'CLOSED' | 'CANCELLED'
+  outcome: JournalOutcome | null
+  closed_ts: number | null
+  close_reason: string | null
+}
+
+export interface JournalBlock {
+  calls: number
+  filled: number
+  closed: number
+  targets: number
+  stops: number
+  avg_r: number | null
+  sum_r: number | null
+  win_rate: number | null
+  avg_mfe_r: number | null
+  avg_mae_r: number | null
+}
+
+export interface JournalView {
+  rows: JournalCall[]
+  summary: { all: JournalBlock; by_kind: Record<string, JournalBlock>; by_side: Record<string, JournalBlock>; by_tag: Record<string, JournalBlock> }
+  tags: string[]
+  open: number
+}
