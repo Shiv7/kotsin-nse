@@ -298,3 +298,23 @@ weekly Sharpe 0.97, 4.5 % a year on the full 20-unit notional (about 20–25 % o
 drift-down +109, calm +78, relief −4, fear −63. **Decision: the rule passed its one pre-registered run. Whether the holdout
 (2025-10-01 → 2026-10-16) is spent on it is the owner's call; the facts he should weigh are the flat 2023 and 2025, the
 long-only nature of the absolute return and the 15-month drawdown.**
+
+### 7b, holdout — written 2026-10-25 before the run, on the owner's word ("go ahead" to spending the holdout on §7b)
+
+**What is spent.** The holdout 2025-10-01 → 2026-10-16, untouched by every study above (its filings were downloaded and
+not read; the daily cache runs to 2026-10-19; the F&O membership covers it). It is spent **once**, on §7b exactly as run
+in-sample: `kotsin-nse events --holdout` — |z| ≥ 2, close(E) → close(E+20), cap 20 admitted by |z|, 14.62 bps once plus
+a roll per expiry inside the hold; E in 2025-10-01 → 2026-10-16 − 20 sessions (about four results seasons: Oct–Nov 2025,
+Jan–Feb 2026, Apr–May 2026, Jul–Aug 2026). The book starts empty on 2025-10-01 (seats held by late-September 2025 events
+are ignored — slightly generous, noted). The guard that refuses an `end` inside the holdout is lifted only by `--holdout`.
+
+**The bar, and why it is lower than in-sample.** Twelve months hold roughly 25 weeks with events and 100–120 admitted
+trades. Per-event noise is ~600–700 bps, so even if the true edge were the in-sample +89 bps the expected t by week is
+about 1.4: a t ≥ 2 bar would reject a real edge about half the time. The holdout is a **confirmation of a point estimate**,
+not a re-discovery. **PASS = admitted events' net mean > 0, t ≥ 1.0 by week, ≥ 50 % of weeks positive.** Reported beside
+it, not pass criteria: whether the holdout mean lies within 2 standard errors of +89.5; the two halves (2025-10-01 →
+2026-03-31, 2026-04-01 → 2026-10-16); by month; the long and short legs, in-hours vs after-hours, |z| bins, carry-adjusted;
+the uncapped and cap-10/40 variants; the book's session P&L, Sharpe, drawdown, occupancy.
+
+**Decision rule.** PASS → the rule goes to the engine as a 15:20 SHADOW job and runs a results season on paper before any
+money. FAIL → the lane is closed in writing; no variant is tried on the holdout. A second run only for a named code bug.

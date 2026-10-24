@@ -198,7 +198,7 @@ class Settings(BaseSettings):
     #: overnight (delivery) cash equity pays STT on BOTH legs at this rate; the intraday rate
     #: above applies to the sell leg only.
     cost_stt_pct_delivery_equity: float = 0.1
-    cost_stt_pct_sell_option_premium: float = 0.0625
+    cost_stt_pct_sell_option_premium: float = 0.1  # 0.1 % of premium on sale since 2024-10-01 (was 0.0625)
     cost_stt_pct_sell_future: float = 0.02
     cost_exchange_txn_pct_equity: float = 0.00297
     cost_exchange_txn_pct_option: float = 0.05

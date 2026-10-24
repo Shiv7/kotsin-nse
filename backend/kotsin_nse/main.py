@@ -376,6 +376,11 @@ def run_events(settings: Settings, args: argparse.Namespace) -> None:
         from .research.events import execution_check
 
         out = execution_check(settings, settings.data_dir / "obtests" / f"{args.exec_check}-events.parquet")
+    elif args.holdout:
+        from .research.events import HOLDOUT_END, HOLDOUT_HALVES, HOLDOUT_START, study_book
+
+        # the one holdout run of §7b: the guard is lifted here and nowhere else
+        out = study_book(settings, end=HOLDOUT_END, label=args.label, cap=args.cap, start=HOLDOUT_START.isoformat(), halves=HOLDOUT_HALVES, allow_holdout=True)
     elif args.book:
         from .research.events import study_book
 
@@ -631,6 +636,7 @@ def build_parser() -> argparse.ArgumentParser:
     evs.add_argument("--exec-check", dest="exec_check", default="", help="run id: the 15:25 execution check on that run's events (5m cache)")
     evs.add_argument("--book", action="store_true", help="prereg 7b: the same selection held 20 sessions as a book (roll at expiry, |z| priority)")
     evs.add_argument("--cap", type=int, default=20, help="prereg 7b: most open positions")
+    evs.add_argument("--holdout", action="store_true", help="prereg 7b, holdout: the book rule once on 2025-10-01 -> 2026-10-16 (the owner's word)")
 
     m = sub.add_parser("mtf-backtest", help="1h/4h sweeps timed on 15m/5m, over the 5m cache")
     m.add_argument("--start", required=True)

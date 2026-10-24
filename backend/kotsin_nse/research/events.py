@@ -166,6 +166,9 @@ HOLD_BOOK = 20  # §7b
 CAP = 20
 CARRY_BPS = 50.0  # a stock future's premium decay over ~20 sessions, the §7b sensitivity
 TUESDAY_FROM = "2025-09"  # NSE moved its expiry day from Thursday to Tuesday in September 2025
+HOLDOUT_END = date(2026, 10, 16)
+HOLDOUT_HALVES = (("2025-10-01", "2026-03-31"), ("2026-04-01", "2026-10-16"))
+IN_SAMPLE_NET_7B = 89.46  # §7b's one in-sample run, the reference the holdout is compared with
 
 
 def event_sessions(results: pd.DataFrame, sessions: list[str]) -> pd.DataFrame:
@@ -202,7 +205,7 @@ def event_sessions(results: pd.DataFrame, sessions: list[str]) -> pd.DataFrame:
     return out[pd.Series(keep, index=out.index)].reset_index(drop=True)
 
 
-def _weekly_stats(s: pd.Series) -> dict[str, Any]:
+def _weekly_stats(s: pd.Series, halves: tuple[tuple[str, str], ...] = HALVES) -> dict[str, Any]:
     """``s`` in bps, indexed by the event session; the unit of inference is the week of E."""
     import math
 
@@ -214,11 +217,11 @@ def _weekly_stats(s: pd.Series) -> dict[str, Any]:
     t = float(wk.mean() / (sd / math.sqrt(len(wk)))) if sd > 0 and len(wk) > 1 else None
     return {"n": len(s), "avg_bps": round(float(s.mean()), 2), "median_bps": round(float(s.median()), 2), "t_by_week": round(t, 2) if t else None,
             "weeks": len(wk), "weeks_positive": round(float((wk > 0).mean()) * 100, 1),
-            "halves": [round(float(s[(s.index >= a) & (s.index <= b)].mean()), 2) if ((s.index >= a) & (s.index <= b)).any() else None for a, b in HALVES],
+            "halves": [round(float(s[(s.index >= a) & (s.index <= b)].mean()), 2) if ((s.index >= a) & (s.index <= b)).any() else None for a, b in halves],
             "by_year_bps": s.groupby(s.index.str[:4]).mean().round(2).to_dict(), "hit_rate": round(float((s > 0).mean()) * 100, 1)}
 
 
-def event_table(settings: Settings, ev: pd.DataFrame, end: date) -> pd.DataFrame:
+def event_table(settings: Settings, ev: pd.DataFrame, end: date, start: str = "2021-04-01") -> pd.DataFrame:
     """The reaction, its z, the run-up, the drifts and the raw forward returns for every event of an
     F&O member (point-in-time), E ≤ ``end`` − 20 sessions so every drift is observable inside the window."""
     import numpy as np
@@ -254,7 +257,7 @@ def event_table(settings: Settings, ev: pd.DataFrame, end: date) -> pd.DataFrame
         cv, ov, nv, adjv, retv = c.to_numpy(float), o.to_numpy(float), n_c.to_numpy(float), adj.to_numpy(float), ret.to_numpy(float)
         for x in g.itertuples():
             e = x.E
-            if e not in pos_of or e > cutoff or e < "2021-04-01":
+            if e not in pos_of or e > cutoff or e < start:
                 continue
             i = pos_of[e]
             if not (fm.covers(date.fromisoformat(e)) and fm.member(sym, date.fromisoformat(e))):
@@ -446,9 +449,11 @@ def study(settings: Settings, end: date = date(2025, 9, 30), label: str = "") ->
 
 
 
-def study_book(settings: Settings, end: date = date(2025, 9, 30), label: str = "", cap: int = CAP, hold: int = HOLD_BOOK) -> dict[str, Any]:
+def study_book(settings: Settings, end: date = date(2025, 9, 30), label: str = "", cap: int = CAP, hold: int = HOLD_BOOK, *,
+               start: str = "2021-04-01", halves: tuple[tuple[str, str], ...] = HALVES, allow_holdout: bool = False) -> dict[str, Any]:
     """§7b as written: the §7 selection held ``hold`` sessions as a book of at most ``cap`` positions,
-    |z| priority, a roll charged for every expiry inside the hold. Writes ``obtests/events7b-<id>.json``."""
+    |z| priority, a roll charged for every expiry inside the hold. Writes ``obtests/events7b-<id>.json``.
+    ``allow_holdout`` lifts the guard on purpose — the holdout is spent once, on the owner's word (prereg §7b, holdout)."""
     import math
     import uuid
 
@@ -460,14 +465,14 @@ def study_book(settings: Settings, end: date = date(2025, 9, 30), label: str = "
     from .history import HistoryStore
     from .regimes import _daily
 
-    if end >= HOLDOUT_START:
+    if end >= HOLDOUT_START and not allow_holdout:
         raise ValueError(f"{end} is inside the holdout (from {HOLDOUT_START})")
     t0 = time.time()
     results = pd.read_parquet(settings.data_dir / "events" / "results.parquet")
     store = HistoryStore(settings.data_dir / "history")
     sessions = [d for d in _daily(store, "NIFTY")["day"] if d <= end.isoformat()]
     ev = event_sessions(results[results["broadcast_ist"] < f"{end.isoformat()} 23:59:59"], sessions)
-    t = event_table(settings, ev, end)
+    t = event_table(settings, ev, end, start)
     inst = Instrument("BT", "BT", Segment.NSE_FO, InstrumentKind.FUTURE, lot_size=1)
     rt = CostModel(settings).round_trip(inst, 1000.0, 1000.0, 500).total / 500_000 * 1e4 + 10.0
     exp = set(expiries(sessions))
@@ -483,22 +488,28 @@ def study_book(settings: Settings, end: date = date(2025, 9, 30), label: str = "
 
     def block(adm: pd.DataFrame) -> dict[str, Any]:
         si = adm.set_index("E")
-        return {"net": _weekly_stats(si["net"]), "gross": _weekly_stats(si["gross"]), "market_adjusted": _weekly_stats(si["adj"]),
-                "carry_adjusted": _weekly_stats(si["carry_adjusted"]),
-                "long_leg_net": _weekly_stats(si.loc[si["side"] > 0, "net"]), "short_leg_net": _weekly_stats(si.loc[si["side"] < 0, "net"]),
-                "long_leg_carry_adjusted": _weekly_stats(si.loc[si["side"] > 0, "carry_adjusted"]),
-                "in_hours_net": _weekly_stats(si.loc[si["in_hours"], "net"]), "after_hours_net": _weekly_stats(si.loc[~si["in_hours"], "net"]),
-                "abs_z_2_3_net": _weekly_stats(si.loc[si["z"].abs() < 3, "net"]), "abs_z_gt_3_net": _weekly_stats(si.loc[si["z"].abs() >= 3, "net"]),
+        return {"net": _weekly_stats(si["net"], halves), "gross": _weekly_stats(si["gross"], halves), "market_adjusted": _weekly_stats(si["adj"], halves),
+                "carry_adjusted": _weekly_stats(si["carry_adjusted"], halves),
+                "long_leg_net": _weekly_stats(si.loc[si["side"] > 0, "net"], halves), "short_leg_net": _weekly_stats(si.loc[si["side"] < 0, "net"], halves),
+                "long_leg_carry_adjusted": _weekly_stats(si.loc[si["side"] > 0, "carry_adjusted"], halves),
+                "in_hours_net": _weekly_stats(si.loc[si["in_hours"], "net"], halves), "after_hours_net": _weekly_stats(si.loc[~si["in_hours"], "net"], halves),
+                "abs_z_2_3_net": _weekly_stats(si.loc[si["z"].abs() < 3, "net"], halves), "abs_z_gt_3_net": _weekly_stats(si.loc[si["z"].abs() >= 3, "net"], halves),
                 "avg_rolls": round(float(adm["rolls"].mean()), 3), "share_turned_away": round(float(1 - len(adm) / len(sel)) * 100, 1) if len(sel) else None}
 
     taken = admit(sel, sessions, hold, cap)
     adm = sel[taken]
-    primary = _weekly_stats(adm.set_index("E")["net"])
+    primary = _weekly_stats(adm.set_index("E")["net"], halves)
     primary["passes"] = bool(primary.get("t_by_week") and primary["t_by_week"] >= 2.0 and primary["avg_bps"] > 0
                              and primary["weeks_positive"] >= 55 and all(h is not None and h > 0 for h in primary["halves"]))
+    if allow_holdout:
+        # the holdout's bar (prereg §7b, holdout): a confirmation of the in-sample estimate, not a re-discovery
+        se = float(adm["net"].std(ddof=1) / math.sqrt(len(adm))) if len(adm) > 1 else float("nan")
+        primary["passes_holdout"] = bool(primary.get("t_by_week") and primary["t_by_week"] >= 1.0 and primary["avg_bps"] > 0 and primary["weeks_positive"] >= 50)
+        primary["vs_in_sample"] = {"in_sample_avg_bps": IN_SAMPLE_NET_7B, "se_per_event_bps": round(se, 2),
+                                   "within_2se_of_in_sample": bool(abs(primary["avg_bps"] - IN_SAMPLE_NET_7B) <= 2 * se) if se == se else None}
     closes = pd.DataFrame({s: _daily(store, s).set_index("day")["c"] for s in sorted(adm["symbol"].unique())})
     pnl = book_pnl(adm, closes, sessions, hold)
-    pnl = pnl[pnl.index >= "2021-04-01"]
+    pnl = pnl[pnl.index >= start]
     wk = pnl["net_bps"].groupby(["{}-W{:02d}".format(*date.fromisoformat(d).isocalendar()[:2]) for d in pnl.index]).sum()
     sd = wk.std(ddof=1)
     book = {"sessions": len(pnl), "net_bps_units_per_session": round(float(pnl["net_bps"].mean()), 2),
@@ -508,7 +519,7 @@ def study_book(settings: Settings, end: date = date(2025, 9, 30), label: str = "
             "share_sessions_empty": round(float((pnl["open"] == 0).mean()) * 100, 1),
             "by_year_net_bps_units": pnl["net_bps"].groupby(pnl.index.str[:4]).sum().round(1).to_dict()} | _drawdowns(pnl["net_bps"])
     out: dict[str, Any] = {"id": f"events7b-{uuid.uuid4().hex[:10]}", "kind": "events7b", "label": label, "end": end.isoformat(), "hold": hold, "cap": cap,
-                           "cost_bps_round_trip": round(rt, 2), "carry_bps": CARRY_BPS, "expiries": len(exp), "events_all_members": len(t),
+                           "start": start, "halves": list(halves), "holdout": allow_holdout, "cost_bps_round_trip": round(rt, 2), "carry_bps": CARRY_BPS, "expiries": len(exp), "events_all_members": len(t),
                            "candidates_abs_z_ge_2": len(sel), "admitted_n": len(adm), "primary_admitted_net": primary, "admitted": block(adm),
                            "book": book, "uncapped": block(sel)}
     for c in (10, 40):
@@ -518,6 +529,7 @@ def study_book(settings: Settings, end: date = date(2025, 9, 30), label: str = "
         si = adm.set_index("E")
         reg = pd.read_parquet(reg_p)["regime"].reindex(si.index)
         out["by_regime_at_E_post_hoc"] = {str(int(k)): {"n": len(g), "net_bps": round(float(g["net"].mean()), 2)} for k, g in si.groupby(reg.values) if k == k}
+    out["by_month_admitted"] = {m: {"n": int(g["net"].count()), "net_bps": round(float(g["net"].mean()), 1)} for m, g in adm.groupby(adm["E"].str[:7])}
     out["seconds"] = round(time.time() - t0, 1)
     obt = settings.data_dir / "obtests"
     obt.mkdir(exist_ok=True)

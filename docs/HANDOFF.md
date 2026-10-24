@@ -170,7 +170,7 @@ intrinsic from it):
 - **§5b, held to expiry** (wings 2σ of the move to expiry, one at a time, 4 days on average): **−13.0 points gross**, −17.7 net
   at 10 lots, PF 0.78, 129 trades — fails (`condorB-c7cd9eea63`). The next-day overpricing does not survive a multi-day hold;
   the worst weeks (−515 points) outweigh it. **Option selling, as specified, is closed in the exploration window.**
-- Note: `cost_stt_pct_sell_option_premium` is 0.0625 in config; NSE's rate since 2024-10-01 is 0.1 % — update before any live use.
+- Note: `cost_stt_pct_sell_option_premium` was 0.0625 until 2026-10-25; it is now 0.1 (NSE's rate since 2024-10-01). Option-selling backtests before that date understate the STT by 0.0375 % of premium sold.
 
 **Overnight vs intraday** (prereg §6b, `research/overnight.py`, `overnight-23c20be4e0`, daily cache 2021-04 → 2025-09): **the
 whole return is overnight; intraday drifts DOWN.** NIFTY: overnight (prev close → open) **+9.1 bps a night** (t 6.0, 71 % of weeks,
