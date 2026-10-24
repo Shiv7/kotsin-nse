@@ -156,3 +156,21 @@ weeks positive, both halves positive. Reported, not judged: the same on BANKNIFT
 **Results (2026-10-24):** §6a fails — +11.8 bps/week gross (t 1.4), −9.3 net at 72 % weekly turnover (`chainscore-0a17df1e73`).
 §6b fails as a trade — NIFTY overnight +9.1 bps gross (t 6.0) vs 12.8 bps costs → −3.7 net (`overnight-23c20be4e0`) — but the
 decomposition is the strongest fact found: stocks +16.4 bps overnight (t 10.8), −8.4 intraday (t −3.3), 96 % / 91 % of names.
+
+## 6c. Overnight only, names picked by the chain (`research/nightpick.py`) — 2026-10-24, before any result
+
+Combines the two real sources: the overnight premium (§6b: stocks +16.4 bps a night) and the chain's
+one-day information (§1). **Timing caveat, stated up front:** the chain readings are the bhavcopy's
+close-of-D values; NSE publishes the file after the close, so in the backtest they stand in for what
+the engine's live chain shows at 15:25 (it computes the same readings live). A 5-minute approximation.
+
+**Primary rule.** Each session D: a ridge score from the four chain ranks (as §6a) with weights fitted
+walk-forward on the **overnight return** (D's close → D+1's open) over the 12 months before D's month;
+**long the top quintile, equal-weighted stock futures, from D's close to D+1's open**; costs 14.6 bps
+per name per night (a full round trip). **Pass**: net > 0, t(by week) ≥ 2.0, ≥ 55 % of weeks positive,
+both halves (2022-04 → 2023-12 / 2024-01 → 2025-09) positive, Sharpe ≥ 1.0.
+
+Reported, not judged: every member's overnight (the baseline the pick must beat), the bottom quintile,
+top − bottom; by year; by the regime at D's close — **post-hoc** (§6b already showed relief-rally and
+calm nights are the big ones), so a regime filter is a candidate for a later pre-registration, not a
+result here; a 10-lot NIFTY future on the same nights as a cheaper carrier.
