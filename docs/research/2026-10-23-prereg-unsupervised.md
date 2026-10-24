@@ -174,3 +174,7 @@ Reported, not judged: every member's overnight (the baseline the pick must beat)
 top − bottom; by year; by the regime at D's close — **post-hoc** (§6b already showed relief-rally and
 calm nights are the big ones), so a regime filter is a candidate for a later pre-registration, not a
 result here; a 10-lot NIFTY future on the same nights as a cheaper carrier.
+
+**§6c result (2026-10-24):** passes as registered (`nightpick-e7c35211e4`: +7.5 bps net, t 3.5, both halves, Sharpe 1.85). The
+execution check with tradable prices: entry at the 15:25 bar holds (+8.6 net); exit at the 09:16 close −3.2, at 09:20 −5.0 — the
+edge is the opening print's overshoot, which futures cannot sell and cash cannot afford (delivery STT). Not taken to the holdout.

@@ -183,6 +183,19 @@ headwind, the "up" races scoring 48 % in the power study is this, and a close→
 Next: the overnight premium as the *direction* inside a cheaper carrier (hold through the night, not the day; stock selection on
 the chain score's long leg, held overnight only) — write it up before running.
 
+**Overnight only, names picked by the chain** (prereg §6c, `research/nightpick.py`, `nightpick-e7c35211e4`): the chain score
+(ridge, walk-forward, fitted on the overnight return) top quintile, long close → open, 14.6 bps a name a night. **Passes the
+pre-registered test: +7.5 bps a night net, t 3.5, 68.5 % of weeks, both halves +7.4 / +7.6, net Sharpe 1.85 (+22.1 gross vs
++15.9 for every member; top − bottom +10.8, t 14).** The fitted signs are the mirror of §1's: what predicts a higher gap predicts a
+lower next-day intraday — the chain predicts the gap, the day gives it back. **Then the execution check (not tuning: the same
+picks, tradable prices from the 5m / 1m cache, 2024-01 → 2025-09):** entry at the 15:10–15:25 bar instead of the official close
+is fine (+8.6 net, t 2.6 — the closing VWAP is not the source); **the exit is: to the 09:15 open print +7.6 net, to the 09:15 bar's
+CLOSE (09:16) −3.2, to 09:17 −3.1, to 09:20 −5.0.** Half the gap reverses inside the first minute. Stock futures have no opening
+auction, so the print cannot be sold; cash has one, but delivery STT (0.1 % each way) alone exceeds the gross. **A pass on paper
+that fails on execution — do not spend the holdout on it.** What survives (the ~11 bps still there at 09:16) is about equal to a
+realistic round trip. The gap-and-first-minute-reversal is itself a structural fact worth knowing: a chain-picked name's open
+overshoots and fades at once.
+
 **Weekly option-chain score** (prereg §6a, `research/chainscore.py`, `chainscore-0a17df1e73`): ridge weights walk-forward (12
 months), top − bottom quintile, weekly. **+11.8 bps a week gross (t 1.4, not significant), −9.3 net**: 72 % of each leg turns
 over every week, so the costs are nearly a full round trip anyway; the day-1 information (§1) fades by day 5. Daily rebalancing:
