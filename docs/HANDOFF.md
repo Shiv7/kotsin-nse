@@ -219,10 +219,14 @@ z = the market-adjusted close-to-close move ÷ the stock's 60-session σ.
   is stronger in the names that were later dropped). 72 of them were fetched (HDFC, MINDTREE, IDFC, GSPL, PEL are gone); run 3 is
   the same rule on 3,205 events. The four insurers (results filed under another NSE category) and ~160 postponed meetings are
   missing by construction (227 of 3,388 member result dates).
-- **Before the holdout** (spent once, on the owner's word): the 15:25 execution check — select *and* enter on E's 15:25 bar from
-  the 5m cache (2024-01 → 2025-09; the 72 past members have no 5m data, so it is a check on the survivors); a 20-session hold
-  crosses a monthly expiry two times in three, so a roll (another round trip) must be charged before that hold is judged; the
-  position count in a result season (about 55 selected events a month in season, 20–40 open at once at the 5-day hold).
+- **Execution check** (`events --exec-check`, 5m cache 2024-01 → 2025-09, today's F&O stocks only — 970 events, 326 selected):
+  selecting on the 15:25 bar = selecting on the close (z correlation 0.991), and entering at 15:25 costs nothing. **But on this
+  recent survivors-only slice the registered 5-day hold is flat: +1.8 bps net (t 0.06; median +31) / +7.6 traded at 15:25.** 1 day
+  +14 / +18 (t 1.1 / 1.7); **20 days +68 / +94 (t 1.45 / 2.5)** — the only horizon positive in every cut, and not the registered
+  rule. The full-sample pass rests on 2021–2023 and on the stocks that later left F&O. **The 5-day rule does not go to the holdout.**
+- **Next (needs the owner's word, then one pre-registered run — §7b):** the same selection held 20 sessions, charged a roll (a
+  second round trip, ~15 bps) whenever the hold crosses a monthly expiry (two holds in three do); position count in a result
+  season (about 55 selected events a month in season). The holdout stays untouched until a rule passes that.
 
 **Weekly option-chain score** (prereg §6a, `research/chainscore.py`, `chainscore-0a17df1e73`): ridge weights walk-forward (12
 months), top − bottom quintile, weekly. **+11.8 bps a week gross (t 1.4, not significant), −9.3 net**: 72 % of each leg turns
@@ -340,9 +344,9 @@ The 64-state bias gate (`use_bias=true`) only has data from 2024, which left too
 
 ## 6. Open work / next steps
 
-1. **One candidate (2026-10-25): post-results drift, §3.4 row 13** — passes as pre-registered on the exploration
-   window. Before the holdout (2025-10-01 → 2026-10-16, still untouched, spent once on the owner's word): the 15:25
-   execution check, the roll cost for holds across expiry, the position count in a result season. Re-check the other
+1. **One lead (2026-10-25): post-results drift, §3.4 row 13** — the 5-day rule passes as pre-registered over 2021–25
+   but is flat on 2024–25 survivors (execution check); the 20-session hold is positive in every cut and is the next
+   pre-registration (§7b, with a roll cost). The holdout (2025-10-01 → 2026-10-16) is untouched, spent once on the owner's word. Re-check the other
    backtesters with `fo_universe` too — and with the daily data of the stocks that left F&O (row 13 showed the cache
    itself was a survivors' list).
 2. Robustness block for every backtest report: top-5 share of profit, total without the best 1/3/5,

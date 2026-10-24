@@ -230,3 +230,13 @@ short +40 (t 1.5); in-hours broadcasts +83.9 (t 2.7, n 220) vs after-hours +21.9
 drift-down +65, calm +42, relief rally −36, fear −64. Missing by construction: the four insurers (results filed
 under another NSE category, 64 dates) and ~160 postponed-meeting dates. **Not taken to the holdout.** First the
 15:25 execution check (selection and entry on the 15:25 bar, 5m cache, 2024-01 → 2025-09), then the owner's word.
+
+**§7 execution check (2026-10-25, `kotsin-nse events --exec-check events-f1042b6f6f`; 5m cache, 2024-01 → 2025-09, so only
+today's F&O stocks — 970 events, 326 selected).** Selecting on the 15:25 bar gives the same picks as the close (z correlation
+0.991, same sign 96 %) and entering there costs nothing (every hold a little better). **But on this recent, survivors-only slice the
+registered 5-session hold is flat: +1.8 bps net (daily rule, t 0.06, median +31) / +7.6 traded at 15:25 (t 0.3).** 1 session: +14 /
++18 (t 1.1 / 1.7); 20 sessions: **+68 / +94 (t 1.45 / 2.5, 59 / 67 % of weeks)**. So the full-sample pass of the 5-day rule rests on
+2021–2023 and on the stocks that later left F&O; the 20-session hold is the only horizon positive in every cut, and it is not
+the registered rule. **Decision: the 5-day rule does not go to the holdout.** Next, if the owner agrees: §7b — the same selection
+held 20 sessions, charged a roll (a second round trip) whenever the hold crosses a monthly expiry, with the pass criteria of §7;
+one run.

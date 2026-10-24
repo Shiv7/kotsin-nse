@@ -372,7 +372,12 @@ def run_events(settings: Settings, args: argparse.Namespace) -> None:
     """Post-results drift (research/events.py, pre-registered §7)."""
     from .research.events import study
 
-    out = study(settings, end=date.fromisoformat(args.end), label=args.label)
+    if args.exec_check:
+        from .research.events import execution_check
+
+        out = execution_check(settings, settings.data_dir / "obtests" / f"{args.exec_check}-events.parquet")
+    else:
+        out = study(settings, end=date.fromisoformat(args.end), label=args.label)
     print(json.dumps(out, indent=1, default=float))
 
 
@@ -619,6 +624,7 @@ def build_parser() -> argparse.ArgumentParser:
     evs = sub.add_parser("events", help="post-results drift: |z| >= 2 reaction, close(E) -> close(E+5), stock futures (prereg 7)")
     evs.add_argument("--end", default="2025-09-30")
     evs.add_argument("--label", default="")
+    evs.add_argument("--exec-check", dest="exec_check", default="", help="run id: the 15:25 execution check on that run's events (5m cache)")
 
     m = sub.add_parser("mtf-backtest", help="1h/4h sweeps timed on 15m/5m, over the 5m cache")
     m.add_argument("--start", required=True)

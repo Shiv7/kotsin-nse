@@ -368,4 +368,81 @@ def study(settings: Settings, end: date = date(2025, 9, 30), label: str = "") ->
     return out
 
 
-__all__ = ["SOURCES", "build_tables", "event_sessions", "event_table", "fetch", "months", "study"]
+
+
+def execution_check(settings: Settings, events_parquet: Path, start: str = "2024-01-01", cost_bps: float = 14.62) -> dict[str, Any]:
+    """§7's execution check: select **and** enter on E's 15:25 bar, exit on E+k's 15:25 bar, every price from
+    the 5m cache (it is not bonus/split adjusted while the daily cache is, so the two are never mixed); the
+    daily-close rule on the same events beside it. Only the stocks with 5m data (today's F&O list)."""
+    import math
+
+    import numpy as np
+
+    from ..market.session import ist_at
+    from .history import HistoryStore
+    from .regimes import _daily
+
+    store = HistoryStore(settings.data_dir / "history")
+    t = pd.read_parquet(events_parquet)
+    t = t[t["E"] >= start]
+    sessions = list(_daily(store, "NIFTY")["day"])
+    pos = {d: i for i, d in enumerate(sessions)}
+
+    def last_px(c5: pd.Series, day: str) -> float:
+        ts = ist_at(date.fromisoformat(day), "15:25")
+        if ts in c5.index:
+            return float(c5.loc[ts])
+        w = c5[(c5.index >= ist_at(date.fromisoformat(day), "15:00")) & (c5.index < ts + 300)]
+        return float(w.iloc[-1]) if len(w) else float("nan")
+
+    n5 = store.load("NIFTY", "5m").set_index("ts")["c"]
+    cache: dict[str, pd.Series | None] = {}
+    rows = []
+    for x in t.itertuples():
+        if x.symbol not in cache:
+            m5 = store.load(x.symbol, "5m")
+            cache[x.symbol] = m5.set_index("ts")["c"] if len(m5) else None
+        c5 = cache[x.symbol]
+        if c5 is None:
+            continue
+        i = pos[x.E]
+        p_prev, p_e, n_prev, n_e = last_px(c5, sessions[i - 1]), last_px(c5, x.E), last_px(n5, sessions[i - 1]), last_px(n5, x.E)
+        if not all(np.isfinite(v) for v in (p_prev, p_e, n_prev, n_e)) or abs(p_e / p_prev - 1) > 0.5:
+            continue
+        z = ((p_e / p_prev - 1) - (n_e / n_prev - 1)) / x.sigma
+        d = _daily(store, x.symbol).set_index("day")["c"]
+        row: dict[str, Any] = {"E": x.E, "symbol": x.symbol, "z_close": x.z, "z_1525": z}
+        ok = True
+        for k in KS:
+            j = i + k
+            if j >= len(sessions):
+                ok = False
+                break
+            p_x = last_px(c5, sessions[j])
+            if not np.isfinite(p_x) or abs(p_x / p_e - 1) > 0.6:
+                ok = False
+                break
+            row[f"i_{k}"] = np.sign(z) * (p_x / p_e - 1) * 1e4 - cost_bps
+            row[f"d_{k}"] = np.sign(x.z) * (d.loc[sessions[j]] / d.loc[x.E] - 1) * 1e4 - cost_bps if sessions[j] in d.index and x.E in d.index else float("nan")
+        if ok:
+            rows.append(row)
+    r = pd.DataFrame(rows)
+    if r.empty:
+        return {"n": 0}
+
+    def wk(sr: pd.Series) -> dict[str, Any]:
+        sr = sr.dropna()
+        w = sr.groupby(["{}-W{:02d}".format(*date.fromisoformat(d).isocalendar()[:2]) for d in sr.index]).sum()
+        sd = w.std(ddof=1)
+        return {"n": len(sr), "avg_bps": round(float(sr.mean()), 1), "median_bps": round(float(sr.median()), 1),
+                "t_by_week": round(float(w.mean() / (sd / math.sqrt(len(w)))), 2) if sd > 0 and len(w) > 1 else None,
+                "weeks_positive": round(float((w > 0).mean()) * 100, 1)}
+
+    sel_c, sel_i = r[r["z_close"].abs() >= Z_MIN].set_index("E"), r[r["z_1525"].abs() >= Z_MIN].set_index("E")
+    return {"events_with_5m": len(r), "selected_at_close": len(sel_c), "selected_at_1525": len(sel_i),
+            "z_corr": round(float(r[["z_close", "z_1525"]].corr().iloc[0, 1]), 3),
+            "same_sign_pct": round(float((np.sign(r["z_close"]) == np.sign(r["z_1525"])).mean()) * 100, 1),
+            "by_hold": {str(k): {"daily_rule": wk(sel_c[f"d_{k}"]), "select_and_trade_at_1525": wk(sel_i[f"i_{k}"])} for k in KS}}
+
+
+__all__ = ["SOURCES", "build_tables", "event_sessions", "event_table", "execution_check", "fetch", "months", "study"]
