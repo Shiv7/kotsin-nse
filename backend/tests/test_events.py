@@ -55,3 +55,60 @@ def test_weekly_stats_sum_events_inside_a_week():
     st = _weekly_stats(s)
     assert st["n"] == 4 and st["weeks"] == 2 and st["weeks_positive"] == 100.0 and st["avg_bps"] == 10.0 and st["hit_rate"] == 75.0
     assert st["by_year_bps"] == {"2025": 10.0}
+
+
+# ---- §7b: the expiry calendar, the roll count, the book ----
+
+from kotsin_nse.research.events import admit, book_pnl, expiries, rolls  # noqa: E402
+
+
+def _sessions(start: str, end: str, holidays: set[str] = frozenset()) -> list[str]:
+    days = pd.bdate_range(start, end).strftime("%Y-%m-%d")
+    return [d for d in days if d not in holidays]
+
+
+def test_expiries_are_the_last_thursday_then_tuesday_from_september_2025_and_step_back_over_a_holiday():
+    sess = _sessions("2025-07-01", "2025-10-31", holidays={"2025-08-28"})  # the last Thursday of Aug 2025 made a holiday
+    exp = expiries(sess)
+    assert "2025-07-31" in exp  # last Thursday
+    assert "2025-08-27" in exp  # Wednesday: the session before the holiday Thursday
+    assert "2025-09-30" in exp  # last Tuesday, after NSE's move
+    assert "2025-10-28" in exp  # last Tuesday
+    assert "2025-09-25" not in exp
+
+
+def test_rolls_count_only_expiries_strictly_inside_the_hold():
+    sess = _sessions("2025-01-01", "2025-03-31")
+    exp = set(expiries(sess))
+    assert exp == {"2025-01-30", "2025-02-27", "2025-03-27"}
+    i = sess.index("2025-01-30")
+    assert sess[i + 20] == "2025-02-27"
+    assert rolls(i, i + 20, sess, exp) == 0  # entered on the Jan expiry, exits on the Feb expiry: no roll
+    assert rolls(i, i + 21, sess, exp) == 1  # one session longer: Feb 27 is inside the hold
+    assert rolls(i - 1, i + 21, sess, exp) == 2  # entered the day before the Jan expiry: two rolls
+    k = sess.index("2025-01-02")
+    assert rolls(k, k + 5, sess, exp) == 0
+
+
+def test_the_book_admits_by_abs_z_until_the_cap_and_frees_room_on_the_exit_day():
+    sess = _sessions("2025-01-01", "2025-03-31")
+    cands = pd.DataFrame({
+        "E": ["2025-01-02"] * 3 + ["2025-01-03"] + [sess[sess.index("2025-01-02") + 20]] * 2,
+        "symbol": ["A", "B", "C", "D", "E", "F"],
+        "z": [2.5, -4.0, 3.0, 2.2, 2.1, -2.0],
+    })
+    taken = admit(cands, sess, 20, 2)
+    assert taken.tolist() == [False, True, True, False, True, True]  # B and C by |z|; D finds no room; A and E... A exits 20 sessions on, so two seats free
+    assert admit(cands, sess, 20, None).all()
+
+
+def test_book_pnl_sums_open_positions_and_charges_costs_on_the_exit_day():
+    sess = _sessions("2025-01-01", "2025-02-28")
+    i = sess.index("2025-01-02")
+    closes = pd.DataFrame({"A": [100.0 * 1.01**k for k in range(len(sess))], "B": [50.0] * len(sess)}, index=sess)
+    adm = pd.DataFrame({"E": ["2025-01-02", "2025-01-02"], "symbol": ["A", "B"], "side": [1.0, -1.0], "cost": [15.0, 30.0]})
+    pnl = book_pnl(adm, closes, sess, 5)
+    assert pnl["open"].iloc[i] == 0 and pnl["open"].iloc[i + 1] == 2 and pnl["open"].iloc[i + 5] == 2 and pnl["open"].iloc[i + 6] == 0
+    assert abs(pnl["gross_bps"].iloc[i + 1] - 100.0) < 1e-6  # A up 1 % (100 bps), B flat
+    assert pnl["cost_bps"].iloc[i + 5] == 45.0 and pnl["cost_bps"].sum() == 45.0
+    assert abs(pnl["net_bps"].sum() - (500.0 - 45.0)) < 1e-6

@@ -376,6 +376,10 @@ def run_events(settings: Settings, args: argparse.Namespace) -> None:
         from .research.events import execution_check
 
         out = execution_check(settings, settings.data_dir / "obtests" / f"{args.exec_check}-events.parquet")
+    elif args.book:
+        from .research.events import study_book
+
+        out = study_book(settings, end=date.fromisoformat(args.end), label=args.label, cap=args.cap)
     else:
         out = study(settings, end=date.fromisoformat(args.end), label=args.label)
     print(json.dumps(out, indent=1, default=float))
@@ -625,6 +629,8 @@ def build_parser() -> argparse.ArgumentParser:
     evs.add_argument("--end", default="2025-09-30")
     evs.add_argument("--label", default="")
     evs.add_argument("--exec-check", dest="exec_check", default="", help="run id: the 15:25 execution check on that run's events (5m cache)")
+    evs.add_argument("--book", action="store_true", help="prereg 7b: the same selection held 20 sessions as a book (roll at expiry, |z| priority)")
+    evs.add_argument("--cap", type=int, default=20, help="prereg 7b: most open positions")
 
     m = sub.add_parser("mtf-backtest", help="1h/4h sweeps timed on 15m/5m, over the 5m cache")
     m.add_argument("--start", required=True)

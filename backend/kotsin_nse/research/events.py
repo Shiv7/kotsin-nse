@@ -162,6 +162,10 @@ SIGMA_N = 60
 RUNUP_N = 5
 CLOSE_HM = "15:30"
 OPEN_HM = "09:15"
+HOLD_BOOK = 20  # §7b
+CAP = 20
+CARRY_BPS = 50.0  # a stock future's premium decay over ~20 sessions, the §7b sensitivity
+TUESDAY_FROM = "2025-09"  # NSE moved its expiry day from Thursday to Tuesday in September 2025
 
 
 def event_sessions(results: pd.DataFrame, sessions: list[str]) -> pd.DataFrame:
@@ -277,6 +281,78 @@ def event_table(settings: Settings, ev: pd.DataFrame, end: date) -> pd.DataFrame
     return pd.DataFrame(rows)
 
 
+def expiries(sessions: list[str]) -> list[str]:
+    """Monthly stock-futures expiry sessions: the last Thursday of each month — the previous session if
+    it is a holiday — and the last Tuesday from September 2025."""
+    idx = pd.Index(sorted(sessions))
+    out = []
+    for m in sorted({s[:7] for s in sessions}):
+        y, mo = int(m[:4]), int(m[5:7])
+        last = date(y + (mo == 12), mo % 12 + 1, 1) - timedelta(days=1)
+        wd = 1 if m >= TUESDAY_FROM else 3
+        d = last - timedelta(days=(last.weekday() - wd) % 7)
+        pos = idx.searchsorted(d.isoformat(), side="right") - 1
+        if pos >= 0 and idx[pos][:7] == m and (d - date.fromisoformat(idx[pos])).days <= 3:
+            out.append(str(idx[pos]))
+    return out
+
+
+def rolls(entry: int, exit_: int, sessions: list[str], exp: set[str]) -> int:
+    """Expiries strictly inside the hold: each one is a roll (another round trip)."""
+    return sum(1 for j in range(entry + 1, exit_) if sessions[j] in exp)
+
+
+def admit(cands: pd.DataFrame, sessions: list[str], hold: int, cap: int | None) -> pd.Series:
+    """Which candidates a book of at most ``cap`` positions takes: at the close of each E the positions
+    exiting that day leave first, then the day's candidates enter in descending |z| while room remains."""
+    pos_of = {s: i for i, s in enumerate(sessions)}
+    exits: list[int] = []
+    taken = pd.Series(False, index=cands.index)
+    for e, g in cands.groupby("E", sort=True):
+        i = pos_of[e]
+        exits = [x for x in exits if x > i]
+        for ix in g["z"].abs().sort_values(ascending=False).index:
+            if cap is not None and len(exits) >= cap:
+                break
+            taken[ix] = True
+            exits.append(i + hold)
+    return taken
+
+
+def book_pnl(adm: pd.DataFrame, closes: pd.DataFrame, sessions: list[str], hold: int) -> pd.DataFrame:
+    """The book session by session: the sum over open positions of side × the stock's daily return (one
+    notional unit each) in bps, costs charged on the exit session, the number of positions open."""
+    import numpy as np
+
+    pos_of = {s: i for i, s in enumerate(sessions)}
+    c = closes.reindex(sessions)
+    ret = c.pct_change().to_numpy(float)
+    col = {s: k for k, s in enumerate(c.columns)}
+    pnl = np.zeros(len(sessions))
+    cost = np.zeros(len(sessions))
+    n_open = np.zeros(len(sessions), dtype=int)
+    for x in adm.itertuples():
+        i, j = pos_of[x.E], pos_of[x.E] + hold
+        k = col[x.symbol]
+        r = ret[i + 1 : j + 1, k]
+        pnl[i + 1 : j + 1] += np.where(np.isfinite(r), r, 0.0) * x.side * 1e4
+        n_open[i + 1 : j + 1] += 1
+        cost[j] += x.cost
+    return pd.DataFrame({"day": sessions, "gross_bps": pnl, "cost_bps": cost, "net_bps": pnl - cost, "open": n_open}).set_index("day")
+
+
+def _drawdowns(net: pd.Series) -> dict[str, Any]:
+    cum = net.cumsum()
+    peak = cum.cummax()
+    dd = cum - peak
+    under = dd < 0
+    longest = cur = 0
+    for u in under:
+        cur = cur + 1 if u else 0
+        longest = max(longest, cur)
+    return {"max_drawdown_bps_units": round(float(dd.min()), 1), "longest_drawdown_sessions": int(longest)}
+
+
 def study(settings: Settings, end: date = date(2025, 9, 30), label: str = "") -> dict[str, Any]:
     """§7 as written. Writes ``obtests/events-<id>.json`` and the event table beside it."""
     import uuid
@@ -368,6 +444,87 @@ def study(settings: Settings, end: date = date(2025, 9, 30), label: str = "") ->
     return out
 
 
+
+
+def study_book(settings: Settings, end: date = date(2025, 9, 30), label: str = "", cap: int = CAP, hold: int = HOLD_BOOK) -> dict[str, Any]:
+    """§7b as written: the §7 selection held ``hold`` sessions as a book of at most ``cap`` positions,
+    |z| priority, a roll charged for every expiry inside the hold. Writes ``obtests/events7b-<id>.json``."""
+    import math
+    import uuid
+
+    import numpy as np
+
+    from ..config import Segment
+    from ..domain import Instrument, InstrumentKind
+    from ..risk.costs import CostModel
+    from .history import HistoryStore
+    from .regimes import _daily
+
+    if end >= HOLDOUT_START:
+        raise ValueError(f"{end} is inside the holdout (from {HOLDOUT_START})")
+    t0 = time.time()
+    results = pd.read_parquet(settings.data_dir / "events" / "results.parquet")
+    store = HistoryStore(settings.data_dir / "history")
+    sessions = [d for d in _daily(store, "NIFTY")["day"] if d <= end.isoformat()]
+    ev = event_sessions(results[results["broadcast_ist"] < f"{end.isoformat()} 23:59:59"], sessions)
+    t = event_table(settings, ev, end)
+    inst = Instrument("BT", "BT", Segment.NSE_FO, InstrumentKind.FUTURE, lot_size=1)
+    rt = CostModel(settings).round_trip(inst, 1000.0, 1000.0, 500).total / 500_000 * 1e4 + 10.0
+    exp = set(expiries(sessions))
+    pos_of = {s: i for i, s in enumerate(sessions)}
+    t["side"] = np.sign(t["z"])
+    sel = t[t["z"].abs() >= Z_MIN].copy().reset_index(drop=True)
+    sel["rolls"] = [rolls(pos_of[e], pos_of[e] + hold, sessions, exp) for e in sel["E"]]
+    sel["cost"] = rt * (1 + sel["rolls"])
+    sel["gross"] = sel["side"] * sel[f"raw_{hold}"] * 1e4
+    sel["net"] = sel["gross"] - sel["cost"]
+    sel["adj"] = sel["side"] * sel[f"drift_{hold}"] * 1e4
+    sel["carry_adjusted"] = sel["net"] - CARRY_BPS * sel["side"]
+
+    def block(adm: pd.DataFrame) -> dict[str, Any]:
+        si = adm.set_index("E")
+        return {"net": _weekly_stats(si["net"]), "gross": _weekly_stats(si["gross"]), "market_adjusted": _weekly_stats(si["adj"]),
+                "carry_adjusted": _weekly_stats(si["carry_adjusted"]),
+                "long_leg_net": _weekly_stats(si.loc[si["side"] > 0, "net"]), "short_leg_net": _weekly_stats(si.loc[si["side"] < 0, "net"]),
+                "long_leg_carry_adjusted": _weekly_stats(si.loc[si["side"] > 0, "carry_adjusted"]),
+                "in_hours_net": _weekly_stats(si.loc[si["in_hours"], "net"]), "after_hours_net": _weekly_stats(si.loc[~si["in_hours"], "net"]),
+                "abs_z_2_3_net": _weekly_stats(si.loc[si["z"].abs() < 3, "net"]), "abs_z_gt_3_net": _weekly_stats(si.loc[si["z"].abs() >= 3, "net"]),
+                "avg_rolls": round(float(adm["rolls"].mean()), 3), "share_turned_away": round(float(1 - len(adm) / len(sel)) * 100, 1) if len(sel) else None}
+
+    taken = admit(sel, sessions, hold, cap)
+    adm = sel[taken]
+    primary = _weekly_stats(adm.set_index("E")["net"])
+    primary["passes"] = bool(primary.get("t_by_week") and primary["t_by_week"] >= 2.0 and primary["avg_bps"] > 0
+                             and primary["weeks_positive"] >= 55 and all(h is not None and h > 0 for h in primary["halves"]))
+    closes = pd.DataFrame({s: _daily(store, s).set_index("day")["c"] for s in sorted(adm["symbol"].unique())})
+    pnl = book_pnl(adm, closes, sessions, hold)
+    pnl = pnl[pnl.index >= "2021-04-01"]
+    wk = pnl["net_bps"].groupby(["{}-W{:02d}".format(*date.fromisoformat(d).isocalendar()[:2]) for d in pnl.index]).sum()
+    sd = wk.std(ddof=1)
+    book = {"sessions": len(pnl), "net_bps_units_per_session": round(float(pnl["net_bps"].mean()), 2),
+            "weekly_sharpe": round(float(wk.mean() / sd * math.sqrt(52)), 2) if sd > 0 else None,
+            "annual_pct_on_cap_notional": round(float(pnl["net_bps"].mean()) * 252 / cap / 100, 2) if cap else None,
+            "avg_open": round(float(pnl["open"].mean()), 1), "peak_open": int(pnl["open"].max()),
+            "share_sessions_empty": round(float((pnl["open"] == 0).mean()) * 100, 1),
+            "by_year_net_bps_units": pnl["net_bps"].groupby(pnl.index.str[:4]).sum().round(1).to_dict()} | _drawdowns(pnl["net_bps"])
+    out: dict[str, Any] = {"id": f"events7b-{uuid.uuid4().hex[:10]}", "kind": "events7b", "label": label, "end": end.isoformat(), "hold": hold, "cap": cap,
+                           "cost_bps_round_trip": round(rt, 2), "carry_bps": CARRY_BPS, "expiries": len(exp), "events_all_members": len(t),
+                           "candidates_abs_z_ge_2": len(sel), "admitted_n": len(adm), "primary_admitted_net": primary, "admitted": block(adm),
+                           "book": book, "uncapped": block(sel)}
+    for c in (10, 40):
+        out[f"cap_{c}"] = block(sel[admit(sel, sessions, hold, c)])
+    reg_p = settings.data_dir / "oi_daily" / "_regimes.parquet"
+    if reg_p.exists() and len(adm):
+        si = adm.set_index("E")
+        reg = pd.read_parquet(reg_p)["regime"].reindex(si.index)
+        out["by_regime_at_E_post_hoc"] = {str(int(k)): {"n": len(g), "net_bps": round(float(g["net"].mean()), 2)} for k, g in si.groupby(reg.values) if k == k}
+    out["seconds"] = round(time.time() - t0, 1)
+    obt = settings.data_dir / "obtests"
+    obt.mkdir(exist_ok=True)
+    (obt / f"{out['id']}.json").write_text(json.dumps(out, default=float))
+    sel.assign(admitted=taken.to_numpy()).to_parquet(obt / f"{out['id']}-candidates.parquet", index=False)
+    pnl.to_parquet(obt / f"{out['id']}-book.parquet")
+    return out
 
 
 def execution_check(settings: Settings, events_parquet: Path, start: str = "2024-01-01", cost_bps: float = 14.62) -> dict[str, Any]:
