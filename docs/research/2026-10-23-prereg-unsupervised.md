@@ -318,3 +318,20 @@ the uncapped and cap-10/40 variants; the book's session P&L, Sharpe, drawdown, o
 
 **Decision rule.** PASS → the rule goes to the engine as a 15:20 SHADOW job and runs a results season on paper before any
 money. FAIL → the lane is closed in writing; no variant is tried on the holdout. A second run only for a named code bug.
+
+**§7b holdout result (2026-10-25, the one run, `kotsin-nse events --holdout`, `events7b-564c98006d`; 794 member events, 332
+candidates, 120 admitted, 22 weeks with events). Primary — admitted events, net per event: +64.8 bps, median +156, t 0.99 by
+week, 63.6 % of weeks positive, halves +47 / +81, hit rate 59.2 %. The bar was mean > 0, t ≥ 1.0, ≥ 50 % of weeks: t is 0.99.
+FAIL, by the rule as written.** The point estimate is positive and within 2 standard errors of the in-sample +89.5 (se 64 bps
+per event — the holdout is as under-powered as predicted); gross +93 (t 1.4), market-adjusted +96 (t 1.3), carry-adjusted +70.
+What should worry more than the t: **the uncapped rule lost money out of sample — −18 bps net (t −0.4, 332 events; long leg
+−29, short −7)**; the whole positive result lives in the |z|-priority cap (cap 10 +33, t 0.4; cap 20 +65, t 1.0; cap 40 +60,
+t 1.1), which in-sample was a secondary read-out, not the thing being tested. **The legs flipped**: in-sample long +209 / short
+−8; holdout long +50 (t 0.4, carry-adjusted 0) / short +77 (t 1.0). By month: Oct 2025 +206 (n 20), Nov +40, Jan 2026 −70,
+Feb −43, Apr +220, May −99, Jun −588 (n 3), Jul +138, Aug +358 (n 4) — two seasons up, one down, one mixed. In-hours n 3.
+The book: 9.3 open on average, full on the peak days, empty 27 % of sessions, weekly Sharpe 0.88, 3.9 % a year on the 20-unit
+notional, worst drawdown 0.41 of it, longest 88 sessions. **Decision, per the rule written above: the lane is closed; no variant
+is tried on the holdout.** The honest reading of the whole lane: post-results drift exists in the Indian F&O names
+(market-adjusted +96 bps over 20 sessions even here), but after costs, as a tradeable rule with a fixed selection, the
+evidence over 2021–2026 is "small and unstable" — the sign of the absolute return depended on which stocks the cap let in and
+on which way the market went during the hold. The holdout is spent.
