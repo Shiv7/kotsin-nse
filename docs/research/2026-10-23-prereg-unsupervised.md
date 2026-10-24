@@ -124,3 +124,31 @@ Costs: 1 point of spread per leg on entry; charges at 1 lot and at 10 lots (brok
 **Pass:** the same as §5 (net > 0, t by week ≥ 2, ≥ 60 % months, both halves, PF ≥ 1.2, still positive at
 2 points), at **10 lots**; 1 lot reported. This is the last variant in the exploration window; the
 survivor of §5 / §5b, if any, goes to the holdout once.
+
+## 6. Two follow-ups (written 2026-10-24, before any result)
+
+Both chase the cost problem that stopped §1 and §5: the information is real, the daily turnover killed it.
+
+### 6a. A combined option-chain score, traded weekly (`research/chainscore.py`)
+From the §1 panel (158 k stock-sessions, known after each close): H1 call−put IV spread, H2 put skew,
+H3 abnormal option/stock volume, H4 OTM put build, each as a per-session cross-sectional rank (0–1).
+**Score** = the weighted sum with weights fitted **walk-forward**: for each month, a ridge regression of
+the next-5-session return on the four ranks over the previous 12 months (no look-ahead; the first
+test month is 2022-04). The **primary rule**: every Friday's close (the last session of the week), go
+long the top quintile and short the bottom quintile of the score, equal-weighted, as stock futures;
+hold to the next Friday's close; a stock already on the same side is kept, so costs (the §1 round
+trip, 14.6 bps) are charged only on names that enter or leave. Reported, not judged: the same with
+daily rebalancing, the long and the short legs separately, by year.
+
+**Pass**: weekly long-short return > 0 after costs with t(by week) ≥ 2.0, ≥ 55 % of weeks positive,
+both halves (2022-04 → 2023-12 / 2024-01 → 2025-09) positive, and a Sharpe (weekly, annualised)
+≥ 1.0. One run. A pass goes to the holdout once, on the owner's word.
+
+### 6b. Overnight vs intraday (`research/overnight.py`)
+Daily cache 2021-04-01 → 2025-09-30, NIFTY, BANKNIFTY and every F&O stock (point-in-time members).
+Decompose each session: **overnight** = open / previous close − 1, **intraday** = close / open − 1.
+Report means, t by week, both halves, by year, and for the stocks the cross-sectional average.
+**Primary rule** (index only): long NIFTY futures from each close to the next open (one lot; costs = the
+future's charges + 5 bp slippage per fill, round trip). **Pass**: net > 0, t(by week) ≥ 2.0, ≥ 55 % of
+weeks positive, both halves positive. Reported, not judged: the same on BANKNIFTY; intraday short
+(open → close) as the mirror; the overnight return by regime (`_regimes.parquet`); by weekday.
