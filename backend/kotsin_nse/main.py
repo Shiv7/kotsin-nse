@@ -368,6 +368,35 @@ def run_fetch_results(settings: Settings, args: argparse.Namespace) -> None:
                       "board_result_rows": len(b)}, default=int, indent=1))
 
 
+def run_dayread(settings: Settings, args: argparse.Namespace) -> None:
+    """One session as the operator reads it, from the archive (analysis/dayread.py)."""
+    from .analysis.dayread import from_archive
+
+    day = date.fromisoformat(args.day) if args.day else date.today()
+    out = from_archive(settings.data_dir, args.symbol.upper(), day)
+    if out is None:
+        print(f"no archived bars for {args.symbol.upper()} on {day}", file=sys.stderr)
+        raise SystemExit(1)
+    if args.json:
+        print(json.dumps(out, indent=1, default=float))
+        return
+    lv = out["levels"]
+    print(f"{out['symbol']} {out['day']}  O {out['open']} H {out['high']} L {out['low']} C {out['close']}  gap {out['gap_pct']}%  "
+          f"CPR {lv.get('BC')}–{lv.get('TC')}  S1 {lv.get('S1')}  R1 {lv.get('R1')}  tolerance {out['tolerance']}  options {out['expiry']}")
+    print("\nevents")
+    for e in out["events"]:
+        print(f"  {e['time']}  {e['kind']:<10} {e['text']}")
+    print("\nlegs")
+    for lg in out["legs"]:
+        f, op = lg.get("futures"), lg.get("options")
+        who = f"OI {f['oi_chg_pct']:+.2f}% {f['read']}" if f else "no futures OI"
+        opt = f" | {', '.join(op['moves'])} → {op['read']}" if op and op["moves"] else ""
+        print(f"  {lg['from']}→{lg['to']} {lg['dir']:<4} {lg['pts']:+8.2f} ({lg['pct']:+.2f}%)  {who}{opt}")
+    print("\nsummary")
+    for s in out["summary"]:
+        print(f"  {s}")
+
+
 def run_events(settings: Settings, args: argparse.Namespace) -> None:
     """Post-results drift (research/events.py, pre-registered §7)."""
     from .research.events import study
@@ -627,6 +656,11 @@ def build_parser() -> argparse.ArgumentParser:
     npk.add_argument("--end", default="2025-09-30")
     npk.add_argument("--label", default="")
 
+    dr = sub.add_parser("dayread", help="one session on the 5m chart as the operator reads it: pivots, CPR, swings, each leg's futures and option OI")
+    dr.add_argument("symbol")
+    dr.add_argument("--day", default="", help="YYYY-MM-DD (default today); needs the day's archive files")
+    dr.add_argument("--json", action="store_true")
+
     fr = sub.add_parser("fetch-results", help="NSE's results calendar: financial-results + integrated-filing broadcasts, board meetings")
     fr.add_argument("--pause", type=float, default=1.5)
 
@@ -698,6 +732,8 @@ def cli() -> None:
         run_nightpick(settings, args)
     elif command == "fetch-results":
         run_fetch_results(settings, args)
+    elif command == "dayread":
+        run_dayread(settings, args)
     elif command == "events":
         run_events(settings, args)
     elif command == "mtf-backtest":

@@ -429,6 +429,94 @@ function HedgeCard({ h, bias }: { h: NonNullable<Bundle['hedge']>; bias: string 
 }
 
 /** One stock end to end, in reading order: Claude's read, then the evidence behind it. */
+/* ---------- the day read (backend/kotsin_nse/analysis/dayread.py) ---------- */
+interface DayEvent { time: string; kind: string; text: string; price: number; level: string | null }
+interface DayLeg {
+  from: string; to: string; closed: boolean; dir: 'up' | 'down'; p0: number; p1: number; pts: number; pct: number
+  futures: { oi_chg: number; oi_chg_pct: number; build_up: string; read: string } | null
+  options: { calls_net: number; puts_net: number; moves: string[]; read: string; pcr: number | null } | null
+}
+interface DayRead {
+  symbol: string; day: string; bars: number; expiry: string | null; open: number; high: number; low: number; close: number; gap_pct: Num
+  levels: Record<string, number>; tolerance: number; events: DayEvent[]; legs: DayLeg[]; summary: string[]
+  htf: { '15m': { trend: string; swings: { time: string; kind: string; price: number }[] }; '30m': { green: number; red: number }; close?: { position: string; vs_cpr: string } }
+}
+
+const EVENT_TONE: Record<string, string> = {
+  SUPPORT: 'text-emerald-300', BREAK_UP: 'text-emerald-300', BOS_UP: 'text-emerald-200', HH: 'text-emerald-400', HL: 'text-emerald-400',
+  RESISTANCE: 'text-rose-300', BREAK_DOWN: 'text-rose-300', BOS_DOWN: 'text-rose-200', LH: 'text-rose-400', LL: 'text-rose-400',
+}
+const BUILD_TONE: Record<string, string> = { LB: 'text-emerald-300', SC: 'text-emerald-200', SB: 'text-rose-300', LU: 'text-rose-200', FLAT: 'text-slate-400' }
+
+function DayReadCard({ symbol }: { symbol: string }) {
+  const [showAll, setShowAll] = useState(false)
+  const { data: r, error } = usePoll<DayRead>(`/api/dayread/${encodeURIComponent(symbol)}`, 30000)
+  if (error && !r) return <Card title="4b · The day, as you read it"><ErrorLine error={error} /></Card>
+  if (!r) return null
+  const lv = r.levels
+  const events = showAll ? r.events : r.events.filter((e) => !['HH', 'HL', 'LH', 'LL'].includes(e.kind))
+  return (
+    <Card
+      title="4b · The day, as you read it: pivots, CPR, structure, and who was positioning on each leg"
+      right={`${r.day} · ${r.bars} bars · tolerance ${fmt.n(r.tolerance)} · options ${r.expiry ?? '—'}`}
+    >
+      <div className="mb-2 flex flex-wrap gap-x-4 gap-y-1 font-mono text-[11px] text-slate-400">
+        {['PDH', 'R1', 'TC', 'P', 'BC', 'PDC', 'S1', 'PDL'].filter((k) => lv[k] != null).map((k) => (
+          <span key={k}>{k} <span className="text-slate-200">{fmt.n(lv[k])}</span></span>
+        ))}
+      </div>
+      <ul className="mb-3 space-y-1 text-xs leading-relaxed text-slate-300">
+        {r.summary.map((s, i) => <li key={i}>{s}</li>)}
+      </ul>
+      <div className="grid gap-3 lg:grid-cols-2">
+        <div>
+          <div className="mb-1 flex items-center justify-between text-[11px] uppercase tracking-wide text-slate-500">
+            <span>events on the 5m chart</span>
+            <button onClick={() => setShowAll((v) => !v)} className="rounded bg-slate-800 px-1.5 py-0.5 normal-case text-slate-300 hover:bg-slate-700">
+              {showAll ? 'hide every swing' : 'show every swing'}
+            </button>
+          </div>
+          <table className="w-full font-mono text-[11px]">
+            <tbody>
+              {events.map((e, i) => (
+                <tr key={i} className="border-t border-slate-800/60">
+                  <td className="py-0.5 pr-2 text-slate-500">{e.time}</td>
+                  <td className={cls('py-0.5 pr-2', EVENT_TONE[e.kind] ?? 'text-slate-300')}>{e.kind.replace('_', ' ')}</td>
+                  <td className="py-0.5 text-slate-300">{e.text}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div>
+          <div className="mb-1 text-[11px] uppercase tracking-wide text-slate-500">legs between swings: futures OI and the strikes around price</div>
+          <table className="w-full font-mono text-[11px]">
+            <tbody>
+              {r.legs.map((l, i) => (
+                <tr key={i} className="border-t border-slate-800/60 align-top">
+                  <td className="py-0.5 pr-2 text-slate-500">{l.from}→{l.to}{l.closed ? '' : '…'}</td>
+                  <td className={cls('py-0.5 pr-2', l.pts >= 0 ? 'text-emerald-300' : 'text-rose-300')}>{l.pts >= 0 ? '+' : ''}{fmt.n(l.pts)} ({l.pct >= 0 ? '+' : ''}{l.pct}%)</td>
+                  <td className={cls('py-0.5 pr-2', BUILD_TONE[l.futures?.build_up ?? 'FLAT'])}>
+                    {l.futures ? `OI ${l.futures.oi_chg_pct >= 0 ? '+' : ''}${l.futures.oi_chg_pct}% ${l.futures.read}` : '—'}
+                  </td>
+                  <td className="py-0.5 text-slate-400">
+                    {l.options?.moves.length ? <>{l.options.moves.join(', ')} <span className="text-slate-500">· {l.options.read}{l.options.pcr != null ? ` · PCR ${l.options.pcr}` : ''}</span></> : '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      {r.htf.close && (
+        <div className="mt-2 text-[11px] text-slate-500">
+          15m structure <span className="text-slate-300">{r.htf['15m'].trend}</span> · 30m {r.htf['30m'].green} green / {r.htf['30m'].red} red · closed {r.htf.close.position}, {r.htf.close.vs_cpr}
+        </div>
+      )}
+    </Card>
+  )
+}
+
 export function Analysis() {
   const { symbol: param } = useParams()
   const nav = useNavigate()
@@ -461,6 +549,7 @@ export function Analysis() {
       {data?.positioning && <PositioningCard p={data.positioning} build={data.buildup} />}
       {data && <LevelsCard lv={data.levels} fib={data.big_picture?.fibonacci} structure={data.structure} profile={data.profile} />}
       {data?.today && <TodayCard t={data.today} />}
+      {symbol && data?.live !== false && <DayReadCard symbol={symbol} />}
       {symbol && data?.live !== false && (
         <Card title="5 · Microstructure">
           <MicroPanel symbol={symbol} />

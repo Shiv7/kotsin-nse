@@ -58,3 +58,8 @@ Two things follow, and both are encoded rather than remembered:
   −80% and +185%. The backtester must import the live code.
 * Trade statistics cluster by day. Always run a within-day permutation test before believing a
   split, and say plainly when n is too small.
+* The session before a monthly expiry, the tracked option expiry rolls to the next month while
+  only the nearest future is on the quote channel: on 2026-10-26 every stock's calls/puts legs read
+  as missing from 09:15 to 15:30 (`fno_snapshot` skipped the expiry because "its" future had no
+  price). The strikes are now priced off the front future when the expiry's own has no quote, and
+  the snapshot says so in `missing`. Check the F&O page the day before every expiry.

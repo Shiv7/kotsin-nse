@@ -70,6 +70,7 @@ Built 2026-10-18 from `995a914` with every strategy removed, then rebuilt as a r
 | `market/fo_universe.py` | **F&O membership by date** from NSE's bhavcopies + NSE's symbol-change list: a stock is tradable as a future only on sessions its FUTSTK rows appear. `swing.py` uses it by default (`fo_members=true`) |
 | `market/fo_bhavcopy.py` | NSE daily F&O bhavcopy (official OI of every contract) |
 | `research/` | backtesters: `obtest.py` (order block), `playbooks.py` (5m sweep, value area), `mtf.py` (1h/4h sweep), `fibob.py` (Fib+pivot+OB), `swing.py` (dropped 2026-10-23, §5), `oi_daily.py`, `oi16.py` (16 & 64 states), studies `oi16_study.py`, `oi64_study.py`; `micro_ic.py` — each recorded order-flow reading against the next 5/15/30 min (IC by day) |
+| `analysis/dayread.py` | **the day as the owner reads it** (2026-10-26): over a session's closed 5m bars, every previous-day pivot and the CPR band tested, held, rejected or broken (one event per visit, re-armed two tolerances away), swings labelled HH/HL/LH/LL as they become known, breaks of structure, and for each leg between swings the front future's OI change (LB/SC/SB/LU, one-frame OI spikes removed) and the calls/puts added or shed at the strikes around price; 15m/30m/1h beside it. `kotsin-nse dayread NIFTY --day 2026-10-26` (archive) and `/api/dayread/{symbol}` (today live, `?day=` archive); card 4b on the Analysis page. A reading, not a signal |
 | `exec/`, `risk/costs.py`, `ledger/` | order gateway (SHADOW/PAPER/LIVE, nothing submits), measured cost model (₹40/order flat, STT, GST…) |
 | UI | Overview, **Board** (live/replay), **Backtest** (every run, every trade opens on its chart), Chart, Options, Universe, System (feed rate) |
 
@@ -87,6 +88,7 @@ CLI (all read the cache in `backend/data-live/`, `KN_DATA_DIR` from `.env`):
 fetch-history --all-fo --tf 1m,5m,1d --start --end   # 5paisa history into data-live/history/<tf>/
 fetch-oi --start --end [--legacy]                    # NSE bhavcopies into data-live/oi_daily/ (--legacy: the older file, to 2024-07-05, into oi_daily_legacy/) + NSE's symbol-change list
 micro-ic --start --end                               # does the recorded order flow predict (needs ≥ 15 recorded days)
+dayread SYMBOL --day YYYY-MM-DD [--json]            # one archived session as the owner reads it (pivots, CPR, swings, OI per leg)
 ob-backtest | pb-backtest | mtf-backtest | fib-backtest | swing-backtest  --start --end --set k=v --label
 ```
 Backtest results are JSON in `backend/data-live/obtests/` (git-ignored; visible on the Backtest page).

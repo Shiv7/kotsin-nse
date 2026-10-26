@@ -251,6 +251,26 @@ def build_app(engine: Engine) -> FastAPI:
             raise HTTPException(404, f"no daily history for {symbol.upper()} — not an F&O stock we hold data for")
         return out
 
+    @api.get("/dayread/{symbol}")
+    async def dayread(symbol: str, day: str | None = None) -> dict[str, Any]:
+        """The session on the 5-minute chart as the operator reads it (analysis/dayread.py):
+        pivots and CPR tested, held or broken; swings and breaks of structure; each leg's futures
+        OI and the strikes written or covered. Today from the engine; a past ``day`` from the archive."""
+        from datetime import date
+
+        from ..analysis.dayread import from_archive, from_engine
+        from ..market.session import ist_day
+
+        sym = symbol.upper()
+        now = time.time()
+        if day and date.fromisoformat(day) != ist_day(now):
+            out = from_archive(engine.s.data_dir, sym, date.fromisoformat(day))
+        else:
+            out = from_engine(engine, sym, now)
+        if out is None:
+            raise HTTPException(404, f"no bars for {sym} on {day or ist_day(now).isoformat()}")
+        return out
+
     @api.get("/analysis-symbols")
     async def analysis_symbols() -> list[dict[str, Any]]:
         """Every stock the Analysis page can open: live ones first, then those with cached history."""

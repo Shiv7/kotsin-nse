@@ -1162,6 +1162,14 @@ class Engine:
         for e in g.option_expiries:
             und = g.future_for(e) or fut
             fx = self.ltps.get(und.scrip_code)
+            if not fx and und is not fut and self.ltps.get(fut.scrip_code):
+                # The expiry's own future is not on the quote channel (only the nearest
+                # `universe_futures_months` are), so price the strikes off the front future and
+                # say so. Found 2026-10-26, the session before the October expiry: every stock's
+                # tracked expiry had rolled to November, whose futures had no frame all day, so the
+                # calls and puts legs read as missing for all 52 names from 09:15 to 15:30.
+                missing.append(f"{e}: priced off the front future ({und.name or und.scrip_code} has no quote)")
+                und, fx = fut, self.ltps.get(fut.scrip_code)
             if not fx:
                 missing.append(f"{e}: no price for its future {und.name or und.scrip_code}")
                 continue
