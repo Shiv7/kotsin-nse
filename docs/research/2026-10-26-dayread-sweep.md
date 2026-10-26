@@ -114,3 +114,34 @@ phenomenon on these days, not a morning one. Up-legs with an OI change (LB or SC
   pre-registration first, then a forward SHADOW test (the holdout is spent).
 - Useful as structure for the day: the first half hour is a day extreme 4 days in 5; a hold is good
   for about an hour, half the time; 5m legs are retraced almost fully, 30m legs two thirds.
+
+## 9. The retest as a trade to the next wall (owner's ask, the same night)
+
+"Proper retest, then price moves, then it reaches the next wall — that gives the direction too." Tested on
+every held retest of the owner's sequence above (6,409: 2,856 bullish, 3,553 bearish; indices excluded), on the
+5m bars. Entry A = the close of the retest bar; entry B = the first 5m close beyond the retest bar's high (low)
+within 6 bars ("it starts growing"; 49 % of retests give it). Stop L = the retest bar's low (high) minus one
+tolerance; stop P = the central pivot (the owner's "TC to pivot" risk). Target = the nearest wall beyond the entry
+by at least one tolerance: daily pivots R1/R2/R3 (S1/S2/S3), PDH (PDL), the previous week's pivots WP/WR1/WR2
+(WS1/WS2), and the next round number (a step of ~0.5–0.7 % of price). Stop and target in the same bar count as
+the stop. Costs 15 bps a round trip. t by day.
+
+| Entry | Stop | n | target first | stop first | close | wall touched by the close | median risk / reward bps | gross bps | net bps | gross R | net R |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| A retest close | L | 6,371 | 43.5 % | 49.4 % | 7.0 % | 58.4 % | 39 / 47 | +2.3 | −12.7 | +0.06 | −0.35 |
+| B first close beyond | L | 3,101 | 52.5 % | 34.0 % | 13.5 % | 58.5 % | 65 / 46 | +2.0 | −13.0 | +0.03 | −0.21 |
+| B | P | 3,101 | 51.8 % | 33.7 % | 14.5 % | 58.5 % | 67 / 46 | +1.0 | −14.0 | +0.02 | −0.23 |
+| B, pivot walls only | P | 3,101 | 47.0 % | 35.7 % | 17.2 % | 53.7 % | 67 / 55 | +0.8 | −14.2 | +0.01 | −0.23 |
+
+By the wall that was the target (entry B, stop L): round number 755 cases, hit 63 %, reward 36 bps, +3.7 gross;
+PDH/PDL 767, 52 %, +3; S1/R1 990, 49 %, −1; S2/R2 356, 40 %, +2; weekly pivot 112, 61 %, +9. By the setup's
+reward:risk: under 1 → 58 % reach the target, +0.8 gross; 1–2 → 36 %, +6.3; 2–3 → 14 %, −5.4. By hour of the
+retest: −6 to +6 bps gross everywhere; 2024 +2.6, 2025 +1.3. Bullish and bearish the same.
+
+The next wall is reached 58 % of the time — because it is closer than the stop (median reward 46 bps against a
+65 bps risk). A driftless path reaches the nearer side first risk ÷ (risk + reward) = 59 % of the time; the
+observed 52.5 % plus the 13.5 % that were still open at the close is that number. When the wall is 2–3 R away
+only 14 % get there. The hit rate is set by the distances, not by the sequence: the sequence gives the direction
+of the move so far, not of the move to come. Expectancy +0.01 to +0.06 R before costs, −0.2 to −0.35 R after —
+the same as HANDOFF §3.4 rows 11 and 11c from a different construction. Script: scratch `retest_wall.py`
+(method fully specified above).
