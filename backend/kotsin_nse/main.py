@@ -368,6 +368,28 @@ def run_fetch_results(settings: Settings, args: argparse.Namespace) -> None:
                       "board_result_rows": len(b)}, default=int, indent=1))
 
 
+def run_dayread_sweep(settings: Settings, args: argparse.Namespace) -> None:
+    """The day read on every stock-day (research/dayread_sweep.py), then the tables (--stats)."""
+    from pathlib import Path
+
+    from .research.dayread_stats import run as stats
+    from .research.dayread_sweep import DEV_END, DEV_START, sweep_archive, sweep_history
+
+    out = Path(args.out)
+    if args.stats:
+        stats(out, settings.data_dir)
+        print(f"report: {out / 'report.txt'}")
+        return
+    if args.part in ("arch", "both"):
+        n = sweep_archive(settings.data_dir, out)
+        print(f"archive: {n} stock-days")
+    if args.part in ("hist", "both"):
+        start = date.fromisoformat(args.start) if args.start else DEV_START
+        end = date.fromisoformat(args.end) if args.end else DEV_END
+        n = sweep_history(settings.data_dir, out, start, end, args.limit or None)
+        print(f"history: {n} stock-days {start} → {end}")
+
+
 def run_dayread(settings: Settings, args: argparse.Namespace) -> None:
     """One session as the operator reads it, from the archive (analysis/dayread.py)."""
     from .analysis.dayread import from_archive
@@ -661,6 +683,14 @@ def build_parser() -> argparse.ArgumentParser:
     dr.add_argument("--day", default="", help="YYYY-MM-DD (default today); needs the day's archive files")
     dr.add_argument("--json", action="store_true")
 
+    ds = sub.add_parser("dayread-sweep", help="the day read on every stock-day of the 5m cache (2024-01 → 2025-09) and the OI archive days; --stats for the tables")
+    ds.add_argument("out", help="directory for the per-symbol parquet files and the report")
+    ds.add_argument("--part", choices=["hist", "arch", "both"], default="both")
+    ds.add_argument("--start", default="", help="YYYY-MM-DD (default 2024-01-01; the holdout 2025-10-01 → 2026-10-16 is spent)")
+    ds.add_argument("--end", default="", help="YYYY-MM-DD (default 2025-09-30)")
+    ds.add_argument("--limit", type=int, default=0, help="first N symbols only (a dry run)")
+    ds.add_argument("--stats", action="store_true", help="write report.txt / report.json from an existing sweep")
+
     fr = sub.add_parser("fetch-results", help="NSE's results calendar: financial-results + integrated-filing broadcasts, board meetings")
     fr.add_argument("--pause", type=float, default=1.5)
 
@@ -734,6 +764,8 @@ def cli() -> None:
         run_fetch_results(settings, args)
     elif command == "dayread":
         run_dayread(settings, args)
+    elif command == "dayread-sweep":
+        run_dayread_sweep(settings, args)
     elif command == "events":
         run_events(settings, args)
     elif command == "mtf-backtest":

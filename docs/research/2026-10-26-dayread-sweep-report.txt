@@ -1,0 +1,485 @@
+
+## coverage
+{
+ "stock_days": 90452,
+ "symbols": 216,
+ "from": "2024-01-01",
+ "to": "2025-09-30",
+ "events_per_day": 33.0,
+ "legs_per_day": 14.1,
+ "trend_day_pct(close in top/bottom 15% of range)": 29.9,
+ "day_high_in_first_hour_pct": 53.3,
+ "day_low_in_first_hour_pct": 46.5,
+ "baseline_rcl_bps_by_time": {
+  "09:15": -1.7,
+  "10:15": 0.4,
+  "11:15": -0.7,
+  "12:15": 1.2,
+  "13:15": 0.9,
+  "14:15": 0.5
+ }
+}
+
+## opening_range
+{
+ "low_in_first_30min_pct": 38.8,
+ "high_in_first_30min_pct": 45.9,
+ "both_in_first_30min(inside day)_pct": 6.1,
+ "neither_pct": 21.4,
+ "high_by_halfhour_pct": {
+  "0": 45.9,
+  "1": 7.4,
+  "2": 5.0,
+  "3": 4.0,
+  "4": 3.6,
+  "5": 3.1,
+  "6": 3.0,
+  "7": 2.8,
+  "8": 2.8,
+  "9": 3.3,
+  "10": 3.9,
+  "11": 6.4,
+  "12": 8.6
+ },
+ "low_by_halfhour_pct": {
+  "0": 38.8,
+  "1": 7.7,
+  "2": 5.4,
+  "3": 4.2,
+  "4": 3.3,
+  "5": 3.4,
+  "6": 3.3,
+  "7": 3.0,
+  "8": 3.1,
+  "9": 3.6,
+  "10": 4.9,
+  "11": 6.6,
+  "12": 12.7
+ },
+ "low_in_first_30min|gap_down<-0.5_pct": 50.5,
+ "high_in_first_30min|gap_up>0.5_pct": 48.6
+}
+
+## level_holds
+                      n  gave_way_30m_pct  gave_way_60m_pct  gave_way_by_close_pct  gave_way_30m_first_hour_pct  gave_way_30m_later_pct  signed_x_rcl_bps  day_mean_bps     t  hit_pct
+kind       level                                                                                                                                                                      
+RESISTANCE CPR    62923              11.3              17.6                   35.9                         14.9                     7.7              -1.2          -0.0 -0.00     50.9
+           PDC    62209              24.6              34.3                   53.2                         29.9                    20.3              -1.2          -1.1 -0.35     51.1
+           PDH    59870              24.2              33.4                   51.6                         28.2                    20.4               1.7           7.6  2.59     53.7
+           PDL    26281              24.7              34.7                   52.3                         31.6                    21.5              -2.9         -10.2 -3.11     48.8
+           R1     64408              23.4              32.5                   51.1                         27.1                    19.8               1.2           9.4  3.20     53.6
+           R2     28380              25.1              34.5                   51.1                         31.2                    21.5              -1.5          11.5  3.74     52.1
+           S1     21130              24.5              34.3                   50.8                         32.6                    21.7               1.5         -12.2 -3.72     49.4
+           S2      8297              27.1              36.4                   50.6                         39.3                    23.9              -1.8         -18.8 -4.23     49.2
+SUPPORT    CPR    73283              12.4              19.4                   39.5                         17.4                     6.1              -1.7          -0.4 -0.14     45.6
+           PDC    81320              25.4              35.8                   56.5                         32.1                    17.4              -1.8          -1.5 -0.48     45.6
+           PDH    30016              24.4              35.0                   54.1                         32.7                    19.3              -2.0          -6.5 -2.34     44.8
+           PDL    63036              24.7              35.0                   55.1                         31.7                    18.1              -0.7          10.2  3.14     47.7
+           R1     24451              23.4              33.7                   51.6                         32.6                    19.2               0.6          -5.1 -1.79     46.4
+           R2      9936              25.2              34.9                   51.7                         33.7                    22.3               3.6          -3.7 -1.10     46.7
+           S1     62672              23.1              33.8                   54.2                         29.8                    17.5              -0.7          13.6  4.19     47.7
+           S2     28815              23.0              33.5                   52.1                         30.6                    19.3              -1.6          21.3  6.69     48.3
+
+## level_breaks
+                      n  back_through_30m_pct(false break)  back_through_60m_pct  signed_x_rcl_bps     t  cont_pct
+kind       level                                                                                                  
+BREAK_DOWN CPR    10979                               33.2                  41.2               5.1 -0.94      53.6
+           PDC    16126                               34.9                  43.1               3.5 -1.20      53.5
+           PDH     5304                               34.0                  41.8               8.1  0.30      54.9
+           PDL     6785                               40.2                  47.9              -0.3 -3.61      50.4
+           R1      3570                               34.7                  42.1               0.3 -0.21      52.6
+           R2      1192                               36.4                  43.1               4.8  0.34      53.9
+           S1      4713                               42.5                  50.7               2.5 -3.43      49.4
+           S2      1681                               47.3                  55.0               5.6 -3.74      47.7
+BREAK_UP   CPR     7065                               40.8                  49.9               0.6 -0.94      45.6
+           PDC     9789                               42.3                  51.5               0.1 -1.01      45.8
+           PDH     7175                               43.1                  52.5              -2.5 -1.46      44.2
+           PDL     3025                               41.6                  50.4               4.8  0.04      48.2
+           R1      6199                               44.9                  53.7              -2.4 -2.14      45.1
+           R2      2506                               45.1                  53.2               2.6 -0.81      44.7
+           S1      2249                               41.1                  48.8              11.4  2.41      50.6
+           S2       934                               38.5                  46.6               3.3  2.14      50.1
+
+## held_30m_then_forward
+                      n  days  mean_bps  day_mean_bps     t  hit_pct
+kind       level                                                    
+RESISTANCE CPR    51908   433      -1.5           0.8  0.29     51.4
+           PDC    43137   433       0.3          -0.3 -0.11     52.5
+           PDH    42075   433       3.0           5.1  1.91     54.4
+           PDL    17698   430      -0.7          -5.3 -1.68     50.5
+           R1     45884   433       1.9           5.8  2.21     53.9
+           R2     19301   433       0.6           9.2  3.39     53.2
+           S1     13961   430       3.5          -9.2 -3.14     52.3
+           S2      5212   384       1.2         -11.2 -3.10     53.1
+SUPPORT    CPR    60116   433      -2.2          -1.0 -0.39     46.0
+           PDC    56619   433      -1.5          -3.4 -1.27     46.1
+           PDH    20521   431      -2.9          -7.9 -3.06     45.2
+           PDL    43766   433      -0.4           4.7  1.62     47.8
+           R1     16703   433      -0.4          -7.0 -2.53     46.7
+           R2      6423   423       2.4          -5.6 -1.65     46.9
+           S1     44357   433      -1.7           6.2  2.16     47.3
+           S2     19752   429      -2.1          13.3  4.25     47.4
+
+## level_holds_by_trend
+                               n  days  mean_bps  day_mean_bps     t  hit_pct
+kind       trend                                                             
+RESISTANCE against trend  184275   433       1.8           1.0  0.36     54.2
+           with trend     149223   433      -2.7           0.7  0.24     52.1
+SUPPORT    against trend  164548   433       1.7           5.6  1.88     48.4
+           with trend     208981   433      -3.4           2.7  1.00     46.3
+
+## bos_by_hour
+                    n  signed_x_rcl_bps      t  continue_pct
+kind     hour                                               
+BOS_DOWN 09:15  15744              -0.4  -2.18          52.0
+         10:15  49108               3.7  -1.33          52.2
+         11:15  58742               2.1  -1.40          52.5
+         12:15  60976               1.8  -1.68          51.2
+         13:15  64238               1.3  -2.38          50.7
+         14:15  72649              -2.3  -6.91          47.2
+         15:15  19538              -2.8 -12.89          25.7
+BOS_UP   09:15  12524               4.6  -1.00          48.6
+         10:15  46002               5.3  -0.96          48.9
+         11:15  52657               5.0  -0.33          48.1
+         12:15  55353               2.3  -1.36          47.6
+         13:15  60259               0.4  -2.66          46.8
+         14:15  68810              -0.8  -6.41          44.9
+         15:15  16804              -3.8 -13.08          24.8
+
+## first_bos
+{
+ "n": 90327,
+ "median_bar": 15,
+ "up_pct": 46.8,
+ "agrees_with_close_vs_open_pct": 65.0,
+ "days": 433,
+ "mean_bps": 4.1,
+ "day_mean_bps": 4.1,
+ "t": 3.07,
+ "hit_pct": 50.8
+}
+
+## structure_known_by_10:15
+                 days  share_pct  rcl_bps     t  close_higher_pct
+structure                                                        
+mixed           45409       50.2      1.0  0.20              47.4
+no swings yet    3437        3.8      7.4  0.55              49.6
+up: HH+HL only  41606       46.0     -0.7  0.04              47.7
+
+## structure_known_by_11:15
+                 days  share_pct  rcl_bps     t  close_higher_pct
+structure                                                        
+mixed           73624       81.4     -1.0 -0.16              46.8
+no swings yet     110        0.1     -0.0  0.29              29.1
+up: HH+HL only  16718       18.5      0.5 -0.42              47.5
+
+## owner_sequence_bullish
+{
+ "A_open_test_under_CPR_by_0945": {
+  "n": 31556,
+  "days": 433,
+  "mean_bps": -2.2,
+  "day_mean_bps": 5.1,
+  "t": 1.12,
+  "hit_pct": 49.0,
+  "share_of_days_pct": 34.9,
+  "by_level": {
+   "PDC": 3427,
+   "PDL": 10033,
+   "S1": 14328,
+   "S2": 3768
+  }
+ },
+ "B_BOS_within_1h": {
+  "n": 5830,
+  "days": 419,
+  "mean_bps": 4.1,
+  "day_mean_bps": 0.3,
+  "t": 0.06,
+  "hit_pct": 50.2,
+  "share_of_A_pct": 18.5,
+  "median_bar": 11.0
+ },
+ "C_close_through_CPR": {
+  "n": 3286,
+  "days": 408,
+  "mean_bps": 1.9,
+  "day_mean_bps": -6.8,
+  "t": -1.56,
+  "hit_pct": 48.1,
+  "share_of_B_pct": 56.4,
+  "median_bar": 15.0
+ },
+ "D_first_return_to_CPR": {
+  "held": 2928,
+  "failed": 48,
+  "never_returned": 310,
+  "held_still_holding_30m_later_pct": 91.3,
+  "median_retest_bar": 19.0,
+  "held_forward": {
+   "n": 2928,
+   "days": 404,
+   "mean_bps": 3.8,
+   "day_mean_bps": -3.3,
+   "t": -0.81,
+   "hit_pct": 49.5,
+   "r60_signed_bps": -0.5,
+   "mfe_bps": 89.6,
+   "mae_bps": -82.6
+  },
+  "failed_forward": {
+   "n": 48,
+   "days": 41,
+   "mean_bps": -6.4,
+   "day_mean_bps": -2.9,
+   "t": -0.16,
+   "hit_pct": 43.8
+  },
+  "never_returned_forward_from_break(hindsight)": {
+   "n": 310,
+   "days": 182,
+   "mean_bps": 101.0,
+   "day_mean_bps": 102.7,
+   "t": 8.64,
+   "hit_pct": 78.7
+  }
+ }
+}
+
+## owner_sequence_bullish_held_by_context
+                               n  days  mean_bps  day_mean_bps     t  hit_pct
+context                                                                      
+above 20-DMA                1468   348      -3.7          -9.5 -1.77     46.7
+below 20-DMA                1457   336      11.0           3.1  0.66     52.3
+above 50-DMA                1620   362      -1.2         -10.2 -2.07     47.3
+below 50-DMA                1299   328      10.2           5.9  1.26     52.3
+prev day up                 1030   321       5.8           2.0  0.37     49.4
+prev day down               1898   369       2.8          -5.2 -1.06     49.6
+gap down <-0.3%              638   209       8.3          -1.4 -0.17     50.6
+gap flat                    1324   326       0.3          -5.1 -1.24     48.7
+gap up >0.3%                 966   324       5.7          -2.8 -0.43     49.9
+with the trend (20-DMA)     1468   348      -3.7          -9.5 -1.77     46.7
+against the trend (20-DMA)  1457   336      11.0           3.1  0.66     52.3
+
+## owner_sequence_bullish_held_by_hour
+          n  days  mean_bps  day_mean_bps     t  hit_pct
+hour                                                    
+09:15   500   232      -0.1           1.8  0.25     48.0
+10:15  1235   342       0.4          -3.0 -0.51     48.7
+11:15   419   225      16.4          13.6  1.72     53.0
+12:15   290   179       7.3          -1.7 -0.28     51.7
+13:15   209   138      10.2           9.1  1.61     56.0
+14:15   219   143       0.7          -1.2 -0.27     48.9
+15:15    56    50      -8.1          -7.4 -1.00     21.4
+
+## owner_sequence_bearish
+{
+ "A_open_test_under_CPR_by_0945": {
+  "n": 33603,
+  "days": 433,
+  "mean_bps": 0.4,
+  "day_mean_bps": 3.5,
+  "t": 0.88,
+  "hit_pct": 52.9,
+  "share_of_days_pct": 37.2,
+  "by_level": {
+   "PDC": 2747,
+   "PDH": 8569,
+   "R1": 17942,
+   "R2": 4345
+  }
+ },
+ "B_BOS_within_1h": {
+  "n": 7203,
+  "days": 426,
+  "mean_bps": 1.4,
+  "day_mean_bps": -5.2,
+  "t": -1.35,
+  "hit_pct": 52.2,
+  "share_of_A_pct": 21.4,
+  "median_bar": 10.0
+ },
+ "C_close_through_CPR": {
+  "n": 4019,
+  "days": 420,
+  "mean_bps": 3.1,
+  "day_mean_bps": -13.1,
+  "t": -3.22,
+  "hit_pct": 51.9,
+  "share_of_B_pct": 55.8,
+  "median_bar": 14.0
+ },
+ "D_first_return_to_CPR": {
+  "held": 3628,
+  "failed": 64,
+  "never_returned": 327,
+  "held_still_holding_30m_later_pct": 91.6,
+  "median_retest_bar": 18.0,
+  "held_forward": {
+   "n": 3628,
+   "days": 416,
+   "mean_bps": 4.6,
+   "day_mean_bps": -7.3,
+   "t": -1.85,
+   "hit_pct": 53.6,
+   "r60_signed_bps": 1.7,
+   "mfe_bps": 92.1,
+   "mae_bps": -83.2
+  },
+  "failed_forward": {
+   "n": 64,
+   "days": 59,
+   "mean_bps": 10.6,
+   "day_mean_bps": 15.8,
+   "t": 0.9,
+   "hit_pct": 60.9
+  },
+  "never_returned_forward_from_break(hindsight)": {
+   "n": 327,
+   "days": 180,
+   "mean_bps": 107.0,
+   "day_mean_bps": 92.6,
+   "t": 13.86,
+   "hit_pct": 87.8
+  }
+ }
+}
+
+## owner_sequence_bearish_held_by_context
+                               n  days  mean_bps  day_mean_bps     t  hit_pct
+context                                                                      
+above 20-DMA                2139   380       3.8          -3.5 -0.78     53.1
+below 20-DMA                1486   349       5.8          -4.5 -0.89     54.3
+above 50-DMA                2215   382       4.1          -4.1 -0.92     52.8
+below 50-DMA                1404   351       5.9          -4.0 -0.84     54.9
+prev day up                 2302   385       2.4          -4.3 -0.97     53.7
+prev day down               1326   357       8.4          -1.0 -0.21     53.5
+gap down <-0.3%              355   193       4.3          -1.4 -0.19     54.6
+gap flat                    1476   346       5.3          -5.6 -1.21     54.5
+gap up >0.3%                1797   358       4.1          -6.5 -1.31     52.7
+with the trend (20-DMA)     1486   349       5.8          -4.5 -0.89     54.3
+against the trend (20-DMA)  2139   380       3.8          -3.5 -0.78     53.1
+
+## owner_sequence_bearish_held_by_hour
+          n  days  mean_bps  day_mean_bps     t  hit_pct
+hour                                                    
+09:15   708   283      10.9           5.1  0.75     55.1
+10:15  1501   365       3.1          -2.3 -0.41     53.4
+11:15   524   260       5.4           4.8  0.67     54.0
+12:15   347   198      -9.2         -11.9 -1.69     49.0
+13:15   249   153      18.9          10.6  1.73     55.4
+14:15   236   149       0.2          -1.4 -0.31     52.5
+15:15    63    56      -0.2          -1.6 -0.54     61.9
+
+## gaps
+           days  close>open_pct  open_to_close_bps
+gap                                               
+<-1%       5037            58.8               40.0
+-1..-0.3   9930            50.9                7.0
+flat      32654            43.6              -18.7
+0.3..1    28063            41.6              -23.0
+>1%       11125            43.2              -19.2
+
+## initial_balance
+{
+ "days_with_break_pct": 82.4,
+ "break_up_share_pct": 45.5,
+ "close_beyond_IBH|break_up_pct": 55.2,
+ "close_beyond_IBL|break_down_pct": 57.5
+}
+
+## structure_noise_by_timeframe
+           n  median_retrace_pct  retrace>50%_pct  retrace>100%_pct
+tf                                                                 
+5m   1184291                  89             79.5              42.5
+15m   376107                  79             72.2              36.8
+30m   170742                  66             61.4              30.5
+
+## legs_per_day
+{
+ "median": 14.0,
+ "p10": 10.0,
+ "p90": 18.0,
+ "largest_leg_pct_of_ADR_median": 59
+}
+
+## outer_pivots_by_crowd_total(hindsight)
+                                       n  days  mean_bps  day_mean_bps      t  hit_pct  raw_bps  net_bps
+kind       crowd_total(hindsight)                                                                       
+RESISTANCE 1-10                        5     1     210.8         210.8    NaN     80.0      6.0     -9.0
+           11-30                     229    10     -33.7         -22.6  -0.41     48.9     91.4     76.4
+           31-80                    6575   106       6.8           6.3   2.10     56.2     40.4     25.4
+           81+                     36466   316       5.6           5.8   7.55     57.0     -3.0    -18.0
+SUPPORT    1-10                       27     4      97.1          92.2   4.68     70.4    241.2    226.2
+           11-30                     448    21       8.2           8.4   1.28     50.4     69.6     54.6
+           31-80                    8916   152       7.8           7.0   3.84     52.8     34.3     19.3
+           81+                     31402   256      15.0          14.4  12.30     54.8    -16.8    -31.8
+
+## outer_pivots_by_crowd_so_far(known)
+                                    n  days  mean_bps  day_mean_bps      t  hit_pct  raw_bps  net_bps
+kind       crowd_so_far(known)                                                                       
+RESISTANCE 1-5                   2126   433       8.6           9.0   2.28     57.1     14.3     -0.7
+           6-15                  4177   433      -2.2          -1.7  -0.55     53.7      4.6    -10.4
+           16-40                 9628   432       2.3           3.1   1.35     55.0      8.4     -6.6
+           41+                  27344   427       7.7           6.8   3.37     57.9      1.7    -13.3
+SUPPORT    1-5                   2094   433       4.5           4.2   1.11     48.5     -1.4    -16.4
+           6-15                  4067   432       2.6           2.2   0.88     48.5     -5.2    -20.2
+           16-40                 8805   428       4.8           5.0   2.87     49.5     -7.6    -22.6
+           41+                  25827   412      18.8          16.4  12.21     57.4     -3.6    -18.6
+
+## outer_pivots_by_nifty_so_far(known)
+                                    n  days  mean_bps  day_mean_bps      t  hit_pct  raw_bps  net_bps
+kind       nifty_so_far(known)                                                                       
+RESISTANCE <-0.5%                1371   129       1.4          -5.3  -0.61     54.9      8.4     -6.6
+           -0.5..-0.15           8651   297       1.9           2.0   0.54     55.6      4.4    -10.6
+           flat                 21037   389       3.0           3.3   1.55     55.5      8.5     -6.5
+           0.15..0.5             8882   275       9.7          14.2   3.52     58.6     -5.7    -20.7
+           >0.5%                 3334   126      22.5          18.3   4.87     64.9     -0.3    -15.3
+SUPPORT    <-0.5%                5568   149      35.5          31.1  10.37     65.5    -10.6    -25.6
+           -0.5..-0.15          12317   322      16.6          19.6   8.14     55.9     -6.7    -21.7
+           flat                 16854   385       7.3           6.6   3.09     51.1     -5.2    -20.2
+           0.15..0.5             4744   242       5.2           1.6   0.50     51.2      0.0    -15.0
+           >0.5%                 1309   105      -1.5         -11.0  -1.72     46.4     33.9     18.9
+
+## outer_pivots_alone_rule(at most 15 seen so far, |Nifty so far| < 0.5%)
+               n  days  mean_bps  day_mean_bps     t  hit_pct  raw_bps  net_bps  daily_net_t  events_per_day  gave_way_30m_pct  gave_way_by_close_pct
+kind                                                                                                                                                 
+RESISTANCE  6119   423       1.8           4.4  1.55     54.9      8.5     -6.5        -1.07            14.5              27.2                   52.6
+SUPPORT     5959   422       3.6           4.7  1.90     48.5     -3.4    -18.4        -3.07            14.1              28.8                   59.3
+
+## oi_legs(3 days, description)
+                  n  share_pct  median_leg_pct  next_leg_retrace_median_pct
+dir  build_up                                                              
+down FLAT      1228       65.4            0.44                           82
+     LU         211       11.2            0.60                           80
+     SB         440       23.4            0.62                           76
+up   FLAT      1301       70.2            0.34                          124
+     LB         334       18.0            0.56                           82
+     SC         219       11.8            0.55                           82
+
+## oi_up_leg_mix_by_hour_pct
+build_up  FLAT    LB    SC
+hr                        
+09:15     76.0  16.0   8.0
+10:15     74.0  16.0   9.0
+11:15     73.0  15.0  12.0
+12:15     72.0  19.0   9.0
+13:15     60.0  23.0  17.0
+14:15     40.0  26.0  34.0
+
+## oi_down_leg_mix_by_hour_pct
+build_up  FLAT    LU    SB
+hr                        
+09:15     68.0  12.0  19.0
+10:15     64.0  10.0  26.0
+11:15     64.0  12.0  24.0
+12:15     72.0   8.0  20.0
+13:15     63.0   9.0  27.0
+14:15     36.0  33.0  30.0
+
+## oi_day_build_mix
+day_build   FLAT  LB  LU  SB  SC
+day                             
+2026-10-19    71  15  29  98   4
+2026-10-23     2   4  27  10   9
+2026-10-26     1   7   9   1  34

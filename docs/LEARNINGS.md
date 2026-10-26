@@ -63,3 +63,7 @@ Two things follow, and both are encoded rather than remembered:
   as missing from 09:15 to 15:30 (`fno_snapshot` skipped the expiry because "its" future had no
   price). The strikes are now priced off the front future when the expiry's own has no quote, and
   the snapshot says so in `missing`. Check the F&O page the day before every expiry.
+
+## Research
+- **A conditioning variable must be known at the time of the trade, not at the end of the day.** The day-read sweep (2026-10-26) first showed S1/S2 holds worth +30 to +57 bps "when few stocks tested S1/S2 that day" (t 9). The day's count is known only at the close — few tests all day means the market did not fall later. With the count known at the time it was −3 bps raw, −18 after costs. Same trap as "never returned to the CPR" (+100 bps, t 9–14): a day that never came back is a day that trended. Check every filter for hindsight before reading its number.
+- **A level touch that "held" is a 30-minute fact.** Across 90,452 stock-days a held pivot gave way within the hour a third of the time and by the close half (the CPR band: 19 % / 39 %); 35–47 % of breaks were back through within 30 minutes. 5m legs are retraced 89 % (median) by the next one, 30m legs 66 %. Read structure on 30m or above; treat a 5m hold as an alert.
