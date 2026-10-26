@@ -299,3 +299,19 @@ async def test_a_halt_rejects_the_entry_and_the_signal_says_so(tmp_path):
     await _feed(r, store, DAY_BARS)
     sig = r.snapshot()["signals"][0]
     assert not sig["taken"] and "REJECTED_HALT" in sig["why"] and r.snapshot()["summary"]["open"] == 0
+
+
+async def test_the_runner_follows_the_engine_when_the_universe_dict_is_replaced(settings):
+    """The engine assigns a new ``underlyings`` dict once the universe is built (and on a rebuild). The
+    first live boot showed the strategy with 0 stocks: it held the empty dict from construction."""
+    from kotsin_nse.engine import Engine
+
+    e = Engine(settings)
+    await e.start()
+    try:
+        assert e.strategy is not None and e.strategy.underlyings == {}
+        e.underlyings = {"ABC": _inst()}
+        assert e.strategy.underlyings["ABC"].scrip_code == "1"
+        assert e.strategy.snapshot()["universe"] == 1
+    finally:
+        await e.stop()

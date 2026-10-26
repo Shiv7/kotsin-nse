@@ -70,7 +70,7 @@ class ShadowRunner:
         gateway: Gateway,
         ledger: Ledger | None,
         costs: CostModel,
-        underlyings: Mapping[str, Instrument],
+        underlyings: Mapping[str, Instrument] | Callable[[], Mapping[str, Instrument]],
         spawn: Spawn | None = None,
         segment: Segment = Segment.NSE_EQ,
     ) -> None:
@@ -79,7 +79,9 @@ class ShadowRunner:
         self.gateway = gateway
         self.ledger = ledger
         self.costs = costs
-        self.underlyings = underlyings
+        #: a getter, because the engine *replaces* its ``underlyings`` dict when the universe is built
+        #: after boot (and again on a rebuild) — a reference taken at construction would stay empty
+        self._underlyings = underlyings
         self.segment = segment
         self.rule = settings.strategy_rule
         self.filter = settings.strategy_filter
@@ -96,6 +98,11 @@ class ShadowRunner:
         self.errors = 0
         self._writes: list[Awaitable[Any]] = []
         self._lock = asyncio.Lock()  # the writes of consecutive bars land in order, one at a time
+
+    @property
+    def underlyings(self) -> Mapping[str, Instrument]:
+        u = self._underlyings
+        return u() if callable(u) else u
 
     # -- the day -----------------------------------------------------------------------------------------
 

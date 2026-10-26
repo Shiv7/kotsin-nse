@@ -206,7 +206,7 @@ class Engine:
         #: the one strategy (strategy/runner.py): the CPR retest sequence on closed 5m bars, SHADOW
         self.strategy: ShadowRunner | None = (
             ShadowRunner(settings, store=self.store, gateway=self.gateway, ledger=self.ledger, costs=self.costs,
-                         underlyings=self.underlyings, spawn=self._spawn)
+                         underlyings=lambda: self.underlyings, spawn=self._spawn)
             if settings.strategy_enabled
             else None
         )
