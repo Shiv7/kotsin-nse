@@ -80,6 +80,7 @@ from .orderflow.micro import MicroMeter
 from .risk.costs import CostModel
 from .scan.board import OIRead, attach_setups
 from .scan.live import LiveScanner
+from .strategy.runner import ShadowRunner
 from .structure.service import from_store as structure_from_store
 from .venue.fivepaisa.auth import Authenticator
 from .venue.fivepaisa.rest import FivePaisaREST
@@ -202,6 +203,13 @@ class Engine:
         self.quotes: dict[str, Quote] = {}
         self.ltps: dict[str, float] = {}
         self._journal_scored = 0.0
+        #: the one strategy (strategy/runner.py): the CPR retest sequence on closed 5m bars, SHADOW
+        self.strategy: ShadowRunner | None = (
+            ShadowRunner(settings, store=self.store, gateway=self.gateway, ledger=self.ledger, costs=self.costs,
+                         underlyings=self.underlyings, spawn=self._spawn)
+            if settings.strategy_enabled
+            else None
+        )
         self._future_to_underlying: dict[str, str] = {}
         self._mode = Mode.SHADOW
         self._armed_until: float | None = None
@@ -816,6 +824,8 @@ class Engine:
             if minute > self._scanned_minute:
                 self._scanned_minute = minute
                 self._spawn(self._scan(minute), "scan")
+        if bar.tf == "5m" and self.strategy is not None:
+            await self.strategy.on_bar(bar)
         if bar.tf != PRIMARY_TF:
             return
         # Off the tick path: at 15:15 IST two hundred 30m bars close in the same second and each
@@ -1378,5 +1388,11 @@ class Engine:
             },
             "archive": self.archive.stats(),
             "telegram": self.telegram.stats(),
+            "strategy": (
+                {"name": "cpr_retest", "day": self.strategy.day, "rule": self.strategy.rule, "filter": self.strategy.filter,
+                 **self.strategy.snapshot()["summary"], "orders": self.strategy.orders, "errors": self.strategy.errors}
+                if self.strategy is not None
+                else None
+            ),
             "boot_notes": self.boot_notes,
         }

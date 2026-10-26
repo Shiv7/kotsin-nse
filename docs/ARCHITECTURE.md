@@ -18,7 +18,7 @@
   bars/          ticks → 1m → 5m/15m/30m on the SESSION grid (09:15 NSE, 09:00 MCX)│
                  ⊕ OI from the front future ⊕ session VWAP → UnifiedBar ◀──────────┘
                      ▼
-  (strategy)     nothing here yet — a strategy reads closed bars and submits orders
+  strategy/      the CPR retest sequence on closed 5m bars → ENTRY/EXIT intents (SHADOW from 2026-10-27)
                      ▼
   exec/          gateway: SHADOW | PAPER (fills vs the live book)
                  | LIVE_CAPPED | LIVE · halt · idempotency · caps · breaker · reconcile
@@ -68,6 +68,7 @@ All of it is **one asyncio process**, connected by bounded in-process queues (`b
 | `risk/costs.py` | the measured NSE/MCX charge model — used by paper and live alike |
 | `exec/gateway.py` · `paper.py` · `live.py` · `reconcile.py` | modes, book-walking fills, real orders, truth |
 | `ledger/db.py` | SQLite: control row, orders, positions, trades, events, health, the call journal |
+| `strategy/cpr_retest.py` · `runner.py` | the one strategy: the owner's CPR retest sequence (open test under the CPR by 09:45 → BOS within the hour → close through TC → held retest → first close beyond it), entry at that close, stop under the retest bar, target the next wall then trail wall to wall; the live `sequence` is the research sweep's logic on the bars so far (replayed: 10,304 symbol-day-sides identical). The runner keeps the shadow book (every exit rule scored, context tags, ledger rows, `data-live/strategy/<day>.json`, `/api/strategy`, the Shadow page) |
 | `journal.py` | the owner's call journal: a discretionary call logged as it is seen (Chart page), scored by the engine from the 1m bars that follow — fill, stop before target, R at 15/30/60 min and at 15:25; the Journal page reads it by kind, side and tag |
 | `api/routes.py` | REST; computes nothing, reads engine state and ledger rows |
 | `research/history.py` | Parquet cache of broker history, merged on overlap |
@@ -87,8 +88,9 @@ Boundaries are enforced by `import-linter` (`backend/pyproject.toml`), not by co
    own candle for that bucket (bounded wait, default 12 s) and installs it over the live build.
    A bucket the socket joined mid-way that REST cannot confirm is logged as a fragment.
 
-There is no decision step: this is where a strategy would read the bar and submit through the
-gateway (halt → idempotency → caps → place, an order row written whatever happens).
+The decision step: every closed **5m** bar goes to `strategy/runner.py`, which decides synchronously
+and submits through the gateway (halt → idempotency → caps → place, an order row written whatever
+happens); its ledger and file writes are spawned afterwards, in order, off the tick path.
 
 ## Live archive (`ops/archive.py`)
 

@@ -173,6 +173,19 @@ class Settings(BaseSettings):
     #: re-centre a root's strikes on its live future once it has moved a strike from the centre
     strike_recenter: bool = True
 
+    # ---- the strategy (strategy/) --------------------------------------------------------------
+    #: run the CPR retest sequence (``strategy/cpr_retest.py``) on every closed 5m bar of the cash
+    #: equities. Orders go through the gateway in whatever mode the control row says — SHADOW by
+    #: default, where the book is scored here and nothing is placed.
+    strategy_enabled: bool = True
+    #: the exit rule the shadow book trades (the other two are scored alongside as "virtual")
+    strategy_rule: Literal["wall_then_trail", "fixed_wall", "fixed_1to2"] = "wall_then_trail"
+    #: ``none`` = every confirmed retest; else tag names joined by ``+`` that must all hold at the
+    #: entry (``cpr_retest.daily_tags`` / ``intraday_tags``), e.g. ``st60_al+dma20_al``
+    strategy_filter: str = "none"
+    #: shadow size per trade, rupees of notional (the research's bps are size-free; this is for ₹)
+    strategy_notional_inr: float = 25_000.0
+
     # ---- LIVE_CAPPED caps ----------------------------------------------------------------------
     # Mode is state (R9); these only bound what an *armed* engine may do.
     live_segments: str = "NSE_EQ"

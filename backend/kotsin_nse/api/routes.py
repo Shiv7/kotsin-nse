@@ -103,6 +103,20 @@ def build_app(engine: Engine) -> FastAPI:
     async def recent_events(limit: int = Query(100, le=500)) -> list[dict[str, Any]]:
         return await engine.ledger.recent(events, limit)
 
+    # -- the strategy's shadow book (strategy/runner.py keeps it; this only reads) --------------------
+
+    @api.get("/strategy")
+    async def strategy_view(day: str | None = None) -> dict[str, Any]:
+        r = engine.strategy
+        if r is None:
+            raise HTTPException(404, "the strategy is disabled (KN_STRATEGY_ENABLED=false)")
+        if day and day != r.day:
+            snap = r.read_day(day)
+            if snap is None:
+                raise HTTPException(404, f"no strategy record for {day}")
+            return snap
+        return r.snapshot()
+
     # -- the owner's call journal -------------------------------------------------------------------
     # Scoring happens in the engine (``Engine._score_journal``), from the bars; these only store and read.
 

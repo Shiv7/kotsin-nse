@@ -182,3 +182,33 @@ way. The pattern is remembered on the days that trended; it did not predict them
 trend-day predictor known by 10:50, and the price path has not supplied one (the day-type study, these filters).
 Break-even at these distances: a 72 % wall-hit rate; a driftless path gives 59 %; observed 52.5 % + 13.5 % open at
 the close.
+
+## 11. "Find each stock which is trending and use this strategy" (owner, 2026-10-27 00:30)
+
+Method (scratch `retest_trend.py`, the same 3,101 entry-B instances as §10, dev window): 33 definitions of "trending",
+every one known at the confirmation bar — daily (close vs DMA20/DMA50, EMA 9/21/50 stack, 5- and 20-day return, 20-day
+return minus NIFTY's, ADX14 > 20/25 with DI aligned, yesterday's close in its range ≥ 0.7, yesterday's return, close vs the
+weekly pivot), the owner's stack (SuperTrend(10, 3) on 15m and on 1H bars, built from the 5m history), intraday at the bar
+(move from the open ≥ 0.3 / 0.5 ADR, close in the top fifth of the range so far, range so far ≥ 0.5 ADR, NIFTY's own move
+≥ 0.2 %, the stock's move minus NIFTY's ≥ 0.3 %, the opening hour's range broken), and the cross-section (the aligned
+move / ADR ranked across all stocks at that bar: top half, top 20 %, top 10 %, top 5 %), plus combinations. For each: the
+share of entries landing on a trend day the trade's way (base 29.9 %), and the four rules' gross / net / day-t.
+
+Result: nothing. Trend-day share 26–36 % across every filter; the ones that raise it (move ≥ 0.5 ADR 36 %, top-10 % movers
+33 %, top-10 % with NIFTY aligned 41 % on n 128) lose more, because what has moved has less left: the top 20 % of the day's
+movers −3.2 gross / −18 net (n 1,174), the top 10 % −6.1 / −21, the top 5 % −11 / −26; the *not*-top-20 % +5.3 / −9.7. The
+best subsets are the owner's daily stack with the 1H SuperTrend (n 480: next-wall +4.3 gross / −10.7 net, 1:2 +10.2 / −4.8,
+day-t −0.4 to −3.0) and "not moving relative to NIFTY" (n 710: +4.6 / −10.4). The 15m SuperTrend aligned is *worse* than
+not aligned (+1.1 vs +3.7 gross). Every filter, both years, negative net.
+
+Plain momentum on every stock-day (signed move / ADR at a bar, by decile → the rest of the day): the top decile continues
+by +12 to +15 bps raw at 09:45 / 10:15 / 11:15 / 12:15 and the bottom decile reverses by +2 to +10 (both sides drift up with
+the market); against the cross-section the top decile is +4 to +7 and the bottom +6 to +8 — the extremes both mean-revert
+relative to the crowd. Continuation in the move's direction for the top decile: −1.0 bps/day-mean at 09:45, +1.1 at 10:15,
++4.6 at 11:15, +6.6 at 12:15 (t 1.8; 2024 +14.5, 2025 −3.8). Trend-day share rises with the move (23 → 34 % for the top
+decile from 09:45 to 12:15) but so does what is already spent.
+
+The owner's decision the same night: run the sequence in SHADOW from 2026-10-27, every confirmed retest, each tagged with
+these filters, and read the day against this note in the evening. The live detector (`strategy/cpr_retest.sequence`)
+replayed on twelve stocks' history reproduced the sweep's sequence rows on 10,304 symbol-day-sides with zero differences and
+found each confirmation bar at its own prefix (168 / 168).

@@ -9,6 +9,7 @@ import { Journal } from './pages/Journal'
 import { ObBacktest } from './pages/ObBacktest'
 import { Options } from './pages/Options'
 import { Overview } from './pages/Overview'
+import { Shadow } from './pages/Shadow'
 import { System } from './pages/System'
 import { Universe } from './pages/Universe'
 import type { Health } from './types'
@@ -20,6 +21,7 @@ const PAGES = [
   ['/backtest', 'Backtest'],
   ['/chart', 'Chart'],
   ['/journal', 'Journal'],
+  ['/shadow', 'Shadow'],
   ['/options', 'Options'],
   ['/universe', 'Universe'],
   ['/system', 'System'],
@@ -37,6 +39,7 @@ function Pages() {
         <Route path="/backtest" element={<ObBacktest />} />
         <Route path="/chart" element={<Chart />} />
         <Route path="/journal" element={<Journal />} />
+        <Route path="/shadow" element={<Shadow />} />
         <Route path="/options" element={<Options />} />
         <Route path="/universe" element={<Universe />} />
         <Route path="/system" element={<System />} />
@@ -66,7 +69,7 @@ export default function App() {
             </NavLink>
           ))}
           <div className="px-2 pt-4 text-[10px] leading-relaxed text-slate-600">
-            base · no strategy
+            shadow · CPR retest
             <br />
             NSE + MCX on 5paisa
           </div>
