@@ -145,3 +145,40 @@ only 14 % get there. The hit rate is set by the distances, not by the sequence: 
 of the move so far, not of the move to come. Expectancy +0.01 to +0.06 R before costs, −0.2 to −0.35 R after —
 the same as HANDOFF §3.4 rows 11 and 11c from a different construction. Script: scratch `retest_wall.py`
 (method fully specified above).
+
+## 10. Dynamic management and entry filters on the same retests (owner: "our entry, stop and target are not dynamic")
+
+Same instances, entry = the first 5m close beyond the retest bar's extreme within 6 bars (3,101), initial stop = the
+retest bar's extreme minus a tolerance (median risk 65 bps), walls as in §9 (median nearest wall 46 bps away).
+Eleven exit rules, then entry filters known at the entry bar. Costs 15 bps.
+
+| Exit rule | win % | avg win / loss bps | gross bps | net bps | net R | exits |
+|---|---|---|---|---|---|---|
+| fixed: next wall | 58.2 | +48 / −61 | +2.0 | −13.0 | −0.21 | wall 52, stop 34, close 14 |
+| fixed 1:2 | 43.6 | +87 / −59 | +4.4 | −10.6 | −0.18 | stop 43, close 38, target 19 |
+| fixed 1:1 | 51.2 | +63 / −61 | +2.3 | −12.7 | −0.21 | |
+| ATR stop (1×), target 2 ATR | 34.4 | +60 / −30 | +0.8 | −14.2 | −0.23 | stop 64 |
+| trail under each new 5m swing low | 39.0 | +78 / −45 | +2.7 | −12.3 | −0.20 | stop 56, close 23, trail 21 |
+| break-even at 1R, target 2R | 57.8 | +47 / −60 | +2.1 | −12.9 | −0.21 | |
+| half off at 1R, rest trailed | 45.1 | +62 / −47 | +1.9 | −13.1 | −0.21 | |
+| time stop (12 bars, < 0.5R) | 52.6 | +39 / −43 | 0.0 | −15.0 | −0.24 | |
+| chandelier 1.5 ATR | 38.1 | +48 / −27 | +1.6 | −13.4 | −0.21 | |
+| **next wall, then trail under it to the following wall** | 58.2 | +50 / −61 | +3.2 | −11.8 | −0.19 | trail 45, stop 34, close 21, following wall 0 |
+| fade: sell the confirmation, target the retest low, stop the wall | 55.5 | +38 / −47 | +0.1 | −14.9 | −0.24 | |
+
+Every rule lands between 0 and +4.4 bps gross: the exit changes the shape (win rate against payoff), never the mean
+— the optional-stopping theorem on a driftless path. The fade at +0.1 says the path after the confirmation has no
+drift either way. Entry filters on the next-wall rule: rejection bar (close in the top/bottom third) +3.4 gross
+(1,182); quiet pullback (retest volume ≤ 0.7× the day's average) +3.5 (1,645); confirmation on volume ≥ 1.5× −1.8
+(782); all three +3.7 (76); before 11:15 +1.8, after +2.3; narrow / medium / wide CPR +1.6 / +2.8 / +1.4; gap with
+the trade +3.0, against +2.0. Nothing above +4 gross, nothing positive net, every day-clustered t negative.
+
+**Where the owner's trades come from.** Split by what the day turned out to be (hindsight): 29.9 % of these retests
+fell on a trend day in the trade's direction (close in the top/bottom 15 % of the range) — there the next-wall rule
+makes +27 bps gross with 77 % wins, wall-then-trail +37, fixed 1:2 +56 (+41 net), trail-swings +42. The other 70 %:
+−7 to −15 gross on ordinary days (66 %) and −36 to −62 on trend days against (4 %). The sequence does not raise the
+odds of a trend day: 29.8 % of all stock-days are trend days, 29.9 % of the retest days are trend days the trade's
+way. The pattern is remembered on the days that trended; it did not predict them. The algorithm's missing piece is a
+trend-day predictor known by 10:50, and the price path has not supplied one (the day-type study, these filters).
+Break-even at these distances: a 72 % wall-hit rate; a driftless path gives 59 %; observed 52.5 % + 13.5 % open at
+the close.
