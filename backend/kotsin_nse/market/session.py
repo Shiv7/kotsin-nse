@@ -153,6 +153,11 @@ def session_close_ts(segment: Segment, d: date) -> float:
     return from_ist(datetime.combine(d, SESSIONS[segment].close, tzinfo=IST))
 
 
+def day_start_ts(d: date) -> float:
+    """Midnight IST of ``d`` — where the broker stamps a finished daily candle."""
+    return from_ist(datetime.combine(d, time(0, 0), tzinfo=IST))
+
+
 def is_open(segment: Segment, ts: float, calendar: TradingCalendar) -> bool:
     dt = to_ist(ts)
     return calendar.is_trading_day(dt.date(), segment) and SESSIONS[segment].contains(dt.time())

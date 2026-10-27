@@ -84,6 +84,15 @@ class BarStore:
         series = self._closed.get((symbol, tf), [])
         return series[-1] if series else None
 
+    def get(self, symbol: str, tf: str, ts: int) -> UnifiedBar | None:
+        """The closed bar of the bucket starting at ``ts``, if held (searched from the newest end)."""
+        for b in reversed(self._closed.get((symbol, tf), [])):
+            if b.ts == ts:
+                return b
+            if b.ts < ts:
+                return None
+        return None
+
     def forming(self, symbol: str, tf: str) -> UnifiedBar | None:
         return self._forming.get((symbol, tf))
 

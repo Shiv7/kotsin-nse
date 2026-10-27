@@ -38,7 +38,14 @@ from typing import Any
 import structlog
 
 from ..domain import Instrument
-from ..market.session import ist_day, ist_naive_to_ts
+from ..market.session import (
+    TF_SECONDS,
+    bucket_end,
+    ist_day,
+    ist_naive_to_ts,
+    session_close_ts,
+    session_open_ts,
+)
 from .store import BarStore
 from .unified import BarSource, UnifiedBar
 
@@ -97,6 +104,8 @@ class TfStats:
     #: partial bars installed from REST — corrections, not fidelity failures
     partial_replaced: int = 0
     partial_missing: int = 0
+    #: buckets the socket never delivered, installed from REST by the sweep
+    inserted: int = 0
 
     def record(self, c: BarCheck) -> None:
         if c.error:
@@ -139,6 +148,7 @@ class TfStats:
             "rest_failures": self.rest_failures,
             "partial_replaced": self.partial_replaced,
             "partial_missing": self.partial_missing,
+            "inserted": self.inserted,
         }
 
 
@@ -163,6 +173,7 @@ class BarReconciler:
         retry_delay_s: float = 5.0,
         max_concurrent: int = 6,
         keep_checks: int = 200,
+        on_insert: Callable[[UnifiedBar], None] | None = None,
     ) -> None:
         self.rest = rest
         self.store = store
@@ -174,8 +185,13 @@ class BarReconciler:
         self._sem = asyncio.Semaphore(max_concurrent)
         self.stats: dict[str, TfStats] = {}
         self.recent: deque[BarCheck] = deque(maxlen=keep_checks)
-        self.live_bar_kept = 0  # closed 30m bars REST could not confirm in time
+        self.on_insert = on_insert
+        self.live_bar_kept = 0  # closed 30m / decided 5m bars REST could not confirm in time
         self.partial_unconfirmed = 0  # of those, fragments the socket joined mid-way
+        self.inserted = 0  # buckets the socket never delivered, installed from REST by the sweep
+        #: (symbol, tf, bucket) of today the exchange has no candle for either — nothing traded; asked once
+        self._absent: set[tuple[str, str, int]] = set()
+        self._absent_day: date | None = None
         self.last_sweep_ts: float | None = None
         self.sweeps = 0
 
@@ -263,29 +279,38 @@ class BarReconciler:
 
     # -- periodic sweep -----------------------------------------------------------------------
 
-    async def sweep(self, symbols: list[str], *, today: date | None = None) -> int:
-        """Reconcile every unconfirmed closed bar of today for the sweep timeframes. One REST call
-        per symbol per timeframe, paced by the semaphore."""
+    async def sweep(self, symbols: list[str], *, today: date | None = None, now: float | None = None) -> int:
+        """Reconcile every unconfirmed closed bar of today for the sweep timeframes, and install from REST
+        every bucket of today that has ended and the store does not hold at all. One REST call per symbol
+        per timeframe, paced by the semaphore.
+
+        The missing buckets are not hypothetical. 5paisa's cash feed stops advancing ``TickDt`` at
+        15:14:59 every day (23, 26 and 27 Oct 2026: not one of 218 stocks had a 1m bar in 15:15–15:27,
+        only the 15:28 closing print), and a laptop that slept through 09:15 (27 Oct) woke with no bars
+        for the gap. The exchange has those candles; a sweep that only repaired buckets it held left the
+        holes forever."""
         today = today or date.today()
+        now = time.time() if now is None else now
         day = today.isoformat()
+        if self._absent_day != today:
+            self._absent, self._absent_day = set(), today
         checked = 0
         for symbol in symbols:
             inst = self.resolve(symbol)
             if inst is None:
                 continue
             for tf in self.sweep_tfs:
-                pending = [
-                    b
-                    for b in self.store.bars(symbol, tf)
-                    if ist_day(b.ts) == today and not b.extra.get("confirmed") and b.source is not BarSource.REST
-                ]
-                if not pending:
+                held = {int(b.ts): b for b in self.store.bars(symbol, tf) if ist_day(b.ts) == today}
+                pending = [b for b in held.values() if not b.extra.get("confirmed") and b.source is not BarSource.REST]
+                missing = self._missing_buckets(inst, tf, today, held, now)
+                if not pending and not missing:
                     continue
                 async with self._sem:
                     try:
                         rows = await self.rest.candles(inst, tf, day, day)
                     except Exception as exc:  # noqa: BLE001
-                        self._record(BarCheck(symbol, tf, pending[-1].ts, found=False, error=str(exc)[:160]))
+                        ref_ts = pending[-1].ts if pending else missing[-1]
+                        self._record(BarCheck(symbol, tf, ref_ts, found=False, error=str(exc)[:160]))
                         continue
                 by_ts = {int(ist_naive_to_ts(r["dt"])): r for r in rows}
                 for b in pending:
@@ -294,16 +319,64 @@ class BarReconciler:
                         continue  # still forming, or the exchange has not published it yet
                     self._record(self._install(b, row))
                     checked += 1
+                for ts in missing:
+                    row = by_ts.get(ts)
+                    if row is None:
+                        # the exchange has no candle for it either (nothing traded) — once it is two
+                        # minutes old, stop asking: an illiquid name's empty minutes are permanent
+                        if rows and bucket_end(inst.segment, ts, tf) <= now - 120:
+                            self._absent.add((symbol, tf, ts))
+                        continue
+                    self._insert(inst, tf, ts, row)
+                    checked += 1
                 await asyncio.sleep(0.05)
         self.sweeps += 1
         self.last_sweep_ts = time.time()
         return checked
+
+    def _missing_buckets(self, inst: Instrument, tf: str, today: date, held: dict[int, UnifiedBar], now: float) -> list[int]:
+        """The buckets of ``today`` that ended at least ``settle_delay_s`` ago and are not in ``held``."""
+        if tf not in TF_SECONDS:
+            return []
+        seg = inst.segment
+        start, close = int(session_open_ts(seg, today)), int(session_close_ts(seg, today))
+        return [
+            b0
+            for b0 in range(start, close, TF_SECONDS[tf])
+            if b0 not in held
+            and (inst.symbol, tf, b0) not in self._absent
+            and bucket_end(seg, b0, tf) <= now - self.settle_delay_s
+        ]
+
+    def _insert(self, inst: Instrument, tf: str, ts: int, rest_row: dict[str, Any]) -> None:
+        rest = _ohlcv(rest_row)
+        bar = UnifiedBar(
+            symbol=inst.symbol,
+            scrip_code=inst.scrip_code,
+            tf=tf,
+            ts=int(ts),
+            open=rest["o"],
+            high=rest["h"],
+            low=rest["l"],
+            close=rest["c"],
+            volume=rest["v"],
+            source=BarSource.REST,
+            complete=True,
+            extra={"confirmed": True, "inserted": True},
+        )
+        self.store.replace_closed(bar)
+        self.inserted += 1
+        self.stats.setdefault(tf, TfStats()).inserted += 1
+        log.info("bars.inserted", symbol=inst.symbol, tf=tf, ts=ts)
+        if self.on_insert is not None:
+            self.on_insert(bar)
 
     def snapshot(self) -> dict[str, Any]:
         return {
             "by_tf": {tf: s.to_json() for tf, s in sorted(self.stats.items())},
             "live_bar_kept": self.live_bar_kept,
             "partial_unconfirmed": self.partial_unconfirmed,
+            "inserted": self.inserted,
             "sweeps": self.sweeps,
             "last_sweep_ts": self.last_sweep_ts,
             "recent_diffs": [c.to_json() for c in list(self.recent)[-25:] if c.found and not c.exact],

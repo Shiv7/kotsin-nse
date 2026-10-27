@@ -17,6 +17,7 @@ interface Signal {
   risk_bps: number
   walls: Wall[]
   retest_time: string
+  bar?: string
   tags: Tags
   taken: boolean
   why: string
@@ -37,6 +38,7 @@ interface Position {
   rule: string
   opened_ts: number
   entry_time: string
+  entry_bar?: string
   retest_time: string
   mode: string
   tags: Tags
@@ -137,8 +139,8 @@ function TradeRows({ rows, rule }: { rows: Position[]; rule: string }) {
     <>
       {rows.map((p) => (
         <tr key={p.id} className="border-b border-slate-900 align-top">
-          <td className="whitespace-nowrap px-2 py-1 text-slate-400">
-            {p.retest_time} → {p.entry_time}
+          <td className="whitespace-nowrap px-2 py-1 text-slate-400" title={`bars labelled by their open; the entry fires at ${p.entry_time}`}>
+            {p.retest_time} → {p.entry_bar ?? p.entry_time}
           </td>
           <td className="px-2 py-1 font-semibold">{p.symbol}</td>
           <td className={cls('px-2 py-1', p.side === 'LONG' ? 'text-emerald-400' : 'text-rose-400')}>{p.side}</td>
@@ -183,7 +185,7 @@ function TradeRows({ rows, rule }: { rows: Position[]; rule: string }) {
   )
 }
 
-const TRADE_HEAD = ['Retest → entry', 'Symbol', 'Side', 'Entry', 'Stop (initial)', 'Target', 'Risk bps', 'Reward bps', 'Bars', 'MFE', 'MAE', 'P&L bps', 'Net ₹ / last', 'R', 'Exit', 'Other rules', 'Context']
+const TRADE_HEAD = ['Retest → entry bar', 'Symbol', 'Side', 'Entry', 'Stop (initial)', 'Target', 'Risk bps', 'Reward bps', 'Bars', 'MFE', 'MAE', 'P&L bps', 'Net ₹ / last', 'R', 'Exit', 'Other rules', 'Context']
 
 /** The shadow book of the one strategy: the owner's CPR retest sequence, mechanical, every confirmed
  * retest taken at the bar's close, stop under the retest bar, target the next wall then trail. Numbers here
@@ -240,11 +242,11 @@ export function Shadow() {
 
       <div className="grid gap-4 xl:grid-cols-2">
         <Card title="Signals" right="every confirmed retest, taken or not">
-          <Table head={['Retest → entry', 'Symbol', 'Side', 'Entry', 'Stop', 'Risk bps', 'Walls', 'Taken', 'Context']} empty="none yet">
+          <Table head={['Retest → entry bar', 'Symbol', 'Side', 'Entry', 'Stop', 'Risk bps', 'Walls', 'Taken', 'Context']} empty="none yet">
             {(data?.signals ?? []).map((g) => (
               <tr key={g.id} className="border-b border-slate-900 align-top">
-                <td className="whitespace-nowrap px-2 py-1 text-slate-400">
-                  {g.retest_time} → {g.time}
+                <td className="whitespace-nowrap px-2 py-1 text-slate-400" title={`bars labelled by their open; the signal fires at ${g.time}`}>
+                  {g.retest_time} → {g.bar ?? g.time}
                 </td>
                 <td className="px-2 py-1 font-semibold">{g.symbol}</td>
                 <td className={cls('px-2 py-1', g.side === 'LONG' ? 'text-emerald-400' : 'text-rose-400')}>{g.side}</td>

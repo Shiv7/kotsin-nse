@@ -33,6 +33,7 @@ import structlog
 
 from .analysis.buildup import recent as recent_positioning
 from .bars.aggregator import Aggregator
+from .bars.daily import daily_bars
 from .bars.store import BarStore
 from .bars.unified import BarSource, UnifiedBar
 from .bars.verify import BarReconciler
@@ -171,7 +172,10 @@ class Engine:
         self.oi_hist: dict[str, deque[tuple[float, float]]] = {}
         #: contract → the exchange's previous close, as every quote frame carries it (PClose)
         self.prev_close_by_code: dict[str, float] = {}
-        self.reconciler = BarReconciler(self.rest, self.store, lambda sym: self.underlyings.get(sym))
+        self.reconciler = BarReconciler(
+            self.rest, self.store, lambda sym: self.underlyings.get(sym),
+            sweep_tfs=("1m", "5m"), max_concurrent=8, on_insert=self._on_inserted,
+        )
         self.groups: dict[str, ScripGroup] = {}
         self.universe_builder: UniverseBuilder | None = None
         self.option_oi: dict[str, dict[str, float]] = {}
@@ -609,22 +613,8 @@ class Engine:
         log.info("backfill.done", series_ok=ok, failed=failed)
 
     def _seed_daily(self, inst: Instrument, rows: list[dict[str, Any]]) -> None:
-        bars = [
-            UnifiedBar(
-                symbol=inst.symbol,
-                scrip_code=inst.scrip_code,
-                tf="1d",
-                ts=int(ist_naive_to_ts(r["dt"])),
-                open=r["o"],
-                high=r["h"],
-                low=r["l"],
-                close=r["c"],
-                volume=r["v"],
-                complete=True,
-            )
-            for r in rows
-        ]
-        self.store.seed(inst.symbol, "1d", bars)
+        # finished sessions only: the broker returns the running day's candle too (bars/daily.py)
+        self.store.seed(inst.symbol, "1d", daily_bars(inst, rows, now=time.time()))
 
     # -- control -----------------------------------------------------------------------------------
 
@@ -825,7 +815,8 @@ class Engine:
                 self._scanned_minute = minute
                 self._spawn(self._scan(minute), "scan")
         if bar.tf == "5m" and self.strategy is not None:
-            await self.strategy.on_bar(bar)
+            # off the tick path: the decision waits (bounded) for the exchange's candle first
+            self._spawn(self._decide(bar), "decide")
         if bar.tf != PRIMARY_TF:
             return
         # Off the tick path: at 15:15 IST two hundred 30m bars close in the same second and each
@@ -857,6 +848,38 @@ class Engine:
                     )
         except Exception as exc:  # noqa: BLE001 - a failed check keeps the live build
             log.warning("bar.reconcile_failed", symbol=bar.symbol, error=str(exc))
+
+    async def _decide(self, bar: UnifiedBar) -> None:
+        """Hand a closed 5m bar to the strategy — the exchange's candle for the bucket, not the socket's
+        build, when REST answers in time.
+
+        Day 1 (2026-10-27): 57 % of the feed's 5m bars differed from the exchange's (1.7 bps on average)
+        and, replayed on the exchange's bars, 2 of the 6 signals did not exist while another did. The
+        research ran on the exchange's bars; the live sequence has to read the same ones. Bounded by
+        ``strategy_bar_timeout_s``: a slow broker delays the decision, never blocks it, and a bar REST
+        cannot confirm is decided on the live build (counted in ``fidelity.live_bar_kept``)."""
+        if self.strategy is None:
+            return
+        decided = bar
+        if self.s.strategy_bars == "exchange" and self.reconciler_ready and self.s.has_credentials:
+            try:
+                check = await self.reconciler.reconcile_bar(bar, timeout_s=self.s.strategy_bar_timeout_s)
+                if check.replaced:
+                    decided = self.store.get(bar.symbol, bar.tf, int(bar.ts)) or bar
+                elif not check.found or check.error:
+                    self.reconciler.live_bar_kept += 1
+            except Exception as exc:  # noqa: BLE001 - the decision happens on the live build
+                log.warning("strategy.reconcile_failed", symbol=bar.symbol, error=str(exc))
+        await self.strategy.on_bar(decided)
+
+    def _on_inserted(self, bar: UnifiedBar) -> None:
+        """A bucket the socket never delivered, installed from REST by the sweep: archived like a closed
+        1m bar; a 5m bar goes to the strategy, whose bar-order guard drops anything older than what it
+        has already decided on."""
+        if bar.tf == "1m":
+            self.archive.bar(bar)
+        elif bar.tf == "5m" and self.strategy is not None:
+            self._spawn(self.strategy.on_bar(bar), "decide")
 
     def scan_symbols(self) -> list[str]:
         """The board's universe: NSE stocks with F&O and the MCX commodities — not indices."""
@@ -1038,7 +1061,11 @@ class Engine:
                         self.reconciler.last_sweep_ts is None
                         or now - self.reconciler.last_sweep_ts > self.s.bar_sweep_interval_s
                     )
-                    and any(is_open(g.segment, now, self.calendar) for g in self.groups.values())
+                    and any(
+                        # one more sweep after the close: the last buckets never arrive by socket
+                        is_open(g.segment, now, self.calendar) or is_open(g.segment, now - 900, self.calendar)
+                        for g in self.groups.values()
+                    )
                 ):
                     self._sweep_task = asyncio.create_task(
                         self.reconciler.sweep(list(self.underlyings))

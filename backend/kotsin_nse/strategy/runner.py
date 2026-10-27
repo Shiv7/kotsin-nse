@@ -25,7 +25,7 @@ from typing import Any
 import structlog
 
 from ..bars.store import BarStore
-from ..bars.unified import UnifiedBar
+from ..bars.unified import BarSource, UnifiedBar
 from ..config import Segment, Settings
 from ..domain import Instrument, InstrumentKind, OrderIntent, OrderSide, Purpose, new_id, to_json
 from ..exec.gateway import Gateway
@@ -52,13 +52,15 @@ class SymbolDay:
     weekly: dict[str, float] | None
     adr: float | None
     tol: float
+    #: the previous session's closes — the official one, the last traded, which one built the levels, its date
+    closes: dict[str, Any] = field(default_factory=dict)
     daily: dict[int, dict[str, Any]] = field(default_factory=dict)
     stages: dict[int, cr.Stage] = field(default_factory=lambda: {1: cr.Stage(1), -1: cr.Stage(-1)})
     entered: set[int] = field(default_factory=set)
     last_ts: int = 0
 
     def to_json(self) -> dict[str, Any]:
-        return {"levels": self.levels, "weekly": self.weekly, "adr": self.adr, "tol": self.tol,
+        return {"levels": self.levels, "weekly": self.weekly, "adr": self.adr, "tol": self.tol, "closes": self.closes,
                 "stages": {("bullish" if s > 0 else "bearish"): st.to_json() for s, st in self.stages.items()}}
 
 
@@ -87,6 +89,7 @@ class ShadowRunner:
         self.rule = settings.strategy_rule
         self.filter = settings.strategy_filter
         self.notional = settings.strategy_notional_inr
+        self.pdc = settings.strategy_pdc
         self.dir = settings.data_dir / "strategy"
         self._spawn: Spawn = spawn or (lambda coro, name: asyncio.create_task(coro, name=name))
         self.day = ""
@@ -124,12 +127,14 @@ class ShadowRunner:
         sd = self.syms.get(symbol)
         if sd is not None:
             return sd
-        open_ts = session_open_ts(self.segment, day)
-        rows = [b for b in self.store.bars(symbol, "1d") if b.ts < open_ts and b.high > 0 and b.low > 0]
+        rows = self._sessions_before(symbol, day)
         if not rows:
             return None
         prev = rows[-1]
-        levels = cr.day_levels(prev.high, prev.low, prev.close)
+        prev_day = ist_day(prev.ts)
+        last_trade = self._last_trade(symbol, prev_day)
+        close = last_trade if self.pdc == "last" and last_trade is not None else prev.close
+        levels = cr.day_levels(prev.high, prev.low, close)
         win = rows[-60:]
         adr = guarded_adr([b.high for b in win], [b.low for b in win], [b.close for b in win]) if len(win) >= 21 else None
         weeks: dict[tuple[int, int], list[UnifiedBar]] = {}
@@ -141,9 +146,33 @@ class ShadowRunner:
         if done:
             g = weeks[max(done)]
             weekly = cr.weekly_pivots([(max(b.high for b in g), min(b.low for b in g), g[-1].close)])
-        sd = SymbolDay(levels=levels, weekly=weekly, adr=adr, tol=cr.tolerance(adr, price))
+        closes = {"official": prev.close, "last": last_trade, "used": self.pdc, "day": prev_day.isoformat()}
+        sd = SymbolDay(levels=levels, weekly=weekly, adr=adr, tol=cr.tolerance(adr, price), closes=closes)
         self.syms[symbol] = sd
         return sd
+
+    def _sessions_before(self, symbol: str, day: date) -> list[UnifiedBar]:
+        """The finished sessions before ``day``, one bar per date, oldest first.
+
+        Dates, not timestamps: a running day's candle the broker returned mid-session once sat at 09:14
+        (NIFTY, 2026-10-27) and was "the last 1d bar before the open" — that day's CPR was its own first
+        5m bar. The store can also hold two bars for one date, the broker's candle at midnight and the
+        live 1d bar the aggregator closed at 15:30; the broker's wins."""
+        by_day: dict[date, UnifiedBar] = {}
+        for b in self.store.bars(symbol, "1d"):
+            d = ist_day(b.ts)
+            if d >= day or b.high <= 0 or b.low <= 0:
+                continue
+            cur = by_day.get(d)
+            if cur is None or (cur.source is not BarSource.REST and b.source is BarSource.REST):
+                by_day[d] = b
+        return [by_day[d] for d in sorted(by_day)]
+
+    def _last_trade(self, symbol: str, d: date) -> float | None:
+        """The last traded price of session ``d``: the close of its last 30m bar. The broker's daily candle
+        closes at the exchange's official close instead (a stock's last half hour, volume-weighted)."""
+        bars = [b for b in self.store.bars(symbol, "30m") if ist_day(b.ts) == d]
+        return bars[-1].close if bars else None
 
     # -- bars ------------------------------------------------------------------------------------------
 
@@ -204,7 +233,7 @@ class ShadowRunner:
         signal_id = new_id("sig")
         tags = self._tags(inst.symbol, sd, bars, side, j, bar)
         sig: dict[str, Any] = {
-            "id": signal_id, "ts": int(bar.ts) + 300, "time": ist_hm(int(bar.ts) + 300), "symbol": inst.symbol, "side": "LONG" if side > 0 else "SHORT",
+            "id": signal_id, "ts": int(bar.ts) + 300, "time": ist_hm(int(bar.ts) + 300), "bar": ist_hm(int(bar.ts)), "symbol": inst.symbol, "side": "LONG" if side > 0 else "SHORT",
             "entry": entry, "stop": stop, "risk_bps": round(risk_bps, 1), "walls": [{"name": k, "price": v, "bps": round(abs(v - entry) / entry * 1e4, 1)} for k, v in ws],
             "stage": st.to_json(), "retest_time": ist_hm(bars[i_rt].ts), "tol": sd.tol, "adr": sd.adr, "tags": tags, "taken": False, "why": "",
         }
@@ -228,7 +257,7 @@ class ShadowRunner:
         intent = OrderIntent(
             strategy=cr.NAME, instrument=inst, side=OrderSide.BUY if side > 0 else OrderSide.SELL, qty=qty, purpose=Purpose.ENTRY,
             signal_id=signal_id, client_order_id=f"{signal_id}|ENTRY|{pos_id}", position_id=pos_id, ref_price=entry,
-            reason=f"CPR retest held {sig['retest_time']} → first close beyond at {sig['time']}; stop {stop:.2f}, next wall {ws[0][0]} {ws[0][1]:.2f}",
+            reason=f"CPR retest held {sig['retest_time']} → first close beyond: the {sig['bar']} bar (fires {sig['time']}); stop {stop:.2f}, next wall {ws[0][0]} {ws[0][1]:.2f}",
         )
         res = self.gateway.submit(intent)
         self.orders += 1
@@ -245,7 +274,7 @@ class ShadowRunner:
             "side": sig["side"], "qty": qty, "entry": fill, "initial_stop": stop, "stop": primary.stop_price(), "target": primary.target_price(),
             "target_name": ws[0][0], "walls": sig["walls"], "risk_bps": round(abs(fill - stop) / fill * 1e4, 1),
             "reward_bps": round(abs(ws[0][1] - fill) / fill * 1e4, 1), "rule": self.rule, "signal_id": signal_id, "opened_ts": int(bar.ts) + 300,
-            "entry_time": sig["time"], "retest_time": sig["retest_time"], "mode": res.order.mode, "tags": tags, "tol": sd.tol,
+            "entry_time": sig["time"], "entry_bar": sig["bar"], "retest_time": sig["retest_time"], "mode": res.order.mode, "tags": tags, "tol": sd.tol,
             "bars_held": 0, "mfe_bps": 0.0, "mae_bps": 0.0, "last": fill, "pnl_bps": 0.0, "closed_ts": None, "exit": None, "exit_reason": None,
             "gross_inr": None, "charges_inr": None, "net_inr": None, "r": None, "virtual": {},
         }
@@ -453,10 +482,10 @@ class ShadowRunner:
         for sym, sd in sorted(self.syms.items()):
             for side, st in sd.stages.items():
                 if st.name != "none":
-                    stages.append({"symbol": sym, "side": "bullish" if side > 0 else "bearish", **st.to_json(), "tol": round(sd.tol, 2), "levels": sd.levels})
+                    stages.append({"symbol": sym, "side": "bullish" if side > 0 else "bearish", **st.to_json(), "tol": round(sd.tol, 2), "levels": sd.levels, "closes": sd.closes})
         taken = [s for s in self.signals if s["taken"]]
         return {
-            "strategy": cr.NAME, "day": self.day, "rule": self.rule, "filter": self.filter, "notional_inr": self.notional,
+            "strategy": cr.NAME, "day": self.day, "rule": self.rule, "filter": self.filter, "pdc": self.pdc, "notional_inr": self.notional,
             "universe": sum(1 for sym, i in self.underlyings.items() if i.kind is InstrumentKind.EQUITY and sym not in INDEX_ROOTS), "with_levels": len(self.syms),
             "orders": self.orders, "errors": self.errors,
             "summary": {

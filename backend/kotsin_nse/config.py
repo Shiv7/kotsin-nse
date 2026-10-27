@@ -185,6 +185,16 @@ class Settings(BaseSettings):
     strategy_filter: str = "none"
     #: shadow size per trade, rupees of notional (the research's bps are size-free; this is for ₹)
     strategy_notional_inr: float = 25_000.0
+    #: the previous session's close the CPR is built on. ``official`` = the exchange's close (the broker's
+    #: daily candle; for a stock the last half hour's weighted average). ``last`` = the last traded price
+    #: (the close of that session's last 30m bar), which is what a chart drawn from ticks shows: AXISBANK
+    #: 2026-10-26 closed 1220.0 officially against 1225.0 last traded, and the owner's Kite CPR implied 1224.97.
+    strategy_pdc: Literal["official", "last"] = "official"
+    #: ``exchange`` = a closed 5m bar waits (bounded) for the exchange's candle before the strategy reads
+    #: it; ``feed`` = the socket's build decides at once
+    strategy_bars: Literal["exchange", "feed"] = "exchange"
+    #: how long a decision may wait for the exchange's 5m candle (217 symbols close in the same second)
+    strategy_bar_timeout_s: float = 25.0
 
     # ---- LIVE_CAPPED caps ----------------------------------------------------------------------
     # Mode is state (R9); these only bound what an *armed* engine may do.

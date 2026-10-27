@@ -197,3 +197,29 @@ trading day, and a missing one produces a session of empty bars that looks like 
 * So every reader of cached 1m bars uses 09:15 ≤ start < 15:14 (`research/history.session_rows`).
   The live engine builds 15:15–15:30 from the feed itself, and the archive keeps it.
 * Futures and options 1m history exist too (an illiquid strike returns only the minutes it traded).
+
+## Daily candles include the running session (measured 2026-10-27)
+
+A daily-history request made during the session returns today's candle too: the open and the minutes so
+far, stamped with the day's first tick time rather than midnight — `2026-10-27T09:14:00` for NIFTY (the
+index prints from 09:14), `09:15:00` for every stock and BANKNIFTY. Finished days are stamped `00:00:00`.
+Seeded as a complete 1d bar it is "the last bar before the open" (NIFTY's CPR on 27 Oct was its own first
+5m bar) and at 09:15 it collides with the live day bar the aggregator builds. `bars/daily.py` keeps a row
+only once its session has closed.
+
+## The cash feed's last fifteen minutes (measured 23, 26 and 27 Oct 2026)
+
+For every NSE stock the socket's `TickDt` stops advancing at 15:14:59. Frames keep arriving until 15:28
+with the same LastRate and a `TotalQty` that restarts from a small number, then one closing print arrives
+stamped 15:28 (the official close). Not one of 218 stocks had a 1m bar between 15:15 and 15:27 on any of
+the three days; the indices print every minute to 15:29. REST has the 1m and 5m candles for those
+minutes, so the sweep installs the buckets the socket never delivered (`BarReconciler.sweep`; `inserted`
+under `fidelity` in `/api/health`).
+
+## Daily close vs last traded (measured 2026-10-26)
+
+The daily candle's close is the exchange's official close (a stock's last half hour, volume-weighted):
+AXISBANK 1220.0, POLICYBZR 1023.0 — the number every quote frame carries as `PClose`. The 30m candle for
+the 15:15 bucket closes at the last traded price: 1225.0 and 1020.6. A chart drawn from ticks builds its
+previous-day levels on the latter (the owner's Kite CPR that day implied 1224.97 and 1020.70); for an
+index the two are one number. `KN_STRATEGY_PDC` picks which one the strategy's CPR uses.

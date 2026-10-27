@@ -7,7 +7,7 @@ import asyncio
 import random
 
 from kotsin_nse.bars.store import BarStore
-from kotsin_nse.bars.unified import UnifiedBar
+from kotsin_nse.bars.unified import BarSource, UnifiedBar
 from kotsin_nse.config import Segment, Settings
 from kotsin_nse.domain import Instrument, InstrumentKind
 from kotsin_nse.exec.gateway import Gateway, Mode
@@ -217,8 +217,8 @@ def _seed_daily(store: BarStore, symbol: str, code: str) -> None:
     store.seed(symbol, "1d", rows)
 
 
-def _runner(tmp_path, store, rule="wall_then_trail", filt="none", symbols=("ABC",)) -> ShadowRunner:
-    s = Settings(_env_file=None, data_dir=tmp_path, engine_enabled=False, strategy_rule=rule, strategy_filter=filt)
+def _runner(tmp_path, store, rule="wall_then_trail", filt="none", symbols=("ABC",), **kw) -> ShadowRunner:
+    s = Settings(_env_file=None, data_dir=tmp_path, engine_enabled=False, strategy_rule=rule, strategy_filter=filt, **kw)
     costs = CostModel(s)
     gw = Gateway(matcher=PaperMatcher(costs), mode=lambda: Mode.SHADOW, halted=lambda: (False, ""), book_for=lambda _c: None, ltp_for=lambda _c: None)
     tasks: list[asyncio.Task] = []
@@ -255,8 +255,10 @@ async def test_the_runner_takes_the_retest_and_trails_out_in_shadow(tmp_path):
     assert snap["summary"]["signals"] == 1 and snap["summary"]["taken"] == 1 and snap["summary"]["closed"] == 1 and snap["summary"]["open"] == 0
     sig = snap["signals"][0]
     assert sig["side"] == "LONG" and sig["entry"] == 106.8 and sig["stop"] == 104.2 and sig["retest_time"] == "09:55" and sig["time"] == "10:10"
+    assert sig["bar"] == "10:05", "the bar is labelled by its open, as the owner's chart labels it; `time` is when the close fires"
     assert sig["walls"][0]["name"] == "R1"
     t = snap["trades"][0]
+    assert t["entry_bar"] == "10:05" and t["entry_time"] == "10:10"
     assert [w["name"] for w in sig["walls"][:3]] == ["R1", "WR1", "PDH"]  # the weekly R1 109.67 sits between R1 and PDH
     assert t["status"] == "CLOSED" and t["exit_reason"] == "trail" and round(t["exit"], 2) == 108.67 and t["mode"] == "SHADOW"
     assert t["qty"] == 234  # ₹25,000 at 106.8
@@ -329,3 +331,47 @@ async def test_the_runner_follows_the_engine_when_the_universe_dict_is_replaced(
         assert e.strategy.snapshot()["universe"] == 1
     finally:
         await e.stop()
+
+
+async def test_a_running_days_candle_stamped_before_the_open_is_not_the_previous_day(tmp_path):
+    """2026-10-27: the 09:25 restart seeded NIFTY's running daily candle at 09:14 and 'the last 1d bar before
+    the open' was that — PDH/PDL/PDC were today's first 5m bar and every level was fiction. Dates, not ts."""
+    store = BarStore()
+    _seed_daily(store, "ABC", "1")
+    store.seed("ABC", "1d", [_ubar("ABC", "1", "1d", ist_ts(DAY, "09:14"), 120.0, 125.0, 115.0, 120.0)])
+    r = _runner(tmp_path, store)
+    await _feed(r, store, DAY_BARS, pad_to=75)
+    snap = r.snapshot()
+    lv = snap["stages"][0]["levels"]
+    assert (lv["PDH"], lv["PDL"], lv["PDC"]) == PREV and snap["stages"][0]["closes"]["day"] < DAY
+    assert snap["summary"]["signals"] == 1 and snap["signals"][0]["entry"] == 106.8
+
+
+async def test_the_brokers_candle_wins_over_the_live_day_bar_for_the_same_date(tmp_path):
+    """A long-running engine holds two bars for yesterday: the live 1d bar it closed at 15:30 (ts 09:15) and,
+    after a re-backfill, the broker's candle at 00:00. One date, one bar: the exchange's."""
+    store = BarStore()
+    _seed_daily(store, "ABC", "1")  # the previous session as a LIVE bar at 09:15 with PREV = (110, 100, 104)
+    rest = _ubar("ABC", "1", "1d", ist_ts(DAY, "00:00") - 86400, 104.0, 112.0, 100.0, 104.0)
+    rest.source = BarSource.REST
+    store.seed("ABC", "1d", [rest])
+    r = _runner(tmp_path, store)
+    await _feed(r, store, DAY_BARS, pad_to=75)
+    lv = r.snapshot()["stages"][0]["levels"]
+    assert lv["PDH"] == 112.0 and lv["PDL"] == 100.0
+
+
+async def test_pdc_last_builds_the_cpr_on_the_previous_sessions_last_traded_price(tmp_path):
+    """AXISBANK 2026-10-26: official close 1220.0 (the broker's daily candle), last traded 1225.0 (the close
+    of the 15:15 30m bar); the owner's Kite CPR implied 1224.97. ``KN_STRATEGY_PDC=last`` draws his levels."""
+    store = BarStore()
+    _seed_daily(store, "ABC", "1")
+    store.seed("ABC", "30m", [_ubar("ABC", "1", "30m", ist_ts(DAY, "15:15") - 86400, 104.5, 105.2, 104.4, 105.0)])
+    r = _runner(tmp_path, store, strategy_pdc="last")
+    await _feed(r, store, DAY_BARS, pad_to=75)
+    snap = r.snapshot()
+    st = snap["stages"][0]
+    assert snap["pdc"] == "last" and st["closes"] == {"official": 104.0, "last": 105.0, "used": "last", "day": st["closes"]["day"]}
+    assert st["levels"] == cr.day_levels(110.0, 100.0, 105.0) and st["levels"]["P"] != cr.day_levels(*PREV)["P"]
+    # the official close is the default; the last traded price is still reported next to it
+    assert _runner(tmp_path, store).pdc == "official"

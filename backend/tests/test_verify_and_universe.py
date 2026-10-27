@@ -148,6 +148,40 @@ async def test_sweep_reconciles_only_unconfirmed_live_bars_of_today(equity):
     assert rest.calls == 1
 
 
+def test_get_finds_a_closed_bucket_by_its_start(equity):
+    store = BarStore()
+    t = ist_ts("2026-09-18", "10:15")
+    b = bar(t, 100, 101, 99, 100.5, 500)
+    store.close(b)
+    assert store.get("RELIANCE", "30m", int(t)) is b
+    assert store.get("RELIANCE", "30m", int(t) + 1800) is None and store.get("RELIANCE", "30m", int(t) - 1800) is None
+
+
+async def test_sweep_inserts_the_buckets_the_socket_never_delivered(equity):
+    """Every stock's last fifteen minutes, every day: 5paisa's cash feed stops advancing TickDt at 15:14:59
+    (23, 26 and 27 Oct 2026: 0 of 218 stocks had a 1m bar in 15:15–15:27). REST has those candles; a sweep
+    that only repaired buckets it held left the hole forever — and the same hole after a laptop sleep."""
+    store = BarStore()
+    today = date.today()
+    day = today.isoformat()
+    t = ist_ts(day, "15:00")
+    store.close(bar(t, 100, 101, 99, 100.5, 500, tf="1m"))
+    rest = _Rest({"1m": [_row(day, "15:00", 100, 101, 99, 100.5, 500), _row(day, "15:01", 100.5, 102, 100, 101, 400), _row(day, "15:02", 101, 101.5, 100.5, 101.2, 300)]})
+    inserted: list = []
+    r = BarReconciler(rest, store, lambda _s: equity, sweep_tfs=("1m",), settle_delay_s=0.0, on_insert=inserted.append)
+    # at 15:02:30 the 15:01 bucket has ended and is missing; the 15:02 bucket is still running
+    n = await r.sweep(["RELIANCE"], today=today, now=ist_ts(day, "15:02") + 30)
+    assert n == 2 and rest.calls == 1
+    assert [ist_hm(b.ts) for b in store.bars("RELIANCE", "1m")] == ["15:00", "15:01"]
+    b = store.get("RELIANCE", "1m", int(t) + 60)
+    assert b is not None and b.source is BarSource.REST and b.complete and b.extra["inserted"] and b.high == 102
+    assert inserted == [b] and r.stats["1m"].inserted == 1 and r.snapshot()["inserted"] == 1
+    # the next sweep fills the bucket that has ended since; nothing is inserted twice
+    assert await r.sweep(["RELIANCE"], today=today, now=ist_ts(day, "15:03") + 5) == 1
+    assert [ist_hm(b.ts) for b in store.bars("RELIANCE", "1m")] == ["15:00", "15:01", "15:02"]
+    assert await r.sweep(["RELIANCE"], today=today, now=ist_ts(day, "15:03") + 5) == 0 and rest.calls == 2
+
+
 # ---------------------------------------------------------------------------------------------------
 # universe
 # ---------------------------------------------------------------------------------------------------
