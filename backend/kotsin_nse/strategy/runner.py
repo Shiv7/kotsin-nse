@@ -29,6 +29,7 @@ from ..bars.unified import UnifiedBar
 from ..config import Segment, Settings
 from ..domain import Instrument, InstrumentKind, OrderIntent, OrderSide, Purpose, new_id, to_json
 from ..exec.gateway import Gateway
+from ..instrument.universe import INDEX_ROOTS
 from ..ledger.db import Ledger
 from ..market.session import bucket_end, ist_day, ist_hm, session_close_ts, session_open_ts
 from ..risk.costs import CostModel
@@ -208,6 +209,11 @@ class ShadowRunner:
             "stage": st.to_json(), "retest_time": ist_hm(bars[i_rt].ts), "tol": sd.tol, "adr": sd.adr, "tags": tags, "taken": False, "why": "",
         }
         self.signals.append(sig)
+        if inst.symbol in INDEX_ROOTS:
+            # day 1 (2026-10-27) booked NIFTY and BANKNIFTY as ₹25,000 of "stock": the index roots carry an
+            # NSE_EQ leg in the catalogue. The sequence stays visible; the book is cash equities only.
+            sig["why"] = "index: no cash leg to trade — recorded, not booked"
+            return
         if risk_bps <= 0:
             sig["why"] = "no risk: the stop is at the entry"
             return
@@ -283,7 +289,7 @@ class ShadowRunner:
     def _peers_move(self, symbol: str, day: date, side: int, j: int) -> list[float]:
         out: list[float] = []
         for sym, inst in self.underlyings.items():
-            if sym == symbol or inst.kind is not InstrumentKind.EQUITY:
+            if sym == symbol or inst.kind is not InstrumentKind.EQUITY or sym in INDEX_ROOTS:
                 continue
             pb = self._today_bars(sym, day)
             if len(pb) <= j or pb[0].o <= 0:
@@ -451,7 +457,7 @@ class ShadowRunner:
         taken = [s for s in self.signals if s["taken"]]
         return {
             "strategy": cr.NAME, "day": self.day, "rule": self.rule, "filter": self.filter, "notional_inr": self.notional,
-            "universe": sum(1 for i in self.underlyings.values() if i.kind is InstrumentKind.EQUITY), "with_levels": len(self.syms),
+            "universe": sum(1 for sym, i in self.underlyings.items() if i.kind is InstrumentKind.EQUITY and sym not in INDEX_ROOTS), "with_levels": len(self.syms),
             "orders": self.orders, "errors": self.errors,
             "summary": {
                 "signals": len(self.signals), "taken": len(taken), "skipped": len(self.signals) - len(taken), "open": len(self.positions), "closed": len(closed),

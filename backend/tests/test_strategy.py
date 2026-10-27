@@ -291,6 +291,20 @@ async def test_the_filter_skips_the_signal_but_records_it(tmp_path):
     assert "filter" in r.snapshot()["signals"][0]["why"]
 
 
+async def test_an_index_root_is_recorded_but_not_booked(tmp_path):
+    """Day 1 (2026-10-27) shadow-traded NIFTY and BANKNIFTY as ₹25,000 of stock: the index roots carry an
+    NSE_EQ leg (kind EQUITY) in the catalogue. The sequence is still recorded; nothing is booked."""
+    store = BarStore()
+    _seed_daily(store, "NIFTY", "999920000")
+    r = _runner(tmp_path, store, symbols=("NIFTY",))
+    await _feed(r, store, DAY_BARS, symbol="NIFTY", code="999920000")
+    snap = r.snapshot()
+    assert snap["universe"] == 0 and snap["with_levels"] == 1
+    assert snap["summary"]["signals"] == 1 and snap["summary"]["taken"] == 0 and r.orders == 0
+    assert snap["signals"][0]["symbol"] == "NIFTY" and snap["signals"][0]["why"].startswith("index")
+    assert [s["symbol"] for s in snap["stages"]] == ["NIFTY"]
+
+
 async def test_a_halt_rejects_the_entry_and_the_signal_says_so(tmp_path):
     store = BarStore()
     _seed_daily(store, "ABC", "1")
