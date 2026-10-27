@@ -1,0 +1,103 @@
+seq day range: 2024-01-01 → 2025-09-30
+instances: 3101 bullish 1327 days 429 | risk terciles (bps): [np.float64(20.7), np.float64(55.3), np.float64(76.9), np.float64(374.0)]
+w1 < 1R: 2348 | w1 hit before stop: 1627 | failure shape (w1 hit & baseline trail stop <= 10 bps from entry): 704 | trail_gap <= 10 bps regardless of hit: 1109
+
+## all instances, per rule
+                         n  win_pct  avg_win  avg_loss  payoff  gross  gross_med   net  net_R  t_net(day)  held_med  mfe50_pct                               exits
+rule                                                                                                                                                              
+wall_then_trail       3101     58.2     49.6     -61.3    0.81    3.2        6.1 -11.8 -0.191       -7.61      14.0       24.0  trail:45 stop:34 close:21 target:0
+wall_then_be          3101     39.2     74.3     -42.2    1.76    3.5        0.0 -11.5 -0.190       -6.74      17.0       25.1           trail:34 stop:34 close:32
+wall_then_swing       3101     37.3     78.3     -40.9    1.91    3.5        0.0 -11.5 -0.191       -6.59      18.0       25.0  trail:39 stop:34 close:27 target:1
+wall_then_bars3       3101     50.5     55.7     -51.8    1.07    2.5        1.2 -12.5 -0.200       -8.13      13.0       26.7           trail:49 stop:34 close:17
+wall_min_1R           3101     40.7     88.9     -53.9    1.65    4.2      -10.1 -10.8 -0.181       -5.51      26.0       33.0           close:46 stop:41 trail:12
+half_wall_then_swing  3101     58.2     48.9     -61.3    0.80    2.8       14.9 -12.2 -0.201       -7.76      18.0       19.9           trail:39 stop:34 close:27
+fixed_wall            3101     58.2     47.5     -61.3    0.78    2.0       25.5 -13.0 -0.212       -8.27       9.0       30.5          target:52 stop:34 close:14
+fixed_1to2            3101     43.6     86.5     -59.0    1.46    4.4      -20.4 -10.6 -0.183       -5.39      23.0       38.4          stop:43 close:38 target:19
+
+## split (a): first wall < 1R
+                         n  win_pct  avg_win  avg_loss  payoff  gross  gross_med   net  net_R  t_net(day)  held_med  mfe50_pct
+rule                                                                                                                          
+wall_then_trail       2348     61.3     42.7     -64.3    0.66    1.3        6.7 -13.7 -0.203       -7.80      12.0       21.2
+wall_then_be          2348     38.8     67.6     -40.6    1.66    1.4        0.0 -13.6 -0.200       -7.08      16.0       23.1
+wall_then_swing       2348     35.2     74.8     -38.4    1.95    1.5        0.0 -13.5 -0.200       -6.84      16.0       23.2
+wall_then_bars3       2348     51.3     50.3     -51.1    0.99    1.0        2.4 -14.0 -0.207       -8.21      12.0       23.7
+wall_min_1R           2348     40.7     87.2     -55.9    1.56    2.3      -12.2 -12.7 -0.189       -5.37      27.0       33.6
+half_wall_then_swing  2348     61.3     42.5     -64.3    0.66    1.2       15.8 -13.8 -0.207       -7.92      16.0       15.7
+fixed_wall            2348     61.3     41.8     -64.3    0.65    0.8       27.3 -14.2 -0.217       -8.21       8.0       28.4
+fixed_1to2            2348     43.7     86.6     -60.8    1.43    3.6      -20.0 -11.4 -0.174       -4.20      23.0       38.9
+
+## split (a): first wall >= 1R
+                        n  win_pct  avg_win  avg_loss  payoff  gross  gross_med  net  net_R  t_net(day)  held_med  mfe50_pct
+rule                                                                                                                        
+wall_then_trail       753     48.3     77.0     -54.4    1.42    9.1       -5.5 -5.9 -0.155       -1.68      19.0       32.8
+wall_then_be          753     40.6     94.1     -47.3    1.99   10.1       -5.5 -4.9 -0.158       -1.22      23.0       31.2
+wall_then_swing       753     43.7     87.1     -49.9    1.75   10.0       -5.5 -5.0 -0.160       -1.13      23.0       30.6
+wall_then_bars3       753     48.1     73.5     -54.1    1.36    7.3       -5.5 -7.7 -0.179       -2.32      19.0       36.3
+wall_min_1R           753     40.6     94.1     -47.3    1.99   10.1       -5.5 -4.9 -0.158       -1.22      23.0       31.2
+half_wall_then_swing  753     48.3     74.1     -54.4    1.36    7.7       -5.5 -7.3 -0.182       -2.12      23.0       32.8
+fixed_wall            753     48.3     70.2     -54.4    1.29    5.8       -5.5 -9.2 -0.197       -3.21      16.0       36.9
+fixed_1to2            753     43.3     86.0     -53.7    1.60    6.8      -22.1 -8.2 -0.209       -2.32      21.0       36.7
+
+## split (b): risk tercile low
+                         n  win_pct  avg_win  avg_loss  payoff  gross  gross_med   net  net_R  t_net(day)  held_med  mfe50_pct
+rule                                                                                                                          
+wall_then_trail       1034     54.7     36.9     -40.8    0.90    1.7        3.1 -13.3 -0.308       -8.21      13.0       24.0
+wall_then_be          1034     38.2     48.7     -29.9    1.63    0.1        0.0 -14.9 -0.343       -7.70      16.0       23.5
+wall_then_swing       1034     34.6     52.3     -28.3    1.85   -0.4        0.0 -15.4 -0.353       -8.61      17.0       22.5
+wall_then_bars3       1034     49.1     40.5     -36.3    1.12    1.4        0.0 -13.6 -0.312       -8.10      13.0       30.5
+wall_min_1R           1034     36.8     59.2     -34.5    1.71   -0.0      -13.5 -15.0 -0.345       -6.95      21.0       30.1
+half_wall_then_swing  1034     54.7     33.7     -40.8    0.83   -0.0       10.8 -15.0 -0.344       -9.80      17.0       17.0
+fixed_wall            1034     54.7     34.1     -40.8    0.84    0.2       19.4 -14.8 -0.337      -10.03       9.0       32.0
+fixed_1to2            1034     40.8     57.9     -39.5    1.46    0.2      -26.7 -14.8 -0.339       -6.92      19.0       39.0
+
+## split (b): risk tercile mid
+                         n  win_pct  avg_win  avg_loss  payoff  gross  gross_med   net  net_R  t_net(day)  held_med  mfe50_pct
+rule                                                                                                                          
+wall_then_trail       1033     58.6     49.0     -57.2    0.86    5.0        6.6 -10.0 -0.151       -4.71      15.0       24.6
+wall_then_be          1033     40.0     75.0     -39.5    1.90    6.3        0.0  -8.7 -0.128       -3.44      17.0       26.6
+wall_then_swing       1033     39.3     78.7     -39.0    2.02    7.2        0.0  -7.8 -0.116       -3.21      18.0       27.0
+wall_then_bars3       1033     51.8     54.9     -49.1    1.12    4.8        4.2 -10.2 -0.157       -5.57      13.0       26.8
+wall_min_1R           1033     42.4     88.5     -50.9    1.74    8.2       -5.5  -6.8 -0.095       -2.11      26.0       34.9
+half_wall_then_swing  1033     58.6     49.4     -57.2    0.86    5.2       15.8  -9.8 -0.149       -4.76      18.0       21.5
+fixed_wall            1033     58.6     46.2     -57.2    0.81    3.4       28.3 -11.6 -0.179       -6.06      10.0       28.9
+fixed_1to2            1033     45.0     83.4     -55.5    1.50    7.0      -15.5  -8.0 -0.117       -2.99      22.0       39.3
+
+## split (b): risk tercile high
+                         n  win_pct  avg_win  avg_loss  payoff  gross  gross_med   net  net_R  t_net(day)  held_med  mfe50_pct
+rule                                                                                                                          
+wall_then_trail       1034     61.2     61.5     -89.6    0.69    2.9        8.9 -12.1 -0.114       -3.60      14.0       23.5
+wall_then_be          1034     39.6     98.2     -57.5    1.71    4.1        0.0 -10.9 -0.099       -3.05      18.0       25.0
+wall_then_swing       1034     37.9    101.6     -56.0    1.81    3.7        0.0 -11.3 -0.102       -3.28      18.0       25.4
+wall_then_bars3       1034     50.7     71.1     -70.5    1.01    1.3        2.6 -13.7 -0.132       -4.22      14.0       23.5
+wall_min_1R           1034     42.7    114.9     -78.1    1.47    4.4       -7.4 -10.6 -0.103       -2.47      34.0       33.6
+half_wall_then_swing  1034     61.2     61.9     -89.6    0.69    3.1       18.9 -11.9 -0.111       -3.94      19.0       20.8
+fixed_wall            1034     61.2     60.8     -89.6    0.68    2.4       33.5 -12.6 -0.119       -4.27      10.0       30.7
+fixed_1to2            1034     44.9    115.5     -83.5    1.38    5.8      -16.5  -9.2 -0.092       -1.87      30.0       37.1
+
+## the day-1 failure shape only (wall 1 hit, baseline's trailed stop within 10 bps of the entry)
+                        n  win_pct  avg_win  avg_loss  payoff  gross  gross_med   net  net_R  t_net(day)  held_med  mfe50_pct                       exits
+rule                                                                                                                                                     
+wall_then_trail       704    100.0     32.8       NaN     NaN   32.8       11.3  17.8  0.294        8.90      11.0       22.2           trail:87 close:13
+wall_then_be          704     58.2     54.2       0.0    -inf   31.6        4.0  16.6  0.265        6.73      16.0       23.3           trail:72 close:28
+wall_then_swing       704     46.2     68.6       0.0    -inf   31.7        0.0  16.7  0.269        7.00      17.0       22.0  trail:79 close:20 target:1
+wall_then_bars3       704     76.0     42.2       0.0    -inf   32.1       19.2  17.1  0.277        9.07      10.0       24.2            trail:95 close:5
+wall_min_1R           704     59.5     82.9     -40.9    2.03   32.8       23.5  17.8  0.277        3.56      40.0       37.3   close:62 stop:21 trail:17
+half_wall_then_swing  704    100.0     31.8       NaN     NaN   31.8       19.4  16.8  0.264       15.34      17.0       11.7           trail:80 close:20
+fixed_wall            704    100.0     32.0       NaN     NaN   32.0       31.0  17.0  0.262       47.34       5.0       27.7                  target:100
+fixed_1to2            704     65.3     83.4     -52.3    1.59   36.4       31.5  21.4  0.326        4.78      34.0       45.0  close:46 target:31 stop:23
+
+## wall 1 hit, all (the trail rules only differ from each other here)
+                         n  win_pct  avg_win  avg_loss  payoff  gross  gross_med   net  net_R  t_net(day)  held_med  mfe50_pct
+rule                                                                                                                          
+wall_then_trail       1627    100.0     51.8       NaN     NaN   51.8       30.9  36.8  0.514       18.77      16.0       29.7
+wall_then_be          1627     63.9     82.0       0.0    -inf   52.4       16.1  37.4  0.516       14.36      24.0       31.2
+wall_then_swing       1627     60.2     87.2       0.0    -inf   52.5       19.5  37.5  0.515       14.27      24.0       31.1
+wall_then_bars3       1627     85.4     59.1       0.0    -inf   50.5       35.3  35.5  0.496       22.05      14.0       33.5
+wall_min_1R           1627     66.6     98.7     -36.1    2.74   53.7       38.0  38.7  0.533       10.87      43.0       42.2
+half_wall_then_swing  1627    100.0     51.0       NaN     NaN   51.0       34.3  36.0  0.495       25.05      24.0       23.9
+fixed_wall            1627    100.0     49.5       NaN     NaN   49.5       41.2  34.5  0.474       38.01       7.0       38.7
+fixed_1to2            1627     72.2     95.2     -52.5    1.81   54.0       54.5  39.0  0.530       12.20      35.0       49.7
+
+## MFE (bps) of the instances: mean 90.5 median 62.6 | share with MFE >= 30: 72.2 %
+share of instances (MFE >= 30 bps) where ANY rule captured >= 50 % of the MFE: 65.8 % | best single rule: {'fixed_1to2': 0.384, 'wall_min_1R': 0.33, 'fixed_wall': 0.305}
+saved /private/tmp/claude-501/-Users-shivendrapratap-Downloads-kotsin-kotsin-nse/2bae6dc3-b199-49f6-a1aa-3825e7313e55/scratchpad/sweep/retest_trail.parquet
