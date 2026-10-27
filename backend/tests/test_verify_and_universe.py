@@ -158,9 +158,8 @@ def test_get_finds_a_closed_bucket_by_its_start(equity):
 
 
 async def test_sweep_inserts_the_buckets_the_socket_never_delivered(equity):
-    """Every stock's last fifteen minutes, every day: 5paisa's cash feed stops advancing TickDt at 15:14:59
-    (23, 26 and 27 Oct 2026: 0 of 218 stocks had a 1m bar in 15:15–15:27). REST has those candles; a sweep
-    that only repaired buckets it held left the hole forever — and the same hole after a laptop sleep."""
+    """The 09:15–09:19 hole after the 27 Oct 2026 hibernate, and the gap a reconnect leaves: REST has those
+    candles, and a sweep that only repaired buckets it held left them empty forever."""
     store = BarStore()
     today = date.today()
     day = today.isoformat()

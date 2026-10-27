@@ -186,9 +186,10 @@ class Settings(BaseSettings):
     #: shadow size per trade, rupees of notional (the research's bps are size-free; this is for ₹)
     strategy_notional_inr: float = 25_000.0
     #: the previous session's close the CPR is built on. ``official`` = the exchange's close (the broker's
-    #: daily candle; for a stock the last half hour's weighted average). ``last`` = the last traded price
-    #: (the close of that session's last 30m bar), which is what a chart drawn from ticks shows: AXISBANK
-    #: 2026-10-26 closed 1220.0 officially against 1225.0 last traded, and the owner's Kite CPR implied 1224.97.
+    #: daily candle; for an F&O stock the closing auction's price since 2026-08-03). ``last`` = a stock's last
+    #: continuous trade before the 15:15 auction (the close of its 14:45 30m bar), which is what a chart drawn
+    #: from ticks shows: AXISBANK 2026-10-26 closed 1220.0 in the auction against 1225.0 last traded, and the
+    #: owner's Kite CPR implied 1224.97. An index has no auction; ``last`` falls back to its official close.
     strategy_pdc: Literal["official", "last"] = "official"
     #: ``exchange`` = a closed 5m bar waits (bounded) for the exchange's candle before the strategy reads
     #: it; ``feed`` = the socket's build decides at once

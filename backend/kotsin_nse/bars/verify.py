@@ -284,11 +284,11 @@ class BarReconciler:
         every bucket of today that has ended and the store does not hold at all. One REST call per symbol
         per timeframe, paced by the semaphore.
 
-        The missing buckets are not hypothetical. 5paisa's cash feed stops advancing ``TickDt`` at
-        15:14:59 every day (23, 26 and 27 Oct 2026: not one of 218 stocks had a 1m bar in 15:15–15:27,
-        only the 15:28 closing print), and a laptop that slept through 09:15 (27 Oct) woke with no bars
-        for the gap. The exchange has those candles; a sweep that only repaired buckets it held left the
-        holes forever."""
+        The missing buckets are real: a laptop that slept through 09:15 (27 Oct 2026) woke with no bars for
+        the gap, and a socket reconnect leaves the same shape; a sweep that only repaired buckets it held left
+        them empty forever. A bucket the exchange has no candle for either — nothing traded: an illiquid
+        minute, or 15:15–15:27 on every F&O stock since NSE's closing auction (3 Aug 2026) — is remembered
+        and not asked for again."""
         today = today or date.today()
         now = time.time() if now is None else now
         day = today.isoformat()

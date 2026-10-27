@@ -361,17 +361,29 @@ async def test_the_brokers_candle_wins_over_the_live_day_bar_for_the_same_date(t
     assert lv["PDH"] == 112.0 and lv["PDL"] == 100.0
 
 
-async def test_pdc_last_builds_the_cpr_on_the_previous_sessions_last_traded_price(tmp_path):
-    """AXISBANK 2026-10-26: official close 1220.0 (the broker's daily candle), last traded 1225.0 (the close
-    of the 15:15 30m bar); the owner's Kite CPR implied 1224.97. ``KN_STRATEGY_PDC=last`` draws his levels."""
+async def test_pdc_last_builds_the_cpr_on_the_previous_sessions_last_continuous_trade(tmp_path):
+    """AXISBANK 2026-10-26: the closing auction's price 1220.0 (the broker's daily candle, the official close
+    since 2026-08-03), the last continuous trade 1225.0 (the close of the 14:45 30m bar); the owner's Kite CPR
+    implied 1224.97. ``KN_STRATEGY_PDC=last`` draws his levels; the auction print (in the 15:15 bucket on some
+    days) is not a trade of the continuous session; an index has no auction and keeps its official close."""
     store = BarStore()
     _seed_daily(store, "ABC", "1")
-    store.seed("ABC", "30m", [_ubar("ABC", "1", "30m", ist_ts(DAY, "15:15") - 86400, 104.5, 105.2, 104.4, 105.0)])
+    prev = ist_ts(DAY, "09:15") - 86400
+    store.seed("ABC", "30m", [_ubar("ABC", "1", "30m", prev + 5.5 * 3600, 104.5, 105.2, 104.4, 105.0),  # 14:45–15:15
+                              _ubar("ABC", "1", "30m", prev + 6 * 3600, 104.0, 104.0, 104.0, 104.0)])  # 15:15: the auction print
     r = _runner(tmp_path, store, strategy_pdc="last")
     await _feed(r, store, DAY_BARS, pad_to=75)
     snap = r.snapshot()
     st = snap["stages"][0]
     assert snap["pdc"] == "last" and st["closes"] == {"official": 104.0, "last": 105.0, "used": "last", "day": st["closes"]["day"]}
     assert st["levels"] == cr.day_levels(110.0, 100.0, 105.0) and st["levels"]["P"] != cr.day_levels(*PREV)["P"]
-    # the official close is the default; the last traded price is still reported next to it
+    # an index: no continuous-trade close, the official one builds the levels
+    store2 = BarStore()
+    _seed_daily(store2, "NIFTY", "999920000")
+    store2.seed("NIFTY", "30m", [_ubar("NIFTY", "999920000", "30m", prev + 5.5 * 3600, 104.5, 105.2, 104.4, 105.0)])
+    r2 = _runner(tmp_path, store2, symbols=("NIFTY",), strategy_pdc="last")
+    await _feed(r2, store2, DAY_BARS, symbol="NIFTY", code="999920000", pad_to=75)
+    st2 = r2.snapshot()["stages"][0]
+    assert st2["closes"]["last"] is None and st2["levels"] == cr.day_levels(*PREV)
+    # the official close is the default
     assert _runner(tmp_path, store).pdc == "official"

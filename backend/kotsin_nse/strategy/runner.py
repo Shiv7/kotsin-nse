@@ -40,6 +40,10 @@ from . import cpr_retest as cr
 log = structlog.get_logger(__name__)
 
 TF = "5m"
+#: NSE cash since 2026-08-03: continuous trading in the F&O stocks ends here and a closing auction sets the
+#: official close. A chart drawn from ticks (the owner's Kite) takes the last continuous trade as the previous
+#: day's close — AXISBANK 26 Oct 2026: 1225.0, against the auction's 1220.0.
+CONTINUOUS_END_HM = "15:15"
 NIFTY = "NIFTY"
 Spawn = Callable[[Coroutine[Any, Any, Any], str], Any]
 
@@ -169,9 +173,11 @@ class ShadowRunner:
         return [by_day[d] for d in sorted(by_day)]
 
     def _last_trade(self, symbol: str, d: date) -> float | None:
-        """The last traded price of session ``d``: the close of its last 30m bar. The broker's daily candle
-        closes at the exchange's official close instead (a stock's last half hour, volume-weighted)."""
-        bars = [b for b in self.store.bars(symbol, "30m") if ist_day(b.ts) == d]
+        """The last continuous trade of session ``d`` for a stock: the close of its last 30m bar that began
+        before the closing auction. ``None`` for an index, whose official close is its last print."""
+        if symbol in INDEX_ROOTS:
+            return None
+        bars = [b for b in self.store.bars(symbol, "30m") if ist_day(b.ts) == d and ist_hm(b.ts) < CONTINUOUS_END_HM]
         return bars[-1].close if bars else None
 
     # -- bars ------------------------------------------------------------------------------------------

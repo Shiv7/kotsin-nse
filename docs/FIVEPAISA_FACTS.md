@@ -207,19 +207,25 @@ Seeded as a complete 1d bar it is "the last bar before the open" (NIFTY's CPR on
 5m bar) and at 09:15 it collides with the live day bar the aggregator builds. `bars/daily.py` keeps a row
 only once its session has closed.
 
-## The cash feed's last fifteen minutes (measured 23, 26 and 27 Oct 2026)
+## The closing auction: no trades 15:15–15:28 (measured 23, 26 and 27 Oct 2026)
 
-For every NSE stock the socket's `TickDt` stops advancing at 15:14:59. Frames keep arriving until 15:28
-with the same LastRate and a `TotalQty` that restarts from a small number, then one closing print arrives
-stamped 15:28 (the official close). Not one of 218 stocks had a 1m bar between 15:15 and 15:27 on any of
-the three days; the indices print every minute to 15:29. REST has the 1m and 5m candles for those
-minutes, so the sweep installs the buckets the socket never delivered (`BarReconciler.sweep`; `inserted`
-under `fidelity` in `/api/health`).
+Since 2026-08-03 NSE runs a Closing Auction Session for the stocks with F&O contracts — this engine's whole
+universe (NSE circular NSE/CMTR/73362 of 2026-03-18): continuous trading ends at 15:15, the auction sets
+the official close (the VWAP close is gone), and F&O contracts trade to 15:40. In the broker's data: the
+socket's `TickDt` stops at 15:14:59, frames keep arriving to 15:28 with the same LastRate and a `TotalQty`
+that restarts from a small number (the auction's indicative quantity), then one print stamped 15:28 at the
+auction price; REST has no 1m candle between 15:15 and 15:27 either. Not one of 218 stocks had a bar there
+on the three days; the indices print every minute to 15:29 and step to their official close in the last.
+The daily candle closes at the auction price and its low (high) includes it — AXISBANK 27 Oct: low 1205.7
+= close, under the whole session. The 30m 15:15 bucket held the auction print on 27 Oct and not on 26 Oct.
+`market/session.py` still closes NSE cash and F&O at 15:30 — an open item before LIVE (the 15:20
+force-flat cannot execute) and for the futures' last ten minutes of ticks and OI.
 
 ## Daily close vs last traded (measured 2026-10-26)
 
-The daily candle's close is the exchange's official close (a stock's last half hour, volume-weighted):
-AXISBANK 1220.0, POLICYBZR 1023.0 — the number every quote frame carries as `PClose`. The 30m candle for
-the 15:15 bucket closes at the last traded price: 1225.0 and 1020.6. A chart drawn from ticks builds its
-previous-day levels on the latter (the owner's Kite CPR that day implied 1224.97 and 1020.70); for an
-index the two are one number. `KN_STRATEGY_PDC` picks which one the strategy's CPR uses.
+The daily candle's close is the exchange's official close — the closing auction's price: AXISBANK 1220.0,
+POLICYBZR 1023.0, the number every quote frame carries as `PClose`. The 14:45 30m candle, the last of
+continuous trading, closes at the last continuous trade: 1225.0 and 1020.6. A chart drawn from ticks builds
+its previous-day levels on the latter (the owner's Kite CPR that day implied 1224.97 and 1020.70); an index
+has no auction and the two are one number. `KN_STRATEGY_PDC` picks which one the strategy's CPR uses
+(`last` = the last continuous trade for a stock, the official close for an index).
