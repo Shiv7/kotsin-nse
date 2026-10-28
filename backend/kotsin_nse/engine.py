@@ -182,6 +182,7 @@ class Engine:
         self._bg_tasks: set[asyncio.Task[Any]] = set()
         self._sweep_task: asyncio.Task[Any] | None = None
         self._intraday_rebuild_day: str = ""
+        self._refresh_day: str = ""  # the day whose post-close 1d/30m refresh has run
         self._rewarm_ts = 0.0
         self.matcher = PaperMatcher(self.costs)
         self.live_exec: LiveExecutor | None = None
@@ -563,8 +564,8 @@ class Engine:
             groups = {g.root: g for g in ordered[: self.s.max_universe]}
         return groups
 
-    async def _backfill(self, universe: list[Instrument]) -> None:
-        """Warm the primary intraday series and a year of dailies from REST.
+    async def _backfill(self, universe: list[Instrument], *, tfs: tuple[str, ...] | None = None) -> None:
+        """Warm the primary intraday series and a year of dailies from REST (``tfs`` narrows the frames).
 
         Sequential and rate-limit friendly: the broker's historical endpoint is the slowest thing
         we touch, and hammering it at boot is how the old stack earned its retry storms.
@@ -589,6 +590,8 @@ class Engine:
             on_board = inst.kind is InstrumentKind.EQUITY or inst.segment is Segment.MCX_FO
             if on_board and started(inst.segment):
                 frames.append(("1m", end))
+            if tfs is not None:
+                frames = [(tf, start) for tf, start in frames if tf in tfs]
             for tf, start in frames:
                 try:
                     rows = await self.rest.candles(inst, tf, start.isoformat(), ask_to)
@@ -972,6 +975,13 @@ class Engine:
         self._mcx_oi_ref_day = day
         log.info("oi.mcx_reference", day=prev.isoformat(), closes=len(refs), today_first=len(first), of=len(codes))
 
+    async def _refresh_closed_day(self) -> None:
+        """Re-seed the daily and primary-frame series from REST after the session: the day's finished
+        candle (tomorrow's previous day for every level) and the exchange's own 30m bars."""
+        t0 = time.time()
+        await self._backfill(list(self.underlyings.values()), tfs=("1d", PRIMARY_TF))
+        log.info("refresh.done", seconds=round(time.time() - t0), tfs=["1d", PRIMARY_TF])
+
     async def _rewarm(self) -> None:
         cold = [g.underlying for g in self.groups.values() if self._prev_close(g.underlying.symbol) is None]
         log.info("engine.rewarm", underlyings=len(cold))
@@ -1085,6 +1095,20 @@ class Engine:
 
                 # scripFinder's 09:20 IST intraday rebuild: refetch the master, re-pick strikes,
                 # subscribe anything new. Strikes listed 09:00–09:15 are not in an overnight master.
+                # After the close, once a day: the finished daily candle and the exchange's 30m bars for
+                # today replace whatever the socket built. 2026-10-28: a laptop asleep all session left a
+                # two-tick "day" in the store that would have been every level's previous day tomorrow.
+                # The boot backfill does this once; an engine that runs for weeks needs it every evening.
+                if (
+                    self.reconciler_ready
+                    and self.s.has_credentials
+                    and self.underlyings
+                    and ist_hm(now) >= "15:50"
+                    and self._refresh_day != day
+                ):
+                    self._refresh_day = day
+                    self._spawn(self._refresh_closed_day(), "refresh")
+
                 if self.reconciler_ready and ist_hm(now) >= "09:20" and self._intraday_rebuild_day != day:
                     self._intraday_rebuild_day = day
                     self._spawn(self._intraday_universe_rebuild(), "intraday_rebuild")
