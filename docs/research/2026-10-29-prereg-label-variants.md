@@ -55,12 +55,12 @@ impulse ≥ 2 tol kept 4 at +26.9. IB15: 413 symbol-days, +7.3 gross / −7.7 ne
 ## Run log
 
 - 01:12 IST: harness `scripts/2026-10-29-label-variants/variants.py` on the development window, output pending.
-- 01:25 IST, first pass (wrong, kept for the record): the through-bar entries were scored only on the 3,101 sides that
+- 01:05 IST, first pass (wrong, kept for the record): the through-bar entries were scored only on the 3,101 sides that
   later confirmed — `brk_bar` +25.4 gross / +10.4 net, t 5.7; `brk_cpr` +27.2 / +12.2, t 7.0. That is look-ahead: at the
   through bar nobody knows the retest will hold and the confirmation will come; the subset is the one where the trade
   survived to the confirmation bar, so the entry sits on the confirmation bar's gain by construction. Caught before it
   was reported. The same trap sat in `stop_in` (scored on confirmed fills only: +16.4 gross).
-- 01:35 IST, honest pass — every entry scored on every bar where it is known (7,138 sides reached the through bar;
+- 01:10 IST, honest pass — every entry scored on every bar where it is known (7,138 sides reached the through bar;
   6,409 held retests; 4,061 stop-order fills), 429 days:
 
   | entry / rule | n | gross bps | net bps | t by day |

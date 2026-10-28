@@ -1,6 +1,6 @@
 # Pre-registration: the same five concepts on 5m, 15m, 30m (intraday) and 1h, 4h, daily (positional)
 
-Written 2026-10-29 03:25 IST, before the run. Owner: "why you testing all on 5 minute run all strategy on 5, 15, 30,
+Written 2026-10-29 01:38 IST, before the run. Owner: "why you testing all on 5 minute run all strategy on 5, 15, 30,
 1hr, 4hr also positional way and then tell me all results".
 
 ## Fixed before the run
@@ -38,7 +38,7 @@ timeframe (positional trades are stock futures: the cost is about the same; the 
 Expected: the gross per trade grows with the timeframe (bigger stops), the net stays near or below zero.
 
 ## Run log
-- 03:55 IST, first run (`scripts/2026-10-29-all-timeframes/mtf_all.py`, results `mtf_results.csv`): intraday rows at
+- 01:50 IST, first run (`scripts/2026-10-29-all-timeframes/mtf_all.py`, results `mtf_results.csv`): intraday rows at
   5m / 15m / 30m all negative net (the best: the 30m order block +13.6 gross / −1.4 net, t −0.1). **Positional cells
   passing the bar as scored:** 1h sweep reversal +37.3 gross / +22.3 net (t 12.2, n 124,465, 2024 = 2025 = +22.3,
   long +27 / short +18); 4h sweep reversal +38.2 / +23.2 (t 10.4, n 64,744); 1h order block +27.2 / +12.2 (t 4.3);
@@ -51,13 +51,13 @@ Expected: the gross per trade grows with the timeframe (bigger stops), the net s
   number of entries per stock at random bars with the same side, the same stop rule (the bar's far side ∓ tol), the
   same walls, trail and hold. **A cell keeps its pass only if, with (1) and (2), it still clears the bar and beats its
   placebo by ≥ 10 bps net.** Exit reasons and bars held are recorded.
-- 04:10 IST, robustness run 1 (gap-aware fills, no last-bar entries, placebos): the 1h sweep reversal fell to +10.0
+- 01:57 IST, robustness run 1 (gap-aware fills, no last-bar entries, placebos): the 1h sweep reversal fell to +10.0
   net (t 6.8, n 113,217) and still beat its placebo (−22.9); the daily order block to +41.8 (t 3.9, long-only).
   Then a third artifact was found in the positional scan: **a window scanned backwards takes entries in its back part
   with the levels of its base day — PDH / PDL sweeps and walls from a day that had not happened yet.** The 1h
   sweep's extra 78,000 entries were exactly those (a bar that trades below a *future* day's low and closes back
   above it is selected on the future). Entries restricted to the forward part of every window.
-- 04:30 IST, robustness run 2 (all three fixes, placebos; entries 2024-01-01 → 2025-09-30 only):
+- 02:04 IST, robustness run 2 (all three fixes, placebos; entries 2024-01-01 → 2025-09-30 only):
 
   | tf | concept | exit | n | gross | net | t by day | 2024 | 2025 | placebo net |
   |---|---|---|---|---|---|---|---|---|---|

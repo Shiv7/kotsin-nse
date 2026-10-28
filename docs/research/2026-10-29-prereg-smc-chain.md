@@ -1,6 +1,6 @@
 # Pre-registration: the intraday SMC chain on 5m with the 1H bias, the discount filter and MTF pivot confluence
 
-Written 2026-10-29 02:50 IST, before the run. Owner (02:40): "any learning pattern we found add MTF pivot proper SMC
+Written 2026-10-29 01:22 IST, before the run. Owner (02:40): "any learning pattern we found add MTF pivot proper SMC
 concept we should get something na bro". HANDOFF §3.4 rows 1–5 and the power study scored the parts (order-block
 playbook on 1m −0.41 R; 5m sweep reversals −0.21 R; 1h/4h sweep → 5m BOS −0.03 R; Fib + pivot + 1h OB −0.08 R; an OB's
 first retest races 49.7 % against 50.8 % for an ordinary candle). The intraday chain as SMC teaches it — liquidity sweep
@@ -28,7 +28,7 @@ within a tolerance of the zone; (f) the move's impulse is a gap (FVG); (g) entry
 2025) positive. Otherwise the SMC chain joins rows 1–5 as scored, and the line closes. Expected: fail.
 
 ## Run log
-- 03:05 IST, one run (`scripts/2026-10-29-smc-chain/smc.py`, 2 min): 183,261 order-block first-return fills on 433 days
+- 01:33 IST, one run (`scripts/2026-10-29-smc-chain/smc.py`, 2 min): 183,261 order-block first-return fills on 433 days
   (94,422 short / 88,839 long), median risk 17.9 bps, median room to wall 1 3.6R, median 4 bars from the break to the
   return.
 

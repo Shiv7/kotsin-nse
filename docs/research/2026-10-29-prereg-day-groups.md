@@ -1,6 +1,6 @@
 # Pre-registration: group the days by NIFTY's previous day and first hour against fixed levels, then pick the algo per group
 
-Written 2026-10-29 02:05 IST, before the run. Owner's ask (29 Oct 01:50–02:00): "each day is not unique, club each nifty
+Written 2026-10-29 01:14 IST, before the run. Owner's ask (29 Oct 01:50–02:00): "each day is not unique, club each nifty
 day from his previous day then based on opening first 1 hour watch along and then try to put in group and those history
 data best algo we will apply"; "optimisation around fibo pivot known stable data points and price based action";
 "split data 80 20 learn 80% data pattern in remaining 20% test with RL so our learning also improved".
@@ -35,7 +35,7 @@ contexts does not choose the algo, and the line closes. Expected: fail (the 2026
 right 44 % of the time and traded it at −3.6 net; nothing on NIFTY's path has yet predicted the stocks' afternoon).
 
 ## Run log
-- 02:20 IST, one run (`scripts/2026-10-29-label-variants/daygroups.py`, results beside it): 433 NIFTY days with the
+- 01:19 IST, one run (`scripts/2026-10-29-label-variants/daygroups.py`, results beside it): 433 NIFTY days with the
   stocks' instances, train 346 (2024-01-01 → 2025-05-28), test 87 (2025-05-29 → 2025-09-30); the reverse split as a check.
   Every single action loses on its own across all days (net per traded day: retest −15 / −17, through −14 / −15,
   IB15 −22 / −17, movers basket −13 / −17, NIFTY continuation −3.2, fade −6.8).
