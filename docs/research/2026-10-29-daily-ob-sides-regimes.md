@@ -68,3 +68,16 @@ regime, not a higher average.
   short side is the open question for the shadow book — not for the backtest, which has nothing left to test.
 - The shadow book carries both sides with the switch and records the regime on every entry; the evening read splits
   by side and regime as above.
+
+## Built (04:45 IST, the owner: "go ahead test what we believed, long short take both depend on situation")
+
+`strategy/daily_ob.py` (the rule, pure) and `strategy/positional.py` (`PositionalRunner`, the book): at every session's
+close — after the engine's post-close refresh of the daily series, and at boot for the sessions missed — the open
+positions take the day's bar (gap-aware stop, stop before target, out after 20 sessions), the pending limits are
+checked (filled only when the session traded 10 bps through Z; a touch that did not is recorded and the zone is not
+retried; a short needs NIFTY's trailing 20-session return ≤ 0, `KN_POSITIONAL_SHORT_GATE`; a full book or a stock
+already held is recorded as skipped), and every intact zone with no return yet becomes the next session's pending
+limit. Sizing ₹500 of risk a trade (`KN_POSITIONAL_RISK_INR`); costs the measured model with delivery STT on the long
+cash leg and futures STT on the short. State in `data-live/strategy/positional.json`, read at `/api/positional`, the
+summary in `/api/health` under `positional`; every entry carries its zone, its regime and the stock's context for
+the evening read. Tests `tests/test_positional.py`. First session on the book: the restart's next close.

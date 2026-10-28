@@ -117,6 +117,15 @@ def build_app(engine: Engine) -> FastAPI:
             return snap
         return r.snapshot()
 
+    # -- the positional book (strategy/positional.py keeps it; this only reads) ----------------------
+
+    @api.get("/positional")
+    async def positional_view() -> dict[str, Any]:
+        r = engine.positional
+        if r is None:
+            raise HTTPException(404, "the positional book is disabled (KN_POSITIONAL_ENABLED=false)")
+        return r.snapshot()
+
     # -- the owner's call journal -------------------------------------------------------------------
     # Scoring happens in the engine (``Engine._score_journal``), from the bars; these only store and read.
 

@@ -209,6 +209,19 @@ class Settings(BaseSettings):
     #: that print became PDH and R1 on the 28th. ``daily`` = the daily candle's high/low, auction print included.
     strategy_levels_hl: Literal["continuous", "daily"] = "continuous"
 
+    # ---- the positional book: the daily order block (strategy/daily_ob.py, strategy/positional.py) ------
+    positional_enabled: bool = True
+    #: rupees at risk per trade (entry to stop); the quantity follows
+    positional_risk_inr: float = 500.0
+    positional_max_open: int = 20
+    #: the short side: ``nifty20`` only while NIFTY's trailing 20-session return is ≤ 0 (the research marking),
+    #: ``always``, or ``off``
+    positional_short_gate: Literal["nifty20", "always", "off"] = "nifty20"
+    positional_target_r: float = 2.0
+    positional_max_sessions: int = 20
+    #: the limit at Z counts as filled once a session trades this far through it
+    positional_fill_through_bps: float = 10.0
+
     # ---- LIVE_CAPPED caps ----------------------------------------------------------------------
     # Mode is state (R9); these only bound what an *armed* engine may do.
     live_segments: str = "NSE_EQ"

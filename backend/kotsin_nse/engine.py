@@ -81,6 +81,7 @@ from .orderflow.micro import MicroMeter
 from .risk.costs import CostModel
 from .scan.board import OIRead, attach_setups
 from .scan.live import LiveScanner
+from .strategy.positional import PositionalRunner
 from .strategy.runner import ShadowRunner
 from .structure.service import from_store as structure_from_store
 from .venue.fivepaisa.auth import Authenticator
@@ -214,6 +215,10 @@ class Engine:
                          underlyings=lambda: self.underlyings, spawn=self._spawn)
             if settings.strategy_enabled
             else None
+        )
+        #: the positional book (strategy/positional.py): the daily order block, decided at each session's close
+        self.positional: PositionalRunner | None = (
+            PositionalRunner(settings, store=self.store, costs=self.costs, underlyings=lambda: self.underlyings) if settings.positional_enabled else None
         )
         self._future_to_underlying: dict[str, str] = {}
         self._mode = Mode.SHADOW
@@ -614,6 +619,12 @@ class Engine:
                 ok += 1
                 await asyncio.sleep(0.15)
         log.info("backfill.done", series_ok=ok, failed=failed)
+        if self.positional is not None and tfs is None:
+            try:
+                done = await self.positional.catch_up()  # first boot: the pending limits; later boots: the sessions missed
+                log.info("positional.catch_up", sessions=done)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("positional.failed", error=repr(exc))
 
     def _seed_daily(self, inst: Instrument, rows: list[dict[str, Any]]) -> None:
         # finished sessions only: the broker returns the running day's candle too (bars/daily.py)
@@ -981,6 +992,11 @@ class Engine:
         t0 = time.time()
         await self._backfill(list(self.underlyings.values()), tfs=("1d", PRIMARY_TF))
         log.info("refresh.done", seconds=round(time.time() - t0), tfs=["1d", PRIMARY_TF])
+        if self.positional is not None:
+            try:
+                await self.positional.catch_up()  # the session just finished, and any the engine slept through
+            except Exception as exc:  # noqa: BLE001 - the positional book must never take the engine down
+                log.warning("positional.failed", error=repr(exc))
 
     async def _rewarm(self) -> None:
         cold = [g.underlying for g in self.groups.values() if self._prev_close(g.underlying.symbol) is None]
@@ -1445,5 +1461,6 @@ class Engine:
                 if self.strategy is not None
                 else None
             ),
+            "positional": ({"name": "daily_ob", "last_day": self.positional.last_day, **self.positional.snapshot()["summary"]} if self.positional is not None else None),
             "boot_notes": self.boot_notes,
         }
