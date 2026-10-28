@@ -220,6 +220,10 @@ class Engine:
         self.positional: PositionalRunner | None = (
             PositionalRunner(settings, store=self.store, costs=self.costs, underlyings=lambda: self.underlyings) if settings.positional_enabled else None
         )
+        if self.positional is not None:
+            self.positional.enrich = self._positional_context
+            self.positional.bhav = self._positional_bhav
+        self._bhav_cache: dict[date, Any] = {}
         self._future_to_underlying: dict[str, str] = {}
         self._mode = Mode.SHADOW
         self._armed_until: float | None = None
@@ -1357,6 +1361,74 @@ class Engine:
         for k in ("call_wall", "put_wall", "call_add", "put_add"):
             row[f"x_{k}"] = (e.get(k) or {}).get("strike")
         return row
+
+    # -- what the positional book records on every entry (strategy/positional.py) ---------------------------
+
+    FNO_KEYS = ("bias", "score", "premium", "futures_state", "futures_px_chg", "futures_oi_chg_pct", "calls_state", "calls_oi_chg_pct",
+                "puts_state", "puts_oi_chg_pct", "x_pcr_oi", "x_pcr_oi_chg", "x_iv", "x_iv_prev", "x_implied_move_pct", "x_call_wall", "x_put_wall")
+
+    def _positional_context(self, symbol: str) -> dict[str, Any]:
+        """The engine's readings at the close for one stock: the F&O board, the day's order flow, the book."""
+        out: dict[str, Any] = {}
+        try:
+            snap = self.fno_snapshot(symbol, time.time())
+            if snap:
+                row = self.fno_row(snap)
+                out["fno"] = {k: row.get(k) for k in self.FNO_KEYS}
+        except Exception as exc:  # noqa: BLE001
+            out["fno_error"] = str(exc)[:80]
+        inst = self.underlyings.get(symbol)
+        if inst is None:
+            return out
+        mins = [m.to_json() for m in self.flow.minutes(inst.scrip_code)]
+        if mins:
+            last = mins[-1]
+            out["flow"] = {"minutes": len(mins), "buy": round(sum(m.get("buy") or 0 for m in mins)), "sell": round(sum(m.get("sell") or 0 for m in mins)),
+                           "delta": round(last.get("cum_delta") or 0), "ofi": round(sum(m.get("ofi") or 0 for m in mins), 1), "ofi_deep": round(sum(m.get("ofi_deep") or 0 for m in mins), 1),
+                           "imbalance": last.get("imbalance"), "micro_bps": last.get("micro_bps"), "spread_bps": last.get("spread_bps")}
+        ms = self.micro.snapshot(inst.scrip_code)
+        if ms:
+            out["micro"] = {k: ms.get(k) for k in ("micro_bps", "queue_imbalance", "book_skew", "spread_bps", "spread_z", "kyle_lambda_bps_per_10k", "frames")}
+        return out
+
+    def _positional_bhav(self, symbol: str, day: date) -> dict[str, Any] | None:
+        """NSE's official closing OI for ``day``: the stock future's OI and price change against the previous
+        bhavcopy (the build-up), and the nearest expiry's put/call OI ratio. None until the file exists."""
+        if not self.oi_daily.has(day):
+            return None
+        prev = [d for d in self.oi_daily.days() if d < day]
+        if not prev:
+            return None
+        def table(d: date) -> Any:
+            if d not in self._bhav_cache:
+                if len(self._bhav_cache) > 3:
+                    self._bhav_cache.pop(next(iter(self._bhav_cache)))
+                self._bhav_cache[d] = self.oi_daily.load(d, columns=("symbol", "kind", "expiry", "option_type", "close", "oi"))
+            return self._bhav_cache[d]
+        o, p = table(day), table(prev[-1])
+        f = o[(o["symbol"] == symbol) & (o["kind"] == "FUTSTK")]
+        fp = p[(p["symbol"] == symbol) & (p["kind"] == "FUTSTK")]
+        if f.empty or fp.empty:
+            return {"day": day.isoformat(), "note": "no stock future in the bhavcopy"}
+        near = f.sort_values("expiry").iloc[0]
+        nearp = fp[fp["expiry"] == near["expiry"]]
+        oi, oi_p = float(f["oi"].sum()), float(fp["oi"].sum())
+        px, px_p = float(near["close"]), (float(nearp["close"].iloc[0]) if len(nearp) else None)
+        d_oi = (oi / oi_p - 1) * 100 if oi_p else None
+        d_px = (px / px_p - 1) * 100 if px_p else None
+        if d_oi is None or d_px is None:
+            label = None
+        elif d_oi > 1:
+            label = "long build-up" if d_px > 0 else "short build-up"
+        elif d_oi < -1:
+            label = "short covering" if d_px > 0 else "long unwinding"
+        else:
+            label = "flat OI"
+        opt = o[(o["symbol"] == symbol) & (o["kind"] == "OPTSTK") & (o["expiry"] == near["expiry"])]
+        ce = float(opt[opt["option_type"] == "CE"]["oi"].sum())
+        pe = float(opt[opt["option_type"] == "PE"]["oi"].sum())
+        return {"day": day.isoformat(), "prev": prev[-1].isoformat(), "fut_oi": oi, "fut_oi_chg_pct": round(d_oi, 2) if d_oi is not None else None,
+                "fut_px_chg_pct": round(d_px, 2) if d_px is not None else None, "build_up": label, "pcr_oi": round(pe / ce, 2) if ce else None, "expiry": str(near["expiry"])}
 
     def _record_fno(self, now: float) -> None:
         """Worker thread: read every root with options and archive the minute's row. It only reads

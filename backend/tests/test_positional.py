@@ -138,3 +138,34 @@ async def test_the_short_gate_follows_nifty(tmp_path):
     store2.seed("NIFTY", "1d", [_bar("NIFTY", "999920000", nxt, 21000, 21010, 20990, 21000)])
     line2 = await r2.on_session_close(nxt)
     assert line2["opened"] == 1 and r2.trades[0]["venue"] == "future" and r2.trades[0]["side"] == -1 and r2.trades[0]["exit_reason"] == "target"  # the session ran to the target
+
+
+async def test_entries_carry_the_engines_readings_and_the_bhavcopy_arrives_later(tmp_path):
+    store = BarStore()
+    rows = demand_series()
+    _seed(store, "ABC", "1", rows)
+    r = _runner(tmp_path, store)
+    r.enrich = lambda sym: {"fno": {"futures_state": "short covering", "x_pcr_oi": 0.8}, "flow": {"ofi": 1200.0, "delta": -300}, "micro": {"queue_imbalance": 0.2}}
+    seen: list[tuple[str, str]] = []
+    bhav_ready = {"on": False}
+
+    def bhav(sym, day):
+        seen.append((sym, day.isoformat()))
+        return {"build_up": "long build-up", "pcr_oi": 1.1} if bhav_ready["on"] else None
+
+    r.bhav = bhav
+    await r.catch_up()
+    nxt = sessions(len(rows) + 1)[-1]
+    store.seed("ABC", "1d", [_bar("ABC", "1", nxt, 105.0, 105.2, 100.3, 103.0)])
+    store.seed("NIFTY", "1d", [_bar("NIFTY", "999920000", nxt, 19000, 19010, 18990, 19000)])
+    await r.on_session_close(nxt)
+    t = r.trades[0]
+    assert t["context"]["fno"]["futures_state"] == "short covering" and t["context"]["flow"]["ofi"] == 1200.0 and t["context"]["micro"]["queue_imbalance"] == 0.2
+    assert t["bhav"] is None and seen == [("ABC", nxt.isoformat())]  # the bhavcopy was not out at the close
+    # the next session: the file exists now and the entry gets its official OI read
+    bhav_ready["on"] = True
+    nxt2 = sessions(len(rows) + 2)[-1]
+    store.seed("ABC", "1d", [_bar("ABC", "1", nxt2, 103.0, 103.5, 102.0, 102.5)])
+    store.seed("NIFTY", "1d", [_bar("NIFTY", "999920000", nxt2, 19000, 19010, 18990, 19000)])
+    await r.on_session_close(nxt2)
+    assert r.trades[0]["bhav"] == {"build_up": "long build-up", "pcr_oi": 1.1}

@@ -60,6 +60,11 @@ class PositionalRunner:
         self.trades: list[dict[str, Any]] = []
         self.skipped: list[dict[str, Any]] = []
         self.days: list[dict[str, Any]] = []  # one line per session processed
+        #: the engine's readings at the close, attached to every entry for the evening read: the F&O board (the
+        #: future's build-up, the calls' and puts' states, PCR, IV, the walls), the day's order flow (OFI, delta,
+        #: imbalance) and the book's microstructure; ``bhav`` the official closing OI once NSE publishes it
+        self.enrich: Callable[[str], dict[str, Any]] | None = None
+        self.bhav: Callable[[str, date], dict[str, Any] | None] | None = None
         self._lock = asyncio.Lock()
         self._load()
 
@@ -137,6 +142,7 @@ class PositionalRunner:
         dstr = day.isoformat()
         if self.last_day and dstr <= self.last_day:
             return {"day": dstr, "skipped": "already processed"}
+        self._fill_bhav(day)
         nifty = daily_series(self.store, NIFTY)
         before = [b.close for b in nifty if ist_day(b.ts) < day]
         nifty_ret = ob.trailing_return(before)
@@ -219,10 +225,39 @@ class PositionalRunner:
         log.info("positional.session", **line)
         return line
 
+    def _fill_bhav(self, day: date) -> None:
+        """NSE's F&O bhavcopy arrives after 18:00: an entry whose official closing OI was not there at its own
+        close gets it on a later pass (the next session's close, or boot)."""
+        if self.bhav is None:
+            return
+        for pos in [*self.positions.values(), *self.trades[-200:]]:
+            if pos.get("bhav") is not None or (day.toordinal() - date.fromisoformat(pos["entry_day"]).toordinal()) > 10:
+                continue
+            try:
+                pos["bhav"] = self.bhav(pos["symbol"], date.fromisoformat(pos["entry_day"]))
+            except Exception as exc:  # noqa: BLE001 - enrichment never blocks the book
+                log.warning("positional.bhav_failed", symbol=pos["symbol"], error=repr(exc))
+
+    def _context(self, symbol: str, day: date) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        ctx: dict[str, Any] = {}
+        bhav = None
+        if self.enrich is not None:
+            try:
+                ctx = self.enrich(symbol) or {}
+            except Exception as exc:  # noqa: BLE001
+                log.warning("positional.enrich_failed", symbol=symbol, error=repr(exc))
+        if self.bhav is not None:
+            try:
+                bhav = self.bhav(symbol, day)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("positional.bhav_failed", symbol=symbol, error=repr(exc))
+        return ctx, bhav
+
     # -- the book ----------------------------------------------------------------------------------------
 
     def _open(self, inst: Instrument, zn: dict[str, Any], bar: Bar5, dstr: str, nifty_ret: float | None) -> dict[str, Any]:
         side, entry, stop = zn["side"], float(zn["z"]), float(zn["stop"])
+        ctx, bhav = self._context(inst.symbol, date.fromisoformat(dstr))
         risk_px = abs(entry - stop)
         qty = max(1, int(self.s.positional_risk_inr / risk_px)) if risk_px > 0 else 1
         target = entry + side * self.s.positional_target_r * risk_px
@@ -231,6 +266,7 @@ class PositionalRunner:
             "entry_day": dstr, "entry": entry, "stop": stop, "target": target, "qty": qty, "notional_inr": round(entry * qty, 2), "risk_bps": round(risk_px / entry * 1e4, 1),
             "risk_inr": round(risk_px * qty, 2), "zone": {"low": zn["low"], "high": zn["high"], "impulse": zn["impulse"], "swept_before": zn["swept_before"], "ob_ts": zn["ob_ts"], "bos_ts": zn["bos_ts"]},
             "regime": {"nifty_ret20": round(nifty_ret, 2) if nifty_ret is not None else None}, "held": 0, "last": bar.c, "mfe_bps": 0.0, "mae_bps": 0.0,
+            "context": ctx, "bhav": bhav,
             "exit_day": None, "exit": None, "exit_reason": None, "pnl_bps": None, "gross_inr": None, "charges_inr": None, "net_inr": None, "r": None,
         }
         self.positions[pos["id"]] = pos
