@@ -65,3 +65,12 @@ Calibration: 50 Opus 5.5 calls, under $1. Full run: Haiku 5.5 under $1 or Opus 5
   weak 8. The model is strict: on its own reading almost no mechanical held retest is a setup the method
   would take. Whether that is the owner's reading is exactly what the gate measures; nothing is tuned until
   his 50 labels are in.
+- 2026-10-29 00:48 IST (interim, not the gate): the owner printed the sheet to PDF. The sheet's database
+  (`scripts/2026-10-28-chart-labels/labels-2026-10-29.json`) holds 20 labels by the owner (c01–c08, c39–c50) and
+  30 by a separate Claude.ai chat he opened on the same page (c09–c38, labeller `claude`, each reason headed "AS
+  SHIV WOULD GRADE IT"; that chat also republished the page with a third tab). The 30 are a model rater, not the
+  owner, so they cannot stand in for his labels in the gate. On his 20 against Opus: `take` 10/20 (kappa −0.10;
+  owner yes 9, Opus yes 0), `double_bottom` 4/20 (0.01; owner "proper" 14, Opus never), `retest` 8/20 (0.07),
+  `rejection_at_edge` 5/20 (−0.27; owner yes 16, Opus 6), `impulse` 11/20 (0.31). The disagreement is systematic,
+  not noise: the owner reads most charts as proper double bottoms with a rejection, and in 8 of his 11 "no"
+  answers his reason names an earlier bar he would have entered on. The gate still waits for his remaining 30.
