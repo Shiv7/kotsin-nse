@@ -74,3 +74,23 @@ Expected: the gross per trade grows with the timeframe (bigger stops), the net s
   and daily (+28.4, t 1.9, n 1,793): positive in both halves and far above their placebos, below the t bar and on
   small samples. Recorded as leads; not shipped. Every "pass" of the first run was an artifact: stop fills across gaps
   (+6 to +12 bps), entries at the session's last bar, and the back-window future levels (the whole of the 1h sweep).
+- 02:40 IST, written before the run: the one daily lead (order block, fixed 1:2: +28.4 net, t 1.9 on 2024–25) gets its
+  own out-of-sample on **2021-01 → 2023-12 daily bars**, which no test has touched (the 1d cache holds 294 names
+  including 72 past F&O members). Same harness, same placebo. It stays a lead unless net > 0 with t ≥ 2.5, n ≥ 300
+  and every year positive; the 4h lead has no bars before 2024 and cannot be checked this way.
+- 02:55 IST, the daily order block (fixed 1:2) on 2021-01 → 2023-12, one run (`scripts/2026-10-29-all-timeframes/ob5y.py`;
+  the harness's daily series start fixed to START − 400 days first — the first attempt had only 2023): all 289
+  cached names +71.1 gross / +56.1 net (t 5.2, n 3,627) — but the 1,122 trades in names **not yet in F&O on the
+  day** made +80 net and the members +45: the admission bias the `fo_universe` docstring warns of. **Members on the
+  day only (point-in-time bhavcopies): n 2,505, +60.4 gross / +45.4 net, t 4.0, 2021 +48.5 / 2022 +44.0 / 2023 +44.7,
+  long +79 / short +12, placebo −64.1 — PASSES the rule written above.** The same on 2024-01 → 2025-09 over the full
+  daily cache, members only: n 1,627, +40.6 / +25.6, t 1.5, 2024 +39.9 / 2025 +11.8, long +48 / short +4, placebo −77.
+  **Five years, members only: n 4,132, +52.6 gross / +37.6 net, t 4.0, every year positive, 41 of 56 months, 172 of
+  264 stocks, top ten stocks 26 % of the total; risk median 212 bps, 46 % win, 42 % target / 48 % stop / 4 % gap-stop,
+  held 4.4 sessions; worst month 2025-03 −97; drawdown of the cumulative per-day mean −2,323 bps (about 70 average
+  days). The trail rule on the same trades +5.3 net: the fixed 1:2 is the exit.**
+- Caveats before anyone sizes it: fills at Z are assumed whenever a bar trades to Z (a resting limit at the exact
+  level fills less often); 15 bps covers charges and a tick, not the roll of a future across expiry on the longer
+  holds nor margin; it is mostly a long strategy in a market that rose; 2025 is the weakest year (+11.8) and the
+  holdout 2025-10 → 2026-10 is spent, so the only out-of-sample left is forward. **Next: a positional daily shadow
+  book for it (loop 2), read every evening like the intraday one.**

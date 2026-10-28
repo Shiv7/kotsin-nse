@@ -187,7 +187,7 @@ def run_tf(tf: str, syms: list[str]) -> pd.DataFrame:
         if d1 is None or len(d1) < 80:
             continue
         if tf == "1d":
-            d1 = d1[(d1["day"] >= date(2023, 1, 1)) & (d1["day"] <= END)].reset_index(drop=True)
+            d1 = d1[(d1["day"] >= START - timedelta(days=400)) & (d1["day"] <= END)].reset_index(drop=True)
             dbars = [Bar5(int(r.ts), r.o, r.h, r.l, r.c, r.v) for r in d1.itertuples()]
             wk = d1["day"].map(lambda x: x.isocalendar()[:2]).tolist()
             weeks = sorted(set(wk))
