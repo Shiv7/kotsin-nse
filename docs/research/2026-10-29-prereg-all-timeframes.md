@@ -94,3 +94,27 @@ Expected: the gross per trade grows with the timeframe (bigger stops), the net s
   holds nor margin; it is mostly a long strategy in a market that rose; 2025 is the weakest year (+11.8) and the
   holdout 2025-10 → 2026-10 is spent, so the only out-of-sample left is forward. **Next: a positional daily shadow
   book for it (loop 2), read every evening like the intraday one.**
+- 03:15 IST, the three caveats closed properly (`scripts/2026-10-29-all-timeframes/ob5y_robust.py`; 9,766 zones with a
+  first return 2021-01 → 2025-09, 7,002 in members; the harness's walls requirement dropped, so n differs slightly):
+
+  | fill model | cost | n | gross | net | t | 2021 / 22 / 23 / 24 / 25 |
+  |---|---|---|---|---|---|---|
+  | limit at Z, filled on a touch | 15 | 4,175 | +53.2 | +38.2 | 3.9 | +48 / +44 / +44 / +39 / +17 |
+  | limit at Z, filled only once price trades 10 bps through | 15 | 3,780 | +43.4 | +28.4 | 2.8 | +38 / +29 / +37 / +30 / +9 |
+  | the same | 15 + 5 on every stop + 10 when the hold crosses a month end (17 %) | 3,780 | +39.0 | **+24.0** | 2.3 | +33 / +25 / +33 / +26 / +5 |
+  | market order at the close of the bar that reached the zone | the same stack | 4,175 | +23.4 | +8.4 | 0.9 | +11 / −3 / +4 / +13 / +20 |
+
+  **The fill is the biggest lever**: it lives on the limit at the zone. Conservative case (through, full stack), by
+  side: long +56.0 net, short −7.1; minus NIFTY over the hold at beta 1: long +33.8, short +9.7 (NIFTY rose 22 bps
+  during the longs' holds and 15 during the shorts'). NIFTY-down months +35.3 (long +43, short +29); up months +11.8
+  (long +68, short −51). 14 of 19 quarters positive, worst 2025Q2 −23.7. **Sensitivity** (not pre-registered;
+  reported as the shape, 2R stays the registered target): target 1.5R +46 (t 5.6–6.0), 2R +24 (t 2.3), 3R +5
+  (t 0.9); hold 10 / 20 / 40 sessions identical — the trades resolve inside ten sessions and the edge is in the
+  first 1.5–2R. The book: +0.17 R a trade, 796 trades a year, median 11 open positions (90th pct 21, max 39), equity
+  +646 R over 3,780 trades with a −44 R drawdown; every year positive in R (2021 +98, 2022 +185, 2023 +183, 2024
+  +114, 2025 +64).
+- **Verdict on the daily order block, properly:** it passes with the conservative fill and the full cost stack,
+  every year, in down months, market-adjusted on both sides, on an untuned zone definition, and it is not knife-edge
+  on target or hold. What it is not: a short strategy after costs (shorts carry nothing), a small-account strategy if
+  run in full (₹25–50 lakh deployed at ₹5,000 risk a trade), or anything without the limit fill. 2025 is the weakest
+  year on every row. Forward shadow is the next evidence; nothing else is left to test on the past.
