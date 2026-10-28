@@ -18,6 +18,7 @@ from kotsin_nse.risk.costs import CostModel
 from kotsin_nse.strategy.runner import ShadowRunner
 
 S = Path(sys.argv[1]); DAY = sys.argv[2]; API = "http://localhost:8500"
+SOURCE = sys.argv[3] if len(sys.argv) > 3 else "api"  # "archive": the day's 5m bars built from the feed's 1m archive
 d = date.fromisoformat(DAY); OPEN, CLOSE = session_open_ts(Segment.NSE_EQ, d), session_close_ts(Segment.NSE_EQ, d)
 codes = pd.read_parquet("/Users/shivendrapratap/Downloads/kotsin/kotsin-nse/backend/data-live/archive/bars/2026-10-27.parquet", columns=["symbol", "scrip_code"]).drop_duplicates("symbol")
 insts = {r.symbol: Instrument(scrip_code=str(r.scrip_code), symbol=r.symbol, segment=Segment.NSE_EQ, kind=InstrumentKind.EQUITY) for r in codes.itertuples()}
@@ -30,13 +31,22 @@ def ubar(inst, tf, b):
     return UnifiedBar(symbol=inst.symbol, scrip_code=inst.scrip_code, tf=tf, ts=int(b["ts"]), open=b["o"], high=b["h"], low=b["l"], close=b["c"],
                       volume=b["v"], source=BarSource.REST if b["source"] == "rest" else BarSource.LIVE, complete=True)
 
+def archive_5m():
+    a = pd.read_parquet(f"/Users/shivendrapratap/Downloads/kotsin/kotsin-nse/backend/data-live/archive/bars/{DAY}.parquet")
+    a = a[a["source"] != "partial"].copy(); a["b"] = (a["ts"] // 300) * 300
+    g = a.sort_values("ts").groupby(["symbol", "b"]).agg(o=("o", "first"), h=("h", "max"), l=("l", "min"), c=("c", "last"), v=("v", "sum")).reset_index()
+    return {sym: [{"ts": int(r.b), "o": r.o, "h": r.h, "l": r.l, "c": r.c, "v": r.v, "source": "live"} for r in d.itertuples()] for sym, d in g.groupby("symbol")}
+
+
 async def main():
     store = BarStore()
     today: list[UnifiedBar] = []
     missing = []
+    arch = archive_5m() if SOURCE == "archive" else {}
     for sym, inst in insts.items():
         try:
-            d1, m30, m5 = get(sym, "1d", 80), get(sym, "30m", 40), get(sym, "5m", 100)
+            d1, m30 = get(sym, "1d", 80), get(sym, "30m", 120)
+            m5 = arch.get(sym, []) if SOURCE == "archive" else get(sym, "5m", 100)
         except Exception as e:  # noqa: BLE001
             missing.append((sym, str(e)[:60])); continue
         store.seed(sym, "1d", [ubar(inst, "1d", b) for b in d1 if b["ts"] < OPEN])
@@ -63,7 +73,9 @@ async def main():
     print("by rule:", {k: (v["closed"], v["avg_pnl_bps"], v["win_pct"]) for k, v in sm["by_rule"].items()})
     print("\nsignals (bar = Kite label):")
     for g in sorted(snap["signals"], key=lambda x: x["ts"]):
-        print(f"  {g['bar']} {g['symbol']:11} {g['side']:5} entry {g['entry']:<9} stop {round(g['stop'],2):<9} risk {g['risk_bps']:>5} bps  wall1 {g['walls'][0]['name'] if g['walls'] else '-'} {round(g['walls'][0]['price'],2) if g['walls'] else ''}  retest {g['retest_time']}  taken={g['taken']} {g['why']}")
+        nr = g.get('nearest') or {}
+        print(f"  {g['bar']} {g['symbol']:11} {g['side']:5} entry {g['entry']:<9} stop {round(g['stop'],2):<9} risk {g['risk_bps']:>5} bps  wall1 {g['walls'][0]['name'] if g['walls'] else '-'} {round(g['walls'][0]['price'],2) if g['walls'] else ''} nearest {nr.get('name')} {nr.get('r')}R  move {g['tags'].get('move_adr')} ADR  retest {g['retest_time']}  taken={g['taken']} {g['why']}")
+    print("levels:", {st['symbol']: (st['closes'].get('hl'), st['closes'].get('high'), st['closes'].get('high_official')) for st in snap['stages'] if st['stage'] == 'confirmed'})
     print("\ntrades:")
     for t in sorted(snap["trades"], key=lambda x: x["opened_ts"]):
         v = t["virtual"]

@@ -138,7 +138,9 @@ class ShadowRunner:
         prev_day = ist_day(prev.ts)
         last_trade = self._last_trade(symbol, prev_day)
         close = last_trade if self.pdc == "last" and last_trade is not None else prev.close
-        levels = cr.day_levels(prev.high, prev.low, close)
+        hl = self._continuous_hl(symbol, prev_day) if (self.pdc == "last" and last_trade is not None and self.s.strategy_levels_hl == "continuous") else None
+        high, low = hl if hl is not None else (prev.high, prev.low)
+        levels = cr.day_levels(high, low, close)
         win = rows[-60:]
         adr = guarded_adr([b.high for b in win], [b.low for b in win], [b.close for b in win]) if len(win) >= 21 else None
         weeks: dict[tuple[int, int], list[UnifiedBar]] = {}
@@ -150,7 +152,8 @@ class ShadowRunner:
         if done:
             g = weeks[max(done)]
             weekly = cr.weekly_pivots([(max(b.high for b in g), min(b.low for b in g), g[-1].close)])
-        closes = {"official": prev.close, "last": last_trade, "used": self.pdc, "day": prev_day.isoformat()}
+        closes = {"official": prev.close, "last": last_trade, "used": self.pdc, "day": prev_day.isoformat(),
+                  "hl": "continuous" if hl is not None else "daily", "high": high, "low": low, "high_official": prev.high, "low_official": prev.low}
         sd = SymbolDay(levels=levels, weekly=weekly, adr=adr, tol=cr.tolerance(adr, price), closes=closes)
         self.syms[symbol] = sd
         return sd
@@ -171,6 +174,14 @@ class ShadowRunner:
             if cur is None or (cur.source is not BarSource.REST and b.source is BarSource.REST):
                 by_day[d] = b
         return [by_day[d] for d in sorted(by_day)]
+
+    def _continuous_hl(self, symbol: str, d: date) -> tuple[float, float] | None:
+        """Session ``d``'s high and low from continuous trading: its 30m bars that began before the closing
+        auction, all twelve of them (a gap → None, and the daily candle stands)."""
+        bars = [b for b in self.store.bars(symbol, "30m") if ist_day(b.ts) == d and ist_hm(b.ts) < CONTINUOUS_END_HM]
+        if len(bars) < 12:
+            return None
+        return max(b.high for b in bars), min(b.low for b in bars)
 
     def _last_trade(self, symbol: str, d: date) -> float | None:
         """The last continuous trade of session ``d`` for a stock: the close of its last 30m bar that began
@@ -235,13 +246,17 @@ class ShadowRunner:
         entry = bars[j].c
         stop = (bars[i_rt].l - sd.tol) if side > 0 else (bars[i_rt].h + sd.tol)
         risk_bps = abs(entry - stop) / entry * 1e4
-        ws = cr.walls(side, entry, sd.levels, sd.weekly, sd.tol)
+        ws = cr.walls(side, entry, sd.levels, sd.weekly, sd.tol, use_round=self.s.strategy_walls_round)
+        near = cr.nearest_level(side, entry, sd.levels, sd.weekly)
         signal_id = new_id("sig")
         tags = self._tags(inst.symbol, sd, bars, side, j, bar)
         sig: dict[str, Any] = {
             "id": signal_id, "ts": int(bar.ts) + 300, "time": ist_hm(int(bar.ts) + 300), "bar": ist_hm(int(bar.ts)), "symbol": inst.symbol, "side": "LONG" if side > 0 else "SHORT",
             "entry": entry, "stop": stop, "risk_bps": round(risk_bps, 1), "walls": [{"name": k, "price": v, "bps": round(abs(v - entry) / entry * 1e4, 1)} for k, v in ws],
             "stage": st.to_json(), "retest_time": ist_hm(bars[i_rt].ts), "tol": sd.tol, "adr": sd.adr, "tags": tags, "taken": False, "why": "",
+            # the nearest real level beyond the entry at any distance, and its distance in R: the one inside the
+            # tolerance is the one that stops the trade (the 27 Oct BANKNIFTY short, S1 32 points below)
+            "nearest": {"name": near[0], "price": near[1], "bps": round(abs(near[1] - entry) / entry * 1e4, 1), "r": round(abs(near[1] - entry) / entry * 1e4 / risk_bps, 2) if risk_bps > 0 else None} if near else None,
         }
         self.signals.append(sig)
         if inst.symbol in INDEX_ROOTS:
@@ -254,6 +269,10 @@ class ShadowRunner:
             return
         if not ws:
             sig["why"] = "no wall beyond the entry by a tolerance"
+            return
+        mv = tags.get("move_adr")
+        if self.s.strategy_max_move_adr > 0 and mv is not None and mv >= self.s.strategy_max_move_adr:
+            sig["why"] = f"moved {mv:.2f} ADR from the open already (cap {self.s.strategy_max_move_adr})"
             return
         if not cr.passes(self.filter, tags):
             sig["why"] = f"filter {self.filter!r} not met"
@@ -492,6 +511,7 @@ class ShadowRunner:
         taken = [s for s in self.signals if s["taken"]]
         return {
             "strategy": cr.NAME, "day": self.day, "rule": self.rule, "filter": self.filter, "pdc": self.pdc, "notional_inr": self.notional,
+            "walls_round": self.s.strategy_walls_round, "max_move_adr": self.s.strategy_max_move_adr, "levels_hl": self.s.strategy_levels_hl,
             "universe": sum(1 for sym, i in self.underlyings.items() if i.kind is InstrumentKind.EQUITY and sym not in INDEX_ROOTS), "with_levels": len(self.syms),
             "orders": self.orders, "errors": self.errors,
             "summary": {

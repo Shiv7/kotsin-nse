@@ -196,6 +196,18 @@ class Settings(BaseSettings):
     strategy_bars: Literal["exchange", "feed"] = "exchange"
     #: how long a decision may wait for the exchange's 5m candle (217 symbols close in the same second)
     strategy_bar_timeout_s: float = 25.0
+    #: round numbers as walls. The 29 Oct 2026 read of the first fifteen shadow trades: five of the eight first
+    #: walls under 0.8R were round numbers, and the trail to them gave AXISBANK's 96 bps and PIIND's 232 away.
+    #: On the dev window dropping them moves the mean by nothing (+3.2 gross either way): the walls are the
+    #: levels on the chart, nothing else.
+    strategy_walls_round: bool = False
+    #: no entry once the stock has travelled this many ADRs from the open (0 = off). Dev window, 3,101 entries:
+    #: the 604 past 0.6 ADR made −1.3 bps gross, the rest +4.4 (RECLTD, PREMIERENE, HINDUNILVR on 28 Oct).
+    strategy_max_move_adr: float = 0.6
+    #: with ``strategy_pdc = last``, the previous day's high and low from continuous trades too (its 30m bars
+    #: before 15:15). The 27 Oct 2026 closing auction printed PREMIERENE at 862 against a last trade of 835 and
+    #: that print became PDH and R1 on the 28th. ``daily`` = the daily candle's high/low, auction print included.
+    strategy_levels_hl: Literal["continuous", "daily"] = "continuous"
 
     # ---- LIVE_CAPPED caps ----------------------------------------------------------------------
     # Mode is state (R9); these only bound what an *armed* engine may do.

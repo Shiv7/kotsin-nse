@@ -92,6 +92,16 @@ def test_walls_are_beyond_the_entry_by_a_tolerance_nearest_first():
     assert cr.round_step(1500.0) == 10 and cr.round_step(250.0) == 1 and cr.round_step(40.0) == 0.5
 
 
+def test_walls_without_round_numbers_and_the_nearest_level_at_any_distance():
+    levels = cr.day_levels(*PREV)
+    assert cr.walls(-1, 103.0, levels, None, 0.3, use_round=False)[0] == ("PDL", 100.0)
+    assert all(w[0] != "ROUND" for w in cr.walls(1, 106.8, levels, None, 0.1, use_round=False))
+    # S1 99.33 and PDL 100 sit under a short at 100.2 inside a tolerance of 1.0: no wall, but the nearest level is PDL
+    assert cr.walls(-1, 100.2, levels, None, 1.0, use_round=False)[0][0] == "S2"
+    assert cr.nearest_level(-1, 100.2, levels, None) == ("PDL", 100.0)
+    assert cr.nearest_level(1, 106.8, levels, None)[0] == "R1"
+
+
 def test_wall_then_trail_takes_the_wall_then_trails_to_the_next():
     levels = cr.day_levels(*PREV)
     ws = [v for _k, v in cr.walls(1, 106.8, levels, None, 1.0)]
@@ -375,7 +385,8 @@ async def test_pdc_last_builds_the_cpr_on_the_previous_sessions_last_continuous_
     await _feed(r, store, DAY_BARS, pad_to=75)
     snap = r.snapshot()
     st = snap["stages"][0]
-    assert snap["pdc"] == "last" and st["closes"] == {"official": 104.0, "last": 105.0, "used": "last", "day": st["closes"]["day"]}
+    assert snap["pdc"] == "last" and {k: st["closes"][k] for k in ("official", "last", "used")} == {"official": 104.0, "last": 105.0, "used": "last"}
+    assert st["closes"]["hl"] == "daily"  # two 30m bars are not a session: the daily candle's high and low stand
     assert st["levels"] == cr.day_levels(110.0, 100.0, 105.0) and st["levels"]["P"] != cr.day_levels(*PREV)["P"]
     # an index: no continuous-trade close, the official one builds the levels
     store2 = BarStore()
@@ -387,3 +398,38 @@ async def test_pdc_last_builds_the_cpr_on_the_previous_sessions_last_continuous_
     assert st2["closes"]["last"] is None and st2["levels"] == cr.day_levels(*PREV)
     # the official close is the default
     assert _runner(tmp_path, store).pdc == "official"
+
+
+
+async def test_an_entry_past_the_move_cap_is_recorded_not_taken(tmp_path):
+    """28 Oct 2026: RECLTD, PREMIERENE and HINDUNILVR were entered after a full day's range had been travelled;
+    on the dev window the 604 entries past 0.6 ADR lose. DAY_BARS moves 0.50 ADR from the open by the entry."""
+    store = BarStore()
+    _seed_daily(store, "ABC", "1")
+    r = _runner(tmp_path, store, strategy_max_move_adr=0.4)
+    await _feed(r, store, DAY_BARS, pad_to=75)
+    s = r.snapshot()
+    assert s["summary"]["signals"] == 1 and s["summary"]["taken"] == 0 and "ADR" in s["signals"][0]["why"] and r.orders == 0
+    assert s["signals"][0]["nearest"]["name"] == "R1" and s["max_move_adr"] == 0.4 and s["walls_round"] is False
+    assert all(w["name"] != "ROUND" for w in s["signals"][0]["walls"])
+
+
+async def test_pdc_last_takes_the_previous_days_high_and_low_from_continuous_trades(tmp_path):
+    """27 Oct 2026, PREMIERENE: the 15:28 auction printed 862.00 against a last trade of 842; the daily candle's
+    high and close became 862 and the 28th's PDH and R1 were that one print. With twelve 30m bars of the
+    session the high and low come from them; the auction's 15:15 bucket is not continuous trading."""
+    store = BarStore()
+    _seed_daily(store, "ABC", "1")  # the daily candle: H 110, L 100, C 104
+    prev = ist_ts(DAY, "09:15") - 86400
+    rows = [_ubar("ABC", "1", "30m", prev + i * 1800, 104.0, 108.0, 101.0, 104.0) for i in range(12)]  # 09:15 … 14:45
+    rows[-1] = _ubar("ABC", "1", "30m", prev + 11 * 1800, 104.5, 108.5, 104.4, 105.0)  # 14:45–15:15: the last continuous trade 105
+    rows.append(_ubar("ABC", "1", "30m", prev + 12 * 1800, 110.0, 110.0, 110.0, 110.0))  # 15:15: the auction print at the daily high
+    store.seed("ABC", "30m", rows)
+    r = _runner(tmp_path, store, strategy_pdc="last")
+    await _feed(r, store, DAY_BARS, pad_to=75)
+    st = r.snapshot()["stages"][0]
+    assert st["closes"]["hl"] == "continuous" and (st["closes"]["high"], st["closes"]["low"], st["closes"]["high_official"]) == (108.5, 101.0, 110.0)
+    assert st["levels"] == cr.day_levels(108.5, 101.0, 105.0)
+    # asked for the daily candle instead: the print stays in
+    r2 = _runner(tmp_path, BarStore(), strategy_pdc="last", strategy_levels_hl="daily")
+    assert r2.s.strategy_levels_hl == "daily"

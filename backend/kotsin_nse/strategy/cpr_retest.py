@@ -133,25 +133,36 @@ def round_step(px: float) -> float:
     return ROUND_STEPS[-1]
 
 
-def walls(side: int, entry: float, levels: dict[str, float], weekly: dict[str, float] | None, tol: float) -> list[tuple[str, float]]:
+def walls(side: int, entry: float, levels: dict[str, float], weekly: dict[str, float] | None, tol: float, *, use_round: bool = True) -> list[tuple[str, float]]:
     """The walls beyond the entry by at least a tolerance, nearest first: daily R1/R2/R3 (S1/S2/S3), the
-    previous day's high (low), the previous week's pivot and R1/R2 (S1/S2), the next round number."""
+    previous day's high (low), the previous week's pivot and R1/R2 (S1/S2), and the next round number when
+    ``use_round`` (the live book stopped naming it on 2026-10-29: `Settings.strategy_walls_round`)."""
     cands: dict[str, float] = {}
     if side > 0:
         cands.update({k: levels[k] for k in ("R1", "R2", "R3") if k in levels})
         cands["PDH"] = levels["PDH"]
         if weekly:
             cands.update({k: weekly[k] for k in ("WP", "WR1", "WR2") if k in weekly})
-        step = round_step(entry)
-        cands["ROUND"] = math.floor(entry / step) * step + step
+        if use_round:
+            step = round_step(entry)
+            cands["ROUND"] = math.floor(entry / step) * step + step
         return sorted(((k, v) for k, v in cands.items() if v - entry >= tol), key=lambda kv: kv[1])
     cands.update({k: levels[k] for k in ("S1", "S2", "S3") if k in levels})
     cands["PDL"] = levels["PDL"]
     if weekly:
         cands.update({k: weekly[k] for k in ("WP", "WS1", "WS2") if k in weekly})
-    step = round_step(entry)
-    cands["ROUND"] = math.ceil(entry / step) * step - step
+    if use_round:
+        step = round_step(entry)
+        cands["ROUND"] = math.ceil(entry / step) * step - step
     return sorted(((k, v) for k, v in cands.items() if entry - v >= tol), key=lambda kv: -kv[1])
+
+
+def nearest_level(side: int, entry: float, levels: dict[str, float], weekly: dict[str, float] | None) -> tuple[str, float] | None:
+    """The nearest pivot, previous-day extreme or weekly pivot beyond the entry at *any* distance — the level
+    that stops a trade before its first wall when it sits inside the tolerance (BANKNIFTY 2026-10-27: S1 32
+    points under a short, named no wall, held to the point and the bounce took the stop)."""
+    c = walls(side, entry, levels, weekly, 0.0, use_round=False)
+    return c[0] if c else None
 
 
 def weekly_pivots(weeks: Sequence[tuple[float, float, float]]) -> dict[str, float] | None:
@@ -360,4 +371,4 @@ def passes(filter_spec: str, tags: dict[str, Any]) -> bool:
 
 
 __all__ = ["BOS_BARS", "CONFIRM_BARS", "NAME", "OPEN_TEST_BARS", "RULES", "STAGES", "ExitPlan", "Stage", "daily_tags", "day_levels",
-           "intraday_tags", "passes", "round_step", "sequence", "supertrend_dir", "tolerance", "walls", "weekly_pivots"]
+           "intraday_tags", "nearest_level", "passes", "round_step", "sequence", "supertrend_dir", "tolerance", "walls", "weekly_pivots"]
