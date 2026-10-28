@@ -41,9 +41,10 @@ for sym in syms:
         for zn in st.zones:
             key = (zn.side, zn.ob_ts)
             if key in seen or not zn.retest_ts: continue
-            seen.add(key)
             k = next(i for i, b in enumerate(wb) if b.ts == zn.retest_ts[0])
-            if k < min_k or k > max_k or k >= len(wb) - 1: continue
+            if k > max_k: continue  # the return has not come yet: a later window records it (not seen)
+            seen.add(key)  # returned inside this window's week(s), or already in the past
+            if k < min_k or k >= len(wb) - 1: continue
             side = 1 if zn.side == "BULLISH" else -1
             dk = days[lo_i + k]
             try: member = fm.member(sym, dk)

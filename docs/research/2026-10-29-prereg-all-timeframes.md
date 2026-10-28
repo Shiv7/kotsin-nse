@@ -118,3 +118,23 @@ Expected: the gross per trade grows with the timeframe (bigger stops), the net s
   on target or hold. What it is not: a short strategy after costs (shorts carry nothing), a small-account strategy if
   run in full (₹25–50 lakh deployed at ₹5,000 risk a trade), or anything without the limit fill. 2025 is the weakest
   year on every row. Forward shadow is the next evidence; nothing else is left to test on the past.
+- 03:40 IST, a de-duplication fix in the window scan (a zone whose first return came after the window's entry span
+  was marked seen and lost; now a later window may take it). The five-year numbers moved by under 1 bps (conservative
+  +24.8 net, t 2.4, n 3,786). Note on pace: the five-year harness scans two of every four weeks, so its 797 trades a
+  year and median 11 open positions are **half** the real rate; a full scan runs about 130 entries a month and twice
+  the concurrency.
+- 03:45 IST, **October 2026, every week scanned, as a shadow book would have seen it** (`ob_month.py`; a forward look at
+  the fixed rule, not a test; the month lies inside and just past the spent holdout and nothing is changed on it):
+  132 entries in 100 stocks, 115 closed by the 28th: **+55.0 net a trade (+0.31 R), 47 % wins, 54 targets / 60 stops /
+  1 gap, +35.6 R**; with the 17 open marked at the last close +64.2, +41.3 R. Short +101.9 on 84, long −1.6 on 48 — a
+  falling month, the shorts carried it. Day-wise: 1–19 Oct every day but three positive; **21 Oct put on 11 longs and
+  10 of them stopped on the 22nd** — entries cluster by day and side and move together, the risk a per-trade number
+  hides. Against the five-year conservative +25, +55 on 115 trades is 1.3 standard errors above: consistent, not
+  more evidence. Entries and F&O read: `scripts/2026-10-29-all-timeframes/ob_2026-10_entries.csv`.
+- The futures and options data on the entry day (`ob_oct_fno.py`, NSE bhavcopies): the stock future's OI and price
+  change (build-up) and the nearest expiry's put/call OI ratio. Build-up agreeing with the trade: 5 trades at +419;
+  against: 46 at +26; neither: 81 at +64. Longs did worst where puts were heavy (PCR top third −65 on 10), shorts
+  paid in every PCR tercile. One month, descriptive; no gate from it.
+- **The same order block on 5m** for the October days with intraday bars (23, 26, 27, 28 Oct; `ob_oct_5m.py`):
+  275 trades, −9.9 gross / −24.9 net, 24 % wins — what the history says of the intraday version (row 19). The daily
+  timeframe is the one that pays; not the 5m.
