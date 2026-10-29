@@ -1,0 +1,65 @@
+
+######## 2026-10-29  NIFTY: pdc 22699, open 22694 (-0.02%), first hour 22657–22799, 10:15 close 22787 (+0.39%), close 22937 (+1.05%); levels {'P': 22658, 'R1': 22818, 'S1': 22539, 'R2': 22938, 'S2': 22378, 'R3': 23098, 'S3': 22259, 'TC': 22679, 'BC': 22638, 'H3': 22776, 'L3': 22622, 'H4': 22853, 'L4': 22545, 'PDH': 22778, 'PDL': 22498, 'PDC': 22699}
+
+=== SHREECEM LONG  entry bar 10:25 @ 23255.0  stop 23142.39 (48.4 bps)  first wall R1 23320.00 (28.0 bps, 0.6R)  exit 23142.39 stop -48.4 bps  MFE +11 MAE -50 bars 12
+  levels: P 23145.0 TC 23172.5 BC 23117.5 | R1 23320.0 S1 23025.0 | PDH 23265.0 PDL 22970.0 | pdc used 23200.0 (last; official 23020.0)
+  daily: prev day -1.20% closed at 17% of its range; 5d +3.2%  20d +3.8%; vs DMA20 3.14% DMA50 0.45% ema stack False rs20 4.19 | 1H supertrend 1 (with)
+  last sessions (30m cache): 27Oct 23330.0→23250.0 (-0.3%) H23430.0 L23125.0 | 28Oct 23045.0→23020.0 (-0.1%) H23265.0 L22970.0
+  open 23185.00 (-0.06% vs pdc), first hour 23025.00–23200.00, 10:15 close 23150.00; day H 23280.00 L 23010.00 close 23120.00 (-0.34%)
+  sequence: open test 09:20 o23120.00 h23120.00 l23025.00 c23055.00 → BOS 10:15 o23150.00 h23210.00 l23150.00 c23210.00 → through 10:15 o23150.00 h23210.00 l23150.00 c23210.00 → retest 10:20 o23210.00 h23210.00 l23195.00 c23195.00 → entry 10:25 o23250.00 h23275.00 l23250.00 c23255.00
+  after entry: 10:30 23280.00/23280.00/23235.00/23240.00 (-0.06%); 10:35 23235.00/23260.00/23220.00/23260.00 (+0.02%); 10:40 23240.00/23265.00/23220.00/23235.00 (-0.09%); 10:45 23240.00/23240.00/23200.00/23200.00 (-0.24%); 10:50 23195.00/23235.00/23195.00/23200.00 (-0.24%); 10:55 23210.00/23220.00/23190.00/23190.00 (-0.28%); 11:00 23195.00/23220.00/23190.00/23210.00 (-0.19%); 11:05 23230.00/23230.00/23195.00/23195.00 (-0.26%)
+  during trade: high 23280.00 at 10:30, low 23140.00 at 11:35; exit bar 11:35; rest of day after exit: 11:40 23170.00/23170.00/23135.00/23150.00 (-0.45%); 11:45 23165.00/23200.00/23165.00/23180.00 (-0.32%); 11:50 23200.00/23200.00/23160.00/23160.00 (-0.41%)
+  NIFTY: at entry 22865 (+0.73% vs pdc, +0.75% from open, above TC); entry→exit -0.05%; stock entry→exit -0.48% | stock vs NIFTY from open to entry: -0.45% | tags move_adr 0.1 range_pos 0.75 ib_al False nifty_move 0.68 xs_pct 0.42
+
+=== TATAPOWER LONG  entry bar 10:25 @ 339.3  stop 337.57 (51.0 bps)  first wall PDH 340.85 (45.7 bps, 0.9R)  exit 342.8387 trail +104.3 bps  MFE +131 MAE -49 bars 30
+  levels: P 337.02 TC 337.58 BC 336.46 | R1 339.73 S1 333.18 | PDH 340.85 PDL 334.3 | pdc used 335.9 (last; official 335.0)
+  daily: prev day -1.21% closed at 11% of its range; 5d -4.8%  20d -7.4%; vs DMA20 -3.71% DMA50 -6.7% ema stack False rs20 -7.08 | 1H supertrend -1 (against)
+  last sessions (30m cache): 27Oct 341.4→339.6 (-0.5%) H341.8 L333.5 | 28Oct 338.6→335.0 (-1.1%) H340.9 L334.3
+  open 336.00 (+0.03% vs pdc), first hour 334.00–338.15, 10:15 close 337.50; day H 345.65 L 334.00 close 344.55 (+2.58%)
+  sequence: open test 09:45 o337.40 h337.40 l335.70 c335.95 → BOS 10:15 o337.90 h338.90 l337.80 c338.80 → through 10:15 o337.90 h338.90 l337.80 c338.80 → retest 10:20 o338.80 h338.85 l338.35 c338.60 → entry 10:25 o338.60 h339.45 l338.25 c339.30
+  after entry: 10:30 339.40/339.65/338.90/339.10 (-0.06%); 10:35 339.10/339.30/338.60/339.05 (-0.07%); 10:40 339.05/339.30/338.80/338.80 (-0.15%); 10:45 338.80/339.65/338.65/339.15 (-0.04%); 10:50 339.00/339.35/337.65/339.15 (-0.04%); 10:55 339.15/340.20/338.60/339.05 (-0.07%); 11:00 339.20/339.65/338.20/338.55 (-0.22%); 11:05 338.75/338.75/337.75/338.75 (-0.16%)
+  during trade: high 343.75 at 13:00, low 337.65 at 10:50; exit bar 13:05; rest of day after exit: 13:10 343.25/343.35/343.00/343.10 (+1.12%); 13:15 343.10/343.40/343.05/343.20 (+1.15%); 13:20 343.10/343.80/343.00/343.65 (+1.28%)
+  NIFTY: at entry 22865 (+0.73% vs pdc, +0.75% from open, above TC); entry→exit -0.11%; stock entry→exit +1.04% | stock vs NIFTY from open to entry: +0.23% | tags move_adr 0.46 range_pos 0.97 ib_al True nifty_move 0.68 xs_pct 0.75
+
+=== JSWSTEEL LONG  entry bar 10:45 @ 1249.7  stop 1243.17 (52.2 bps)  first wall PDH 1256.20 (52.0 bps, 1.0R)  exit 1255.4 close +45.6 bps  MFE +47 MAE -45 bars 53
+  levels: P 1243.73 TC 1243.87 BC 1243.6 | R1 1256.47 S1 1231.27 | PDH 1256.2 PDL 1231.0 | pdc used 1244.0 (last; official 1241.2)
+  daily: prev day -0.92% closed at 40% of its range; 5d +1.5%  20d -1.8%; vs DMA20 1.77% DMA50 -1.76% ema stack False rs20 -1.45 | 1H supertrend 1 (with)
+  last sessions (30m cache): 27Oct 1250.3→1254.0 (+0.3%) H1266.5 L1243.2 | 28Oct 1251.6→1241.2 (-0.8%) H1256.2 L1231.0
+  open 1240.00 (-0.32% vs pdc), first hour 1233.20–1251.00, 10:15 close 1247.20; day H 1255.60 L 1233.20 close 1255.40 (+0.92%)
+  sequence: open test 09:15 o1240.00 h1243.80 l1233.20 c1239.60 → BOS 10:05 o1247.80 h1251.00 l1247.50 c1249.10 → through 10:05 o1247.80 h1251.00 l1247.50 c1249.10 → retest 10:10 o1249.40 h1249.50 l1246.00 c1247.20 → entry 10:45 o1249.60 h1252.00 l1249.00 c1250.00
+  after entry: 10:50 1249.70/1250.80/1247.60/1248.40 (-0.10%); 10:55 1248.40/1248.90/1244.40/1245.20 (-0.36%); 11:00 1245.20/1248.30/1244.10/1247.90 (-0.14%); 11:05 1248.40/1248.90/1245.30/1247.40 (-0.18%); 11:10 1247.20/1248.20/1246.30/1247.00 (-0.22%); 11:15 1247.00/1248.10/1245.60/1246.00 (-0.30%); 11:20 1246.00/1246.50/1245.20/1246.00 (-0.30%); 11:25 1246.60/1247.50/1246.10/1246.40 (-0.26%)
+  during trade: high 1255.60 at 14:25, low 1244.10 at 11:00; exit bar 15:25; rest of day after exit: 
+  NIFTY: at entry 22844 (+0.64% vs pdc, +0.66% from open, above TC); entry→exit +0.41%; stock entry→exit +0.46% | stock vs NIFTY from open to entry: +0.12% | tags move_adr 0.35 range_pos 0.93 ib_al False nifty_move 0.7 xs_pct 0.67
+
+=== ETERNAL LONG  entry bar 10:50 @ 331.05  stop 327.74 (99.9 bps)  first wall R2 335.80 (143.5 bps, 1.4R)  exit 337.85 close +205.4 bps  MFE +251 MAE -47 bars 52
+  levels: P 327.85 TC 327.92 BC 327.77 | R1 331.9 S1 323.95 | PDH 331.75 PDL 323.8 | pdc used 328.0 (last; official 326.0)
+  daily: prev day -1.51% closed at 28% of its range; 5d +4.4%  20d -1.5%; vs DMA20 1.45% DMA50 0.49% ema stack False rs20 -1.14 | 1H supertrend 1 (with)
+  last sessions (30m cache): 27Oct 330.1→330.5 (+0.1%) H331.4 L323.4 | 28Oct 330.1→326.0 (-1.2%) H331.8 L323.8
+  open 326.10 (-0.58% vs pdc), first hour 324.70–329.55, 10:15 close 326.45; day H 339.35 L 324.70 close 337.85 (+3.00%)
+  sequence: open test 09:40 o325.75 h325.75 l324.70 c325.35 → BOS 10:25 o326.75 h328.60 l326.65 c328.10 → through 10:25 o326.75 h328.60 l326.65 c328.10 → retest 10:30 o328.95 h329.25 l328.60 c328.75 → entry 10:50 o328.55 h331.20 l328.20 c331.00
+  after entry: 10:55 331.00/331.50/330.00/330.30 (-0.23%); 11:00 330.40/330.40/329.60/330.00 (-0.32%); 11:05 330.00/330.15/329.65/329.75 (-0.39%); 11:10 329.65/330.85/329.50/330.70 (-0.11%); 11:15 330.90/331.95/330.50/331.60 (+0.17%); 11:20 331.75/332.45/331.60/332.25 (+0.36%); 11:25 332.25/332.80/331.80/332.65 (+0.48%); 11:30 332.60/335.10/332.60/334.20 (+0.95%)
+  during trade: high 339.35 at 13:55, low 329.50 at 11:10; exit bar 15:25; rest of day after exit: 
+  NIFTY: at entry 22826 (+0.56% vs pdc, +0.58% from open, above TC); entry→exit +0.49%; stock entry→exit +2.05% | stock vs NIFTY from open to entry: +0.94% | tags move_adr 0.59 range_pos 0.98 ib_al True nifty_move 0.66 xs_pct 0.82
+
+=== TIINDIA LONG  entry bar 14:10 @ 2140.9  stop 2118.33 (105.4 bps)  first wall R1 2157.37 (76.9 bps, 0.7R)  exit 2177.0 close +168.6 bps  MFE +173 MAE -4 bars 12
+  levels: P 2118.63 TC 2124.32 BC 2112.95 | R1 2157.37 S1 2091.27 | PDH 2146.0 PDL 2079.9 | pdc used 2130.0 (last; official 2135.0)
+  daily: prev day +1.43% closed at 83% of its range; 5d +1.0%  20d -13.2%; vs DMA20 -4.18% DMA50 -15.19% ema stack False rs20 -12.82 | 1H supertrend 1 (with)
+  last sessions (30m cache): 27Oct 2088.4→2110.0 (+1.0%) H2119.1 L2083.1 | 28Oct 2085.6→2135.0 (+2.4%) H2146.0 L2079.9
+  open 2134.90 (+0.23% vs pdc), first hour 2096.10–2134.90, 10:15 close 2119.00; day H 2177.00 L 2096.10 close 2177.00 (+2.21%)
+  sequence: open test 09:45 o2104.20 h2112.00 l2096.10 c2112.00 → BOS 10:05 o2114.20 h2121.00 l2114.20 c2119.00 → through 14:00 o2128.50 h2131.10 l2127.90 c2130.80 → retest 14:05 o2129.70 h2137.60 l2125.80 c2137.50 → entry 14:10 o2138.80 h2142.40 l2137.40 c2140.90
+  after entry: 14:15 2141.10/2144.20/2140.10/2144.20 (+0.15%); 14:20 2142.60/2144.80/2140.50/2142.70 (+0.08%); 14:25 2142.90/2145.00/2140.60/2143.00 (+0.10%); 14:30 2144.30/2146.90/2143.10/2145.00 (+0.19%); 14:35 2145.70/2150.80/2145.70/2149.90 (+0.42%); 14:40 2149.70/2150.40/2148.90/2150.00 (+0.43%); 14:45 2150.00/2153.20/2150.00/2150.00 (+0.43%); 14:50 2150.90/2151.40/2150.00/2151.40 (+0.49%)
+  during trade: high 2177.00 at 15:25, low 2140.10 at 14:15; exit bar 15:25; rest of day after exit: 
+  NIFTY: at entry 22902 (+0.90% vs pdc, +0.92% from open, above TC); entry→exit +0.15%; stock entry→exit +1.69% | stock vs NIFTY from open to entry: -0.64% | tags move_adr 0.19 range_pos 0.97 ib_al True nifty_move 0.86 xs_pct 0.48
+
+=== LT LONG  entry bar 14:50 @ 3841.6  stop 3829.48 (31.5 bps)  first wall R1 3879.33 (98.2 bps, 3.1R)  exit 3837.1 close -11.7 bps  MFE +1 MAE -18 bars 4
+  levels: P 3824.67 TC 3832.0 BC 3817.33 | R1 3879.33 S1 3755.33 | PDH 3894.0 PDL 3770.0 | pdc used 3810.0 (last; official 3801.3)
+  daily: prev day +3.72% closed at 25% of its range; 5d +4.5%  20d +0.9%; vs DMA20 3.18% DMA50 -1.34% ema stack False rs20 1.28 | 1H supertrend 1 (with)
+  last sessions (30m cache): 27Oct 3702.0→3685.0 (-0.5%) H3713.5 L3648.3 | 28Oct 3823.2→3801.3 (-0.6%) H3894.0 L3770.0
+  open 3814.70 (+0.12% vs pdc), first hour 3765.60–3814.90, 10:15 close 3790.00; day H 3844.00 L 3765.60 close 3837.10 (+0.71%)
+  sequence: open test 09:30 o3778.20 h3780.40 l3771.70 c3775.80 → BOS 10:05 o3783.10 h3790.00 l3782.00 c3787.40 → through 14:30 o3836.00 h3838.10 l3834.60 c3835.90 → retest 14:35 o3835.90 h3840.00 l3835.90 c3839.80 → entry 14:50 o3836.50 h3844.00 l3835.90 c3841.60
+  after entry: 14:55 3841.60/3841.60/3837.10/3837.50 (-0.11%); 15:00 3838.70/3839.90/3836.60/3837.00 (-0.12%); 15:05 3838.40/3841.90/3835.10/3836.40 (-0.14%); 15:10 3836.30/3842.00/3835.90/3838.30 (-0.09%); 15:25 3837.10/3837.10/3837.10/3837.10 (-0.12%)
+  during trade: high 3842.00 at 15:10, low 3835.10 at 15:05; exit bar 15:25; rest of day after exit: 
+  NIFTY: at entry 22946 (+1.09% vs pdc, +1.11% from open, above TC); entry→exit -0.04%; stock entry→exit -0.12% | stock vs NIFTY from open to entry: -0.40% | tags move_adr 0.42 range_pos 0.97 ib_al True nifty_move 1.15 xs_pct 0.55
+
+=== SKIPPED AMBUJACEM LONG entry bar 14:35 @ 360.3 stop 353.05 why: moved 0.80 ADR from the open already (cap 0.6)
+  after: high 361.95 low 354.00 close 354.70 (-1.55%) | path: 14:40 360.85/361.95/357.65/359.65 (-0.18%); 14:45 359.65/360.05/357.35/357.85 (-0.68%); 14:50 357.85/358.80/357.75/358.45 (-0.51%); 14:55 358.60/358.60/356.00/356.00 (-1.19%); 15:00 356.05/356.55/354.80/355.00 (-1.47%); 15:05 355.15/355.95/354.00/355.10 (-1.44%)
