@@ -414,6 +414,23 @@ async def test_an_entry_past_the_move_cap_is_recorded_not_taken(tmp_path):
     assert all(w["name"] != "ROUND" for w in s["signals"][0]["walls"])
 
 
+async def test_an_entry_at_or_after_the_cutoff_is_recorded_not_taken(tmp_path):
+    """29 Oct 2026, LT: entered at 14:50 for a wall 98 bps away with seven bars left; on the dev window the entries
+    from 14:30 on lose −17.4 net with 26 % winners. A cutoff at the entry bar's label; "" switches it off."""
+    store = BarStore()
+    _seed_daily(store, "ABC", "1")
+    r = _runner(tmp_path, store, strategy_entry_cutoff="09:15")  # every entry bar of the day is at or after it
+    await _feed(r, store, DAY_BARS, pad_to=75)
+    s = r.snapshot()
+    assert s["summary"]["signals"] == 1 and s["summary"]["taken"] == 0 and "cutoff" in s["signals"][0]["why"] and r.orders == 0
+    assert s["entry_cutoff"] == "09:15"
+    store2 = BarStore()
+    _seed_daily(store2, "ABC", "1")
+    r2 = _runner(tmp_path / "off", store2, strategy_entry_cutoff="")
+    await _feed(r2, store2, DAY_BARS, pad_to=75)
+    assert r2.snapshot()["summary"]["taken"] == 1
+
+
 async def test_pdc_last_takes_the_previous_days_high_and_low_from_continuous_trades(tmp_path):
     """27 Oct 2026, PREMIERENE: the 15:28 auction printed 862.00 against a last trade of 842; the daily candle's
     high and close became 862 and the 28th's PDH and R1 were that one print. With twelve 30m bars of the

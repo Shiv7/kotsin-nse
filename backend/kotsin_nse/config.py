@@ -208,6 +208,12 @@ class Settings(BaseSettings):
     #: before 15:15). The 27 Oct 2026 closing auction printed PREMIERENE at 862 against a last trade of 835 and
     #: that print became PDH and R1 on the 28th. ``daily`` = the daily candle's high/low, auction print included.
     strategy_levels_hl: Literal["continuous", "daily"] = "continuous"
+    #: no new entry whose entry bar is labelled at or after this IST time ("" = off). A signal after it is recorded
+    #: with ``why`` and not taken. Hygiene, not edge: on the dev window (loop 2, 2026-10-29) the 165 entries from
+    #: 14:30 on made −17.4 net with 26 % winners and 63 % close-outs — a wall 98 bps away with seven bars left
+    #: (LT, 29 Oct) cannot be reached; the rest moved −10.6 → −10.2, below the pre-registered bar, shipped on the
+    #: owner's call as hygiene.
+    strategy_entry_cutoff: str = "14:30"
 
     # ---- the positional book: the daily order block (strategy/daily_ob.py, strategy/positional.py) ------
     positional_enabled: bool = True

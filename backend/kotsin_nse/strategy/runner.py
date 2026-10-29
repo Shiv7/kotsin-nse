@@ -274,6 +274,10 @@ class ShadowRunner:
         if self.s.strategy_max_move_adr > 0 and mv is not None and mv >= self.s.strategy_max_move_adr:
             sig["why"] = f"moved {mv:.2f} ADR from the open already (cap {self.s.strategy_max_move_adr})"
             return
+        cutoff = self.s.strategy_entry_cutoff
+        if cutoff and sig["bar"] >= cutoff:
+            sig["why"] = f"entry bar {sig['bar']} at or after the cutoff {cutoff}: too late to reach a wall"
+            return
         if not cr.passes(self.filter, tags):
             sig["why"] = f"filter {self.filter!r} not met"
             return
@@ -511,7 +515,7 @@ class ShadowRunner:
         taken = [s for s in self.signals if s["taken"]]
         return {
             "strategy": cr.NAME, "day": self.day, "rule": self.rule, "filter": self.filter, "pdc": self.pdc, "notional_inr": self.notional,
-            "walls_round": self.s.strategy_walls_round, "max_move_adr": self.s.strategy_max_move_adr, "levels_hl": self.s.strategy_levels_hl,
+            "walls_round": self.s.strategy_walls_round, "max_move_adr": self.s.strategy_max_move_adr, "levels_hl": self.s.strategy_levels_hl, "entry_cutoff": self.s.strategy_entry_cutoff,
             "universe": sum(1 for sym, i in self.underlyings.items() if i.kind is InstrumentKind.EQUITY and sym not in INDEX_ROOTS), "with_levels": len(self.syms),
             "orders": self.orders, "errors": self.errors,
             "summary": {

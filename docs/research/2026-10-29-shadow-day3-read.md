@@ -56,3 +56,11 @@ wall before the close (win 26 %, 63 % close exits, LT today), improves both year
 ship as a setting (`KN_STRATEGY_ENTRY_CUTOFF=14:30`, signals after it recorded as skipped) if the owner wants it.
 The stop width and the room filter stay as they are. The intraday rule is still −10 net on history after loop 2; the
 charges at ₹25k (41 bps) are the larger lever than any of these.
+
+## Shipped (23:50 IST, owner's call)
+
+`KN_STRATEGY_ENTRY_CUTOFF=14:30` (`Settings.strategy_entry_cutoff`; a signal whose entry bar is labelled at or after
+it is recorded with `why`, not taken; `""` switches it off; the snapshot carries `entry_cutoff`) and
+`KN_STRATEGY_NOTIONAL_INR=100000` so the shadow book's net is read at the research's cost level (13 bps a round trip
+at ₹1L against 41 at ₹25k). Both are below the pre-registered bar and are recorded as hygiene and reporting, not
+edge. Day 4 runs them.
