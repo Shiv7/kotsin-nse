@@ -1,4 +1,4 @@
-# Pre-registration: loop 2 of the intraday CPR retest (2026-10-29, 23:05 IST, written before the runs)
+# Pre-registration: loop 2 of the intraday CPR retest (2026-10-29, written before the runs; committed 22:24 IST in 9c352d5)
 
 ## From the day-3 read (six trades, `scripts/2026-10-29-trade-read/dossier29 → out29.txt`)
 

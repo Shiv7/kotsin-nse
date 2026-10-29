@@ -1,4 +1,4 @@
-# Shadow day 3 (2026-10-29) read trade by trade, and loop 2 (23:15 IST)
+# Shadow day 3 (2026-10-29) read trade by trade, and loop 2 (committed 22:24 IST, 9c352d5)
 
 Loop 1 live (no round walls, 0.6 ADR cap, continuous H/L). NIFTY +1.05 % (open 22694 flat, first hour 22657–22799,
 close 22937 just under R2 22938). Seven signals, all long; six taken, one skipped by the cap. Dossiers in
@@ -47,7 +47,7 @@ Also seen: TATAPOWER and JSWSTEEL both missed the stop by one or two ticks befor
 By year the baseline is 2024 −11.5 / 2025 −9.7; the cutoff improves both (−11.1 / −9.2); the wider stop helps 2024
 and hurts 2025.
 
-## Decision (23:35 IST)
+## Decision (committed 22:24 IST)
 
 Nothing reaches the pre-registered bar (≥ 3 bps net and ≥ 0.3 t): the cutoff is +0.4 bps / +0.37 t, the wider stop
 +0.7 / +0.81 but inconsistent across years, the room skip negative. **Nothing ships by the rule.** Recorded for the
@@ -57,7 +57,7 @@ ship as a setting (`KN_STRATEGY_ENTRY_CUTOFF=14:30`, signals after it recorded a
 The stop width and the room filter stay as they are. The intraday rule is still −10 net on history after loop 2; the
 charges at ₹25k (41 bps) are the larger lever than any of these.
 
-## Shipped (23:50 IST, owner's call)
+## Shipped (22:38 IST, 657567b, owner's call; engine restarted 22:41)
 
 `KN_STRATEGY_ENTRY_CUTOFF=14:30` (`Settings.strategy_entry_cutoff`; a signal whose entry bar is labelled at or after
 it is recorded with `why`, not taken; `""` switches it off; the snapshot carries `entry_cutoff`) and

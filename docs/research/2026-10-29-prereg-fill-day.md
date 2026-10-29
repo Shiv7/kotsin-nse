@@ -34,7 +34,7 @@ share of trades under **range** that exited on the fill session, by how, with th
   failed in HANDOFF with this document as the reason.
 * Nothing is tuned on the result; the sensitivity table is reported, not chosen from.
 
-## Run log (22:25 IST, `scripts/2026-10-29-all-timeframes/ob5y_fillday.py`, output `ob5y_fillday.log`)
+## Run log (run ≈ 22:00 IST, committed 22:11 in 882e9c5; `scripts/2026-10-29-all-timeframes/ob5y_fillday.py`, output `ob5y_fillday.log`)
 
 Members only, n = 3,786, 2021-01 → 2025-09, conservative stack:
 
@@ -54,7 +54,7 @@ marked failed in HANDOFF (§2 row, §3.4 row 20, §6 item 14) and the lesson in 
 record stays in `data-live/strategy/positional.json` (TITAN's "target" there is the phantom; its true state at the
 close was open, 4434 against 4440).
 
-## The fill session ordered exactly on 5m bars (22:40 IST, `ob5y_exact.py`, `ob5y_exact.log`; informational)
+## The fill session ordered exactly on 5m bars (run ≈ 22:05 IST, same commit; `ob5y_exact.py`, `ob5y_exact.log`; informational)
 
 For the 2024-01 → 2025-09 member trades whose fill day is in the 5m cache (n = 1,139; 333 had no 5m day, 45 the daily
 bar said "through" but no 5m bar did): the fill is the first 5m bar through Z, then stop-before-target bar by bar.
