@@ -223,6 +223,9 @@ class Engine:
         if self.positional is not None:
             self.positional.enrich = self._positional_context
             self.positional.bhav = self._positional_bhav
+        if self.strategy is not None:  # the same readings on every intraday signal, taken at the signal
+            self.strategy.enrich = self._positional_context
+            self.strategy.bhav = self._positional_bhav
         self._bhav_cache: dict[date, Any] = {}
         self._future_to_underlying: dict[str, str] = {}
         self._mode = Mode.SHADOW
@@ -1368,7 +1371,8 @@ class Engine:
                 "puts_state", "puts_oi_chg_pct", "x_pcr_oi", "x_pcr_oi_chg", "x_iv", "x_iv_prev", "x_implied_move_pct", "x_call_wall", "x_put_wall")
 
     def _positional_context(self, symbol: str) -> dict[str, Any]:
-        """The engine's readings at the close for one stock: the F&O board, the day's order flow, the book."""
+        """The engine's readings now for one stock: the F&O board, the day's order flow so far, the book. The
+        positional book read them at the close; the shadow runner reads them at each signal."""
         out: dict[str, Any] = {}
         try:
             snap = self.fno_snapshot(symbol, time.time())

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+from datetime import date
 
 from kotsin_nse.bars.store import BarStore
 from kotsin_nse.bars.unified import BarSource, UnifiedBar
@@ -450,3 +451,41 @@ async def test_pdc_last_takes_the_previous_days_high_and_low_from_continuous_tra
     # asked for the daily candle instead: the print stays in
     r2 = _runner(tmp_path, BarStore(), strategy_pdc="last", strategy_levels_hl="daily")
     assert r2.s.strategy_levels_hl == "daily"
+
+
+async def test_every_signal_carries_the_engines_readings_and_the_previous_sessions_official_oi(tmp_path):
+    """30 Oct 2026: the positional book carried the F&O board, the order flow and NSE's closing OI on each entry;
+    the intraday signals carried none of it (owner: "OI, OFI, micro structure and short long buildup ... factor
+    in this enrich data"). Every signal, taken or not, now records the engine's readings at the signal and the
+    previous session's official OI; a reader that fails is logged and never blocks the entry."""
+    store = BarStore()
+    _seed_daily(store, "ABC", "1")
+    r = _runner(tmp_path, store)
+    asked: list[tuple[str, date]] = []
+
+    def bhav(sym: str, day: date) -> dict:
+        asked.append((sym, day))
+        return {"day": day.isoformat(), "build_up": "short build-up"}
+
+    r.enrich = lambda sym: {"fno": {"futures_state": "long build-up", "x_pcr_oi": 0.8}, "flow": {"ofi": 12.5, "delta": -300}, "micro": {"queue_imbalance": 0.2}}
+    r.bhav = bhav
+    await _feed(r, store, DAY_BARS, pad_to=75)
+    s = r.snapshot()
+    sig = s["signals"][0]
+    assert sig["context"]["fno"]["futures_state"] == "long build-up" and sig["context"]["flow"]["ofi"] == 12.5 and sig["context"]["micro"]["queue_imbalance"] == 0.2
+    assert sig["bhav"] == {"day": s["stages"][0]["closes"]["day"], "build_up": "short build-up"}
+    assert asked == [("ABC", date.fromisoformat(s["stages"][0]["closes"]["day"]))]  # the previous session, not today
+    assert s["trades"][0]["context"] == sig["context"] and s["trades"][0]["bhav"] == sig["bhav"]
+
+    store2 = BarStore()
+    _seed_daily(store2, "ABC", "1")
+    r2 = _runner(tmp_path / "fail", store2)
+
+    def boom(sym: str) -> dict:
+        raise RuntimeError("no board yet")
+
+    r2.enrich = boom
+    r2.bhav = lambda sym, day: None
+    await _feed(r2, store2, DAY_BARS, pad_to=75)
+    s2 = r2.snapshot()
+    assert s2["summary"]["taken"] == 1 and s2["signals"][0]["context"] == {} and s2["signals"][0]["bhav"] is None

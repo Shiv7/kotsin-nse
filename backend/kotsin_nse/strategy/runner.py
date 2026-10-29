@@ -106,6 +106,12 @@ class ShadowRunner:
         self.errors = 0
         self._writes: list[Awaitable[Any]] = []
         self._lock = asyncio.Lock()  # the writes of consecutive bars land in order, one at a time
+        #: the engine's readings at the signal, on every signal (taken or not) for the evening read: the F&O board
+        #: (the future's build-up and OI change, the calls' and puts' states, PCR, IV, the walls), the day's order
+        #: flow so far (buy/sell, delta, OFI, imbalance) and the book's microstructure; ``bhav`` the previous
+        #: session's official closing OI (NSE's build-up label). Set by the engine; None in tests and replays.
+        self.enrich: Callable[[str], dict[str, Any]] | None = None
+        self.bhav: Callable[[str, date], dict[str, Any] | None] | None = None
 
     @property
     def underlyings(self) -> Mapping[str, Instrument]:
@@ -250,10 +256,12 @@ class ShadowRunner:
         near = cr.nearest_level(side, entry, sd.levels, sd.weekly)
         signal_id = new_id("sig")
         tags = self._tags(inst.symbol, sd, bars, side, j, bar)
+        ctx, bhav = self._context(inst.symbol, sd)
         sig: dict[str, Any] = {
             "id": signal_id, "ts": int(bar.ts) + 300, "time": ist_hm(int(bar.ts) + 300), "bar": ist_hm(int(bar.ts)), "symbol": inst.symbol, "side": "LONG" if side > 0 else "SHORT",
             "entry": entry, "stop": stop, "risk_bps": round(risk_bps, 1), "walls": [{"name": k, "price": v, "bps": round(abs(v - entry) / entry * 1e4, 1)} for k, v in ws],
             "stage": st.to_json(), "retest_time": ist_hm(bars[i_rt].ts), "tol": sd.tol, "adr": sd.adr, "tags": tags, "taken": False, "why": "",
+            "context": ctx, "bhav": bhav,
             # the nearest real level beyond the entry at any distance, and its distance in R: the one inside the
             # tolerance is the one that stops the trade (the 27 Oct BANKNIFTY short, S1 32 points below)
             "nearest": {"name": near[0], "price": near[1], "bps": round(abs(near[1] - entry) / entry * 1e4, 1), "r": round(abs(near[1] - entry) / entry * 1e4 / risk_bps, 2) if risk_bps > 0 else None} if near else None,
@@ -304,6 +312,7 @@ class ShadowRunner:
             "target_name": ws[0][0], "walls": sig["walls"], "risk_bps": round(abs(fill - stop) / fill * 1e4, 1),
             "reward_bps": round(abs(ws[0][1] - fill) / fill * 1e4, 1), "rule": self.rule, "signal_id": signal_id, "opened_ts": int(bar.ts) + 300,
             "entry_time": sig["time"], "entry_bar": sig["bar"], "retest_time": sig["retest_time"], "mode": res.order.mode, "tags": tags, "tol": sd.tol,
+            "context": ctx, "bhav": bhav,
             "bars_held": 0, "mfe_bps": 0.0, "mae_bps": 0.0, "last": fill, "pnl_bps": 0.0, "closed_ts": None, "exit": None, "exit_reason": None,
             "gross_inr": None, "charges_inr": None, "net_inr": None, "r": None, "virtual": {},
         }
@@ -312,6 +321,24 @@ class ShadowRunner:
         self._writes.append(self._ledger_position(pos))
         self._writes.append(self._ledger_event("strategy.entry", {k: pos[k] for k in ("id", "symbol", "side", "qty", "entry", "stop", "target", "target_name", "risk_bps", "reward_bps", "mode")}))
         log.info("strategy.entry", symbol=inst.symbol, side=pos["side"], entry=fill, stop=stop, target=ws[0], mode=res.order.mode)
+
+    def _context(self, symbol: str, sd: SymbolDay) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """The engine's readings at the signal and the previous session's official OI. A reader that fails is
+        logged; it never blocks the signal (the readings are for the evening, the sequence is the strategy)."""
+        ctx: dict[str, Any] = {}
+        bhav = None
+        if self.enrich is not None:
+            try:
+                ctx = self.enrich(symbol) or {}
+            except Exception as exc:  # noqa: BLE001 - enrichment never blocks the book
+                log.warning("strategy.enrich_failed", symbol=symbol, error=repr(exc))
+        prev = sd.closes.get("day")
+        if self.bhav is not None and prev:
+            try:
+                bhav = self.bhav(symbol, date.fromisoformat(prev))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("strategy.bhav_failed", symbol=symbol, error=repr(exc))
+        return ctx, bhav
 
     def _tags(self, symbol: str, sd: SymbolDay, bars: list[Bar5], side: int, j: int, bar: UnifiedBar) -> dict[str, Any]:
         day = ist_day(bar.ts)
