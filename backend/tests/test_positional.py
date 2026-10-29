@@ -70,6 +70,11 @@ def test_the_rule_reads_a_zone_a_fill_and_the_exits():
     t = e + 2 * (e - s)
     assert ob.step(1, e, s, t, Bar5(0, 101, t + 0.1, e - 0.1, t, 0), first=True, held=0, max_sessions=20) == (t, "target")
     assert ob.step(1, e, s, t, Bar5(0, 101, t + 0.1, s - 0.1, t, 0), first=True, held=0, max_sessions=20) == (s, "stop")  # the stop before the target
+    # the fill session: a touch of the target cannot be ordered against the fill, so only a close beyond it counts
+    assert ob.step(1, e, s, t, Bar5(0, 101, t + 0.1, e - 0.1, e + 0.2, 0), first=True, held=0, max_sessions=20) is None
+    assert ob.step(1, e, s, t, Bar5(0, 101, t + 0.1, e - 0.1, e + 0.2, 0), first=False, held=1, max_sessions=20) == (t, "target")
+    assert ob.step(-1, 100.0, 101.0, 98.0, Bar5(0, 97.5, 100.2, 97.0, 99.5, 0), first=True, held=0, max_sessions=20) is None  # TITAN's shape
+    assert ob.step(-1, 100.0, 101.0, 98.0, Bar5(0, 99.0, 100.2, 97.0, 97.8, 0), first=True, held=0, max_sessions=20) == (98.0, "target")
     assert ob.step(1, e, s, t, Bar5(0, s - 0.5, s, s - 1, s - 0.8, 0), first=False, held=1, max_sessions=20) == (s - 0.5, "gap_stop")
     assert ob.step(1, e, s, t, Bar5(0, 101, 101.5, 100.6, 101.2, 0), first=False, held=20, max_sessions=20) == (101.2, "time")
     assert ob.step(1, e, s, t, Bar5(0, 101, 101.5, 100.6, 101.2, 0), first=False, held=3, max_sessions=20) is None

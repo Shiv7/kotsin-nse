@@ -202,6 +202,27 @@ def test_store_seed_merges_rather_than_discarding_live_bars(equity):
     assert store.count("RELIANCE", "30m") == 2
 
 
+def test_store_seed_replaces_the_feeds_daily_bar_with_the_brokers_candle_for_the_same_day():
+    """Regression, 29 Oct 2026: after the post-close refresh every 1d series held two bars for the day — the
+    feed's (bucket 09:15) and the broker's (bucket 00:00). Daily bars match by IST date, not by bucket."""
+    store = BarStore()
+    live = bar(ist_ts("2026-10-29", "09:15"), 22694.25, 22961.95, 22656.75, 22936.75)
+    live.tf = "1d"
+    store.close(live)
+    rest = bar(ist_ts("2026-10-29", "00:00"), 22694.25, 22961.6, 22656.85, 22936.75)
+    rest.tf = "1d"
+    prev = bar(ist_ts("2026-10-28", "00:00"), 22678.0, 22778.05, 22497.7, 22698.85)
+    prev.tf = "1d"
+    assert store.seed("RELIANCE", "1d", [prev, rest]) == 2
+    held = store.bars("RELIANCE", "1d")
+    assert [b.ts for b in held] == [prev.ts, rest.ts] and held[-1].high == 22961.6
+    # a live day the re-seed does not cover is kept (the merge, as for every other frame)
+    nxt = bar(ist_ts("2026-10-30", "09:15"), 1, 2, 0.5, 1.5)
+    nxt.tf = "1d"
+    store.close(nxt)
+    assert store.seed("RELIANCE", "1d", [rest]) == 3
+
+
 def test_ist_day_is_used_for_grouping():
     t = ist_ts("2026-09-18", "23:00")  # still the 18th in IST, the 18th in UTC too
     assert ist_day(t).isoformat() == "2026-09-18"

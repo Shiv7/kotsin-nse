@@ -12,6 +12,8 @@ from typing import Any
 
 from .unified import BarSource, UnifiedBar
 
+IST_OFFSET = 19_800  # seconds; a daily bucket is an IST calendar day whichever clock time stamps it
+
 
 class BarStore:
     def __init__(self, max_bars: int = 1500) -> None:
@@ -65,11 +67,22 @@ class BarStore:
         return False
 
     def seed(self, symbol: str, tf: str, bars: list[UnifiedBar]) -> int:
-        """Replace a series wholesale from a backfill. Returns how many bars are held after."""
+        """Replace a series wholesale from a backfill. Returns how many bars are held after.
+
+        Daily bars are matched by IST date, not bucket: the feed's own daily bar sits at 09:15 while the
+        broker's REST candle sits at midnight, and a post-close re-seed must replace the former with the
+        latter rather than keep both (29 Oct 2026: two bars for the day in every 1d series after the refresh).
+        """
         key = (symbol, tf)
         merged = {b.ts: b for b in bars}
-        for existing in self._closed.get(key, []):
-            merged.setdefault(existing.ts, existing)
+        if tf == "1d":
+            seeded_days = {(b.ts + IST_OFFSET) // 86400 for b in bars}
+            for existing in self._closed.get(key, []):
+                if (existing.ts + IST_OFFSET) // 86400 not in seeded_days:
+                    merged.setdefault(existing.ts, existing)
+        else:
+            for existing in self._closed.get(key, []):
+                merged.setdefault(existing.ts, existing)
         series = [merged[ts] for ts in sorted(merged)]
         self._closed[key] = series[-self.max_bars :]
         return len(self._closed[key])

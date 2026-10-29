@@ -1,0 +1,15 @@
+zones with a first return: 9779 (8s), members 7012
+
+== 2024-01 → 2025-09 members with 5m bars on the fill day: n=1139 (no 5m day 333, daily said through but 5m never did 45)
+  range  net=  14.0 win= 43% t= 1.12 years={2024: 24.4, 2025: 5.3} | long   47.4 short  -16.0 | exits {'stop': 578, 'target': 437, 'close': 68, 'gap_stop': 56}
+  close  net= -21.8 win= 35% t=-1.04 years={2024: -3.6, 2025: -37.0} | long    7.6 short  -48.3 | exits {'stop': 657, 'target': 350, 'close': 68, 'gap_stop': 64}
+  exact  net= -23.7 win= 35% t=-1.24 years={2024: -5.6, 2025: -38.8} | long   13.0 short  -56.6 | exits {'stop': 656, 'target': 351, 'close': 68, 'gap_stop': 64}
+
+== the fill-session exits under 'range' (n=304), what the 5m bars say they really were
+exact_how  gap_stop  stop  target  All
+range_how                             
+stop              0   124       2  126
+target            8    72      98  178
+All               8   196     100  304
+  net of those trades: range   95.5 | exact  -25.7 | close-rule  -38.6
+done

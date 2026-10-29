@@ -75,13 +75,22 @@ def returned(side: int, high: float, low: float, bar: Bar5) -> bool:
 
 
 def step(side: int, entry: float, stop: float, target: float, bar: Bar5, *, first: bool, held: int, max_sessions: int) -> tuple[float, str] | None:
-    """One session of an open position. ``first`` = the fill session itself (no gap check: the fill came first).
+    """One session of an open position. ``first`` = the fill session itself: no gap check (the fill came
+    first), and the target counts only when the session *closes* beyond it. A daily bar cannot say whether
+    a touch of the target came before or after the fill (TITAN, 29 Oct 2026: the day's low at 09:15, the
+    fill at 14:05), but a close beyond the target must have come after it — the path from the fill at Z to
+    that close crosses the target. The stop stays range-based: it lies beyond Z on the fill side, so a touch
+    means price passed Z first (a session opening beyond the stop is charged as a stop too, pessimistic).
     Returns (exit price, how) when the trade ends, else None."""
     if not first and ((side > 0 and bar.o <= stop) or (side < 0 and bar.o >= stop)):
         return bar.o, "gap_stop"
     if (side > 0 and bar.l <= stop) or (side < 0 and bar.h >= stop):
         return stop, "stop"
-    if (side > 0 and bar.h >= target) or (side < 0 and bar.l <= target):
+    if first:
+        hit = bar.c >= target if side > 0 else bar.c <= target
+    else:
+        hit = bar.h >= target if side > 0 else bar.l <= target
+    if hit:
         return target, "target"
     if held >= max_sessions:
         return bar.c, "time"
