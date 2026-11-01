@@ -28,7 +28,7 @@ from ..bars.store import BarStore
 from ..bars.unified import BarSource, UnifiedBar
 from ..config import Segment, Settings
 from ..domain import Instrument, InstrumentKind, OrderIntent, OrderSide, Purpose, new_id, to_json
-from ..exec.gateway import Gateway
+from ..exec.gateway import Decision, Gateway
 from ..instrument.universe import INDEX_ROOTS
 from ..ledger.db import Ledger
 from ..market.session import bucket_end, continuous_end_ts, ist_day, ist_hm, session_open_ts
@@ -104,6 +104,9 @@ class ShadowRunner:
         self.plans: dict[str, dict[str, cr.ExitPlan]] = {}
         self.orders = 0
         self.errors = 0
+        #: the live route (2026-11-01): entries the broker refused, exits that could not be filled
+        self.live_rejected = 0
+        self.exit_failures = 0
         self._writes: list[Awaitable[Any]] = []
         self._lock = asyncio.Lock()  # the writes of consecutive bars land in order, one at a time
         #: the engine's readings at the signal, on every signal (taken or not) for the evening read: the F&O board
@@ -148,6 +151,11 @@ class ShadowRunner:
             self.trades = list(reversed(snap.get("trades") or []))
             for p in snap.get("positions") or []:
                 self.positions[p["id"]] = p
+                for key in ("live", "live_exit"):
+                    if (p.get(key) or {}).get("status") == "PENDING":
+                        # the process died while the broker had the order: the reconciler decides what is real
+                        p[key]["status"] = "UNKNOWN"
+                        p[key]["note"] = "restart while the order was pending — reconcile against the broker"
             for pid, rules in (snap.get("plans") or {}).items():
                 self.plans[pid] = {rule: cr.ExitPlan.from_state(st) for rule, st in rules.items()}
             self._restored_entered = {(s["symbol"], 1 if s["side"] == "LONG" else -1) for s in self.signals}
@@ -352,7 +360,8 @@ class ShadowRunner:
         pos_id = new_id("pos")
         intent = OrderIntent(
             strategy=cr.NAME, instrument=inst, side=OrderSide.BUY if side > 0 else OrderSide.SELL, qty=qty, purpose=Purpose.ENTRY,
-            signal_id=signal_id, client_order_id=f"{signal_id}|ENTRY|{pos_id}", position_id=pos_id, ref_price=entry,
+            # ≤ 38 characters: the broker's RemoteOrderID limit (sig-… 16 + |E| 3 + pos-… 16 = 35)
+            signal_id=signal_id, client_order_id=f"{signal_id}|E|{pos_id}", position_id=pos_id, ref_price=entry,
             reason=f"CPR retest held {sig['retest_time']} → first close beyond: the {sig['bar']} bar (fires {sig['time']}); stop {stop:.2f}, next wall {ws[0][0]} {ws[0][1]:.2f}",
         )
         res = self.gateway.submit(intent)
@@ -361,6 +370,13 @@ class ShadowRunner:
         if res.decision.value.startswith("REJECTED") or res.decision.value == "DUP_BLOCKED":
             sig["why"] = f"gateway {res.decision.value}: {res.order.note}"
             return
+        # the live route answers SUBMITTED at once: the book is scored on the rule's price from here, and the
+        # broker's actual fill lands beside it through ``on_live_result`` (slippage, latency, or a refusal)
+        live = (
+            {"status": "PENDING", "client_order_id": intent.client_order_id, "sent_ts": round(time.time(), 3), "ref": entry, "qty_sent": qty}
+            if res.decision is Decision.SUBMITTED
+            else None
+        )
         fill = res.fill.price if res.fill is not None else entry
         if res.fill is not None and 0 < res.fill.qty < qty:
             # PAPER walked the book and stopped at the 10 % ceiling: the position is what filled,
@@ -379,6 +395,7 @@ class ShadowRunner:
             "context": ctx, "bhav": bhav, "last_stepped_ts": int(bar.ts),
             "bars_held": 0, "mfe_bps": 0.0, "mae_bps": 0.0, "last": fill, "pnl_bps": 0.0, "closed_ts": None, "exit": None, "exit_reason": None,
             "gross_inr": None, "charges_inr": None, "net_inr": None, "r": None, "virtual": {},
+            "live": live, "live_exit": None,
         }
         self.positions[pos_id] = pos
         self.plans[pos_id] = plans
@@ -500,12 +517,14 @@ class ShadowRunner:
         if inst is not None:
             intent = OrderIntent(
                 strategy=cr.NAME, instrument=inst, side=OrderSide.SELL if side > 0 else OrderSide.BUY, qty=pos["qty"], purpose=Purpose.EXIT,
-                signal_id=pos["signal_id"], client_order_id=f"{pos['signal_id']}|EXIT|{pos['id']}", position_id=pos["id"], ref_price=exit_px,
+                signal_id=pos["signal_id"], client_order_id=f"{pos['signal_id']}|X|{pos['id']}", position_id=pos["id"], ref_price=exit_px,
                 reason=f"{how} at {exit_px:.2f}",
             )
             res = self.gateway.submit(intent)
             self.orders += 1
             self._writes.append(self._ledger_order(res.order, res.decision.value))
+            if res.decision is Decision.SUBMITTED:
+                pos["live_exit"] = {"status": "PENDING", "client_order_id": intent.client_order_id, "sent_ts": round(time.time(), 3), "ref": exit_px, "qty_sent": pos["qty"]}
             if res.fill is not None:
                 exit_px = res.fill.price
             # a short's entry is the SELL: STT on it, stamp duty on the exit — not the other way round
@@ -551,6 +570,75 @@ class ShadowRunner:
                 self._close(pos, last.close, "close", int(bar.ts) + 300)
                 changed = True
         return changed
+
+    # -- the live route's answers ------------------------------------------------------------------------
+
+    def on_live_result(self, client_order_id: str, res: Any) -> None:
+        """The live route reports back (``Engine._place_live``): the broker's actual fill, or its refusal, for an
+        order ``submit`` answered SUBMITTED. The book was scored on the rule's price when the order went out; the
+        fill is recorded beside it (price, quantity, slippage, latency). An entry the broker refused is removed —
+        no position exists. An exit that failed is marked loudly; the engine has already alerted and halted, and
+        the reconciler sees the real position."""
+        is_exit = "|X|" in client_order_id
+        key = "live_exit" if is_exit else "live"
+        pos = next((p for p in [*self.positions.values(), *self.trades] if (p.get(key) or {}).get("client_order_id") == client_order_id), None)
+        if pos is None:
+            log.warning("strategy.live_result_unmatched", client_order_id=client_order_id)
+            return
+        o, fill = res.order, res.fill
+        rec = dict(pos.get(key) or {})
+        rec.update({"ts": round(time.time(), 3), "broker_order_id": getattr(o, "broker_order_id", ""), "note": getattr(o, "note", ""),
+                    "order_status": getattr(o, "status", ""), **(getattr(res, "meta", None) or {})})
+        side = 1 if pos["side"] == "LONG" else -1
+        if fill is not None:
+            ref = rec.get("ref") or pos["entry"]
+            adverse = side if not is_exit else -side  # positive slippage = paid more / received less than the rule's price
+            rec.update({"status": "FILLED", "price": fill.price, "qty": fill.qty, "charges": round(fill.charges, 2),
+                        "slippage_bps": round((fill.price - ref) / ref * 1e4 * adverse, 2) if ref else None})
+        else:
+            rec.update({"status": "FAILED" if is_exit else "REJECTED", "reason": getattr(o, "note", "")})
+        pos[key] = rec
+        if not is_exit:
+            if fill is None:
+                self.positions.pop(pos["id"], None)
+                self.plans.pop(pos["id"], None)
+                for sig in self.signals:
+                    if sig["id"] == pos["signal_id"]:
+                        sig["taken"] = False
+                        sig["why"] = f"live entry refused: {rec.get('reason', '')}"
+                        sig["live"] = f"REJECTED: {rec.get('reason', '')}"
+                self.live_rejected += 1
+                log.error("strategy.live_entry_rejected", symbol=pos["symbol"], position=pos["id"], reason=rec.get("reason"))
+                self._writes.append(self._ledger_event("strategy.live_entry_rejected", {"position": pos["id"], "symbol": pos["symbol"], "reason": rec.get("reason")}))
+            else:
+                if 0 < fill.qty < pos["qty"]:
+                    rec["note"] = f"partial: {fill.qty} of {pos['qty']} filled; the book holds the filled quantity"
+                    pos["qty"] = fill.qty
+                log.info("strategy.live_entry", symbol=pos["symbol"], position=pos["id"], price=fill.price, qty=fill.qty, slippage_bps=rec.get("slippage_bps"), via=rec.get("via"))
+                self._writes.append(self._ledger_event("strategy.live_entry", {"position": pos["id"], "symbol": pos["symbol"], "price": fill.price, "qty": fill.qty, "slippage_bps": rec.get("slippage_bps"), "latency_ms": rec.get("latency_ms")}))
+        elif fill is not None:
+            entry_px = (pos.get("live") or {}).get("price") or pos["entry"]
+            entry_ch = float((pos.get("live") or {}).get("charges") or 0.0)
+            pos["live_net_inr"] = round((fill.price - entry_px) * side * fill.qty - entry_ch - fill.charges, 2)
+            log.info("strategy.live_exit", symbol=pos["symbol"], position=pos["id"], price=fill.price, qty=fill.qty, net_inr=pos["live_net_inr"], slippage_bps=rec.get("slippage_bps"))
+            self._writes.append(self._ledger_event("strategy.live_exit", {"position": pos["id"], "symbol": pos["symbol"], "price": fill.price, "qty": fill.qty, "net_inr": pos["live_net_inr"], "slippage_bps": rec.get("slippage_bps")}))
+        else:
+            self.exit_failures += 1
+            log.error("strategy.live_exit_failed", symbol=pos["symbol"], position=pos["id"], reason=rec.get("reason"))
+            self._writes.append(self._ledger_event("strategy.live_exit_failed", {"position": pos["id"], "symbol": pos["symbol"], "reason": rec.get("reason")}))
+        self._writes.append(self._ledger_position(pos))
+        self._writes.append(self._write_day())
+        self._flush_writes()
+
+    def live_summary(self) -> dict[str, Any]:
+        allp = [*self.positions.values(), *self.trades]
+        ent = [(p.get("live") or {}).get("status") for p in allp]
+        ex = [(p.get("live_exit") or {}).get("status") for p in allp]
+        return {
+            "pending": ent.count("PENDING") + ex.count("PENDING"), "filled": ent.count("FILLED"), "unknown": ent.count("UNKNOWN") + ex.count("UNKNOWN"),
+            "rejected": self.live_rejected, "exit_filled": ex.count("FILLED"), "exit_failed": ex.count("FAILED"),
+            "net_inr": round(sum(p.get("live_net_inr") or 0 for p in allp), 2),
+        }
 
     # -- persistence -----------------------------------------------------------------------------------
 
@@ -630,6 +718,7 @@ class ShadowRunner:
                 "sum_gross_inr": round(sum(t["gross_inr"] or 0 for t in closed), 2), "sum_net_inr": round(sum(t["net_inr"] or 0 for t in closed), 2),
                 "sum_r": round(sum(t["r"] or 0 for t in closed), 2), "open_pnl_bps": round(sum(p["pnl_bps"] for p in self.positions.values()), 1),
                 "by_rule": by_rule,
+                "live": self.live_summary(),
             },
             "stages": stages, "signals": list(reversed(self.signals)), "positions": sorted(self.positions.values(), key=lambda p: -p["opened_ts"]),
             "trades": list(reversed(closed)),

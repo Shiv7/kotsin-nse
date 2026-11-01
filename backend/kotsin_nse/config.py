@@ -239,6 +239,33 @@ class Settings(BaseSettings):
     live_daily_loss_inr: float = 2_000.0
     live_entry_cutoff_ist: str = "15:10"
 
+    # ---- the live route (2026-11-01) -------------------------------------------------------------
+    #: the strategy's orders go to the broker in a live mode. False keeps every live mode refusable at
+    #: the switch (``Engine.set_mode``): a restart, a .env typo or a UI click alone arms nothing.
+    live_route_enabled: bool = False
+    #: the static IP registered with 5paisa for this API key (SEBI's retail-algo framework, in force
+    #: 2026-04-01). When set, a live mode is refused unless the box's detected public IP equals it — the
+    #: broker rejects an order from any other address, and a book that records exits the broker refused
+    #: is the failure this guards against.
+    live_static_ip: str | None = None
+    #: API orders a second per exchange: SEBI's threshold is 10, 5paisa answers the 11th with HTTP 429
+    live_orders_per_second: float = 8.0
+    #: limit-with-protection: the limit is the touch moved this far through the book (5paisa's API takes
+    #: limit orders only). An exit gets the wider band — it must fill; an entry may miss.
+    live_protect_entry_bps: float = 10.0
+    live_protect_exit_bps: float = 30.0
+    #: seconds an order may sit unfilled before an exit is chased (its limit widened by another band, up
+    #: to ``live_chase_steps`` times) and an entry is cancelled
+    live_fill_timeout_s: float = 15.0
+    live_chase_steps: int = 2
+    #: the engine's positions against the broker's book this often in a live mode; a mismatch freezes entries
+    live_reconcile_s: float = 60.0
+    #: an exit still unfilled after the chase: halt and use the broker's bulk square-off (True), or halt
+    #: and leave the position to the operator (False, the default — the square-off is a hammer)
+    live_exit_fallback_squareoff: bool = False
+    #: 5paisa's exchange-specific AlgoID of a registered algo app; 0 for a non-algo app (≤ 10 orders/s)
+    fp_algo_id: int = 0
+
     # ---- cost model ----------------------------------------------------------------------------
     # Measured on this book, not assumed: at ₹33,000/position the NSE cash round trip was 0.299%,
     # of which 81% was flat brokerage (₹40/order × 2) — see kotsin-box/SESSION-PRIMER.md. These are

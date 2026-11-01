@@ -39,10 +39,13 @@ from .bars.unified import BarSource, UnifiedBar
 from .bars.verify import BarReconciler
 from .bus import Bus, Topic
 from .config import Segment, Settings
-from .domain import Instrument, InstrumentKind
-from .exec.gateway import Gateway, LiveCaps, Mode
+from .domain import Instrument, InstrumentKind, Order, OrderIntent, OrderSide, Purpose, to_json
+from .exec.events import OrderEvents
+from .exec.gateway import LIVE_MODES, Decision, Gateway, LiveCaps, LiveContext, Mode, OrderResult
 from .exec.live import LiveExecutor
 from .exec.paper import BookSnapshot, PaperMatcher
+from .exec.reconcile import LocalPosition, Reconciler
+from .exec.throttle import OrderThrottle
 from .feed import build_source
 from .feed.base import Channel, DepthMsg, OIMsg, TickMsg
 from .feed.rate import FeedRateMeter
@@ -123,12 +126,15 @@ class Engine:
         self.auth = Authenticator(settings, self.http)
         self.rest = FivePaisaREST(settings, self.http, self.auth)
         self.catalogue_loader = CatalogueLoader(settings, self.rest.scrip_master_csv)
+        #: the broker's order / trade confirmations (``exec/events.py``), pushed on the feed socket
+        self.order_events = OrderEvents(on_frame=self._archive_order_frame)
         self.feed = build_source(
             settings,
             self.auth,
             on_tick=self._on_tick,
             on_depth=self._on_depth,
             on_oi=self._on_oi,
+            on_order=self._on_order,
         )
         self.aggregator = Aggregator(self.store, on_bar_close=self._on_bar_close)
         self._segment_by_code: dict[str, Segment] = {}
@@ -190,6 +196,11 @@ class Engine:
         self._rewarm_ts = 0.0
         self.matcher = PaperMatcher(self.costs)
         self.live_exec: LiveExecutor | None = None
+        self.live_reconciler: Reconciler | None = None
+        self._last_reconcile = 0.0
+        self._margin: dict[str, Any] = {}
+        self._margin_ts = 0.0
+        self._margin_balance = 0.0
         self.reconciler_ready = False
         self.gateway = Gateway(
             matcher=self.matcher,
@@ -197,6 +208,8 @@ class Engine:
             halted=self.halted,
             book_for=self.book_for,
             ltp_for=self.ltp_for,
+            router=self._route_live,
+            ctx_for=self._live_context,
             caps=LiveCaps(
                 segments=tuple(s.value for s in settings.live_segment_list),
                 max_notional_inr=settings.live_max_qty_rupees,
@@ -305,8 +318,19 @@ class Engine:
 
     async def _boot_market(self) -> None:
         cat = await self.catalogue_loader.ensure()
-        self.live_exec = LiveExecutor(self.rest, self.costs)
+        self.live_exec = LiveExecutor(
+            self.rest,
+            self.costs,
+            events=self.order_events,
+            throttle=OrderThrottle(self.s.live_orders_per_second),
+            touch_for=self._touch_for,
+            protect_entry_bps=self.s.live_protect_entry_bps,
+            protect_exit_bps=self.s.live_protect_exit_bps,
+            fill_timeout_s=self.s.live_fill_timeout_s,
+            chase_steps=self.s.live_chase_steps,
+        )
         self.gateway.live = self.live_exec
+        self.live_reconciler = Reconciler(self.rest)
         self.reconciler_ready = True
 
         # Pass 1 — who is in the universe. scripFinder's rule: every root with a derivative.
@@ -644,6 +668,157 @@ class Engine:
         # finished sessions only: the broker returns the running day's candle too (bars/daily.py)
         self.store.seed(inst.symbol, "1d", daily_bars(inst, rows, now=time.time()))
 
+    # -- the live route (2026-11-01) ---------------------------------------------------------------
+
+    async def _on_order(self, row: dict[str, Any]) -> None:
+        self.order_events.ingest(row)
+
+    def _archive_order_frame(self, row: dict[str, Any], recv_ts: float) -> None:
+        self.archive.order(row, recv_ts)
+
+    def _touch_for(self, intent: OrderIntent) -> float | None:
+        """The side of the book a protected limit is set from: the ask for a buy, the bid for a sell."""
+        book = self.book_for(intent.instrument.scrip_code)
+        if book is not None:
+            px = book.best_ask if intent.side is OrderSide.BUY else book.best_bid
+            if px:
+                return float(px)
+        return self.ltp_for(intent.instrument.scrip_code)
+
+    def _route_live(self, intent: OrderIntent, order: Order) -> None:
+        """The gateway's router: the strategy decided synchronously; the placement runs off its path."""
+        self._spawn(self._place_live(intent, order), "live.place")
+
+    async def _place_live(self, intent: OrderIntent, order: Order) -> None:
+        sym = intent.instrument.symbol
+        try:
+            res = await self.gateway.place_live(intent, order)
+        except Exception as exc:  # noqa: BLE001 - an exit that failed is the loudest thing this engine does
+            if order.status != "FAILED":
+                order.status, order.note = "FAILED", str(exc)[:300]
+            res = OrderResult(Decision.LIVE_FAILED, order)
+            log.error("live.order_failed", symbol=sym, purpose=intent.purpose.value, qty=intent.qty, error=repr(exc))
+            self.telegram.fire_and_forget(
+                f"🚨 LIVE {intent.purpose.value} FAILED {sym} {intent.qty}: {str(exc)[:160]}", key=f"live-fail-{intent.client_order_id}"
+            )
+            if intent.purpose is Purpose.EXIT:
+                await self.set_halt(True, f"exit failed: {sym}")
+                if self.s.live_exit_fallback_squareoff and self.live_exec is not None:
+                    try:
+                        await self.live_exec.square_off_all()
+                    except Exception as exc2:  # noqa: BLE001
+                        log.error("live.square_off_failed", error=str(exc2))
+        try:
+            await self.ledger.event(
+                "live.result",
+                {"client_order_id": intent.client_order_id, "symbol": sym, "purpose": intent.purpose.value, "decision": res.decision.value,
+                 "status": order.status, "note": order.note, "fill": to_json(res.fill) if res.fill is not None else None, "meta": res.meta},
+            )
+        except Exception as exc:  # noqa: BLE001 - the ledger never blocks the book
+            log.warning("live.result_not_logged", error=str(exc))
+        if self.strategy is not None:
+            self.strategy.on_live_result(intent.client_order_id, res)
+
+    def _local_live_positions(self, *, include_pending: bool = False) -> list[LocalPosition]:
+        """What the engine believes the broker holds: the shadow book's positions whose entry the broker filled."""
+        if self.strategy is None:
+            return []
+        ok = ("FILLED", "PENDING", "UNKNOWN") if include_pending else ("FILLED",)
+        out: list[LocalPosition] = []
+        for p in self.strategy.positions.values():
+            if (p.get("live") or {}).get("status") in ok and (p.get("live_exit") or {}).get("status") != "FILLED":
+                out.append(LocalPosition(str(p["scrip_code"]), str(p["symbol"]), int(p["qty"])))
+        return out
+
+    def _live_day_pnl(self) -> float:
+        if self.strategy is None:
+            return 0.0
+        return float(sum(p.get("live_net_inr") or 0 for p in self.strategy.trades))
+
+    def _live_context(self, intent: OrderIntent) -> LiveContext:
+        fresh = (time.time() - self._margin_ts) < 300
+        return LiveContext(
+            balance=self._margin_balance,
+            open_positions=len(self._local_live_positions(include_pending=True)),
+            day_pnl_inr=self._live_day_pnl(),
+            now_hm_ist=ist_hm(time.time()),
+            segment=intent.instrument.segment.value,
+            exposure_ok=fresh,
+            exposure_reason="" if fresh else "balance unknown: the broker's margin has not been read in 5 minutes",
+        )
+
+    async def _refresh_margin(self) -> None:
+        try:
+            m = await self.rest.margin()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("live.margin_failed", error=str(exc))
+            return
+        self._margin, self._margin_ts = dict(m), time.time()
+        for k in ("NetAvailableMargin", "AvailableMargin", "TotalAvailableMargin", "Ledgerbalance", "LedgerBalance"):
+            v = m.get(k)
+            if v in (None, ""):
+                continue
+            try:
+                self._margin_balance = float(v)
+                break
+            except (TypeError, ValueError):
+                continue
+
+    async def reconcile_now(self) -> dict[str, Any]:
+        """The engine's live positions against the broker's book. A mismatch freezes entries (``halted``)."""
+        if self.live_reconciler is None:
+            return {"error": "no reconciler (no broker session)"}
+        report = await self.live_reconciler.run(self._local_live_positions())
+        self._last_reconcile = time.time()
+        if not report.clean:
+            self.telegram.fire_and_forget(
+                f"⚠️ reconcile: {report.error or str(len(report.mismatches)) + ' mismatch(es)'} — entries frozen", key="reconcile"
+            )
+        return report.to_json()
+
+    def live_readiness(self) -> list[str]:
+        """Why a live mode cannot be armed right now (empty = ready). Each is a thing to fix, not a flag to flip."""
+        out: list[str] = []
+        if not self.s.live_route_enabled:
+            out.append("KN_LIVE_ROUTE_ENABLED is false — the strategy's orders are not routed to the broker")
+        if self.live_exec is None:
+            out.append("no live executor (no broker session)")
+        if self.live_reconciler is None:
+            out.append("no reconciler (no broker session)")
+        elif self.live_reconciler.frozen:
+            out.append(f"reconcile frozen: {self.live_reconciler.freeze_reason}")
+        if self.s.live_static_ip:
+            ip = self.auth.public_ip_cached
+            if ip != self.s.live_static_ip:
+                out.append(f"public IP {ip or 'unknown'} is not the registered static IP {self.s.live_static_ip}")
+        if self.s.feed_enabled and not self.feed.health.connected:
+            out.append("feed socket not connected (the broker's order confirmations ride on it)")
+        if self.strategy is None:
+            out.append("no strategy to route")
+        return out
+
+    def live_status(self) -> dict[str, Any]:
+        blockers = self.live_readiness()
+        inner = getattr(self.feed, "feed", None)
+        return {
+            "mode": self.mode().value,
+            "armed_until": self._armed_until,
+            "route_enabled": self.s.live_route_enabled,
+            "ready": not blockers,
+            "blockers": blockers,
+            "static_ip": self.s.live_static_ip,
+            "public_ip": self.auth.public_ip_cached,
+            "feed_host": getattr(inner, "connected_host", ""),
+            "order_frames": getattr(self.feed.health, "orders", 0),
+            "executor": self.live_exec.stats() if self.live_exec is not None else None,
+            "events": self.order_events.stats(),
+            "reconcile": self.live_reconciler.stats() if self.live_reconciler is not None else None,
+            "positions": self.strategy.live_summary() if self.strategy is not None else None,
+            "margin_balance": self._margin_balance,
+            "margin_ts": self._margin_ts or None,
+            "halted": self.halted(),
+        }
+
     # -- control -----------------------------------------------------------------------------------
 
     async def _load_control(self) -> None:
@@ -671,6 +846,8 @@ class Engine:
             return True, self._halt_reason
         if self.gateway.breaker_tripped:
             return True, "order gateway circuit breaker"
+        if self.live_reconciler is not None and self.live_reconciler.frozen and self._mode in LIVE_MODES:
+            return True, f"reconcile: {self.live_reconciler.freeze_reason}"
         return False, ""
 
     async def set_mode(self, mode: Mode, *, armed_minutes: int | None = None) -> dict[str, Any]:
@@ -678,15 +855,18 @@ class Engine:
         if mode in (Mode.LIVE, Mode.LIVE_CAPPED):
             if not armed_minutes:
                 raise ValueError(f"{mode.value} requires armed_minutes — arming is never implicit")
-            # 2026-11-01 review: the strategy submits through ``Gateway.submit``, which has no live
-            # path — in a live mode it refuses every intent, exits included, and ``Reconciler`` is
-            # wired nowhere. Arming would produce a book that books exits it never sent. Refuse
-            # until the live route (submit_live + a LiveContext + reconciliation) exists — HANDOFF §6.
+            # The live route (2026-11-01): a live mode is armed only when every piece that makes a
+            # routed order real is in place — the route switched on, a broker session, the reconciler
+            # clean, the registered static IP, the socket that carries the confirmations — and the
+            # broker's book agrees with ours right now. Without a strategy the switch routes nothing.
             if self.s.strategy_enabled:
-                raise ValueError(
-                    f"{mode.value} cannot be armed: the strategy's orders are not routed to the broker "
-                    "(Gateway.submit_live is unwired; see docs/HANDOFF.md §6 'before LIVE')"
-                )
+                blockers = self.live_readiness()
+                if blockers:
+                    raise ValueError(f"{mode.value} cannot be armed — the strategy's orders are not routed: " + "; ".join(blockers))
+                report = await self.reconcile_now()
+                if not report.get("clean"):
+                    raise ValueError(f"{mode.value} cannot be armed: the broker's book disagrees — {report.get('error') or report.get('mismatches')}")
+                await self._refresh_margin()
             armed = time.time() + armed_minutes * 60
         self._mode, self._armed_until = mode, armed
         await self.ledger.set_mode(mode.value, armed)
@@ -1118,6 +1298,13 @@ class Engine:
                     if self.s.has_credentials and self.s.engine_enabled:
                         await self.catalogue_loader.ensure()
 
+                if self.live_reconciler is not None and (self.mode() in LIVE_MODES or self._local_live_positions()):
+                    if self.mode() in LIVE_MODES and now - self._margin_ts > 60:
+                        self._spawn(self._refresh_margin(), "live.margin")
+                    if now - self._last_reconcile > self.s.live_reconcile_s and self.gateway.live_pending == 0:
+                        self._last_reconcile = now
+                        self._spawn(self.reconcile_now(), "reconcile.positions")
+
                 # The socket was opened with a token that dies at 23:59:59 IST. Once it has, drop
                 # the socket so the run loop reconnects with a fresh login — otherwise it can sit
                 # "connected" on a dead token and deliver nothing at the open. A minute of grace
@@ -1536,6 +1723,16 @@ class Engine:
             ),
             Check("breaker", not self.gateway.breaker_tripped),
             Check(
+                "live_route",
+                (self.mode() not in LIVE_MODES) or not self.live_readiness(),
+                detail="; ".join(self.live_readiness()) if self.mode() in LIVE_MODES else "not in a live mode",
+            ),
+            Check(
+                "reconcile",
+                not (self.live_reconciler is not None and self.live_reconciler.frozen),
+                detail=self.live_reconciler.freeze_reason if self.live_reconciler is not None and self.live_reconciler.frozen else "",
+            ),
+            Check(
                 "bars_warm",
                 sum(1 for sym in self.underlyings if self.store.count(sym, PRIMARY_TF) >= 21)
                 >= max(1, len(self.underlyings) // 2)
@@ -1563,6 +1760,7 @@ class Engine:
             "feed_rate": self.feed_rate.snapshot(),
             "bars": self.aggregator.stats() | self.store.stats(),
             "gateway": self.gateway.stats(),
+            "live": self.live_status(),
             "rest": self.rest.stats(),
             "catalogue": self.catalogue_loader.catalogue.stats(),
             "universe": self.universe_builder.summary(self.groups) if self.universe_builder else {},

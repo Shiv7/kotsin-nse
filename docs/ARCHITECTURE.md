@@ -130,3 +130,19 @@ minutes and at shutdown, in a worker thread.
 | PIVOT_CONFLUENCE | deliberately suspended 2026-04-02 |
 | MERE / MICROALPHA | deleted upstream; MICROALPHA never emitted a signal |
 | Kafka / Redis / Mongo | one process does not need a broker between its own functions |
+
+## The live route (2026-11-01)
+
+```
+strategy.runner ──submit──▶ exec.gateway ──router──▶ engine._place_live ──▶ gateway.place_live ──▶ exec.live.LiveExecutor
+      ▲                      (gates, caps)            (spawned task)                                   │ throttle → protected limit
+      │                                                                                               │ → rest.place_order
+      └── on_live_result ◀── OrderResult (fill / refusal, via, latency) ◀─────────────────────────────┤ → events.wait (socket frames)
+                                                                                                      │   ∥ rest.order_status (poll)
+venue.fivepaisa.ws ──order frames──▶ engine._on_order ──▶ exec.events.OrderEvents ◀───────────────────┘ → order_book (rate), modify (chase), cancel
+                                              └──▶ archive/orders (raw)
+exec.reconcile.Reconciler ◀── engine.reconcile_now (arming, every live_reconcile_s) ── halts entries on a mismatch
+```
+
+The strategy's decision stays synchronous; only the placement is a task. The book is scored on the rule's prices
+and the broker's fill is recorded beside it, so slippage and latency are measured on every live order.

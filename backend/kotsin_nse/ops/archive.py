@@ -21,6 +21,7 @@ ticks a minute they would be a gigabyte a day for information the 1m bar already
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from collections import defaultdict
@@ -43,6 +44,8 @@ KEYS: dict[str, tuple[str, ...]] = {
     "depth": ("scrip_code", "ts"),
     "flow": ("code", "ts"),
     "fno": ("symbol", "ts"),
+    #: the broker's order / trade confirmation frames, raw — the first real order confirms the schema
+    "orders": ("remote_id", "recv_ts", "req_type"),
 }
 
 
@@ -127,6 +130,22 @@ class DailyArchive:
                 row[f"{side}{i + 1}p"] = float(p) if p is not None else None
                 row[f"{side}{i + 1}q"] = float(q) if q is not None else None
         self._add("depth", ts, row)
+
+    def order(self, row: Mapping[str, Any], recv_ts: float) -> None:
+        """One order / trade confirmation frame as the broker sent it (plus the keys that index it)."""
+        self._add(
+            "orders",
+            recv_ts,
+            {
+                "recv_ts": float(recv_ts),
+                "remote_id": str(row.get("RemoteOrderId") or row.get("RemoteOrderID") or ""),
+                "req_type": str(row.get("ReqType") or ""),
+                "req_status": str(row.get("ReqStatus") if row.get("ReqStatus") is not None else ""),
+                "status": str(row.get("Status") or row.get("OrderStatus") or ""),
+                "scrip_code": str(row.get("ScripCode") or ""),
+                "raw": json.dumps(dict(row), default=str)[:8000],
+            },
+        )
 
     def flow(self, row: Mapping[str, Any]) -> None:
         self._add("flow", float(row["ts"]), dict(row))

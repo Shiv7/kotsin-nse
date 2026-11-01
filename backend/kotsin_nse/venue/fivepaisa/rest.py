@@ -248,9 +248,19 @@ class FivePaisaREST:
     ) -> str:
         """Place an order and return the broker's ``RemoteOrderID`` echo.
 
-        ``price=0`` is a market order. ``remote_order_id`` is our idempotency key and the broker
-        echoes it back, which is what makes reconciliation possible after a crash.
+        ``remote_order_id`` is our idempotency key (≤ 38 characters; the broker echoes it back, which
+        is what makes reconciliation possible after a crash). 5paisa's API accepts **limit orders
+        only** (its SEBI-compliance notice, 2026-04-01), so ``price`` must be > 0: a market order is
+        refused here before it is refused there. ``AlgoID`` is the exchange-specific id of a registered
+        algo app; 0 for a non-algo app (≤ 10 orders a second), as the place-order doc says.
         """
+        if price <= 0:
+            raise VenueError(
+                f"{instrument.symbol}: 5paisa's API accepts limit orders only — a market order (price 0) is "
+                "refused; send a protected limit"
+            )
+        if len(remote_order_id) > 38:
+            raise VenueError(f"RemoteOrderID longer than 38 characters: {remote_order_id!r}")
         body: dict[str, Any] = {
             "ClientCode": self.s.fp_client_code,
             "Exchange": instrument.exch,
@@ -261,12 +271,12 @@ class FivePaisaREST:
             "DisQty": 0,
             "IsIntraday": intraday,
             "AHPlaced": "N",
-            "RemoteOrderID": remote_order_id[:38],
+            "RemoteOrderID": remote_order_id,
             "AppSource": self.s.fp_app_source,
             "iOrderValidity": 0,
+            "AlgoID": int(self.s.fp_algo_id or 0),
+            "Price": instrument.round_price(price),
         }
-        if price > 0:
-            body["Price"] = instrument.round_price(price)
         if stop_trigger > 0:
             body["StopLossPrice"] = instrument.round_price(stop_trigger)
             body["IsStopLossOrder"] = True

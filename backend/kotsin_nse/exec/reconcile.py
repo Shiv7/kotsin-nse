@@ -60,6 +60,26 @@ class Mismatch:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class LocalPosition:
+    """What the engine believes it holds, in the only terms the broker's book can be compared with."""
+
+    scrip_code: str
+    symbol: str
+    qty: int
+
+
+def _as_local(p: Any) -> LocalPosition | None:
+    if isinstance(p, LocalPosition):
+        return p if p.qty else None
+    inst = getattr(p, "instrument", None)
+    if inst is not None:  # domain.Position
+        if getattr(p, "status", "OPEN") != "OPEN" or not getattr(p, "qty_remaining", 0):
+            return None
+        return LocalPosition(str(inst.scrip_code), str(inst.symbol), int(p.qty_remaining))
+    return None
+
+
 @dataclass(slots=True)
 class ReconcileReport:
     ts: float = field(default_factory=time.time)
@@ -87,9 +107,11 @@ class Reconciler:
         self.last: ReconcileReport = ReconcileReport()
         self.frozen = False
         self.freeze_reason = ""
+        self.runs = 0
 
-    async def run(self, positions: list[Position]) -> ReconcileReport:
+    async def run(self, positions: list[Position] | list[LocalPosition] | list[Any]) -> ReconcileReport:
         report = ReconcileReport()
+        self.runs += 1
         try:
             venue_rows = await self.rest.net_positions()
         except VenueError as exc:
@@ -100,9 +122,11 @@ class Reconciler:
             return report
 
         venue = {r["scrip_code"]: r for r in venue_rows if r["net_qty"] != 0}
-        local = {
-            p.instrument.scrip_code: p for p in positions if p.status == "OPEN" and p.qty_remaining
-        }
+        local: dict[str, LocalPosition] = {}
+        for raw in positions:
+            lp = _as_local(raw)
+            if lp is not None:
+                local[lp.scrip_code] = lp
         report.checked = len(venue) + len(local)
 
         for code, row in venue.items():
@@ -119,13 +143,13 @@ class Reconciler:
                         "broker holds a position the engine does not know about",
                     )
                 )
-            elif p.qty_remaining != vq:
+            elif p.qty != vq:
                 report.mismatches.append(
                     Mismatch(
                         MismatchKind.QTY_MISMATCH,
                         code,
-                        p.instrument.symbol,
-                        p.qty_remaining,
+                        p.symbol,
+                        p.qty,
                         vq,
                     )
                 )
@@ -135,8 +159,8 @@ class Reconciler:
                     Mismatch(
                         MismatchKind.PHANTOM,
                         code,
-                        p.instrument.symbol,
-                        p.qty_remaining,
+                        p.symbol,
+                        p.qty,
                         0,
                         "engine holds a position the broker does not show",
                     )
@@ -170,5 +194,6 @@ class Reconciler:
         return {
             "frozen": self.frozen,
             "freeze_reason": self.freeze_reason,
+            "runs": self.runs,
             "last": self.last.to_json(),
         }

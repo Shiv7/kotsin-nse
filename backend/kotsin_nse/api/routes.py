@@ -692,6 +692,28 @@ def build_app(engine: Engine) -> FastAPI:
         engine.gateway.reset_breaker()
         return engine.gateway.stats()
 
+    @api.get("/control/live")
+    async def live_status() -> dict[str, Any]:
+        """The live route's readiness (every blocker named), the executor's fills and latencies, the
+        broker's confirmation frames, the reconciler, the day's live positions."""
+        return engine.live_status()
+
+    @api.get("/control/reconcile")
+    async def reconcile_status() -> dict[str, Any]:
+        return engine.live_reconciler.stats() if engine.live_reconciler is not None else {"frozen": False, "runs": 0, "last": None}
+
+    @api.post("/control/reconcile/run")
+    async def reconcile_run() -> dict[str, Any]:
+        return await engine.reconcile_now()
+
+    @api.post("/control/reconcile/ack")
+    async def reconcile_ack() -> dict[str, Any]:
+        """Operator override: accept the broker's book as read and let entries resume."""
+        if engine.live_reconciler is None:
+            raise HTTPException(400, "no reconciler (no broker session)")
+        engine.live_reconciler.acknowledge()
+        return engine.live_reconciler.stats()
+
     app.include_router(api)
 
     # One socket of state diffs: every forming bar and every LTP, once a second. The chart's

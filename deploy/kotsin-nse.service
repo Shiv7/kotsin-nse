@@ -1,6 +1,6 @@
 [Unit]
 Description=kotsin-nse trading engine
-After=network-online.target
+After=network-online.target chrony.service
 Wants=network-online.target
 
 [Service]
@@ -8,17 +8,21 @@ Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/kotsin-nse/backend
 EnvironmentFile=/home/ubuntu/kotsin-nse/backend/.env
-ExecStart=/home/ubuntu/.local/bin/uv run kotsin-nse
+Environment=PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=TZ=Asia/Kolkata
+ExecStart=/home/ubuntu/.local/bin/uv run kotsin-nse serve
 Restart=on-failure
 # Back off rather than thrash. A crash loop that restarts instantly is how a small problem
 # becomes an outage.
 RestartSec=30
 StartLimitBurst=3
 StartLimitIntervalSec=600
-# A ceiling that belongs to the machine, not to a number someone remembered.
-MemoryMax=1G
+# A ceiling that belongs to the machine, not to a number someone remembered (the engine sits at ~90 MB RSS).
+MemoryMax=1200M
 KillSignal=SIGTERM
 TimeoutStopSec=30
+StandardOutput=append:/home/ubuntu/kotsin-nse/backend/data-live/logs/engine.log
+StandardError=inherit
 
 [Install]
 WantedBy=multi-user.target

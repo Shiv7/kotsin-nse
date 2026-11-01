@@ -18,6 +18,13 @@ dicts in this order is the whole mechanism.
 Channels: ``MarketFeedV3`` (ticks), ``MarketDepthService`` (order book), ``GetScripInfoForFuture``
 (open interest — futures and options only; cash equity has no OI, which is the defect that made
 MicroAlpha's OI term structurally zero for its entire life).
+
+**Order confirmations** (xstream dev-docs, order-tracking-system/web-socket-trade, read 2026-11-01): the
+broker pushes every order and trade event (``ReqType`` P/M/C/T/S) on the same socket, keyed by our
+``RemoteOrderId`` — but only on the feed host named by the session token's ``RedirectServer`` claim
+(``O`` openfeed, ``A`` aopenfeed, ``B`` bopenfeed); market data comes from any of them. So the one socket
+connects to that host, subscribes ``OrderTradeConfirmations`` when an order handler is attached, and hands
+those frames to it untouched.
 """
 
 from __future__ import annotations
@@ -41,6 +48,9 @@ log = structlog.get_logger(__name__)
 
 METHOD = {"mf": "MarketFeedV3", "md": "MarketDepthService", "oi": "GetScripInfoForFuture"}
 OPERATION = {"s": "Subscribe", "u": "Unsubscribe"}
+ORDER_METHOD = "OrderTradeConfirmations"
+#: the feed host per ``RedirectServer`` claim; the default host when the claim is absent or unknown
+REDIRECT_HOSTS = {"O": "openfeed", "A": "aopenfeed", "B": "bopenfeed"}
 
 #: The broker's 20-level depth frames are large; a batch bigger than this is split.
 MAX_ENTRIES_PER_FRAME = 200
@@ -60,6 +70,30 @@ def build_frame(
             "Operation": OPERATION[operation],
         },
         separators=(",", ":"),
+    )
+
+
+def build_order_frame(client_code: str, operation: str = "s") -> str:
+    return json.dumps(
+        {"Method": ORDER_METHOD, "Operation": OPERATION[operation], "ClientCode": client_code},
+        separators=(",", ":"),
+    )
+
+
+def ws_url_for(base: str, redirect_server: str | None) -> str:
+    """The feed URL on the host the session's token names (order confirmations ride only there)."""
+    host = REDIRECT_HOSTS.get((redirect_server or "").strip().upper())
+    if not host or "://openfeed." not in base:
+        return base
+    return base.replace("://openfeed.", f"://{host}.", 1)
+
+
+def is_order_frame(row: Any) -> bool:
+    """An order / trade confirmation, as documented: ``ReqType`` plus one of the order ids."""
+    return (
+        isinstance(row, dict)
+        and "ReqType" in row
+        and any(k in row for k in ("RemoteOrderId", "RemoteOrderID", "BrokerOrderID", "BrokerOrderId"))
     )
 
 
@@ -89,6 +123,7 @@ class FeedHealth:
     ticks: int = 0
     depth: int = 0
     oi: int = 0
+    orders: int = 0
     reconnects: int = 0
     parse_errors: int = 0
     subscriptions: dict[str, int] = field(default_factory=dict)
@@ -115,12 +150,15 @@ class FivePaisaFeed:
         on_tick: Callable[[dict[str, Any]], Awaitable[None]],
         on_depth: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         on_oi: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        on_order: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> None:
         self.s = settings
         self.auth = auth
         self.on_tick = on_tick
         self.on_depth = on_depth
         self.on_oi = on_oi
+        self.on_order = on_order
+        self.connected_host: str = ""
         self.health = FeedHealth()
         self._desired: dict[str, dict[str, Instrument]] = {"mf": {}, "md": {}, "oi": {}}
         self._ws: Any = None
@@ -194,13 +232,21 @@ class FivePaisaFeed:
     async def _connect_and_read(self) -> None:
         session = await self.auth.token()
         self.token_expires_at = session.expires_at
-        url = f"{self.s.endpoints.ws}{session.access_token}|{session.client_code}"
+        base = ws_url_for(self.s.endpoints.ws, getattr(session, "redirect_server", ""))
+        self.connected_host = base.split("://", 1)[-1].split("/", 1)[0]
+        url = f"{base}{session.access_token}|{session.client_code}"
         async with websockets.connect(url, ping_interval=25, ping_timeout=45, max_size=8 << 20) as ws:
             async with self._lock:
                 self._ws = ws
             self.health.connected = True
             self.health.connected_since = time.time()
-            log.info("feed.connected", subscriptions=self.health.subscriptions)
+            log.info("feed.connected", subscriptions=self.health.subscriptions, host=self.connected_host,
+                     order_confirmations=self.on_order is not None)
+            if self.on_order is not None:
+                try:
+                    await ws.send(build_order_frame(str(self.s.fp_client_code), "s"))
+                except Exception as exc:  # noqa: BLE001 - the docs say updates are pushed regardless
+                    log.warning("feed.order_subscribe_failed", error=str(exc))
             for channel, wanted in self._desired.items():
                 if wanted:
                     await self._send_batched(channel, "s", list(wanted.values()))
@@ -233,6 +279,11 @@ class FivePaisaFeed:
                 log.warning("feed.dispatch_failed", error=str(exc))
 
     async def _dispatch(self, row: dict[str, Any]) -> None:
+        if is_order_frame(row):
+            self.health.orders += 1
+            if self.on_order is not None:
+                await self.on_order(row)
+            return
         if "Details" in row or "MarketDepthData" in row:
             if self.on_depth:
                 self.health.depth += 1

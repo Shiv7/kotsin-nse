@@ -13,7 +13,7 @@ from ..config import Settings
 from ..domain import Instrument
 from ..venue.fivepaisa.auth import Authenticator
 from ..venue.fivepaisa.ws import FeedHealth, FivePaisaFeed
-from .base import Capabilities, Channel, DepthMsg, OIMsg, OnDepth, OnOI, OnTick, TickMsg
+from .base import Capabilities, Channel, DepthMsg, OIMsg, OnDepth, OnOI, OnOrder, OnTick, TickMsg
 
 NAME = "fivepaisa"
 WIRE = {Channel.QUOTES: "mf", Channel.DEPTH: "md", Channel.OI: "oi"}
@@ -38,6 +38,7 @@ class FivePaisaSource:
         on_tick: OnTick,
         on_depth: OnDepth | None = None,
         on_oi: OnOI | None = None,
+        on_order: OnOrder | None = None,
     ) -> None:
         async def tick(row: dict[str, Any]) -> None:
             row["source"] = NAME
@@ -53,7 +54,7 @@ class FivePaisaSource:
             if on_oi is not None:
                 await on_oi(cast(OIMsg, row))
 
-        self.feed = FivePaisaFeed(settings, auth, on_tick=tick, on_depth=depth, on_oi=oi)
+        self.feed = FivePaisaFeed(settings, auth, on_tick=tick, on_depth=depth, on_oi=oi, on_order=on_order)
 
     @property
     def health(self) -> FeedHealth:

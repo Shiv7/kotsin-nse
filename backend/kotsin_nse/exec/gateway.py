@@ -17,13 +17,13 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from ..domain import Fill, Order, OrderIntent, Purpose, new_id
+from ..domain import Fill, Order, OrderIntent, OrderSide, Purpose, new_id
 from ..market.session import ist_day
 from .paper import BookSnapshot, NoBook, PaperMatcher
 
@@ -44,7 +44,9 @@ LIVE_MODES = (Mode.LIVE_CAPPED, Mode.LIVE)
 
 
 class Decision(StrEnum):
-    SUBMITTED = "SUBMITTED"
+    SUBMITTED = "SUBMITTED"  # a live order handed to the router; its fill arrives through ``place_live``
+    LIVE_FILLED = "LIVE_FILLED"
+    LIVE_FAILED = "LIVE_FAILED"
     PAPER_FILLED = "PAPER_FILLED"
     SHADOW_OK = "SHADOW_OK"
     SHADOW_WOULD_REJECT = "SHADOW_WOULD_REJECT"
@@ -87,10 +89,16 @@ class OrderResult:
     decision: Decision
     order: Order
     fill: Fill | None = None
+    #: the live route's measurements (via, latency, price sent, chased, partial) — empty elsewhere
+    meta: dict[str, Any] = field(default_factory=dict)
 
     @property
     def filled(self) -> bool:
         return self.fill is not None
+
+
+Router = Callable[[OrderIntent, Order], None]
+ContextFor = Callable[[OrderIntent], LiveContext]
 
 
 class Gateway:
@@ -104,6 +112,8 @@ class Gateway:
         ltp_for: Callable[[str], float | None],
         caps: LiveCaps | None = None,
         live: LiveExecutor | None = None,
+        router: Router | None = None,
+        ctx_for: ContextFor | None = None,
     ) -> None:
         self._matcher = matcher
         self._mode = mode
@@ -112,6 +122,13 @@ class Gateway:
         self._ltp_for = ltp_for
         self.caps = caps or LiveCaps()
         self.live = live
+        #: the live route (2026-11-01): ``submit`` in a live mode runs every gate synchronously, hands the
+        #: intent to the router (the engine schedules ``place_live``) and answers SUBMITTED at once; the
+        #: fill comes back through ``place_live``'s result. The strategy's decision stays synchronous.
+        self.router = router
+        self.ctx_for = ctx_for
+        self.routed = 0
+        self.live_pending = 0
         self._seen: set[str] = set()
         self.orders_today = 0
         self.consecutive_rejects = 0
@@ -207,15 +224,26 @@ class Gateway:
             self.orders_today += 1
             return OrderResult(Decision.PAPER_FILLED, order, fill)
 
-        # No caller routes through ``submit_live`` yet (2026-11-01 review): in a live mode every
-        # intent that reaches here — EXITS INCLUDED — is refused, which the docstring's "exits are
-        # never blocked" does not survive. Counted and logged loudly; ``Engine.set_mode`` refuses
-        # to arm a live mode while this is so.
-        self.unrouted_live_intents += 1
-        log.error("gateway.live_unrouted", purpose=intent.purpose.value, symbol=intent.instrument.symbol, mode=mode.value)
-        return self._reject(
-            order, Decision.REJECTED_BROKER, f"{mode.value} orders must go through submit_live() — not wired; see HANDOFF §6"
-        )
+        if self.router is None:
+            # No router (2026-11-01 review): in a live mode every intent that reaches here — EXITS
+            # INCLUDED — is refused, which the docstring's "exits are never blocked" does not survive.
+            # Counted and logged loudly; ``Engine.set_mode`` refuses to arm a live mode while this is so.
+            self.unrouted_live_intents += 1
+            log.error("gateway.live_unrouted", purpose=intent.purpose.value, symbol=intent.instrument.symbol, mode=mode.value)
+            return self._reject(
+                order, Decision.REJECTED_BROKER, f"{mode.value} orders must go through submit_live() — not wired; see HANDOFF §6"
+            )
+        if self.live is None:
+            return self._reject(order, Decision.REJECTED_BROKER, "live executor not configured (no credentials)")
+        if mode is Mode.LIVE_CAPPED and self.ctx_for is not None:
+            why = self.check_live_caps(intent, self.ctx_for(intent))
+            if why:
+                return self._reject(order, Decision.REJECTED_CAP, why)
+        order.status = "SUBMITTED"
+        self.routed += 1
+        self.live_pending += 1
+        self.router(intent, order)
+        return OrderResult(Decision.SUBMITTED, order)
 
     # -- LIVE ---------------------------------------------------------------------------------------
 
@@ -265,16 +293,41 @@ class Gateway:
             if why:
                 return self._reject(order, Decision.REJECTED_CAP, why)
 
-        res = await self.live.place(intent)
+        self.live_pending += 1
+        return await self.place_live(intent, order)
+
+    async def place_live(self, intent: OrderIntent, order: Order) -> OrderResult:
+        """The placement of an intent the gates already passed (``submit`` in a live mode handed it
+        to the router). Reports the broker's actual fill; an EXIT that fails raises, as the executor
+        does — the engine alerts and the reconciler sees the real position."""
+        assert self.live is not None
+        try:
+            res = await self.live.place(intent)
+        except Exception as exc:
+            order.status, order.note = "FAILED", str(exc)[:300]
+            self.consecutive_rejects += 1
+            if self.consecutive_rejects >= self.caps.breaker_consecutive_rejects:
+                self.breaker_tripped = True
+            raise
+        finally:
+            self.live_pending = max(0, self.live_pending - 1)
         if not res.ok or res.fill is None:
-            return self._reject(order, Decision.REJECTED_BROKER, res.error or "no fill")
-        order.status = "FILLED"
+            out = self._reject(order, Decision.REJECTED_BROKER, res.error or "no fill")
+            out.meta = res.meta()
+            return out
+        order.status = "PARTIAL" if res.partial else "FILLED"
         order.avg_price, order.filled = res.fill.price, res.fill.qty
         order.charges = res.fill.charges
         order.broker_order_id = res.order_id
+        ref = intent.ref_price or 0.0
+        if ref > 0:
+            sign = 1 if intent.side is OrderSide.BUY else -1
+            order.slippage_bps = round((res.fill.price - ref) / ref * 1e4 * sign, 2)
+        if res.partial:
+            order.note = res.error
         self.consecutive_rejects = 0
         self.orders_today += 1
-        return OrderResult(Decision.SUBMITTED, order, res.fill)
+        return OrderResult(Decision.LIVE_FILLED, order, res.fill, meta=res.meta())
 
     def reset_breaker(self) -> None:
         self.consecutive_rejects = 0
@@ -287,8 +340,11 @@ class Gateway:
             "consecutive_rejects": self.consecutive_rejects,
             "breaker_tripped": self.breaker_tripped,
             "unrouted_live_intents": self.unrouted_live_intents,
+            "routed": self.routed,
+            "live_pending": self.live_pending,
             "seen_ids": len(self._seen),
             "live_configured": self.live is not None,
+            "live_routed": self.router is not None,
             "matcher": self._matcher.stats(),
             "caps": {
                 "segments": list(self.caps.segments),

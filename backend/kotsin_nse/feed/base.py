@@ -79,6 +79,9 @@ class OIMsg(TypedDict):
 OnTick = Callable[[TickMsg], Awaitable[None]]
 OnDepth = Callable[[DepthMsg], Awaitable[None]]
 OnOI = Callable[[OIMsg], Awaitable[None]]
+#: an order / trade confirmation frame, untouched: the source does not know the broker's order schema;
+#: ``exec/events.py`` does
+OnOrder = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +139,7 @@ __all__ = [
     "OIMsg",
     "OnDepth",
     "OnOI",
+    "OnOrder",
     "OnTick",
     "TickMsg",
 ]

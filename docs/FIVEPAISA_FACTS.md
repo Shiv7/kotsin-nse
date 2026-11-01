@@ -229,3 +229,21 @@ continuous trading, closes at the last continuous trade: 1225.0 and 1020.6. A ch
 its previous-day levels on the latter (the owner's Kite CPR that day implied 1224.97 and 1020.70); an index
 has no auction and the two are one number. `KN_STRATEGY_PDC` picks which one the strategy's CPR uses
 (`last` = the last continuous trade for a stock, the official close for an index).
+
+## Orders — the live route (read from xstream.5paisa.com/dev-docs on 2026-11-01; **not yet seen on a real order**)
+
+The first real order archives its raw confirmation frames (`archive/orders/<day>.parquet`, column `raw`);
+correct this section from them.
+
+| fact | source |
+|---|---|
+| **Limit orders only.** "Only Limit orders will be accepted by 5paisa api's"; MPP suggested instead of market. `exec/live.py` sends a *protected limit* (the touch ± `live_protect_*_bps`), `rest.place_order` refuses `price ≤ 0`. | 5paisa forum "SEBI Algo Compliance effective 1st April" |
+| **10 orders a second** per exchange; the 11th gets HTTP 429. `exec/throttle.py` (`live_orders_per_second`, default 8). | same |
+| **Static IP** applies to the order APIs only (not the feed); registered against the API key on the Xstream dashboard; up to 3 IPs reported by guides. `live_static_ip` → `Engine.live_readiness`. | same; tradesteadyalgo guide |
+| **AlgoID** is exchange-specific; a non-algo app (≤ 10 OPS) needs none — the place-order doc says pass 0 / null (`fp_algo_id`, default 0); a registered algo app gets 25 OPS. | place-order doc; forum |
+| `RemoteOrderID` ≤ 38 characters; the runner's ids are `sig-…|E|pos-…` / `|X|` = 35. | rest.py (observed limit) |
+| **Order / trade confirmations are pushed on the feed socket**: `{"Method":"OrderTradeConfirmations","Operation":"Subscribe","ClientCode":…}` (the doc says they are pushed even without it). Only on the host named by the JWT's `RedirectServer` claim — `O` openfeed, `A` aopenfeed, `B` bopenfeed; market data comes from any. `ws.py` connects to that host and subscribes when an order handler is attached. | web-socket-trade doc |
+| Confirmation frame fields: `ReqType` P/M/C/T/S, `ReqStatus` 0/1, `ClientCode`, `Exch`, `ExchType`, `BrokerOrderID`, `ExchOrderID`, `ScripCode`, `Symbol`, `Price`, `Qty`, `BuySell` B/S, `Status` ("Placed", "Modified", "Cancelled", "Fully Executed", "SL Triggered"), `RemoteOrderId` (lower-case d!), `TradedQty`, `PendingQty`, `Remark`; a **T** frame adds `ExchTradeId`, `ExchTradeTime`, `TotalTradedQty`, `OrderQty`, `OrderPrice`, and its `Price` is the trade's price — `exec/events.py` builds the average fill from the T frames. No documented "Rejected" or "Partially Executed" status on the socket: a place with `ReqStatus 1` is the rejection; a partial is `TradedQty > 0` with `PendingQty > 0`. | same |
+| `V2/OrderStatus` row (`OrdStatusResLst`): `Status` (sample key; the table says `OrderStatus`) ∈ "Fully Executed", "Modified", "Xmitted", "Rejected By 5P", "Rejected by Exch", "Cancelled", "Pending"; `AveragePrice` = the executed average (**`OrderRate` / `Rate` is the limit sent, never a fill price**); `TradedQty`, `PendingQty`, `OrderQty`, `ExchOrderID`. No `RemoteOrderID` and no reason in the row. The old executor matched "REJECTED" exactly and read `Rate` — two of the broker's rejection strings never terminated and a limit price could have been booked as a fill. | order-status doc |
+| `V4/OrderBook` row (`OrderBookDetail`) carries `RemoteOrderID`, `OrderStatus` (also "AH …"), `Reason`, `AveragePrice`, `BrokerOrderId`, `ExchOrderID`, `TradedQty`, `PendingQty`, `AtMarket`, `DelvIntra` — the row to reconcile an order by, and where a fill's rate is read when the status came without one. | order-book doc |
+| Place-order response: `head.status` (−1/0/1/2), `body.Status` (0 ok, 1 RMS, 2 invalid, 9 auth) **both** checked (`rest._post`); `BrokerOrderID`, `ExchOrderID`, `RemoteOrderID` echoed. RMS rejections "will be decommissioned when 5paisa migrates to new order placement APIs — use the Order Book API to track outcomes". | place-order doc |

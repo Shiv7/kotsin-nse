@@ -56,6 +56,9 @@ class Session:
     client_code: str
     expires_at: float
     minted_at: float = field(default_factory=time.time)
+    #: the JWT's ``RedirectServer`` claim (``O`` / ``A`` / ``B``): the feed host that pushes this
+    #: session's order confirmations (xstream dev-docs, web-socket-trade). "" when unreadable.
+    redirect_server: str = ""
 
     @property
     def usable(self) -> bool:
@@ -78,14 +81,23 @@ class Session:
         return max(0.0, self.expires_at - time.time())
 
 
+def decode_jwt_claims(jwt: str) -> dict[str, Any]:
+    """The JWT payload, or ``{}`` when it cannot be read. Never raises."""
+    try:
+        payload = jwt.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+        return claims if isinstance(claims, dict) else {}
+    except Exception:  # noqa: BLE001 - an unreadable token still works
+        return {}
+
+
 def _decode_jwt_exp(jwt: str) -> float:
     """``exp`` out of the JWT payload, or 0 when it cannot be read. Never raises: an unreadable
     token still works, it just falls back to the conservative 6-hour TTL."""
     try:
-        payload = jwt.split(".")[1]
-        payload += "=" * (-len(payload) % 4)
-        return float(json.loads(base64.urlsafe_b64decode(payload)).get("exp", 0))
-    except Exception:  # noqa: BLE001 - an unreadable token still works; fall back to the TTL
+        return float(decode_jwt_claims(jwt).get("exp", 0))
+    except (TypeError, ValueError):
         return 0.0
 
 
@@ -130,6 +142,11 @@ class Authenticator:
             return False
         self.session = None
         return True
+
+    @property
+    def public_ip_cached(self) -> str | None:
+        """The address every login and order carried, or None before the first login."""
+        return self._public_ip
 
     async def public_ip(self) -> str:
         if self._public_ip:
@@ -183,13 +200,15 @@ class Authenticator:
         access = await self._access_token(request_token, ip)
         exp = _decode_jwt_exp(access)
         expires_at = exp if exp > time.time() else time.time() + 6 * 3600
+        redirect = str(decode_jwt_claims(access).get("RedirectServer") or "").strip().upper()
         log.info(
             "fivepaisa.session",
             client_code=s.fp_client_code,
             expires_in_h=round((expires_at - time.time()) / 3600, 2),
+            redirect_server=redirect or None,
         )
         return Session(
-            access_token=access, client_code=str(s.fp_client_code), expires_at=expires_at
+            access_token=access, client_code=str(s.fp_client_code), expires_at=expires_at, redirect_server=redirect
         )
 
     def _head(self) -> dict[str, Any]:
