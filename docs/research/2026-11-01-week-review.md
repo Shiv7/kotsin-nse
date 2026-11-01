@@ -170,12 +170,13 @@ it: NIFTY's position so far is worth +0.3 bps on 3,100 instances. It stays a des
 |---|---|---|
 | Tue 27 | hibernate at 05:06 (battery 1 %), woke 09:19 | first bar of every stock missed; restarted 09:25 |
 | Wed 28 | asleep on battery all session, dark wakes of seconds | **session lost**; replayed from exchange bars |
-| Thu 29 | clean | |
+| Thu 29 | **not clean** (found 1 Nov evening from `pmset -g log` and the bars archive): lid closed at 10:29 on battery → "Clamshell Sleep" until 10:47 (192 live 1m bars at 10:29, 3 at 10:47, 216 at 10:48) | **18 minutes lost mid-session**; the 10:30–10:45 5m buckets came from the REST sweep, which under the old code shifted the sequence's stage windows (REVIEW S3); SHREECEM's 11:35 stop and TATAPOWER's trail were after the gap |
 | Fri 30 | 11:29 restart on a stale approval | feed down 4 minutes, REST healed the bars, nothing lost by the recompute |
 | Sat 31 → Sun 1 | clamshell sleep on battery from 02:47 Sat (`caffeinate -dis` does not stop lid-closed sleep); lid opened 13:28; charger in at 16:01 at 5 %; the charger flapped AC/battery every few minutes Saturday evening; **1 % at 01:50 Sunday**; 36 % and discharging at 06:40 Sunday | no session on a weekend; the engine process survived (re-logged into 5paisa at 00:01 Sunday) but is one flat battery from dying before Monday |
 
-One of four sessions lost and one opening missed is a 30 % data-loss rate on the only live evidence the project
-collects. Monday needs the charger in and the lid open from 08:45, or the VPS.
+One of four sessions lost, one opening missed, one 18-minute mid-session sleep first read as a clean day, and one
+restart gap: above 30 % data loss on the only live evidence the project collects. Every cause was the laptop
+being used as a laptop (lid closed, battery, a flapping charger), not the software. Monday needs the charger in and the lid open from 08:45, or the VPS.
 
 Scripts: `scripts/2026-11-01-week/` (week_table.py, readings.py, market_flow.py) read only the archives, the
 strategy files, the research cache and the dev-window instances; nothing touched the broker.
