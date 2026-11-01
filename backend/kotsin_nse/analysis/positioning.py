@@ -31,32 +31,36 @@ def positioning(
     days = [d for d in store.days() if d < before][-sessions:]
     rows: list[dict[str, Any]] = []
     last = None
-    prev_oi: float | None = None  # yesterday's summed futures OI, as listed yesterday
-    prev_close_by_expiry: dict[Any, float] = {}  # each contract's own previous close
+    prev_oi_by_expiry: dict[str, float] = {}  # yesterday's futures OI per contract, as listed yesterday
+    prev_close_by_expiry: dict[str, float] = {}  # each contract's own previous close
     for d in days:
+        ds = d.isoformat()  # ``expiry`` is an ISO string in the store
         x = store.load(d, columns=("symbol", "kind", "expiry", "strike", "option_type", "close", "oi", "oi_change"))
         x = x[x["symbol"] == symbol]
         fut = x[x["kind"].isin(("FUTSTK", "FUTIDX"))].sort_values("expiry")
         if fut.empty:
             continue
-        near_fut = fut["expiry"].iloc[0]
+        near_fut = str(fut["expiry"].iloc[0])
         close = float(fut["close"].iloc[0])
         oi, chg = float(fut["oi"].sum()), float(fut["oi_change"].sum())
         front_oi, front_chg = float(fut["oi"].iloc[0]), float(fut["oi_change"].iloc[0])
         opt = x[x["kind"].isin(("OPTSTK", "OPTIDX"))]
         # the nearest expiry still ahead of this session: on expiry day the dying expiry's PCR and
         # walls are its unwind, not a positioning read (the research rolls 5 sessions before)
-        exps = sorted(e for e in opt["expiry"].unique() if e > d) or sorted(opt["expiry"].unique())
+        all_exps = sorted(str(e) for e in opt["expiry"].unique())
+        exps = [e for e in all_exps if e > ds] or all_exps
         near = exps[0] if exps else None
-        on = opt[opt["expiry"] == near] if near else opt
+        on = opt[opt["expiry"].astype(str) == near] if near else opt
         ce, pe = on[on["option_type"] == "CE"], on[on["option_type"] == "PE"]
         label = None
         # price: the near contract against ITS OWN previous close (``research/oi_daily`` does the
         # same). Comparing the nearest close across the roll read every post-expiry day as "up" by
-        # the next month's premium. OI: yesterday's summed OI as listed yesterday — reconstructing
-        # it from today's rows' changes misses the contract that expired, +66 % on the day after.
+        # the next month's premium. OI: yesterday's OI summed over the contracts still alive today
+        # — a plain total read the day after an expiry as the whole market unwinding (28 Oct
+        # 2026), and reconstructing it from today's rows' changes missed the expired contract.
         prev_close = prev_close_by_expiry.get(near_fut)
-        if prev_close is not None and prev_oi:
+        prev_oi = sum(v for e, v in prev_oi_by_expiry.items() if e >= ds)
+        if prev_close is not None and prev_oi > 0:
             oi_pct = (oi / prev_oi - 1) * 100
             up = close >= prev_close
             label = "FLAT" if abs(oi_pct) < FLAT_OI_PCT else ("LB" if up else "SB") if oi > prev_oi else ("SC" if up else "LU")
@@ -71,8 +75,8 @@ def positioning(
             "put_wall": float(pe_below.loc[pe_below["oi"].idxmax(), "strike"]) if len(pe_below) and pe_below["oi"].max() > 0 else None,
             "expiry": near,
         })
-        prev_oi = oi
-        prev_close_by_expiry = {e: float(c) for e, c in zip(fut["expiry"], fut["close"], strict=True)}
+        prev_oi_by_expiry = {str(e): float(v) for e, v in zip(fut["expiry"], fut["oi"], strict=True)}
+        prev_close_by_expiry = {str(e): float(c) for e, c in zip(fut["expiry"], fut["close"], strict=True)}
         last = (d, ce, pe, near)
     if not rows or last is None:
         return None

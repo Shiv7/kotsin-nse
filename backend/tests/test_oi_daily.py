@@ -94,3 +94,19 @@ def test_the_day_after_expiry_compares_the_new_near_contract_with_its_own_previo
     ]))
     r = futures_table(store).iloc[-1]
     assert r["price_chg_pct"] == 0.0  # not +1 % from switching contracts
+
+
+def test_the_session_after_an_expiry_is_not_read_as_the_market_unwinding(tmp_path):
+    """28 Oct 2026: the October series had expired the day before and a plain total of yesterday's
+    OI read 143 of 218 stocks as short covering (total OI −5.6 %). Yesterday's OI is summed over
+    the contracts still alive today."""
+    store = OiDailyStore(tmp_path)
+    _day(store, date(2026, 10, 23), 900, 100, 100.0)
+    _day(store, date(2026, 10, 27), 300, 710, 100.0)  # expiry day: 1,000 → 1,010, the roll
+    store.write(date(2026, 10, 28), pd.DataFrame([  # the October contract is gone; November added 10
+        {"scrip_code": "2", "symbol": "ABC", "kind": "FUTSTK", "expiry": "2026-11-24", "strike": 0, "option_type": "", "close": 100.0, "settle": 100.5, "oi": 720, "oi_change": 10, "volume": 1},
+    ]))
+    t = futures_table(store).set_index("day")
+    assert round(t.loc["2026-10-27", "oi_chg_pct"], 2) == 1.0  # both contracts alive on expiry day: 1,000 → 1,010
+    assert round(t.loc["2026-10-28", "oi_chg_pct"], 2) == 1.41  # against the 710 still alive, not the 1,010 total
+    assert t.loc["2026-10-28", "label"] == "LONG BUILD-UP"

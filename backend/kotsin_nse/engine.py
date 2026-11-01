@@ -1267,13 +1267,18 @@ class Engine:
         now = now or time.time()
         today = ist_day(now)
         fut = g.futures[0]
+        # the price from the front contract, the OI from the one expiring strictly after today: on
+        # expiry day the front's OI is its own run-off (ScripGroup.positioning_future)
+        oi_fut = g.positioning_future(today) or fut
         missing: list[str] = []
         used_refs: list[str] = [fut.scrip_code]
+        if oi_fut is not fut:
+            missing.append(f"futures OI read from {oi_fut.name or oi_fut.scrip_code} ({oi_fut.expiry}): the front expires today")
 
         f_px = self.ltps.get(fut.scrip_code)
         f_prev = self.prev_close_by_code.get(fut.scrip_code)
-        f_oi = self.oi_live.get(fut.scrip_code)
-        f_ref = self._oi_reference(fut.scrip_code)
+        f_oi = self.oi_live.get(oi_fut.scrip_code)
+        f_ref = self._oi_reference(oi_fut.scrip_code)
         fut_leg: Leg | None = None
         if f_px and f_prev and f_oi is not None and f_ref:
             fut_leg = Leg(price_chg_pct=(f_px / f_prev - 1) * 100, oi_chg=f_oi - f_ref, oi_chg_pct=(f_oi / f_ref - 1) * 100)

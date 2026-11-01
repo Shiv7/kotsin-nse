@@ -259,15 +259,20 @@ def test_the_daily_positioning_reads_price_and_oi_within_a_contract_across_the_r
     def fut(expiry, close, oi, chg):
         return {"scrip_code": expiry, "symbol": "ABC", "kind": "FUTSTK", "expiry": expiry, "strike": 0, "option_type": "", "close": close, "settle": close, "oi": oi, "oi_change": chg, "volume": 1}
 
-    store.write(date(2026, 10, 26), pd.DataFrame([fut("2026-10-27", 100.0, 1000, 0), fut("2026-11-24", 101.0, 100, 0)]))
-    store.write(date(2026, 10, 27), pd.DataFrame([fut("2026-10-27", 100.0, 1000, 0), fut("2026-11-24", 101.0, 110, 10)]))  # expiry day
-    store.write(date(2026, 10, 28), pd.DataFrame([fut("2026-11-24", 101.0, 1110, 1000)]))  # the day after: one contract, same total OI, same price
+    def opt(expiry, strike, kind, oi):
+        return {"scrip_code": f"{expiry}{strike}{kind}", "symbol": "ABC", "kind": "OPTSTK", "expiry": expiry, "strike": strike, "option_type": kind, "close": 1.0, "settle": 1.0, "oi": oi, "oi_change": 0, "volume": 1}
+
+    store.write(date(2026, 10, 26), pd.DataFrame([fut("2026-10-27", 100.0, 1000, 0), fut("2026-11-24", 101.0, 100, 0), opt("2026-10-27", 100, "CE", 5), opt("2026-11-24", 100, "PE", 7)]))
+    store.write(date(2026, 10, 27), pd.DataFrame([fut("2026-10-27", 100.0, 300, -700), fut("2026-11-24", 101.0, 810, 710), opt("2026-10-27", 100, "CE", 5), opt("2026-11-24", 100, "PE", 7)]))  # expiry day: the roll
+    store.write(date(2026, 10, 28), pd.DataFrame([fut("2026-11-24", 101.0, 820, 10), opt("2026-11-24", 100, "PE", 7)]))  # the day after: one contract, +10
     out = positioning(store, "ABC", date(2026, 10, 29))
     assert out is not None
     rows = {r["day"]: r for r in out["sessions"]}
-    # price unchanged within the November contract and summed OI unchanged → FLAT, not "LB by the roll premium"
-    assert rows["2026-10-28"]["build_up"] == "FLAT"
-    assert rows["2026-10-27"]["build_up"] == "LB"  # +0.9 % OI with the near contract flat (price "up" on ≥)
+    # the day after the expiry: +1.2 % on the 810 still alive, not −26 % against the 1,110 total ("LU", the roll)
+    assert rows["2026-10-28"]["build_up"] == "LB" and rows["2026-10-28"]["expiry"] == "2026-11-24"
+    # expiry day itself: both contracts alive, 1,100 → 1,110 with the near contract flat, and the
+    # options read from the November expiry, not the one dying that afternoon
+    assert rows["2026-10-27"]["build_up"] == "LB" and rows["2026-10-27"]["expiry"] == "2026-11-24"
 
 
 # -- structure and the day read -----------------------------------------------------------------------------
@@ -319,3 +324,17 @@ def test_the_sequence_windows_are_bar_positions_not_list_indices():
     holed = full[:1] + full[2:]  # the 09:20 bucket never arrived
     st = cr.sequence(holed, lv, tol, open_ts=OPEN)[1]
     assert st.i_os is not None  # the open test is still inside the first six positions
+
+
+def test_the_positioning_future_is_the_one_expiring_after_today():
+    from kotsin_nse.instrument.universe import ScripGroup
+
+    def f(expiry):
+        return Instrument(scrip_code=expiry, symbol="ABC", segment=Segment.NSE_FO, kind=InstrumentKind.FUTURE, name=f"ABC {expiry}", lot_size=500, tick_size=0.05, multiplier=1, underlying="ABC", expiry=expiry)
+
+    g = ScripGroup(root="ABC", segment=Segment.NSE_FO, underlying=f("2026-10-27"), equity=None, futures=[f("2026-10-27"), f("2026-11-24")])
+    assert g.positioning_future(date(2026, 10, 26)).expiry == "2026-10-27"  # the day before: the front
+    assert g.positioning_future(date(2026, 10, 27)).expiry == "2026-11-24"  # expiry day: the next month's OI
+    assert g.front_future.expiry == "2026-10-27"  # the price basis does not move
+    only = ScripGroup(root="ABC", segment=Segment.NSE_FO, underlying=f("2026-10-27"), equity=None, futures=[f("2026-10-27")])
+    assert only.positioning_future(date(2026, 10, 27)).expiry == "2026-10-27"  # nothing later tracked: the front

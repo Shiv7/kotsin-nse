@@ -52,7 +52,8 @@ def futures_table(store: OiDailyStore, cache: Path | None = None) -> pd.DataFram
         return pd.DataFrame(columns=["day", "symbol", "fut_oi", "near_close", "oi_chg_pct", "price_chg_pct", "label"])
     c = pd.concat(rows, ignore_index=True).sort_values(["symbol", "expiry", "day"], kind="stable")
     # a change is from the session before in the store's own day list: a stock absent from that
-    # session's bhavcopy gets NaN, not a change measured from its last row weeks back
+    # session's bhavcopy gets NaN, not a change measured from its last row weeks back (the OI
+    # change is keyed the same way below: only the previous session's rows reach a day)
     prev_day = {b.isoformat(): a.isoformat() for a, b in pairwise(days)}
     # the price change of a session = the NEAR contract against ITS OWN previous settle, so the
     # switch to the next month after an expiry (which trades at a premium) is not a price move
@@ -62,11 +63,19 @@ def futures_table(store: OiDailyStore, cache: Path | None = None) -> pd.DataFram
     # so a near contract without a settle would borrow the next month's
     near = c.sort_values(["symbol", "day", "expiry"], kind="stable").drop_duplicates(["symbol", "day"], keep="first")
     tot = c.groupby(["symbol", "day"])["oi"].sum().rename("fut_oi").reset_index()
+    # yesterday's OI is summed over the contracts STILL ALIVE today: a contract that expired
+    # yesterday is in yesterday's total and cannot be in today's, so a plain total read every
+    # session after an expiry as the whole market unwinding (28 Oct 2026: 143 of 218 stocks
+    # "short covering", total OI −5.6 % — the October series running off, not a position closed)
+    next_day = {a.isoformat(): b.isoformat() for a, b in pairwise(days)}
+    alive_next = c[c["expiry"] >= c["day"].map(next_day).fillna("9999-12-31")]
+    prev_live = alive_next.assign(day=alive_next["day"].map(next_day)).dropna(subset=["day"])
+    prev_live = prev_live.groupby(["symbol", "day"])["oi"].sum().rename("prev_oi").reset_index()
     t = tot.merge(near[["symbol", "day", "settle", "prev_settle"]], on=["symbol", "day"]).sort_values(["symbol", "day"], kind="stable")
+    t = t.merge(prev_live, on=["symbol", "day"], how="left")
     t = t.rename(columns={"settle": "near_close"})
-    gs = t.groupby("symbol")
-    prev_oi = gs["fut_oi"].shift(1).where(gs["day"].shift(1) == t["day"].map(prev_day))
-    t["oi_chg_pct"] = (t["fut_oi"] / prev_oi - 1) * 100
+    t["oi_chg_pct"] = (t["fut_oi"] / t["prev_oi"] - 1) * 100
+    t = t.drop(columns=["prev_oi"])
     t["price_chg_pct"] = (t["near_close"] / t["prev_settle"] - 1) * 100
     t = t.drop(columns=["prev_settle"]).dropna(subset=["oi_chg_pct", "price_chg_pct"])
     t["label"] = [label(p, o) for p, o in zip(t["price_chg_pct"], t["oi_chg_pct"], strict=True)]

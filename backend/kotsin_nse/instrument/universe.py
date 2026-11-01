@@ -79,6 +79,16 @@ class ScripGroup:
     def front_future(self) -> Instrument | None:
         return self.futures[0] if self.futures else None
 
+    def positioning_future(self, today: date) -> Instrument | None:
+        """The future whose OPEN INTEREST is the positioning read: the nearest one expiring
+        strictly after ``today``. On expiry day the front contract's OI is its own run-off (27 Oct
+        2026: "long unwinding, OI −23 to −36 %" on every stock all afternoon — the October series
+        being settled, not a position anyone closed); the next month is where the positions are.
+        The front future stays the PRICE basis. Falls back to the front when nothing later is tracked."""
+        t = today.isoformat()
+        later = [f for f in self.futures if f.expiry > t]
+        return min(later, key=lambda f: f.expiry) if later else self.front_future
+
     def future_for(self, expiry: str) -> Instrument | None:
         """The future an option of ``expiry`` is priced on: the nearest one expiring on or after
         it. MCX GOLD's 31 Dec options sit on the February future (December's expires 4 Dec);
