@@ -13,6 +13,7 @@ import asyncio
 import json
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from datetime import date
 from typing import Any
 
@@ -20,8 +21,8 @@ import structlog
 
 from ..bars.store import BarStore
 from ..bars.unified import BarSource, UnifiedBar
-from ..config import Settings
-from ..domain import Instrument, InstrumentKind, new_id
+from ..config import Segment, Settings
+from ..domain import Instrument, InstrumentKind, OrderSide, new_id
 from ..instrument.universe import INDEX_ROOTS
 from ..market.session import ist_day
 from ..risk.costs import CostModel
@@ -31,7 +32,6 @@ from . import daily_ob as ob
 
 log = structlog.get_logger(__name__)
 NIFTY = "NIFTY"
-STT_DELIVERY_PCT = 0.1  # cash delivery, both legs
 
 
 def daily_series(store: BarStore, symbol: str) -> list[UnifiedBar]:
@@ -274,14 +274,16 @@ class PositionalRunner:
         return pos
 
     def _charges(self, inst: Instrument | None, side: int, entry: float, exit_px: float, qty: int) -> float:
+        """The cost model's own products: a long is cash delivery (STT both legs, delivery stamp); a
+        short held overnight is a stock future (futures STT on the sell leg — the entry — futures
+        exchange charge and stamp). Before 2026-11-01 the short was charged as an equity with its
+        STT swapped by hand, and the delivery rate was a constant that shadowed the setting."""
         if inst is None:
             return 0.0
-        base = self.costs.round_trip(inst, entry, exit_px, qty)
-        if side > 0:  # cash delivery: STT on both legs, not the intraday sell-side rate
-            stt = (entry + exit_px) * qty * STT_DELIVERY_PCT / 100
-        else:  # a short held overnight is a stock future: STT on the sell leg (the entry) at the futures rate
-            stt = entry * qty * self.s.cost_stt_pct_sell_future / 100
-        return round(base.total - base.stt + stt, 2)
+        if side > 0:
+            return round(self.costs.round_trip(inst, entry, exit_px, qty, delivery=True).total, 2)
+        fut = replace(inst, kind=InstrumentKind.FUTURE, segment=Segment.NSE_FO)
+        return round(self.costs.round_trip(fut, entry, exit_px, qty, entry_side=OrderSide.SELL).total, 2)
 
     def _close(self, pos: dict[str, Any], exit_px: float, how: str, dstr: str, inst: Instrument | None) -> None:
         side = pos["side"]

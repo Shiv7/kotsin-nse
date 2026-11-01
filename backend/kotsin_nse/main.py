@@ -154,7 +154,7 @@ def run_playbook(settings: Settings, args: argparse.Namespace) -> None:
             raise SystemExit(f"unknown parameter {k!r}; known: {', '.join(known)}")
         cur = getattr(PBParams(), k)
         over[k] = v if isinstance(cur, str) else (v.lower() == "true") if isinstance(cur, bool) else type(cur)(v)
-    out = run(settings, days, PBParams(**over), label=args.label)  # type: ignore[arg-type]
+    out = run(settings, days, PBParams(**over), label=args.label, allow_holdout=args.allow_holdout)  # type: ignore[arg-type]
     sm = out["summary"]
     print(f"{out['id']}  {sm['trades']} trades / {sm['days']} days  win {sm['win_rate']}%  avg {sm['avg_r']} R  total {sm['total_r']} R  "
           f"net ₹{sm['net_inr']:,}  costs ₹{sm['costs_inr']:,}  t(by day) {sm['t_by_day']}  days +{sm['days_positive']}/-{sm['days_negative']}")
@@ -431,7 +431,7 @@ def run_events(settings: Settings, args: argparse.Namespace) -> None:
         from .research.events import HOLDOUT_END, HOLDOUT_HALVES, HOLDOUT_START, study_book
 
         # the one holdout run of §7b: the guard is lifted here and nowhere else
-        out = study_book(settings, end=HOLDOUT_END, label=args.label, cap=args.cap, start=HOLDOUT_START.isoformat(), halves=HOLDOUT_HALVES, allow_holdout=True)
+        out = study_book(settings, end=HOLDOUT_END, label=args.label, start=HOLDOUT_START.isoformat(), halves=HOLDOUT_HALVES, allow_holdout=True)
     elif args.book:
         from .research.events import study_book
 
@@ -563,7 +563,7 @@ def run_obtest(settings: Settings, args: argparse.Namespace) -> None:
         r = sum(t.r for t in got)
         print(f"  {d}  {len(got):>2} trades  {r:+6.2f} R   ({i}/{n})", flush=True)
 
-    out = run(settings, days, p, label=args.label, on_day=on_day)
+    out = run(settings, days, p, label=args.label, on_day=on_day, allow_holdout=args.allow_holdout)
     sm = out["summary"]
     print(f"\n{out['id']}  {sm['trades']} trades over {sm['days']} days  win {sm['win_rate']}%  avg {sm['avg_r']} R  "
           f"total {sm['total_r']} R  net ₹{sm['net_inr']:,.0f} (costs ₹{sm['costs_inr']:,.0f})  t(by day) {sm['t_by_day']}")
@@ -589,11 +589,15 @@ def build_parser() -> argparse.ArgumentParser:
     o.add_argument("--end", default="")
     o.add_argument("--label", default="")
     o.add_argument("--set", action="append", help="a parameter, e.g. --set min_rr=2 --set side_rule=both")
+    # the 1m cache (2026-08-03 → 10-16) lies inside the holdout window: a 1m backtest is a holdout-period
+    # run by construction and has to say so (HANDOFF §4)
+    o.add_argument("--allow-holdout", action="store_true", help="run on days inside the holdout window (the 1m cache is entirely inside it)")
     pb = sub.add_parser("pb-backtest", help="sweep / value-area strategies over cached 1m days")
     pb.add_argument("--start", default="")
     pb.add_argument("--end", default="")
     pb.add_argument("--label", default="")
     pb.add_argument("--set", action="append", help="e.g. --set strategy=VA_REENTRY --set min_stop_adr=0.2")
+    pb.add_argument("--allow-holdout", action="store_true", help="run on days inside the holdout window (the 1m cache is entirely inside it)")
     fb = sub.add_parser("fib-backtest", help="trend pullbacks at Fibonacci + pivot + order-block confluence (1h → 15m)")
     fb.add_argument("--start", required=True)
     fb.add_argument("--end", required=True)

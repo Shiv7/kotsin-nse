@@ -180,6 +180,16 @@ def analyze(
         return Structure([], [], [], [], [], None, None, None)
     ranges = [b.h - b.l for b in bars[-AVG_CANDLE_BARS:]]
     avg = sum(ranges) / len(ranges) if ranges else None
+    # the average candle AS OF bar k (the last AVG_CANDLE_BARS ending at k), for the zone tests in
+    # the k loop: qualifying a 10:00 zone by the mean candle of the day's LAST twenty bars let the
+    # same zone appear and disappear between two as-of calls and moved its stop with the afternoon
+    cum = [0.0]
+    for b in bars:
+        cum.append(cum[-1] + (b.h - b.l))
+
+    def avg_at(k: int) -> float:
+        lo_i = max(0, k + 1 - AVG_CANDLE_BARS)
+        return (cum[k + 1] - cum[lo_i]) / (k + 1 - lo_i)
     or_bars = bars[:OPENING_RANGE_BARS]
     opening = (min(b.l for b in or_bars), max(b.h for b in or_bars)) if len(or_bars) == OPENING_RANGE_BARS else None
 
@@ -240,11 +250,16 @@ def analyze(
             if j is None or (side, j) in used_ob:
                 continue
             ob = bars[j]
-            gap_in_move = any(g.side == side and j <= g.i <= k for g in gaps)
+            # a gap strictly inside the displacement: its first candle after the order block
+            # (g.i − 1 ≥ j) and its third candle closed by k (g.i + 1 ≤ k). ``j <= g.i <= k`` let the
+            # order-block candle be the gap's middle and, at g.i == k, used a third candle that has
+            # not closed when the break at k is judged
+            gap_in_move = any(g.side == side and j < g.i < k for g in gaps)
+            avg_k = avg_at(k)
             clear = (b.c - ob.h) if side == "BULLISH" else (ob.l - b.c)
-            if not gap_in_move and not (avg and clear >= avg):
+            if not gap_in_move and not (avg_k and clear >= avg_k):
                 continue
-            buf = (avg or 0) * STOP_BUFFER_CANDLE
+            buf = avg_k * STOP_BUFFER_CANDLE
             # the body edge price meets first on its way back: a red candle's open is its body top,
             # a green candle's open its body bottom
             z = ob.o
@@ -310,9 +325,15 @@ def _setup(zones: list[Zone], levels: list[Level], last: float) -> Setup | None:
 
 
 def resample_5m(rows: Sequence[tuple[int, float, float, float, float, float]], session_open_ts: int) -> list[Bar5]:
-    """(ts, o, h, l, c, v) 1m rows → 5m bars on the session grid."""
+    """(ts, o, h, l, c, v) 1m rows → 5m bars on the session grid. A row before the open (a
+    pre-open print) is dropped rather than bucketed into a negative bucket that would become
+    ``bars[0]`` and the day's open; a repeated minute is counted once."""
     out: dict[int, list[float]] = {}
+    seen: set[int] = set()
     for ts, o, h, lo, c, v in rows:
+        if ts < session_open_ts or ts in seen:
+            continue
+        seen.add(ts)
         k = session_open_ts + ((ts - session_open_ts) // 300) * 300
         cur = out.get(k)
         if cur is None:

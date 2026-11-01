@@ -27,6 +27,8 @@ def test_a_running_sessions_candle_is_not_a_day(equity):
 
 
 def test_a_finished_sessions_candle_is_kept_at_midnight_of_its_day(equity):
-    bars = daily_bars(equity, _rows(), now=ist_ts("2026-10-27", "15:31"))
+    # 15:31 is inside the closing auction (cash) and F&O's last ten minutes: not a day yet
+    assert [ist_day(b.ts).isoformat() for b in daily_bars(equity, _rows(), now=ist_ts("2026-10-27", "15:31"))] == ["2026-10-26"]
+    bars = daily_bars(equity, _rows(), now=ist_ts("2026-10-27", "15:46"))
     assert [ist_day(b.ts).isoformat() for b in bars] == ["2026-10-26", "2026-10-27"]
     assert bars[1].ts == ist_ts("2026-10-27", "00:00") and bars[1].close == 1221.6

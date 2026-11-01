@@ -22,6 +22,7 @@ import json
 import math
 import time as _time
 import uuid
+from collections.abc import Sequence
 from datetime import date
 from typing import Any
 
@@ -33,7 +34,7 @@ from ..domain import Instrument, InstrumentKind, OrderSide
 from ..fno.chain import implied_vol
 from ..market.fo_bhavcopy import OiDailyStore
 from ..risk.costs import CostModel
-from .optsignals import HOLDOUT_START, _weekly_t
+from .optsignals import HOLDOUT_START, SESSIONS_PER_YEAR, _weekly_t, sessions_to
 
 LOT = 75
 WING_SD = 2.0
@@ -48,8 +49,10 @@ def _nifty(store: OiDailyStore, d: date) -> pd.DataFrame:
     return df
 
 
-def open_fly(df: pd.DataFrame, d: date, wing_sd: float = WING_SD, to_expiry: bool = False) -> dict[str, Any] | None:
-    """The iron butterfly sold at D's close, or None when the chain cannot price it."""
+def open_fly(df: pd.DataFrame, d: date, sessions: Sequence[date], wing_sd: float = WING_SD, to_expiry: bool = False) -> dict[str, Any] | None:
+    """The iron butterfly sold at D's close, or None when the chain cannot price it. ``sessions`` is
+    the sorted session list: the IV is solved on the sessions left to expiry over 252 (``bdays``), the
+    same clock as the one-day σ (÷ √252) and the move to expiry (× √sessions)."""
     fut = df[df["kind"] == "FUTIDX"].assign(dte=lambda x: (pd.to_datetime(x["expiry"]) - pd.Timestamp(d)).dt.days).sort_values("dte")
     opt = df[df["kind"] == "OPTIDX"]
     if fut.empty or opt.empty:
@@ -59,7 +62,8 @@ def open_fly(df: pd.DataFrame, d: date, wing_sd: float = WING_SD, to_expiry: boo
         return None
     e = ex[0]
     dte = (pd.Timestamp(e) - pd.Timestamp(d)).days
-    t = dte / 365
+    bdays = sessions_to(d, str(e), sessions)
+    t = bdays / SESSIONS_PER_YEAR
     o = opt[opt["expiry"] == e]
     calls = o[(o["option_type"] == "CE") & (o["close"] > 0)].set_index("strike")["close"]
     puts = o[(o["option_type"] == "PE") & (o["close"] > 0)].set_index("strike")["close"]
@@ -73,10 +77,9 @@ def open_fly(df: pd.DataFrame, d: date, wing_sd: float = WING_SD, to_expiry: boo
     iv = [v for v in (implied_vol(float(calls[k]), f, k, t, True), implied_vol(float(puts[k]), f, k, t, False)) if v]
     if not iv:
         return None
-    sd = float(np.mean(iv)) * f / math.sqrt(252)
-    bdays = int(np.busday_count(d + pd.Timedelta(days=1).to_pytimedelta(), date.fromisoformat(e) + pd.Timedelta(days=1).to_pytimedelta()))
+    sd = float(np.mean(iv)) * f / math.sqrt(SESSIONS_PER_YEAR)  # one session's σ in points
     if to_expiry:
-        sd *= math.sqrt(max(bdays, 1))  # the move to expiry, not one day's
+        sd *= math.sqrt(bdays)  # the move to expiry: σ × √(sessions / 252)
     up = [x for x in calls.index if x > k]
     dn = [x for x in puts.index if x < k]
     if not up or not dn:
@@ -130,7 +133,8 @@ def trades(settings: Settings, start: date, end: date, spread_pts: float = 1.0, 
     for s in (OiDailyStore(root / "oi_daily_legacy"), OiDailyStore(root / "oi_daily")):
         for d in s.days():
             by_day[d] = s
-    days = [d for d in sorted(by_day) if start <= d <= end]
+    sessions = sorted(by_day)
+    days = [d for d in sessions if start <= d <= end]
     costs = CostModel(settings)
     rows = []
     prev: tuple[date, pd.DataFrame] | None = None
@@ -138,7 +142,7 @@ def trades(settings: Settings, start: date, end: date, spread_pts: float = 1.0, 
         df = _nifty(by_day[d], d)
         if prev is not None:
             d0, df0 = prev
-            fly = open_fly(df0, d0, wing_sd)
+            fly = open_fly(df0, d0, sessions, wing_sd)
             if fly is not None:
                 got = close_fly(fly, df, d)
                 if got is not None:
@@ -213,7 +217,8 @@ def trades_to_expiry(settings: Settings, start: date, end: date, regime: pd.Seri
     costs = CostModel(settings)
     rows: list[dict[str, Any]] = []
     open_: dict[str, Any] | None = None
-    for d in [d for d in sorted(by_day) if start <= d <= end]:
+    sessions = sorted(by_day)
+    for d in [d for d in sessions if start <= d <= end]:
         df = _nifty(by_day[d], d)
         if open_ is not None and d.isoformat() >= open_["expiry"]:
             got = close_fly(open_, df, d) if d.isoformat() == open_["expiry"] else None
@@ -228,7 +233,7 @@ def trades_to_expiry(settings: Settings, start: date, end: date, regime: pd.Seri
                              "cost_pts": np.nan, "net_pts": np.nan, "settled": False})
             open_ = None
         if open_ is None and regime.get(d.isoformat()) == calm:
-            fly = open_fly(df, d, WING_SD, to_expiry=True)
+            fly = open_fly(df, d, sessions, WING_SD, to_expiry=True)
             if fly is not None and 2 <= fly["dte"] <= 7:
                 open_ = fly
     return pd.DataFrame(rows)

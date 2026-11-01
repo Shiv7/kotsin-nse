@@ -71,7 +71,14 @@ All of it is **one asyncio process**, connected by bounded in-process queues (`b
 | `strategy/cpr_retest.py` · `runner.py` | the one strategy: the owner's CPR retest sequence (open test under the CPR by 09:45 → BOS within the hour → close through TC → held retest → first close beyond it), entry at that close, stop under the retest bar, target the next wall then trail wall to wall; the live `sequence` is the research sweep's logic on the bars so far (replayed: 10,304 symbol-day-sides identical). The runner keeps the shadow book (every exit rule scored, context tags, ledger rows, `data-live/strategy/<day>.json`, `/api/strategy`, the Shadow page) |
 | `journal.py` | the owner's call journal: a discretionary call logged as it is seen (Chart page), scored by the engine from the 1m bars that follow — fill, stop before target, R at 15/30/60 min and at 15:25; the Journal page reads it by kind, side and tag |
 | `api/routes.py` | REST; computes nothing, reads engine state and ledger rows |
-| `research/history.py` | Parquet cache of broker history, merged on overlap |
+| `research/history.py` | Parquet cache of broker history, merged on overlap (fresh rows win, stable order) |
+| `indicators.py` | the indicators both the engine and the research use, on numpy arrays — one Supertrend (Wilder ATR, ratcheting bands, flip on the current bar's band), parity-tested per prefix against `strategy/cpr_retest.supertrend_dir`. The pattern for every maths the research re-typed (2026-11-01 review §7) |
+| `research/common.py` | what every harness shares: the holdout guard (`assert_exploration_window`) and a trade's orders charged one by one (`trade_costs`) |
+
+`market/session.py`'s `SessionSpec` carries, per segment, the `open`, the `close`, the `entry_cutoff`,
+the `force_flat`, the end of **continuous** trading (`continuous_end`, 15:15 on NSE cash — the closing
+auction follows, nothing after it is a trade a bar is built from or an order filled at) and when the
+broker's daily candle is final (`daily_final`, 15:45). Every 15:15 / 15:30 / 15:45 decision has that one owner.
 
 Boundaries are enforced by `import-linter` (`backend/pyproject.toml`), not by convention:
 

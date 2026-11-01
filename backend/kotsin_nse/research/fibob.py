@@ -44,6 +44,7 @@ import pandas as pd
 from ..config import Settings
 from ..market.session import ist_at, ist_day
 from ..risk.costs import CostModel
+from .common import assert_exploration_window
 from .history import HistoryStore
 from .mtf import _simulate, clean_5m, oi_alignment, portfolio, resample, summarize, swings
 
@@ -205,8 +206,14 @@ def trades_for(
         if p.require_sweep:
             prior = [j for j in (sl if sign > 0 else sh) if j + p.swing_side < leg_i]
             levels = [H[j, 3] if sign > 0 else H[j, 2] for j in prior[-4:]]
-            levels += [pv[n] for n in (("S1", "S2", "BC", "WS1") if sign > 0 else ("R1", "R2", "TC", "WR1")) if n in pv]
-            levels += [float(dl["PDL"] if sign > 0 else dl["PDH"])]
+            # the pivots and the previous day's extreme of the LEG-LOW bar's own session: the break
+            # bar may close sessions later, and that session's levels did not exist when the leg began
+            leg_day = ist_day(int(H[leg_i, 0]))
+            if leg_day in daily.index:
+                dl_leg = daily.loc[leg_day]
+                pv_leg = _pivots(dl_leg, sign)
+                levels += [pv_leg[n] for n in (("S1", "S2", "BC", "WS1") if sign > 0 else ("R1", "R2", "TC", "WR1")) if n in pv_leg]
+                levels += [float(dl_leg["PDL"] if sign > 0 else dl_leg["PDH"])]
             lb = H[leg_i]
             swept = any((lb[3] < lv < lb[4]) if sign > 0 else (lb[2] > lv > lb[4]) for lv in levels if not np.isnan(lv))
             if not swept:
@@ -339,10 +346,12 @@ def trades_for(
     return out
 
 
-def run(settings: Settings, start: date, end: date, p: FibParams, *, symbols: list[str] | None = None, label: str = "", on_symbol: Any = None) -> dict[str, Any]:
+def run(settings: Settings, start: date, end: date, p: FibParams, *, symbols: list[str] | None = None, label: str = "", on_symbol: Any = None,
+        allow_holdout: bool = False) -> dict[str, Any]:
     from ..market.fo_bhavcopy import OiDailyStore
     from .oi_daily import futures_table
 
+    assert_exploration_window(start, end, allow_holdout=allow_holdout)
     store = HistoryStore(settings.data_dir / "history")
     costs = CostModel(settings)
     names = symbols or store.symbols("5m")

@@ -59,9 +59,10 @@ class HistoryStore:
     def save(self, symbol: str, tf: str, df: pd.DataFrame) -> None:
         p = self.path(symbol, tf)
         p.parent.mkdir(parents=True, exist_ok=True)
-        df.sort_values("ts").drop_duplicates("ts", keep="last").reset_index(drop=True).to_parquet(
-            p, index=False
-        )
+        # The LAST row of a repeated timestamp wins: ``merge`` appends the fresh rows after the cached
+        # ones, so a re-fetched bar replaces the old. De-duplicate BEFORE sorting — the default sort
+        # is not stable, and would decide at random which duplicate came last.
+        df.drop_duplicates("ts", keep="last").sort_values("ts", kind="stable").reset_index(drop=True).to_parquet(p, index=False)
 
     def merge(self, symbol: str, tf: str, rows: list[dict[str, Any]]) -> int:
         if not rows:

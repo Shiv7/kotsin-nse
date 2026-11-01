@@ -40,8 +40,8 @@ import pandas as pd
 from ..config import Settings
 from ..market.session import ist_at, ist_day
 from ..risk.costs import CostModel
+from .common import assert_exploration_window
 from .confirm import (
-    HOLDOUT_START,
     WEEKLY_NAMES,
     ConfirmParams,
     ConfirmTrade,
@@ -227,8 +227,7 @@ def _enter(sym: str, day: date, sign: int, name: str, lvl: float, nxt: float, r:
 
 def run(settings: Settings, start: date, end: date, p: DbCprParams, *, symbols: list[str] | None = None, label: str = "",
         on_symbol: Any = None, allow_holdout: bool = False) -> dict[str, Any]:
-    if end >= HOLDOUT_START and not allow_holdout:
-        raise ValueError(f"{end} is inside the holdout (from {HOLDOUT_START}); the exploration window ends 2025-09-30")
+    assert_exploration_window(start, end, allow_holdout=allow_holdout)
     store = HistoryStore(settings.data_dir / "history")
     costs = CostModel(settings)
     names = symbols or store.symbols("1m")

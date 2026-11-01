@@ -36,7 +36,13 @@ class BarStore:
             # were mid-way through when the feed connected closes *after* it; letting that PARTIAL
             # overwrite the broker's own candle replaces a correct bar with one missing every tick
             # before connect, and stamps it complete=True for the strategies to read.
-            if not (series[-1].source is not BarSource.PARTIAL and bar.source is BarSource.PARTIAL):
+            # The same for the exchange's own candle (source REST, installed by the sweep or a
+            # seed): a live close never replaces it — only ``replace_closed`` may.
+            existing = series[-1]
+            demotes = (existing.source is not BarSource.PARTIAL and bar.source is BarSource.PARTIAL) or (
+                existing.source is BarSource.REST and bar.source is not BarSource.REST
+            )
+            if not demotes:
                 series[-1] = bar
         else:
             series.append(bar)

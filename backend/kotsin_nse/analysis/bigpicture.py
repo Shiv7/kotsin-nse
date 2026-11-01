@@ -61,7 +61,7 @@ def fibonacci(rows: Daily, last: float, sessions: int = SWING_SESSIONS) -> dict[
 
 def big_picture(rows: Daily, today: date, last: float | None = None) -> dict[str, Any] | None:
     """``rows`` = completed daily sessions before ``today``; ``last`` = the live price (else the last close)."""
-    rows = [r for r in rows if ist_day(int(r[0])) < today and r[2] > 0 and r[3] > 0]
+    rows = [r for r in rows if ist_day(int(r[0])) < today and r[2] > 0 and r[3] > 0 and r[4] > 0]  # a zero close divides below
     if len(rows) < 30:
         return None
     c = [r[4] for r in rows]

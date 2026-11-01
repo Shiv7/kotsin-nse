@@ -51,7 +51,14 @@ NEEDS = {"ofi_per_depth": "ofi", "ofi_5m": "ofi", "ofi_deep_per_depth": "ofi_dee
 
 
 def _roll(f: pd.DataFrame, col: str, n: int = 5) -> pd.Series:
-    return f.groupby("code")[col].transform(lambda s: s.rolling(n, min_periods=n).sum())
+    """``col`` summed over the same code's rows of the last ``n`` minutes — ``ts`` in (t − 60n, t] — and
+    NaN unless all ``n`` minutes are there: a gap in the recording does not make the window shorter,
+    and a fixed row count would have summed across it. ``f`` holds one row per (code, ts)."""
+    out = pd.Series(np.nan, index=f.index)
+    for _code, g in f.groupby("code", sort=False):
+        s = pd.Series(g[col].to_numpy(float), index=pd.to_datetime(g["ts"].to_numpy(np.int64), unit="s"))
+        out.loc[g.index] = s.rolling(f"{n}min", min_periods=n).sum().to_numpy()
+    return out
 
 
 def _depth(f: pd.DataFrame) -> pd.Series:
@@ -72,7 +79,11 @@ def day_frame(archive: Path, day: date) -> pd.DataFrame | None:
     f = pd.read_parquet(fp)
     f["code"] = f["code"].astype(str)
     f["ts"] = f["ts"].astype("int64")
-    f = f[f["code"].isin(close.columns) & (f["ts"] >= lo) & (f["ts"] < hi)].sort_values(["code", "ts"])
+    f = f[f["code"].isin(close.columns) & (f["ts"] >= lo) & (f["ts"] < hi)]
+    # a minute written twice (a restart re-flushed it) keeps its fuller row — the most frames — as
+    # ``confirm_live`` does; two rows a minute would double the rolling sums and the cross-section
+    by = ["code", "ts", "frames"] if "frames" in f.columns else ["code", "ts"]
+    f = f.sort_values(by).drop_duplicates(["code", "ts"], keep="last").reset_index(drop=True)
     if f.empty:
         return None
     f["vol"] = f["buy"] + f["sell"]

@@ -8,8 +8,9 @@ from datetime import date, timedelta
 import pandas as pd
 import pytest
 
+from kotsin_nse.config import Settings
 from kotsin_nse.market.session import ist_at
-from kotsin_nse.research.fibob import ZONES, daily_table
+from kotsin_nse.research.fibob import ZONES, FibParams, daily_table, run
 
 
 def _days(n: int, start: date = date(2025, 1, 1), up: float = 1.0) -> pd.DataFrame:
@@ -45,3 +46,8 @@ def test_the_control_band_is_not_a_fibonacci_band():
     assert ZONES["golden"] == (0.5, 0.618) and ZONES["ote"] == (0.618, 0.79)
     lo, hi = ZONES["control"]
     assert not any(lo <= f <= hi for f in (0.382, 0.618, 0.786)) and lo <= 0.5 <= hi
+
+
+def test_the_holdout_is_refused():
+    with pytest.raises(ValueError, match="holdout"):
+        run(Settings(_env_file=None), date(2025, 9, 1), date(2025, 10, 15), FibParams())

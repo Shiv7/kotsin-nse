@@ -93,24 +93,52 @@ def cpr(prev_h: float, prev_l: float, prev_c: float) -> dict[str, float]:
 
 
 def level_events(bars: Sequence[Bar5], lvls: Sequence[Band], tol: float) -> list[Event]:
-    """Tests, rejections and breaks of each level over closed 5m bars. A level fires once per
-    visit: after an event it is re-armed only when a close is more than two tolerances away."""
+    """Tests, rejections and breaks of each level over closed 5m bars.
+
+    A *break* is the close crossing to the far side of a level (beyond the break margin) from a
+    state that was not already there, and is always reported, armed or not — so "held, then
+    broke" reads as it happened. Which side price "is" on changes only on a close beyond a break
+    margin or a close back inside the band: a close in the margin (above the level but not yet
+    past the break line) leaves it unchanged, so a two-bar break (one close at the line, the next
+    through it) is still a break, and a pull-back that holds just above the level is not followed
+    by a second "break" when price resumes. A *visit* (support held, resistance rejected) fires
+    once per visit: after any event the level is disarmed until a close is more than two
+    tolerances away, so the retest after a break is the one that comes back from a distance.
+    Before 2026-11-01 the break test sat behind the same gate (a break inside the two-tolerance
+    window after a hold was never emitted) and demanded the previous close at or under the level
+    (the two-bar break was missed).
+    """
     out: list[Event] = []
     armed = {b.name: True for b in lvls}
     brk = tol * BREAK_FRAC
+    side: dict[str, int] = {}  # +1 above the break line, −1 below it, 0 inside the band / undecided
+    if bars:
+        o = bars[0].o
+        side = {lv.name: 1 if o > lv.hi + brk else -1 if o < lv.lo - brk else 0 for lv in lvls}
     for i, b in enumerate(bars):
         prev_c = bars[i - 1].c if i else b.o
         for lv in lvls:
+            where = f"{lv.name} {lv.lo:.2f}" if lv.lo == lv.hi else f"{lv.name} {lv.lo:.2f}–{lv.hi:.2f}"
+            was = side[lv.name]
+            if b.c > lv.hi + brk:
+                side[lv.name] = 1
+            elif b.c < lv.lo - brk:
+                side[lv.name] = -1
+            elif lv.lo <= b.c <= lv.hi:
+                side[lv.name] = 0
+            if side[lv.name] == 1 and was != 1:
+                out.append(Event(b.ts, "BREAK_UP", f"closed above {where}", b.c, lv.name))
+                armed[lv.name] = False
+                continue
+            if side[lv.name] == -1 and was != -1:
+                out.append(Event(b.ts, "BREAK_DOWN", f"closed below {where}", b.c, lv.name))
+                armed[lv.name] = False
+                continue
             if not armed[lv.name]:
                 if b.c > lv.hi + 2 * tol or b.c < lv.lo - 2 * tol:
                     armed[lv.name] = True
                 continue
-            where = f"{lv.name} {lv.lo:.2f}" if lv.lo == lv.hi else f"{lv.name} {lv.lo:.2f}–{lv.hi:.2f}"
-            if prev_c <= lv.hi and b.c > lv.hi + brk:
-                out.append(Event(b.ts, "BREAK_UP", f"closed above {where}", b.c, lv.name))
-            elif prev_c >= lv.lo and b.c < lv.lo - brk:
-                out.append(Event(b.ts, "BREAK_DOWN", f"closed below {where}", b.c, lv.name))
-            elif prev_c > lv.hi and b.l <= lv.hi + tol and b.c >= lv.lo:
+            if prev_c > lv.hi and b.l <= lv.hi + tol and b.c >= lv.lo:
                 how = "swept and reclaimed" if b.l < lv.lo - tol else "held as support"
                 out.append(Event(b.ts, "SUPPORT", f"{where} {how} (low {b.l:.2f})", b.l, lv.name))
             elif prev_c < lv.lo and b.h >= lv.lo - tol and b.c <= lv.hi:
@@ -143,7 +171,8 @@ def structure_events(bars: Sequence[Bar5], side: int = SWING_SIDE) -> tuple[list
         for b in bars[s.i + 1 :]:
             if (s.kind == "HIGH" and b.c > s.price) or (s.kind == "LOW" and b.c < s.price):
                 k = "BOS_UP" if s.kind == "HIGH" else "BOS_DOWN"
-                out.append(Event(b.ts, k, f"close {b.c:.2f} {'above' if k == 'BOS_UP' else 'below'} the swing {s.kind.lower()} {s.price:.2f}", b.c))
+                # ``level`` carries the swing's price so one BOS per bar can keep the most extreme swing
+                out.append(Event(b.ts, k, f"close {b.c:.2f} {'above' if k == 'BOS_UP' else 'below'} the swing {s.kind.lower()} {s.price:.2f}", b.c, f"{s.price:.4f}"))
                 break
     # legs: alternate highs and lows; of two same-kind swings in a row keep the more extreme
     kept: list[Any] = []
@@ -159,11 +188,18 @@ def structure_events(bars: Sequence[Bar5], side: int = SWING_SIDE) -> tuple[list
         # the first leg runs from the open to the first swing (the opening drive is never a swing: it has no bars before it)
         legs.insert(0, Leg(bars[0].ts, kept[0].ts, bars[0].o, kept[0].price, True))
         legs.append(Leg(kept[-1].ts, bars[-1].ts, kept[-1].price, bars[-1].c, False))
-    # one BOS per bar: keep the one against the most extreme swing
+    # one BOS per bar: keep the one against the most extreme swing (the highest high broken up,
+    # the lowest low broken down) — ``setdefault`` kept the first in list order, the oldest swing
     seen: dict[tuple[int, str], Event] = {}
     for e in out:
         if e.kind in ("BOS_UP", "BOS_DOWN"):
-            seen.setdefault((e.ts, e.kind), e)
+            cur = seen.get((e.ts, e.kind))
+            if cur is None:
+                seen[(e.ts, e.kind)] = e
+            else:
+                sp, cp = float(e.level or 0), float(cur.level or 0)
+                if (e.kind == "BOS_UP" and sp > cp) or (e.kind == "BOS_DOWN" and sp < cp):
+                    seen[(e.ts, e.kind)] = e
     out = [e for e in out if e.kind not in ("BOS_UP", "BOS_DOWN")] + list(seen.values())
     out.sort(key=lambda e: (e.ts, e.kind))
     return out, legs
@@ -236,11 +272,19 @@ def leg_options(
     return {"calls_net": calls_net, "puts_net": puts_net, "moves": moves, "read": read, "pcr": round(pe_oi / ce_oi, 2) if ce_oi else None}
 
 
-def _resample(bars: Sequence[Bar5], n: int) -> list[Bar5]:
+def _resample(bars: Sequence[Bar5], n: int, open_ts: int | None = None) -> list[Bar5]:
+    """``n`` 5m bars → one, on the CLOCK grid from ``open_ts`` (the first bar's when not given):
+    a missing 5m bucket (an illiquid name, a feed gap) then leaves a short candle rather than
+    shifting every later 15m/30m/1h candle off the exchange's grid."""
+    anchor = int(open_ts if open_ts is not None else bars[0].ts) if bars else 0
+    span = n * 300
+    groups: dict[int, list[Bar5]] = {}
+    for b in bars:
+        groups.setdefault(anchor + ((b.ts - anchor) // span) * span, []).append(b)
     out: list[Bar5] = []
-    for i in range(0, len(bars), n):
-        g = bars[i : i + n]
-        out.append(Bar5(g[0].ts, g[0].o, max(b.h for b in g), min(b.l for b in g), g[-1].c, sum(b.v for b in g)))
+    for k in sorted(groups):
+        g = groups[k]
+        out.append(Bar5(k, g[0].o, max(b.h for b in g), min(b.l for b in g), g[-1].c, sum(b.v for b in g)))
     return out
 
 

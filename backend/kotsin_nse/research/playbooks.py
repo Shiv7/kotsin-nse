@@ -38,6 +38,7 @@ from ..config import Settings
 from ..market.session import ist_at, ist_day
 from ..profile.core import bin_size, volume_profile
 from ..risk.costs import CostModel
+from .common import assert_exploration_window, trade_costs
 from .history import HistoryStore, session_rows
 from .obtest import _fut
 
@@ -176,16 +177,22 @@ def signals_sweep(d: DayData, p: PBParams) -> list[dict[str, Any]]:
             supports["IBL"] = float(ib[:, 3].min())
             resist["IBH"] = float(ib[:, 2].max())
         depth = p.sweep_min_adr * d.adr
-        # a level already traded through earlier today is not resting liquidity any more
+        # a level already traded through earlier today is not resting liquidity any more — for the
+        # IB levels "earlier" means after the IB closed: the IB's own bars are what SET them
         prior = d.m1[d.m1[:, 0] < k]
         lo_so_far = float(prior[:, 3].min()) if len(prior) else math.inf
         hi_so_far = float(prior[:, 2].max()) if len(prior) else -math.inf
+        since_ib = prior[prior[:, 0] >= ib_end]
+        lo_since_ib = float(since_ib[:, 3].min()) if len(since_ib) else math.inf
+        hi_since_ib = float(since_ib[:, 2].max()) if len(since_ib) else -math.inf
         vw = _vwap_upto(d.m1, i)
         for name, lvl in supports.items():
-            if name in allowed and lo <= lvl - depth and c > lvl and lo_so_far > lvl:
+            untaken = (lo_since_ib if name == "IBL" else lo_so_far) > lvl
+            if name in allowed and lo <= lvl - depth and c > lvl and untaken:
                 out.append(_plan(d, p, "BULLISH", f"SWEEP {name}", close_ts, c, lo, lvl, vw))
         for name, lvl in resist.items():
-            if name in allowed and h >= lvl + depth and c < lvl and hi_so_far < lvl:
+            untaken = (hi_since_ib if name == "IBH" else hi_so_far) < lvl
+            if name in allowed and h >= lvl + depth and c < lvl and untaken:
                 out.append(_plan(d, p, "BEARISH", f"SWEEP {name}", close_ts, c, h, lvl, vw))
     return [s for s in out if s]
 
@@ -283,8 +290,7 @@ def simulate(d: DayData, s: dict[str, Any], p: PBParams, costs: CostModel, day: 
         px = float(last[4]) * (1 - sign * p.slip_bps / 1e4)
         t.exits.append({"ts": int(last[0]) + 60, "price": round(px, 4), "frac": left, "why": "EOD"})
     t.gross = sum(sign * (e["price"] - entry) * qty * e["frac"] for e in t.exits)
-    avg_exit = sum(e["price"] * e["frac"] for e in t.exits)
-    t.costs = costs.round_trip(_fut(d.symbol), entry, avg_exit, qty).total
+    t.costs = trade_costs(costs, _fut(d.symbol), sign, entry, qty, t.exits)
     t.net = t.gross - t.costs
     t.r = round(t.net / (risk * qty), 3)
     t.exit_reason = t.exits[-1]["why"]
@@ -339,7 +345,9 @@ def summarize(trades: list[PBTrade], days: list[str]) -> dict[str, Any]:
     }
 
 
-def run(settings: Settings, days: list[date], p: PBParams, *, label: str = "", on_day: Any = None) -> dict[str, Any]:
+def run(settings: Settings, days: list[date], p: PBParams, *, label: str = "", on_day: Any = None, allow_holdout: bool = False) -> dict[str, Any]:
+    if days:
+        assert_exploration_window(min(days), max(days), allow_holdout=allow_holdout)
     store = HistoryStore(settings.data_dir / "history")
     costs = CostModel(settings)
     symbols = store.symbols("1m")

@@ -3,7 +3,9 @@ build-up it reads as, the put-call ratio of the nearest expiry, and where its bi
 
 Build-up per session (futures, all months together): price up + OI up = long build-up (LB), price
 down + OI up = short build-up (SB), price up + OI down = short covering (SC), price down + OI down =
-long unwinding (LU). Under ``FLAT_OI_PCT`` of OI change it is flat.
+long unwinding (LU). Under ``FLAT_OI_PCT`` of OI change it is flat. "Price up" is the near contract
+against its own previous close; "OI up" is today's summed OI against yesterday's summed OI as
+listed yesterday (both as ``research/oi_daily.futures_table`` reads them).
 
 Futures OI is given two ways: ``fut_oi`` sums every month (it does not jump at a rollover, so the
 build-up is read from it) and ``fut_oi_front`` is the nearest month alone — the basis the live feed
@@ -29,34 +31,48 @@ def positioning(
     days = [d for d in store.days() if d < before][-sessions:]
     rows: list[dict[str, Any]] = []
     last = None
-    prev_close = None
+    prev_oi: float | None = None  # yesterday's summed futures OI, as listed yesterday
+    prev_close_by_expiry: dict[Any, float] = {}  # each contract's own previous close
     for d in days:
         x = store.load(d, columns=("symbol", "kind", "expiry", "strike", "option_type", "close", "oi", "oi_change"))
         x = x[x["symbol"] == symbol]
         fut = x[x["kind"].isin(("FUTSTK", "FUTIDX"))].sort_values("expiry")
         if fut.empty:
             continue
+        near_fut = fut["expiry"].iloc[0]
         close = float(fut["close"].iloc[0])
         oi, chg = float(fut["oi"].sum()), float(fut["oi_change"].sum())
         front_oi, front_chg = float(fut["oi"].iloc[0]), float(fut["oi_change"].iloc[0])
         opt = x[x["kind"].isin(("OPTSTK", "OPTIDX"))]
-        near = sorted(opt["expiry"].unique())[0] if len(opt) else None
+        # the nearest expiry still ahead of this session: on expiry day the dying expiry's PCR and
+        # walls are its unwind, not a positioning read (the research rolls 5 sessions before)
+        exps = sorted(e for e in opt["expiry"].unique() if e > d) or sorted(opt["expiry"].unique())
+        near = exps[0] if exps else None
         on = opt[opt["expiry"] == near] if near else opt
         ce, pe = on[on["option_type"] == "CE"], on[on["option_type"] == "PE"]
         label = None
-        if prev_close is not None and oi - chg > 0:
-            oi_pct = chg / (oi - chg) * 100
+        # price: the near contract against ITS OWN previous close (``research/oi_daily`` does the
+        # same). Comparing the nearest close across the roll read every post-expiry day as "up" by
+        # the next month's premium. OI: yesterday's summed OI as listed yesterday — reconstructing
+        # it from today's rows' changes misses the contract that expired, +66 % on the day after.
+        prev_close = prev_close_by_expiry.get(near_fut)
+        if prev_close is not None and prev_oi:
+            oi_pct = (oi / prev_oi - 1) * 100
             up = close >= prev_close
-            label = "FLAT" if abs(oi_pct) < FLAT_OI_PCT else ("LB" if up else "SB") if chg > 0 else ("SC" if up else "LU")
+            label = "FLAT" if abs(oi_pct) < FLAT_OI_PCT else ("LB" if up else "SB") if oi > prev_oi else ("SC" if up else "LU")
+        ce_above = ce[ce["strike"] >= close] if len(ce) else ce
+        pe_below = pe[pe["strike"] <= close] if len(pe) else pe
         rows.append({
             "day": d.isoformat(), "fut_close": round(close, 2), "fut_oi": oi, "fut_oi_chg": chg,
-            "fut_oi_front": front_oi, "fut_oi_front_chg": front_chg, "front_expiry": str(fut["expiry"].iloc[0]),
+            "fut_oi_front": front_oi, "fut_oi_front_chg": front_chg, "front_expiry": str(near_fut),
             "build_up": label, "pcr": round(float(pe["oi"].sum()) / float(ce["oi"].sum()), 2) if ce["oi"].sum() > 0 else None,
-            "call_wall": float(ce.loc[ce["oi"].idxmax(), "strike"]) if len(ce) else None,
-            "put_wall": float(pe.loc[pe["oi"].idxmax(), "strike"]) if len(pe) else None,
+            # walls are one-sided: the biggest call OI at or above the price, the biggest put OI at or below it
+            "call_wall": float(ce_above.loc[ce_above["oi"].idxmax(), "strike"]) if len(ce_above) and ce_above["oi"].max() > 0 else None,
+            "put_wall": float(pe_below.loc[pe_below["oi"].idxmax(), "strike"]) if len(pe_below) and pe_below["oi"].max() > 0 else None,
             "expiry": near,
         })
-        prev_close = close
+        prev_oi = oi
+        prev_close_by_expiry = {e: float(c) for e, c in zip(fut["expiry"], fut["close"], strict=True)}
         last = (d, ce, pe, near)
     if not rows or last is None:
         return None

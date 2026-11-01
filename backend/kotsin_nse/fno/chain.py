@@ -118,11 +118,18 @@ def leg_of(quotes: Sequence[OptQuote]) -> Leg | None:
     return Leg(price_chg_pct=px, oi_chg=chg, oi_chg_pct=(chg / ref * 100) if ref > 0 else None)
 
 
-def _best(rows: Sequence[StrikeRow], side: str, key: str) -> dict[str, float] | None:
+def _best(rows: Sequence[StrikeRow], side: str, key: str, *, future: float | None = None) -> dict[str, float] | None:
+    """The strike with the largest ``key`` on ``side``. With ``future`` the search is one-sided, as
+    a *wall* is: the call wall is the biggest call OI at or above the future (a lid), the put wall
+    the biggest put OI at or below it (a floor). Over every strike an in-the-money pile below the
+    price was reported as the "call wall" and handed to the hedge setups as resistance."""
     vals = [
         (r.strike, v)
         for r in rows
-        if (q := (r.ce if side == "CE" else r.pe)) is not None and (v := getattr(q, key)) is not None and v > 0
+        if (q := (r.ce if side == "CE" else r.pe)) is not None
+        and (v := getattr(q, key)) is not None
+        and v > 0
+        and (future is None or (r.strike >= future if side == "CE" else r.strike <= future))
     ]
     if not vals:
         return None
@@ -191,8 +198,8 @@ def read_chain(
     out["pcr_oi"] = pe_oi / ce_oi if ce_oi > 0 else None
     # a ratio of changes only reads cleanly when calls were added: of a negative it says nothing
     out["pcr_oi_chg"] = pe_add / ce_add if ce_add > 0 else None
-    out["call_wall"] = _best(rows, "CE", "oi")
-    out["put_wall"] = _best(rows, "PE", "oi")
+    out["call_wall"] = _best(rows, "CE", "oi", future=future)
+    out["put_wall"] = _best(rows, "PE", "oi", future=future)
     out["call_add"] = _best(rows, "CE", "oi_chg")
     out["put_add"] = _best(rows, "PE", "oi_chg")
 
@@ -222,7 +229,7 @@ def read_chain(
     sd_unit = (out["iv"] / 100) * math.sqrt(t) if out.get("iv") and t > 0 else None
 
     def where(k: float) -> dict[str, Any]:
-        sd = math.log(k / future) / sd_unit if sd_unit else None
+        sd = math.log(k / future) / sd_unit if sd_unit and k > 0 else None  # a zero strike took the whole read down
         return {"dist_pct": round((k / future - 1) * 100, 3), "sd": round(sd, 2) if sd is not None else None,
                 "far": bool(sd is not None and abs(sd) > 1)}
 

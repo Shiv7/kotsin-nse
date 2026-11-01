@@ -40,19 +40,34 @@ class SessionSpec:
     entry_cutoff: time
     #: every open position is flattened here (10 minutes before close, as validated on NSE cash)
     force_flat: time
+    #: the last instant of CONTINUOUS trading. On NSE cash since 2026-08-03 the F&O stocks stop
+    #: trading at 15:15 and a closing auction (one print, ~15:28) sets the official close; the
+    #: feed keeps sending frames with the indicative auction quantity in ``TotalQty``. Nothing
+    #: between ``continuous_end`` and ``close`` is a trade a bar may be built from or an order may
+    #: be filled at. Equal to ``close`` where there is no auction.
+    continuous_end: time
+    #: when the broker's daily candle for the session can be trusted as final (after the auction
+    #: has settled). ``bars/daily.py`` seeds a session as a finished day only past this.
+    daily_final: time
 
     def contains(self, t: time) -> bool:
-        return self.open <= t <= self.close
+        """Half-open, like every bar bucket: the close instant itself is outside the session."""
+        return self.open <= t < self.close
 
 
 # MCX closes 23:30 in winter and 23:55 in summer. 23:30 is the conservative choice: flattening at
 # 23:20 is inside both. The old stack's single NSE-shaped 15:20 constant would have closed every
 # commodity position eight hours early — see can2_consumer SEGMENT_FLAT.
+#
+# NSE F&O contracts trade to 15:40 since 2026-08-03 (NSE/CMTR/73362); ``close`` here still says
+# 15:30 because every bar grid, the research cache and the REST reconciler are built on it —
+# moving it is a deliberate change with a re-run of the research behind it (HANDOFF §6), not a
+# constant edit. The ten minutes cost the index futures' last ticks and OI in SHADOW, nothing else.
 SESSIONS: dict[Segment, SessionSpec] = {
-    Segment.NSE_EQ: SessionSpec(time(9, 15), time(15, 30), time(14, 45), time(15, 20)),
-    Segment.NSE_FO: SessionSpec(time(9, 15), time(15, 30), time(14, 45), time(15, 20)),
-    Segment.NSE_IDX: SessionSpec(time(9, 15), time(15, 30), time(14, 45), time(15, 20)),
-    Segment.MCX_FO: SessionSpec(time(9, 0), time(23, 30), time(23, 0), time(23, 20)),
+    Segment.NSE_EQ: SessionSpec(time(9, 15), time(15, 30), time(14, 45), time(15, 20), time(15, 15), time(15, 45)),
+    Segment.NSE_FO: SessionSpec(time(9, 15), time(15, 30), time(14, 45), time(15, 20), time(15, 30), time(15, 45)),
+    Segment.NSE_IDX: SessionSpec(time(9, 15), time(15, 30), time(14, 45), time(15, 20), time(15, 30), time(15, 45)),
+    Segment.MCX_FO: SessionSpec(time(9, 0), time(23, 30), time(23, 0), time(23, 20), time(23, 30), time(23, 30)),
 }
 
 
@@ -153,6 +168,17 @@ def session_close_ts(segment: Segment, d: date) -> float:
     return from_ist(datetime.combine(d, SESSIONS[segment].close, tzinfo=IST))
 
 
+def continuous_end_ts(segment: Segment, d: date) -> float:
+    """The end of continuous trading on ``d`` — the last instant a bar may be built from or an
+    order filled at (the closing auction follows on NSE cash)."""
+    return from_ist(datetime.combine(d, SESSIONS[segment].continuous_end, tzinfo=IST))
+
+
+def daily_final_ts(segment: Segment, d: date) -> float:
+    """When the broker's daily candle for session ``d`` is final (the auction has settled)."""
+    return from_ist(datetime.combine(d, SESSIONS[segment].daily_final, tzinfo=IST))
+
+
 def day_start_ts(d: date) -> float:
     """Midnight IST of ``d`` — where the broker stamps a finished daily candle."""
     return from_ist(datetime.combine(d, time(0, 0), tzinfo=IST))
@@ -183,8 +209,9 @@ def seconds_to_close(segment: Segment, ts: float) -> float:
 def bucket_start(segment: Segment, ts: float, tf: str) -> float:
     """Start of the ``tf`` bucket that ``ts`` falls in, anchored on the session open.
 
-    Ticks outside the session are clamped to the session's first bucket for the pre-open case and
-    the last bucket for the post-close case; callers that care filter with :func:`is_open` first.
+    A pre-open tick is clamped to the session's first bucket; a post-close tick is NOT clamped (it
+    floors to a bucket past the close). Callers that care filter with :func:`is_open` first — the
+    aggregator does.
     """
     if tf == "1d":
         return session_open_ts(segment, ist_day(ts))

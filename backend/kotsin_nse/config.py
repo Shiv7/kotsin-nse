@@ -216,7 +216,9 @@ class Settings(BaseSettings):
     strategy_entry_cutoff: str = "14:30"
 
     # ---- the positional book: the daily order block (strategy/daily_ob.py, strategy/positional.py) ------
-    positional_enabled: bool = True
+    #: off by default: the book FAILED its pre-registered test on 2026-10-29 (docs/research/2026-10-29-
+    #: prereg-fill-day.md) and is kept as code only. A fresh .env must not re-arm it.
+    positional_enabled: bool = False
     #: rupees at risk per trade (entry to stop); the quantity follows
     positional_risk_inr: float = 500.0
     positional_max_open: int = 20
@@ -254,12 +256,22 @@ class Settings(BaseSettings):
     #: above applies to the sell leg only.
     cost_stt_pct_delivery_equity: float = 0.1
     cost_stt_pct_sell_option_premium: float = 0.1  # 0.1 % of premium on sale since 2024-10-01 (was 0.0625)
-    cost_stt_pct_sell_future: float = 0.02
+    cost_stt_pct_sell_future: float = 0.02  # since 2024-10-01 (was 0.0125)
+    # NSE transaction charges, % of turnover (premium for options), the 2024-10-01 circular
     cost_exchange_txn_pct_equity: float = 0.00297
-    cost_exchange_txn_pct_option: float = 0.05
+    #: 0.03503 % of premium since 2024-10-01. It was 0.05 % until then — and 0.05 was the value here
+    #: until 2026-11-01, so every option backtest before that date overstated the exchange charge
+    #: by ~43 % (conservative, but not the number on a contract note).
+    cost_exchange_txn_pct_option: float = 0.03503
     cost_exchange_txn_pct_future: float = 0.00173
     cost_sebi_pct: float = 0.0001
+    # stamp duty on the BUY leg, % of turnover, by product (the schedule since 2020-07-01):
+    # equity intraday 0.003, equity delivery 0.015, futures 0.002, options 0.003 (of premium).
+    # One rate for everything was 0.003: futures overstated, delivery understated five-fold.
     cost_stamp_pct_buy: float = 0.003
+    cost_stamp_pct_buy_delivery_equity: float = 0.015
+    cost_stamp_pct_buy_future: float = 0.002
+    cost_stamp_pct_buy_option: float = 0.003
     cost_gst_pct: float = 18.0
     slippage_bps_default: float = 5.0
 
@@ -285,12 +297,16 @@ class Settings(BaseSettings):
                 raise ValueError(f"unknown segment {n!r} — known: {', '.join(Segment.__members__)}")
         return ",".join(names)
 
-    @field_validator("live_entry_cutoff_ist")
+    @field_validator("live_entry_cutoff_ist", "strategy_entry_cutoff")
     @classmethod
     def _hhmm(cls, v: str) -> str:
+        """``HH:MM`` with two digits each — the cutoffs are compared as strings against bar labels,
+        so ``9:30`` would sort after ``14:25`` and silently skip every entry ("" = off)."""
+        if v == "":
+            return v
         hh, _, mm = v.partition(":")
-        if not (hh.isdigit() and mm.isdigit() and 0 <= int(hh) < 24 and 0 <= int(mm) < 60):
-            raise ValueError(f"expected HH:MM, got {v!r}")
+        if not (len(hh) == 2 and len(mm) == 2 and hh.isdigit() and mm.isdigit() and 0 <= int(hh) < 24 and 0 <= int(mm) < 60):
+            raise ValueError(f"expected HH:MM (two digits each), got {v!r}")
         return v
 
     @property

@@ -39,10 +39,11 @@ import numpy as np
 import pandas as pd
 
 from ..config import Settings
+from .common import assert_exploration_window
 from .confirm import ConfirmParams, atr, cpr, doubles
 from .dbcpr import bars_from_1m
 from .history import HistoryStore
-from .optsignals import HOLDOUT_START, _weekly_t
+from .optsignals import _weekly_t
 
 X_LTF, X_HTF, HTF_BARS = 0.25, 1.0, 10
 TOUCH_TOL = 0.05  # ADR
@@ -369,20 +370,22 @@ def run(settings: Settings, label: str = "", on_symbol: Any = None) -> dict[str,
     t0 = _time.time()
     fm, _ = load_members(settings.data_dir)
     store = HistoryStore(settings.data_dir / "history")
-    ltf_end, htf_end = date(2025, 9, 30), date(2025, 9, 30)
-    assert ltf_end < HOLDOUT_START and htf_end < HOLDOUT_START
+    ltf_start, htf_start, ltf_end, htf_end = date(2024, 4, 1), date(2021, 4, 1), date(2025, 9, 30), date(2025, 9, 30)
+    assert_exploration_window(ltf_start, ltf_end)
+    assert_exploration_window(htf_start, htf_end)
     ev: list[dict[str, Any]] = []
     ib: list[dict[str, Any]] = []
     names = [s for s in store.symbols("1m") if s not in ("NIFTY", "BANKNIFTY")]
     for n, sym in enumerate(names, 1):
-        e, i = ltf_events(sym, store.load(sym, "1m"), date(2024, 4, 1), ltf_end, fm.member)
+        e, i = ltf_events(sym, store.load(sym, "1m"), ltf_start, ltf_end, fm.member)
         ev += e
         ib += i
-        ev += htf_events(sym, store.load(sym, "1d"), date(2021, 4, 1), htf_end, fm.member)
+        ev += htf_events(sym, store.load(sym, "1d"), htf_start, htf_end, fm.member)
         if on_symbol and (n % 25 == 0 or n == len(names)):
             on_symbol(sym, n, len(names))
     E = pd.DataFrame(ev)
     root = settings.data_dir / "obtests"
+    root.mkdir(parents=True, exist_ok=True)
     rid = f"power-{uuid.uuid4().hex[:10]}"
     E.to_parquet(root / f"{rid}-events.parquet")
     IB = pd.DataFrame(ib)
@@ -391,6 +394,14 @@ def run(settings: Settings, label: str = "", on_symbol: Any = None) -> dict[str,
            "seconds": round(_time.time() - t0, 1)}
     (root / f"{rid}.json").write_text(json.dumps(out, default=float))
     return out
+
+
+def _qcut(x: pd.Series, labels: list[str]) -> pd.Series:
+    """``pd.qcut`` into ``len(labels)`` bins that survives tied quantile edges (many days with the
+    same value): the tied bins merge (``duplicates="drop"``) and are then named by their interval,
+    since the fixed labels no longer fit."""
+    q = pd.qcut(x, len(labels), duplicates="drop")
+    return q.cat.rename_categories(labels) if len(q.cat.categories) == len(labels) else q
 
 
 def ib_role(ib: pd.DataFrame) -> dict[str, Any]:
@@ -416,13 +427,13 @@ def ib_role(ib: pd.DataFrame) -> dict[str, Any]:
                                      "closed_inside": round(float((first_dn["close_vs_ib"] == "inside").mean()) * 100, 1),
                                      "extension_ib_median": round(float(first_dn["ext_dn_ib"].median()), 2),
                                      "reached_1x_ib_extension": round(float((first_dn["ext_dn_ib"] >= 1).mean()) * 100, 1)}
-    q = pd.qcut(ib["ib_adr"], 4, labels=["smallest IB", "small", "large", "largest IB"])
+    q = _qcut(ib["ib_adr"], ["smallest IB", "small", "large", "largest IB"])
     out["by_ib_size"] = {str(k): {"n": len(g), "broke_neither": round(float((~g["broke_up"] & ~g["broke_dn"]).mean()) * 100, 1),
                                   "broke_both": round(float((g["broke_up"] & g["broke_dn"]).mean()) * 100, 1),
                                   "closed_outside_ib": round(float((g["close_vs_ib"] != "inside").mean()) * 100, 1),
                                   "max_extension_ib_median": round(float(np.maximum(g["ext_up_ib"], g["ext_dn_ib"]).median()), 2)}
                          for k, g in ib.groupby(q, observed=True)}
-    w = pd.qcut(ib["cpr_w_adr"], 3, labels=["narrow CPR", "mid CPR", "wide CPR"])
+    w = _qcut(ib["cpr_w_adr"], ["narrow CPR", "mid CPR", "wide CPR"])
     out["by_cpr_width"] = {str(k): {"n": len(g), "broke_neither": round(float((~g["broke_up"] & ~g["broke_dn"]).mean()) * 100, 1),
                                     "closed_outside_ib": round(float((g["close_vs_ib"] != "inside").mean()) * 100, 1),
                                     "max_extension_ib_median": round(float(np.maximum(g["ext_up_ib"], g["ext_dn_ib"]).median()), 2)}

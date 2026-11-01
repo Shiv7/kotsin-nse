@@ -13,8 +13,23 @@ Four decisions here, each one a bug the old stack actually shipped:
 4. **A bucket that began before we connected is tagged ``PARTIAL``** and excluded from any
    determinism check, instead of quietly looking like a volume collapse.
 
-Higher timeframes are rolled from *closed* 1m bars, so a 30m bar exists only once its last minute
-has closed — which is exactly when FUDKII's boundary should fire.
+Every timeframe is bucketed from the same ticks independently (a 30m bar is not a roll-up of its
+1m bars; the two can differ by the ticks one of them dropped as late). A bar exists only once its
+bucket has ended, by the next tick or by the 1-second flush clock.
+
+Two more rules, each from a measured failure (2026-11-01 review):
+
+5. **A tick for a bucket the store has already closed is late, not a new bar.** The flush clock
+   closes a bucket at its end; feed latency (median 0.85 s, p90 1.4 s) then delivers a frame
+   stamped inside it. Opening a new one-print bar for the old bucket let the next tick close the
+   stub over the full bar (an 11:04 bar of 100/102/99/101 became 97/97/97/97) and fired
+   ``on_bar_close`` twice. Now counted in ``late_ticks`` and dropped; the REST sweep repairs 1m/5m.
+6. **Nothing after the end of continuous trading is a trade.** NSE cash since 2026-08-03: the
+   15:15–15:28 frames carry the closing auction's *indicative* quantity in ``TotalQty``, which
+   restarts small and grows; booked as deltas it was hundreds of thousands of phantom shares at a
+   flat price in the 15:1x bars, the 30m, the live 1d and the session VWAP. Those frames are
+   counted in ``auction_ticks`` and never become bars; the official close reaches the 1d series
+   from the broker's candle after the session (``Engine._refresh_closed_day``).
 """
 
 from __future__ import annotations
@@ -33,6 +48,7 @@ from ..market.session import (
     TF_SECONDS,
     bucket_end,
     bucket_start,
+    continuous_end_ts,
     ist_day,
     session_close_ts,
     session_open_ts,
@@ -60,7 +76,9 @@ class SymbolState:
     # "unknown", so the first tick primes the baseline and books nothing.
     last_total_qty: int | None = None
     day: str = ""
-    session_pv: float = 0.0  # Σ typical × volume, for the session VWAP
+    #: Σ trade price × volume delta over the session (tick-weighted; the REST-seeded bars carry
+    #: Σ HLC/3 × bar volume instead — `bars.vwap.session_vwap`), for the session VWAP
+    session_pv: float = 0.0
     session_v: float = 0.0
     prev_close: float | None = None
     oi: int | None = None
@@ -94,6 +112,8 @@ class Aggregator:
         self.partial_bars = 0
         self.late_ticks = 0
         self.out_of_session_ticks = 0
+        #: frames after the end of continuous trading (NSE cash's closing auction): never bars
+        self.auction_ticks = 0
 
     # -- registration ------------------------------------------------------------------------------
 
@@ -135,6 +155,17 @@ class Aggregator:
             return
         st.oi, st.oi_change_pct, st.fut_scrip_code = oi, change_pct, fut_code
 
+    def mark_reconnected(self, ts: float | None = None) -> None:
+        """The socket came back: every bucket that began before now is missing its first trades.
+
+        ``connected_since`` was set once at ``track()`` and never moved, so after a mid-session
+        reconnect the rejoined bucket was tagged LIVE, counted in the fidelity comparison and read
+        as complete.
+        """
+        now = ts or time.time()
+        for st in self.state.values():
+            st.connected_since = now
+
     # -- tick path ----------------------------------------------------------------------------------
 
     async def on_tick(self, tick: Mapping[str, Any]) -> None:
@@ -158,6 +189,15 @@ class Aggregator:
         # session still update the LTP upstream; they just never become a bar.
         if ts < session_open_ts(segment, day_d) or ts >= session_close_ts(segment, day_d):
             self.out_of_session_ticks += 1
+            return
+        if ts >= continuous_end_ts(segment, day_d):
+            self.auction_ticks += 1  # the closing auction's indicative frames (rule 6)
+            return
+        if st.day and day < st.day:
+            # a frame stamped on an earlier day (a stale snapshot after a reconnect, an illiquid
+            # name's last-trade stamp): rolling the day *backwards* reset the VWAP and the volume
+            # baseline, and the next real tick then booked the whole day's TotalQty into one bar
+            self.late_ticks += 1
             return
         if day != st.day:
             self._roll_day(st, day, tick)
@@ -235,6 +275,10 @@ class Aggregator:
                 self.late_ticks += 1  # a tick older than the bar we are on; count, do not rewrite
                 continue
             if cur is None:
+                last = self.store.last(st.instrument.symbol, tf)
+                if last is not None and bucket <= last.ts:
+                    self.late_ticks += 1  # the flush clock closed this bucket already (rule 5)
+                    continue
                 cur = self._open_bar(st, tf, bucket, price, segment)
                 self.store.set_forming(cur)
             cur.merge_tick(price, qty)
@@ -360,6 +404,7 @@ class Aggregator:
             "partial_bars": self.partial_bars,
             "late_ticks": self.late_ticks,
             "out_of_session_ticks": self.out_of_session_ticks,
+            "auction_ticks": self.auction_ticks,
             "ticks": sum(s.ticks for s in self.state.values()),
             "with_oi": sum(1 for s in self.state.values() if s.oi is not None),
         }

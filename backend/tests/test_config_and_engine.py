@@ -70,13 +70,26 @@ async def test_engine_boots_without_credentials_and_says_why(settings):
 
 
 async def test_live_mode_requires_explicit_arming(settings):
-    e = Engine(settings)
+    e = Engine(settings.model_copy(update={"strategy_enabled": False}))
     await e.start()
     try:
         with pytest.raises(ValueError):
             await e.set_mode(Mode.LIVE_CAPPED)
         await e.set_mode(Mode.LIVE_CAPPED, armed_minutes=30)
         assert e.mode() is Mode.LIVE_CAPPED
+    finally:
+        await e.stop()
+
+
+async def test_live_mode_cannot_be_armed_while_the_strategy_has_no_live_route(settings):
+    """The strategy submits through ``Gateway.submit``, which refuses every intent in a live mode
+    (``submit_live`` is unwired): arming would book exits it never sent. Refused at the switch."""
+    e = Engine(settings.model_copy(update={"strategy_enabled": True}))
+    await e.start()
+    try:
+        with pytest.raises(ValueError, match="not routed"):
+            await e.set_mode(Mode.LIVE_CAPPED, armed_minutes=30)
+        assert e.mode() is Mode.SHADOW
     finally:
         await e.stop()
 
@@ -99,7 +112,7 @@ async def test_expired_arming_falls_back_to_paper_on_restart(settings):
 
 
 async def test_expired_arming_downgrades_even_without_a_restart(settings):
-    e = Engine(settings)
+    e = Engine(settings.model_copy(update={"strategy_enabled": False}))
     await e.start()
     try:
         await e.set_mode(Mode.LIVE_CAPPED, armed_minutes=30)

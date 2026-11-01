@@ -63,6 +63,7 @@ from .market.fo_bhavcopy import fetch_day as fetch_fo_bhavcopy
 from .market.fo_universe import SYMBOL_CHANGES_FILE, parse_symbol_changes
 from .market.session import (
     TradingCalendar,
+    continuous_end_ts,
     is_open,
     ist_day,
     ist_hm,
@@ -148,6 +149,8 @@ class Engine:
         self.micro = MicroMeter()  # microstructure of the underlyings and front futures (orderflow/micro.py)
         self._depth_last: dict[str, float] = {}
         self._open_cache: dict[tuple[Segment, date], float] = {}
+        self._cont_end_cache: dict[tuple[Segment, date], float] = {}
+        self._reconnects_seen = 0
         self.scanner = LiveScanner(self.store)
         self._scanned_minute = 0
         #: near-future OI change % by underlying symbol, for the board's build-up label
@@ -462,7 +465,7 @@ class Engine:
                 m = MicroMeter(self.micro.window)
                 for ts, kind, a in events:
                     if kind == 0:
-                        m.on_tick(a[0], ts, a[1], a[2], a[3], a[4], auction=ts < self._open_ts(Segment.NSE_EQ, ts))
+                        m.on_tick(a[0], ts, a[1], a[2], a[3], a[4], auction=self._in_auction(Segment.NSE_EQ, ts))
                     else:
                         m.on_depth(a[0], ts, a[1], a[2])
                 return m
@@ -616,7 +619,11 @@ class Engine:
                 if tf == "1d":
                     self._seed_daily(inst, rows)
                 else:
-                    self.aggregator.seed(inst, tf, rows, ts_of=ist_naive_to_ts)
+                    # ``until=now``: REST serves the bucket that is still forming at the boot; seeded
+                    # as a complete REST bar it could never be overwritten by the live build (the
+                    # store keeps REST over a live close) and the sweep skips REST-sourced bars —
+                    # that minute stayed a mid-minute snapshot all day
+                    self.aggregator.seed(inst, tf, rows, ts_of=ist_naive_to_ts, until=now)
                     if tf == "1m":
                         # today's 2m … 15m from the same rows — no extra REST calls; before this
                         # they began at the boot, and the chart's 5m was a 404 for five minutes
@@ -671,6 +678,15 @@ class Engine:
         if mode in (Mode.LIVE, Mode.LIVE_CAPPED):
             if not armed_minutes:
                 raise ValueError(f"{mode.value} requires armed_minutes — arming is never implicit")
+            # 2026-11-01 review: the strategy submits through ``Gateway.submit``, which has no live
+            # path — in a live mode it refuses every intent, exits included, and ``Reconciler`` is
+            # wired nowhere. Arming would produce a book that books exits it never sent. Refuse
+            # until the live route (submit_live + a LiveContext + reconciliation) exists — HANDOFF §6.
+            if self.s.strategy_enabled:
+                raise ValueError(
+                    f"{mode.value} cannot be armed: the strategy's orders are not routed to the broker "
+                    "(Gateway.submit_live is unwired; see docs/HANDOFF.md §6 'before LIVE')"
+                )
             armed = time.time() + armed_minutes * 60
         self._mode, self._armed_until = mode, armed
         await self.ledger.set_mode(mode.value, armed)
@@ -716,7 +732,7 @@ class Engine:
                 float(tick.get("bid") or 0),
                 float(tick.get("ask") or 0),
             )
-            auction = t < self._open_ts(inst.segment if inst else Segment.NSE_EQ, t)
+            auction = self._in_auction(inst.segment if inst else Segment.NSE_EQ, t)
             self.flow.on_tick(*args, auction=auction)
             self.micro.on_tick(*args, auction=auction)
         elif code in self._option_tick_codes and self.s.archive_ticks:
@@ -820,6 +836,28 @@ class Engine:
         if hit is None:
             hit = self._open_cache[key] = session_open_ts(segment, key[1])
         return hit
+
+    def _option_oi_reference(self, code: str, segment: Segment) -> float | None:
+        """An option contract's OI change is measured from NSE's closing OI; a contract listed
+        today that had NO open interest at yesterday's close (or was not in the bhavcopy) starts
+        from zero — every lot on it is new writing, the most informative OI change there is. With
+        ``None`` it was excluded from every OI-change sum, the call/put ``add`` strikes and the
+        legs, so fresh writing at a new strike was invisible to the board and the 64-state read."""
+        ref = self._oi_reference(code)
+        if ref is None and segment is not Segment.MCX_FO and self.oi_ref_day is not None:
+            return 0.0
+        return ref
+
+    def _in_auction(self, segment: Segment, ts: float) -> bool:
+        """Pre-open, or past the end of continuous trading (NSE cash's closing auction from 15:15):
+        a frame's new ``TotalQty`` is an indicative match, not a trade anyone took a side of."""
+        if ts < self._open_ts(segment, ts):
+            return True
+        key = (segment, ist_day(ts))
+        end = self._cont_end_cache.get(key)
+        if end is None:
+            end = self._cont_end_cache[key] = continuous_end_ts(segment, key[1])
+        return ts >= end
 
     def session_phase(self, symbol: str, ts: int) -> str:
         inst = self.underlyings.get(symbol)
@@ -1046,6 +1084,12 @@ class Engine:
             now = time.time()
             try:
                 day = ist_day(now).isoformat()
+                rc = int(getattr(self.feed.health, "reconnects", 0) or 0)
+                if rc != self._reconnects_seen:
+                    # the socket came back: the buckets open right now are missing their first
+                    # trades and must be tagged PARTIAL, not read as complete
+                    self._reconnects_seen = rc
+                    self.aggregator.mark_reconnected(now)
                 for fm in self.flow.drain():
                     self.archive.flow(fm.to_json())
                 if now - last_archive > self.s.archive_flush_s:
@@ -1266,7 +1310,7 @@ class Engine:
                     ltp=self.ltps.get(o.scrip_code),
                     prev_close=self.prev_close_by_code.get(o.scrip_code),
                     oi=self.oi_live.get(o.scrip_code),
-                    oi_ref=self._oi_reference(o.scrip_code),
+                    oi_ref=self._option_oi_reference(o.scrip_code, g.segment),
                 )
             rows = [StrikeRow(k, v.get("CE"), v.get("PE")) for k, v in by_strike.items()]
             exp_ts = session_close_ts(g.segment, date.fromisoformat(e))

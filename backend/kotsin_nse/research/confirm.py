@@ -59,13 +59,15 @@ import numpy as np
 import pandas as pd
 
 from ..config import Settings
+from ..indicators import supertrend as _supertrend
+from ..indicators import wilder_atr
 from ..market.session import ist_at, ist_day
 from ..risk.costs import CostModel
+from .common import assert_exploration_window
 from .history import HistoryStore
 from .mtf import clean_5m, resample
 from .obtest import _fut
 
-HOLDOUT_START = date(2025, 10, 1)
 PIVOT_NAMES = ("P", "BC", "TC", "R1", "S1", "R2", "S2", "PDH", "PDL")
 WEEKLY_NAMES = ("P", "BC", "TC", "R1", "S1", "R2", "S2", "PDH", "PDL")  # of the previous week (PDH/PDL = its high/low)
 
@@ -117,29 +119,13 @@ class ConfirmTrade:
 
 
 def atr(h: np.ndarray, lo: np.ndarray, c: np.ndarray, n: int = 14) -> np.ndarray:
-    pc = np.r_[c[0], c[:-1]]
-    tr = np.maximum.reduce([h - lo, np.abs(h - pc), np.abs(lo - pc)])
-    return pd.Series(tr).ewm(alpha=1 / n, adjust=False).mean().to_numpy()
+    return wilder_atr(h, lo, c, n)
 
 
 def supertrend(h: np.ndarray, lo: np.ndarray, c: np.ndarray, n: int = 10, m: float = 3.0) -> np.ndarray:
-    """Direction (+1 up / −1 down) of the usual Supertrend: ATR(n) (Wilder) bands ``m`` × ATR around
-    the bar's (H + L) / 2, each band ratcheting until a close crosses it."""
-    a = atr(h, lo, c, n)
-    mid = (h + lo) / 2
-    ub, lb = mid + m * a, mid - m * a
-    fu, fl = ub.copy(), lb.copy()
-    d = np.ones(len(c))
-    for i in range(1, len(c)):
-        fu[i] = ub[i] if ub[i] < fu[i - 1] or c[i - 1] > fu[i - 1] else fu[i - 1]
-        fl[i] = lb[i] if lb[i] > fl[i - 1] or c[i - 1] < fl[i - 1] else fl[i - 1]
-        if d[i - 1] < 0 and c[i] > fu[i - 1]:
-            d[i] = 1
-        elif d[i - 1] > 0 and c[i] < fl[i - 1]:
-            d[i] = -1
-        else:
-            d[i] = d[i - 1]
-    return d
+    """Direction (+1 up / −1 down; 0 for the first n + 1 bars) of the Supertrend the live CPR retest
+    trades — ``indicators.supertrend``, which flips on the CURRENT bar's ratcheted band."""
+    return _supertrend(h, lo, c, n, m)[0]
 
 
 def cpr(h: float, lo: float, c: float) -> dict[str, float]:
@@ -170,7 +156,9 @@ def doubles(h: np.ndarray, lo: np.ndarray, c: np.ndarray, a: np.ndarray, p: Conf
                 l2 = lo[i2]
                 low = min(l1, l2)
                 if abs(l2 - l1) <= tol:  # the pullback came back to L1: this is the double bottom's breakout
-                    if (i2 - i1 >= p.min_gap and k - i2 <= p.max_wait and neck - low >= p.min_depth_atr * a[k]
+                    # i1 + s <= k: L1 is a swing low only once the s bars after it have closed — a
+                    # trigger before that would read bars after itself
+                    if (i1 + s <= k and i2 - i1 >= p.min_gap and k - i2 <= p.max_wait and neck - low >= p.min_depth_atr * a[k]
                             and ok_entry[k] and k not in out):
                         out[k] = {"k": k, "i1": i1, "i2": i2, "jn": jn, "l1": float(l1), "l2": float(l2), "neck": float(neck)}
                     break  # used up, taken or not
@@ -394,8 +382,7 @@ def summarize(trades: list[ConfirmTrade]) -> dict[str, Any]:
 
 def run(settings: Settings, start: date, end: date, p: ConfirmParams, *, symbols: list[str] | None = None, label: str = "",
         on_symbol: Any = None, allow_holdout: bool = False) -> dict[str, Any]:
-    if end >= HOLDOUT_START and not allow_holdout:
-        raise ValueError(f"{end} is inside the holdout (from {HOLDOUT_START}); the exploration window ends 2025-09-30")
+    assert_exploration_window(start, end, allow_holdout=allow_holdout)
     store = HistoryStore(settings.data_dir / "history")
     costs = CostModel(settings)
     names = symbols or store.symbols("5m")

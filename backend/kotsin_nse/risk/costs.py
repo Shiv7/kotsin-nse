@@ -17,6 +17,7 @@ source so a wrong number is visible rather than buried.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from ..config import Settings
@@ -68,8 +69,10 @@ class CostModel:
         return price * qty * instrument.multiplier
 
     def leg(
-        self, instrument: Instrument, side: OrderSide, price: float, qty: int
+        self, instrument: Instrument, side: OrderSide, price: float, qty: int, *, delivery: bool = False
     ) -> Charges:
+        """One order's charges. ``delivery``: a cash-equity leg held overnight (STT on both legs
+        at the delivery rate, delivery stamp duty on the buy); ignored for derivatives."""
         s = self.s
         t = self.turnover(instrument, price, qty)
         if t <= 0 or qty <= 0:
@@ -83,26 +86,60 @@ class CostModel:
         if kind is InstrumentKind.OPTION:
             exch_pct = s.cost_exchange_txn_pct_option
             stt_pct = s.cost_stt_pct_sell_option_premium
+            stamp_pct = s.cost_stamp_pct_buy_option
+            stt_both = False
         elif kind is InstrumentKind.FUTURE:
             exch_pct = s.cost_exchange_txn_pct_future
             stt_pct = s.cost_stt_pct_sell_future
+            stamp_pct = s.cost_stamp_pct_buy_future
+            stt_both = False
+        elif delivery:
+            exch_pct = s.cost_exchange_txn_pct_equity
+            stt_pct = s.cost_stt_pct_delivery_equity
+            stamp_pct = s.cost_stamp_pct_buy_delivery_equity
+            stt_both = True
         else:
             exch_pct = s.cost_exchange_txn_pct_equity
             stt_pct = s.cost_stt_pct_sell_equity
+            stamp_pct = s.cost_stamp_pct_buy
+            stt_both = False
 
-        stt = t * stt_pct / 100 if side is OrderSide.SELL else 0.0
+        stt = t * stt_pct / 100 if (side is OrderSide.SELL or stt_both) else 0.0
         exchange = t * exch_pct / 100
         sebi = t * s.cost_sebi_pct / 100
-        stamp = t * s.cost_stamp_pct_buy / 100 if side is OrderSide.BUY else 0.0
+        stamp = t * stamp_pct / 100 if side is OrderSide.BUY else 0.0
         gst = (brokerage + exchange + sebi) * s.cost_gst_pct / 100
         return Charges(
             brokerage=brokerage, stt=stt, exchange=exchange, sebi=sebi, stamp=stamp, gst=gst
         )
 
-    def round_trip(self, instrument: Instrument, entry: float, exit_price: float, qty: int) -> Charges:
-        return self.leg(instrument, OrderSide.BUY, entry, qty) + self.leg(
-            instrument, OrderSide.SELL, exit_price, qty
+    def round_trip(
+        self,
+        instrument: Instrument,
+        entry: float,
+        exit_price: float,
+        qty: int,
+        *,
+        entry_side: OrderSide = OrderSide.BUY,
+        delivery: bool = False,
+    ) -> Charges:
+        """Entry and exit as two orders. ``entry_side`` matters: a short pays STT (sell side) on
+        the *entry* turnover and stamp duty (buy side) on the exit's — the legs were always
+        charged as BUY-then-SELL before 2026-11-01."""
+        exit_side = OrderSide.SELL if entry_side is OrderSide.BUY else OrderSide.BUY
+        return self.leg(instrument, entry_side, entry, qty, delivery=delivery) + self.leg(
+            instrument, exit_side, exit_price, qty, delivery=delivery
         )
+
+    def trade(self, instrument: Instrument, entry_side: OrderSide, entry: float, exits: Sequence[tuple[float, int]], *, delivery: bool = False) -> Charges:
+        """A trade with several exit orders (a half at T1, the rest later): every order is charged
+        — the flat brokerage is per order, so a scaled exit is three orders, not two."""
+        qty = sum(q for _p, q in exits)
+        exit_side = OrderSide.SELL if entry_side is OrderSide.BUY else OrderSide.BUY
+        total = self.leg(instrument, entry_side, entry, qty, delivery=delivery)
+        for px, q in exits:
+            total = total + self.leg(instrument, exit_side, px, q, delivery=delivery)
+        return total
 
     def round_trip_pct(self, instrument: Instrument, price: float, qty: int) -> float:
         """Round-trip cost as a percentage of turnover, assuming a flat exit.

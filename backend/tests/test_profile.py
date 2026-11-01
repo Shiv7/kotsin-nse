@@ -17,14 +17,16 @@ def test_bin_size_is_about_five_basis_points_in_whole_ticks():
 def test_volume_profile_finds_the_poc_and_a_value_area_holding_seventy_percent():
     rows = [(100.0, 100.0, 50.0), (100.5, 100.5, 30.0), (101.0, 101.0, 10.0), (99.5, 99.5, 10.0)]
     vp = volume_profile(rows, step=0.5)
-    assert vp is not None and vp.poc == 100.0
-    assert vp.val == 100.0 and vp.vah == 100.5  # 80 of 100 held by the POC and its heavier neighbour
+    # a bin is labelled by its CENTRE: the 100.0–100.5 bin is 100.25 (the lower edge understated
+    # the POC and the value-area high by one step)
+    assert vp is not None and vp.poc == 100.25
+    assert vp.val == 100.25 and vp.vah == 100.75  # 80 of 100 held by the POC and its heavier neighbour
     assert vp.total == pytest.approx(100.0)
 
 
 def test_a_bar_spreads_its_volume_over_its_range():
     vp = volume_profile([(101.0, 100.0, 30.0)], step=0.5)
-    assert vp is not None and vp.prices == [100.0, 100.5, 101.0] and vp.volumes == [10.0, 10.0, 10.0]
+    assert vp is not None and vp.prices == [100.25, 100.75, 101.25] and vp.volumes == [10.0, 10.0, 10.0]
 
 
 def test_market_profile_letters_initial_balance_and_a_trend_day():

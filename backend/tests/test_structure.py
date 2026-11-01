@@ -43,7 +43,7 @@ def test_the_setup_targets_the_nearest_untaken_liquidity_ahead():
     assert st is not None and st.side == "BULLISH"
     assert st.r1 == 103.0  # the opening range high
     assert st.r2 == 104.6  # the untaken swing high / day high
-    assert st.rr == pytest.approx((104.6 - st.z) / (st.z - st.s1), rel=1e-3)
+    assert st.rr == pytest.approx((104.6 - st.z) / (st.z - st.s1), abs=0.006)  # rr is rounded to 2 dp
 
 
 def test_a_close_through_the_far_side_breaks_the_zone():

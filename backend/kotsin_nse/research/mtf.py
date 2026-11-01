@@ -42,6 +42,7 @@ import pandas as pd
 from ..config import Settings
 from ..market.session import ist_at, ist_day
 from ..risk.costs import CostModel
+from .common import assert_exploration_window, trade_costs
 from .history import HistoryStore
 from .obtest import _fut
 
@@ -255,14 +256,12 @@ def trades_for(
         for j in range(j0, len(L)):
             if L[j, 5] > valid_until:
                 break
-            day_j = ist_day(int(L[j, 0]))
-            first_ok = L[j, 5] >= ist_at(day_j, p.first_entry) and L[j, 5] <= ist_at(day_j, p.last_entry)
-            if not first_ok:
-                continue
-            if sign > 0 and (L[j, 3] < wick):
-                break  # the sweep low was taken out again: the idea is dead
-            if sign < 0 and L[j, 2] > wick:
+            # the sweep wick taken out again kills the idea on ANY bar, inside the entry window or not
+            if (sign > 0 and L[j, 3] < wick) or (sign < 0 and L[j, 2] > wick):
                 break
+            day_j = ist_day(int(L[j, 0]))
+            if not (ist_at(day_j, p.first_entry) <= L[j, 5] <= ist_at(day_j, p.last_entry)):
+                continue
             pool = lsh_a if sign > 0 else lsl_a
             conf = pool[(pool + p.ltf_swing_side < j) & (L[pool, 0] >= ts0)] if len(pool) else pool
             if not len(conf):
@@ -352,8 +351,7 @@ def _simulate(t: MTFTrade, F: np.ndarray, p: MTFParams, costs: CostModel) -> Non
     t.sessions_held = len(sessions)
     t.exit_ts = t.exits[-1]["ts"] if t.exits else t.signal_ts
     t.gross = sum(sign * (e["price"] - t.entry) * t.qty * e["frac"] for e in t.exits)
-    avg_exit = sum(e["price"] * e["frac"] for e in t.exits)
-    t.costs = costs.round_trip(_fut(t.symbol), t.entry, avg_exit, t.qty).total
+    t.costs = trade_costs(costs, _fut(t.symbol), sign, t.entry, t.qty, t.exits)
     t.net = t.gross - t.costs
     t.r = round(t.net / (risk * t.qty), 3)
     t.exit_reason = t.exits[-1]["why"] if t.exits else ""
@@ -408,7 +406,9 @@ def summarize(trades: list[MTFTrade]) -> dict[str, Any]:
     }
 
 
-def run(settings: Settings, start: date, end: date, p: MTFParams, *, symbols: list[str] | None = None, label: str = "", on_symbol: Any = None) -> dict[str, Any]:
+def run(settings: Settings, start: date, end: date, p: MTFParams, *, symbols: list[str] | None = None, label: str = "", on_symbol: Any = None,
+        allow_holdout: bool = False) -> dict[str, Any]:
+    assert_exploration_window(start, end, allow_holdout=allow_holdout)
     store = HistoryStore(settings.data_dir / "history")
     costs = CostModel(settings)
     names = symbols or store.symbols("5m")

@@ -6,12 +6,16 @@ from __future__ import annotations
 from datetime import date
 
 import numpy as np
+import pytest
 
 from kotsin_nse.config import Settings
+from kotsin_nse.domain import OrderSide
 from kotsin_nse.market.session import ist_at
+from kotsin_nse.research.obtest import _fut
 from kotsin_nse.research.playbooks import (
     DayData,
     PBParams,
+    run,
     signals_sweep,
     signals_va_reentry,
     simulate,
@@ -61,3 +65,38 @@ def test_simulator_takes_half_at_t1_moves_the_stop_to_breakeven_then_exits_there
     t = simulate(d, plan, PBParams(slip_bps=0), CostModel(Settings(_env_file=None)), DAY)
     assert [e["why"] for e in t.exits] == ["T1", "BE_STOP"]
     assert t.gross == (101.0 - 100.0) * t.qty * 0.5
+
+
+def test_an_initial_balance_low_sweep_fires_once_the_ib_is_set_and_only_while_untaken():
+    # the first hour's low 99.6 at 09:40; a quiet 20 minutes after the IB closes; the 10:35 5m bar
+    # dips to 99.3 and closes back at 99.8 — a sweep of IBL (the IB's own bars SET the level, they
+    # must not count as having taken it)
+    path = flat(60)
+    path[25] = (100.0, 100.05, 99.6, 100.0)
+    path += flat(20) + [(100.0, 100.0, 99.3, 99.8)] * 5 + flat(30, 99.9)
+    sigs = signals_sweep(day(path), PBParams(sweep_levels="IBL"))
+    assert [s["setup"] for s in sigs] == ["SWEEP IBL"]
+    assert sigs[0]["ts"] == OPEN + 85 * 60 and sigs[0]["side"] == "BULLISH" and sigs[0]["level"] == 99.6
+    # the IB low broken (closed under) after the IB closed is not resting liquidity any more
+    taken = list(path)
+    taken[70:75] = [(100.0, 100.0, 99.5, 99.55)] * 5
+    assert signals_sweep(day(taken), PBParams(sweep_levels="IBL")) == []
+
+
+def test_a_trade_that_exits_in_two_pieces_pays_three_orders_not_two():
+    path = [*flat(5), (100.0, 101.2, 100.0, 101.1), (101.1, 101.1, 99.9, 99.95), *flat(5, 99.9)]
+    plan = {"side": "BULLISH", "setup": "T", "ts": OPEN + 5 * 60, "entry": 100.0, "stop": 99.5, "t1": 101.0, "t2": 102.0, "rr": 4.0}
+    settings = Settings(_env_file=None)
+    costs = CostModel(settings)
+    t = simulate(day(path), plan, PBParams(slip_bps=0), costs, DAY)
+    assert [e["why"] for e in t.exits] == ["T1", "BE_STOP"]
+    fut = _fut("X")
+    legs = [costs.leg(fut, OrderSide.BUY, 100.0, t.qty), costs.leg(fut, OrderSide.SELL, 101.0, t.qty / 2), costs.leg(fut, OrderSide.SELL, 100.0, t.qty / 2)]
+    assert t.costs == pytest.approx(sum(x.total for x in legs))
+    assert sum(x.brokerage for x in legs) == 3 * settings.cost_brokerage_per_order_inr
+    assert t.costs > costs.round_trip(fut, 100.0, 100.5, t.qty).total, "two legs at the average exit under-charge"
+
+
+def test_the_holdout_is_refused():
+    with pytest.raises(ValueError, match="holdout"):
+        run(Settings(_env_file=None), [date(2025, 9, 30), date(2025, 10, 1)], PBParams())

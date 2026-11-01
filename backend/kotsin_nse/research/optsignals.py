@@ -25,11 +25,13 @@ adjusted for every corporate action).
 
 from __future__ import annotations
 
+import bisect
 import json
 import math
 import time as _time
 import uuid
-from datetime import date
+from collections.abc import Sequence
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -39,15 +41,34 @@ import pandas as pd
 from ..config import Settings
 from ..fno.chain import implied_vol
 from ..market.fo_bhavcopy import OiDailyStore
+from .common import HOLDOUT_START
 from .history import HistoryStore
 
 MIN_DTE = 5
-HOLDOUT_START = date(2025, 10, 1)
 SIGNALS = {"H1_cw_spread": +1, "H2_skew": -1, "H3_abn_os": -1, "H4_otm_put_build": -1}
 HALVES = ((date(2021, 4, 1), date(2023, 6, 30)), (date(2023, 7, 1), date(2025, 9, 30)))
+#: an IV is solved on trading time (sessions / 252) so that ``iv / sqrt(252)`` is one session's move;
+#: calendar days / 365 against sqrt(252) left the Mon–Wed IVs of a Thursday weekly ~1.2× too high
+SESSIONS_PER_YEAR = 252
 
 
 # -- features from one bhavcopy ------------------------------------------------------------------------
+
+
+def sessions_to(d: date, expiry: date | str, sessions: Sequence[date]) -> int:
+    """Trading sessions from ``d`` (exclusive) to ``expiry`` (inclusive), counted in ``sessions`` — the
+    sorted session list the study holds (the bhavcopy days). Past its last day weekdays stand in (the
+    holidays there are not known yet). At least 1, so an expiring contract still has a day of time."""
+    e = date.fromisoformat(expiry) if isinstance(expiry, str) else expiry
+    n = bisect.bisect_right(sessions, e) - bisect.bisect_right(sessions, d)
+    tail = max(sessions[-1], d) if len(sessions) else d
+    if e > tail:
+        n += int(np.busday_count(tail + timedelta(days=1), e + timedelta(days=1)))
+    return max(n, 1)
+
+
+def _t_years(d: date, expiry: date | str, sessions: Sequence[date]) -> float:
+    return sessions_to(d, expiry, sessions) / SESSIONS_PER_YEAR
 
 
 def _atm_iv(calls: pd.DataFrame, puts: pd.DataFrame, f: float, t: float) -> tuple[float | None, float | None, float | None]:
@@ -61,7 +82,9 @@ def _atm_iv(calls: pd.DataFrame, puts: pd.DataFrame, f: float, t: float) -> tupl
     return implied_vol(float(r["settle_c"]), f, k, t, True), implied_vol(float(r["settle_p"]), f, k, t, False), k
 
 
-def day_features(df: pd.DataFrame, d: date) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+def day_features(df: pd.DataFrame, d: date, sessions: Sequence[date]) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """``sessions``: the sorted session list (see :func:`sessions_to`) — every IV is solved on the
+    sessions left to expiry over 252, never on calendar days."""
     df = df.copy()
     df["dte"] = (pd.to_datetime(df["expiry"]) - pd.Timestamp(d)).dt.days
     fut = df[df["kind"] == "FUTSTK"].set_index(["symbol", "expiry"])["settle"]
@@ -72,7 +95,7 @@ def day_features(df: pd.DataFrame, d: date) -> tuple[list[dict[str, Any]], dict[
         if near is None:
             continue
         f = float(fut[(sym, near)])
-        t = max((pd.Timestamp(near) - pd.Timestamp(d)).days, 1) / 365
+        t = _t_years(d, str(near), sessions)
         gn = g[g["expiry"] == near]
         calls = gn[gn["option_type"] == "CE"].set_index("strike")[["settle", "volume"]]
         puts = gn[gn["option_type"] == "PE"].set_index("strike")[["settle", "volume"]]
@@ -91,10 +114,10 @@ def day_features(df: pd.DataFrame, d: date) -> tuple[list[dict[str, Any]], dict[
             "otm_call_add": float(ce.loc[ce["strike"] > 1.02 * f, "oi_change"].sum()),
             "fut_oi": float(df.loc[(df["kind"] == "FUTSTK") & (df["symbol"] == sym), "oi"].sum()),
         })
-    return rows, _index_row(df, d, "NIFTY")
+    return rows, _index_row(df, d, "NIFTY", sessions)
 
 
-def _index_row(df: pd.DataFrame, d: date, sym: str) -> dict[str, Any] | None:
+def _index_row(df: pd.DataFrame, d: date, sym: str, sessions: Sequence[date]) -> dict[str, Any] | None:
     o = df[(df["kind"] == "OPTIDX") & (df["symbol"] == sym)]
     fu = df[(df["kind"] == "FUTIDX") & (df["symbol"] == sym)].sort_values("dte")
     if o.empty or fu.empty:
@@ -104,7 +127,7 @@ def _index_row(df: pd.DataFrame, d: date, sym: str) -> dict[str, Any] | None:
     if not ex:
         return None
     e = ex[0]
-    t = max((pd.Timestamp(e) - pd.Timestamp(d)).days, 1) / 365
+    t = _t_years(d, str(e), sessions)
     gn = o[o["expiry"] == e]
     calls = gn[gn["option_type"] == "CE"].set_index("strike")[["settle", "volume"]]
     puts = gn[gn["option_type"] == "PE"].set_index("strike")[["settle", "volume"]]
@@ -137,11 +160,12 @@ def build(data_dir: Path, on_day: Any = None) -> tuple[pd.DataFrame, pd.DataFram
     rows_s: list[dict[str, Any]] = []
     rows_m: list[dict[str, Any]] = []
     cols = ("symbol", "kind", "expiry", "strike", "option_type", "settle", "oi", "oi_change", "volume")
-    todo = [d for d in sorted(by_day) if d.isoformat() not in done]
+    sessions = sorted(by_day)  # every bhavcopy session held: the day count an IV is solved on
+    todo = [d for d in sessions if d.isoformat() not in done]
     for n, d in enumerate(todo, 1):
         df = by_day[d].load(d, columns=cols)
         df["expiry"] = df["expiry"].astype(str)
-        s, m = day_features(df, d)
+        s, m = day_features(df, d, sessions)
         rows_s += s
         if m:
             rows_m.append(m)
@@ -329,4 +353,4 @@ def run(settings: Settings, start: date = date(2021, 4, 1), end: date = date(202
     return out
 
 
-__all__ = ["SIGNALS", "build", "day_features", "evaluate", "panel", "run"]
+__all__ = ["SESSIONS_PER_YEAR", "SIGNALS", "build", "day_features", "evaluate", "panel", "run", "sessions_to"]

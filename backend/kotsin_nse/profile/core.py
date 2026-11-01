@@ -22,7 +22,15 @@ from typing import Any
 
 VALUE_AREA = 0.70
 TPO_MINUTES = 30
-LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+#: one letter per 30-minute period; MCX's 09:00–23:30 session has 29 of them, so the second
+#: alphabet is lower case (the usual convention) rather than wrapping back to A
+LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+
+def _bin_price(k: int, step: float) -> float:
+    """A bin's price is its CENTRE: bin ``k`` covers [k·step, (k+1)·step), and labelling it by the
+    lower edge reported the POC and the value-area high one step (about 5 bps) too low."""
+    return round((k + 0.5) * step, 4)
 
 
 def bin_size(price: float, tick: float = 0.05) -> float:
@@ -80,7 +88,7 @@ def volume_profile(rows: Sequence[tuple[float, float, float]], step: float | Non
         for k in ks:
             acc[k] = acc.get(k, 0.0) + each
     keys = list(range(min(acc), max(acc) + 1))
-    prices = [round(k * step, 4) for k in keys]
+    prices = [_bin_price(k, step) for k in keys]
     vols = [acc.get(k, 0.0) for k in keys]
     poc_i = max(range(len(vols)), key=lambda i: vols[i])
     lo_i, hi_i = _value_area(vols, poc_i, VALUE_AREA)
@@ -133,7 +141,7 @@ def market_profile(
         for k in _bins(lo, h, step):
             tpo[k] = tpo.get(k, "") + LETTERS[p % len(LETTERS)]
     keys = list(range(min(tpo), max(tpo) + 1))
-    prices = [round(k * step, 4) for k in keys]
+    prices = [_bin_price(k, step) for k in keys]
     letters = [tpo.get(k, "") for k in keys]
     counts = [float(len(x)) for x in letters]
     mid = (len(keys) - 1) / 2

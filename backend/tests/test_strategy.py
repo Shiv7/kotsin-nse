@@ -275,7 +275,9 @@ async def test_the_runner_takes_the_retest_and_trails_out_in_shadow(tmp_path):
     assert t["qty"] == 234  # ₹25,000 at 106.8
     assert t["net_inr"] is not None and t["net_inr"] < t["gross_inr"] and t["gross_inr"] > 0
     assert t["virtual"]["fixed_wall"]["how"] == "target" and t["virtual"]["fixed_1to2"]["how"] == "close"  # scored to the day's end
-    assert t["virtual"]["fixed_1to2"]["bars"] == 64 and r.plans == {}
+    # the session's last decision bar is the 15:10 one (continuous trading ends 15:15; the 15:15–15:25
+    # buckets are the closing auction, which nothing can be sold into): 61 bars from the entry, not 64
+    assert t["virtual"]["fixed_1to2"]["bars"] == 61 and r.plans == {}
     assert "st60_al" in t["tags"] and "dma20_al" in t["tags"] and t["tags"]["move_adr"] > 0
     assert r.orders == 2  # the ENTRY and the EXIT, both SHADOW
     assert (tmp_path / "strategy" / f"{DAY}.json").exists()
@@ -291,7 +293,8 @@ async def test_a_position_still_open_at_the_last_bar_is_closed_there(tmp_path):
     r = _runner(tmp_path, store, rule="fixed_1to2")
     await _feed(r, store, DAY_BARS, pad_to=75)
     t = r.snapshot()["trades"][0]
-    assert t["exit_reason"] == "close" and t["bars_held"] == 64 and t["closed_ts"] == OPEN + 75 * 300
+    # closed on the 15:10 bar (its end, 15:15, is the end of continuous trading), not on the 15:25 one
+    assert t["exit_reason"] == "close" and t["bars_held"] == 61 and t["closed_ts"] == OPEN + 72 * 300
 
 
 async def test_the_filter_skips_the_signal_but_records_it(tmp_path):
@@ -489,3 +492,39 @@ async def test_every_signal_carries_the_engines_readings_and_the_previous_sessio
     await _feed(r2, store2, DAY_BARS, pad_to=75)
     s2 = r2.snapshot()
     assert s2["summary"]["taken"] == 1 and s2["signals"][0]["context"] == {} and s2["signals"][0]["bhav"] is None
+
+
+async def test_a_restart_inside_the_session_picks_the_book_up_from_the_day_file(tmp_path):
+    """The 30 Oct 11:29 restart: the first bar after a restart overwrote the day's file with an empty
+    book and the open position was orphaned. Now the file is read back — signals, trades, the open
+    positions and every rule's plan — and the second runner ends where one runner would have."""
+    store = BarStore()
+    _seed_daily(store, "ABC", "1")
+    one = _runner(tmp_path / "one", store)
+    await _feed(one, store, DAY_BARS, pad_to=75)
+    expect = one.snapshot()["trades"][0]
+
+    store2 = BarStore()
+    _seed_daily(store2, "ABC", "1")
+    rows = list(DAY_BARS)
+    last = rows[-1][3]
+    rows += [(last, last + 0.1, last - 0.1, last)] * (75 - len(rows))
+    first = _runner(tmp_path / "two", store2)
+    await _feed(first, store2, rows[:12])  # through the entry (the 10:05 bar) and one bar more
+    assert first.snapshot()["summary"]["open"] == 1 and first.plans
+    pos_id = next(iter(first.positions))
+    second = _runner(tmp_path / "two", store2)  # a new process: same data dir, same bars
+    for i in range(12, len(rows)):
+        o, h, lo, c = rows[i]
+        b = _ubar("ABC", "1", "5m", OPEN + 300 * i, o, h, lo, c)
+        store2.close(b)
+        await second.on_bar(b)
+    await asyncio.gather(*second._tasks)  # type: ignore[attr-defined]
+    snap = second.snapshot()
+    assert snap["summary"]["signals"] == 1 and snap["summary"]["taken"] == 1 and snap["summary"]["closed"] == 1 and snap["summary"]["open"] == 0
+    got = snap["trades"][0]
+    assert got["id"] == pos_id  # the position opened before the restart, not a new one
+    for k in ("entry", "exit", "exit_reason", "bars_held", "closed_ts", "pnl_bps"):
+        assert got[k] == expect[k], k
+    assert got["virtual"]["fixed_1to2"]["bars"] == expect["virtual"]["fixed_1to2"]["bars"]
+    assert second.read_day(DAY)["summary"]["closed"] == 1 and len(second.read_day(DAY)["signals"]) == 1

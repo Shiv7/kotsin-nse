@@ -3,6 +3,8 @@ often that source really updates each contract instead of trusting its brochure.
 
 from __future__ import annotations
 
+from datetime import date
+
 import pandas as pd
 import pytest
 from pydantic import ValidationError
@@ -13,6 +15,7 @@ from kotsin_nse.feed import build_source
 from kotsin_nse.feed.base import Channel
 from kotsin_nse.feed.fivepaisa import FivePaisaSource
 from kotsin_nse.feed.rate import FeedRateMeter
+from kotsin_nse.market.session import ist_at
 
 
 def _tick(code: str, recv: float, total: int, ltp: float = 100.0, source: str = "fivepaisa") -> dict:
@@ -131,7 +134,9 @@ async def test_engine_measures_order_flow_on_watched_contracts_and_archives_clos
     try:
         e._inst_by_code = {equity.scrip_code: equity}
         e._tick_archive_codes = {equity.scrip_code}
-        t0 = 1_790_000_040.0
+        # 11:00:00 IST on a session day: a frame after the end of continuous trading (15:15 on NSE
+        # cash) is the closing auction's and classifies as no side — 1_790_000_040 was 19:44 IST
+        t0 = float(ist_at(date(2026, 9, 21), "11:00"))
         await e._on_tick(_tick(equity.scrip_code, t0, 1_000, ltp=100.0))
         await e._on_tick(_tick(equity.scrip_code, t0 + 10, 1_300, ltp=100.05))  # at the previous ask
         await e._on_tick(_tick(equity.scrip_code, t0 + 70, 1_400, ltp=99.95))  # next minute, at the bid

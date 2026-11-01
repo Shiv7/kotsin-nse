@@ -204,33 +204,67 @@ def write(out_dir: Path, name: str, tables: tuple[list[Row], ...]) -> None:
         pd.DataFrame(rows, columns=cols).to_parquet(out_dir / f"{name}.{kind}.parquet", index=False)
 
 
+def daily_ctx(d1_c: np.ndarray, k: int) -> tuple[float, float, float, float]:
+    """The daily context from the ``k`` daily-cache rows before a session: the previous day's return,
+    the 5-day return, the close vs the 20- and 50-day average. Ratios of the adjusted cache's own
+    closes, so they are on one scale whatever the corporate actions."""
+    c = d1_c
+    if k < 2:
+        return NO_CTX
+    return ((c[k - 1] / c[k - 2] - 1) * 100,
+            (c[k - 1] / c[k - 6] - 1) * 100 if k >= 6 else np.nan,
+            (c[k - 1] / c[k - 20:k].mean() - 1) * 100 if k >= 20 else np.nan,
+            (c[k - 1] / c[k - 50:k].mean() - 1) * 100 if k >= 50 else np.nan)
+
+
 def prev_and_adr(d1_ts: np.ndarray, d1_h: np.ndarray, d1_l: np.ndarray, d1_c: np.ndarray, day: date) -> tuple[tuple[float, float, float] | None, float | None, tuple[float, float, float, float]]:
-    """The previous session (h, l, c), the guarded ADR and the daily context (previous day's return,
-    5-day return, close vs the 20- and 50-day average), from the rows strictly before ``day``."""
+    """The previous session (h, l, c), the guarded ADR and the daily context (``daily_ctx``), from the
+    daily-cache rows strictly before ``day``. The daily cache is bonus/split adjusted: these levels
+    belong with bars on the same scale (part B's archive, read the day they were made), not with the
+    unadjusted 5m history — part A uses ``session_aggregates`` and ``prev_and_adr_5m``."""
     k = int(np.searchsorted(d1_ts, ist_at(day, "00:00"), side="left"))
     if k < 2:
         return None, None, NO_CTX
     prev = (float(d1_h[k - 1]), float(d1_l[k - 1]), float(d1_c[k - 1]))
     j = max(0, k - 60)  # ADR_SESSIONS = 50
     adr = guarded_adr(d1_h[j:k].tolist(), d1_l[j:k].tolist(), d1_c[j:k].tolist())
-    c = d1_c
-    ctx = ((c[k - 1] / c[k - 2] - 1) * 100,
-           (c[k - 1] / c[k - 6] - 1) * 100 if k >= 6 else np.nan,
-           (c[k - 1] / c[k - 20:k].mean() - 1) * 100 if k >= 20 else np.nan,
-           (c[k - 1] / c[k - 50:k].mean() - 1) * 100 if k >= 50 else np.nan)
-    return prev, adr, ctx
+    return prev, adr, daily_ctx(d1_c, k)
+
+
+def session_aggregates(dayn: np.ndarray, h: np.ndarray, lo: np.ndarray, c: np.ndarray) -> tuple[np.ndarray, ...]:
+    """Per IST session of the 5m cache (``dayn`` the bars' IST day ordinals, sorted, each session's
+    bars contiguous): the day ordinal, the first bar's index, the bar count, and the session's high
+    (max), low (min) and close (the last bar's close) — levels on the bars' own, unadjusted scale."""
+    uniq, starts, counts = np.unique(dayn, return_index=True, return_counts=True)
+    return uniq, starts, counts, np.maximum.reduceat(h, starts), np.minimum.reduceat(lo, starts), c[starts + counts - 1]
+
+
+def prev_and_adr_5m(q: int, s_h: np.ndarray, s_l: np.ndarray, s_c: np.ndarray) -> tuple[tuple[float, float, float], float | None]:
+    """The previous session's (h, l, c) and the guarded ADR, from the 5m cache's own sessions
+    (``session_aggregates``) before session ``q`` — the same scale as the bars the levels are tested on."""
+    prev = (float(s_h[q - 1]), float(s_l[q - 1]), float(s_c[q - 1]))
+    j = max(0, q - 60)  # ADR_SESSIONS = 50
+    return prev, guarded_adr(s_h[j:q].tolist(), s_l[j:q].tolist(), s_c[j:q].tolist())
 
 
 def _daily(data_dir: Path, sym: str) -> tuple[np.ndarray, ...] | None:
+    """The daily cache as (ts, h, l, c), one row per IST date (the broker's provisional bar and the
+    final one share a date; the later row wins), oldest first."""
     p1 = data_dir / "history" / "1d" / f"{sym}.parquet"
     if not p1.exists():
         return None
-    d1 = pd.read_parquet(p1).drop_duplicates("ts", keep="last").sort_values("ts")
+    d1 = pd.read_parquet(p1).sort_values("ts", kind="stable")
+    dayn = pd.Series((d1["ts"].to_numpy(np.int64) + 19800) // 86400)
+    d1 = d1[~dayn.duplicated(keep="last").to_numpy()]
     return tuple(d1[c].to_numpy(dtype=float) for c in ("ts", "h", "l", "c"))
 
 
 def sweep_history(data_dir: Path, out: Path, start: date = DEV_START, end: date = DEV_END, limit: int | None = None, log: Callable[[str], None] = print) -> int:
-    """Part A: every symbol of the 5m cache, sessions in [start, end] with at least 70 bars."""
+    """Part A: every symbol of the 5m cache, sessions in [start, end] with at least 70 bars. The
+    previous session's H/L/C (the CPR, the pivots, PDH/PDL) and the ADR come from the 5m cache's own
+    sessions: the daily cache is bonus/split adjusted and the 5m bars are not, so before a corporate
+    action its levels sit at the wrong scale. The daily cache gives the calendar and the scale-free
+    context only; a session whose previous session the 5m cache lacks is skipped."""
     syms = sorted(p.stem for p in (data_dir / "history" / "5m").glob("*.parquet") if p.stem != "CRUDEOIL")
     if limit:
         syms = syms[:limit]
@@ -242,7 +276,8 @@ def sweep_history(data_dir: Path, out: Path, start: date = DEV_START, end: date 
         daily = _daily(data_dir, sym)
         if daily is None:
             continue
-        d1_ts, d1_h, d1_l, d1_c = daily
+        d1_ts, _d1_h, _d1_l, d1_c = daily
+        d1_dayn = (d1_ts.astype(np.int64) + 19800) // 86400
         h5 = pd.read_parquet(data_dir / "history" / "5m" / f"{sym}.parquet").drop_duplicates("ts", keep="last").sort_values("ts")
         ts = h5["ts"].to_numpy(dtype=np.int64)
         ist = ts + 19800
@@ -252,13 +287,17 @@ def sweep_history(data_dir: Path, out: Path, start: date = DEV_START, end: date 
         ts, dayn = ts[keep], dayn[keep]
         o_, h_, l_, c_, v_ = (h5[c].to_numpy(dtype=float) for c in ("o", "h", "l", "c", "v"))
         tables: tuple[list[Row], ...] = ([], [], [], [], [])
-        uniq, starts, counts = np.unique(dayn, return_index=True, return_counts=True)
-        for dn, s, cnt in zip(uniq, starts, counts, strict=True):
+        uniq, starts, counts, s_h, s_l, s_c = session_aggregates(dayn, h_, l_, c_)
+        for q, (dn, s, cnt) in enumerate(zip(uniq, starts, counts, strict=True)):
             day = date.fromordinal(EPOCH_ORD + int(dn))
-            if day < start or day > end or cnt < 70:
+            if day < start or day > end or cnt < 70 or q == 0:
                 continue
-            prev, adr, ctx = prev_and_adr(d1_ts, d1_h, d1_l, d1_c, day)
-            if prev is None or prev[0] <= prev[1]:
+            k = int(np.searchsorted(d1_ts, ist_at(day, "00:00"), side="left"))  # daily rows strictly before the day
+            if k < 2 or d1_dayn[k - 1] != uniq[q - 1]:
+                continue  # the session before (per the daily calendar) is not in the 5m cache: no levels for this one
+            prev, adr = prev_and_adr_5m(q, s_h, s_l, s_c)
+            ctx = daily_ctx(d1_c, k)
+            if prev[0] <= prev[1]:
                 continue
             bars = [Bar5(int(ts[i]), o_[i], h_[i], l_[i], c_[i], v_[i]) for i in range(s, s + cnt)]
             if any(b.h < b.l or b.c <= 0 for b in bars):

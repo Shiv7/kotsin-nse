@@ -20,6 +20,7 @@ session before D and nothing later.
 from __future__ import annotations
 
 from datetime import date
+from itertools import pairwise
 from pathlib import Path
 
 import pandas as pd
@@ -49,15 +50,23 @@ def futures_table(store: OiDailyStore, cache: Path | None = None) -> pd.DataFram
             rows.append(fut.assign(day=d.isoformat())[["day", "symbol", "expiry", "settle", "oi"]])
     if not rows:
         return pd.DataFrame(columns=["day", "symbol", "fut_oi", "near_close", "oi_chg_pct", "price_chg_pct", "label"])
-    c = pd.concat(rows, ignore_index=True).sort_values(["symbol", "expiry", "day"])
+    c = pd.concat(rows, ignore_index=True).sort_values(["symbol", "expiry", "day"], kind="stable")
+    # a change is from the session before in the store's own day list: a stock absent from that
+    # session's bhavcopy gets NaN, not a change measured from its last row weeks back
+    prev_day = {b.isoformat(): a.isoformat() for a, b in pairwise(days)}
     # the price change of a session = the NEAR contract against ITS OWN previous settle, so the
     # switch to the next month after an expiry (which trades at a premium) is not a price move
-    c["prev_settle"] = c.groupby(["symbol", "expiry"])["settle"].shift(1)
-    near = c.sort_values(["symbol", "day", "expiry"]).groupby(["symbol", "day"]).first().reset_index()
+    g = c.groupby(["symbol", "expiry"])
+    c["prev_settle"] = g["settle"].shift(1).where(g["day"].shift(1) == c["day"].map(prev_day))
+    # the near contract's own row, whole — ``groupby.first()`` takes the first NON-NULL per column,
+    # so a near contract without a settle would borrow the next month's
+    near = c.sort_values(["symbol", "day", "expiry"], kind="stable").drop_duplicates(["symbol", "day"], keep="first")
     tot = c.groupby(["symbol", "day"])["oi"].sum().rename("fut_oi").reset_index()
-    t = tot.merge(near[["symbol", "day", "settle", "prev_settle"]], on=["symbol", "day"]).sort_values(["symbol", "day"])
+    t = tot.merge(near[["symbol", "day", "settle", "prev_settle"]], on=["symbol", "day"]).sort_values(["symbol", "day"], kind="stable")
     t = t.rename(columns={"settle": "near_close"})
-    t["oi_chg_pct"] = (t["fut_oi"] / t.groupby("symbol")["fut_oi"].shift(1) - 1) * 100
+    gs = t.groupby("symbol")
+    prev_oi = gs["fut_oi"].shift(1).where(gs["day"].shift(1) == t["day"].map(prev_day))
+    t["oi_chg_pct"] = (t["fut_oi"] / prev_oi - 1) * 100
     t["price_chg_pct"] = (t["near_close"] / t["prev_settle"] - 1) * 100
     t = t.drop(columns=["prev_settle"]).dropna(subset=["oi_chg_pct", "price_chg_pct"])
     t["label"] = [label(p, o) for p, o in zip(t["price_chg_pct"], t["oi_chg_pct"], strict=True)]

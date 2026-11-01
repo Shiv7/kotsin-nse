@@ -66,14 +66,17 @@ ids = ["fib-85ee299414", "fib-95ae3b720b", "fib-0781e1dca1", "fib-8c31c1993e", "
        "mtf-004ccb5d7d", "mtf-c6abe0295e", "mtf-f239c60bc3", "mtf-46788dfbf0", "mtf-1a79720739"]
 seen, rows = set(), []
 for rid in ids:
-    for tr in json.load(open(f"data-live/obtests/{rid}.json"))["trades"]:
+    with open(f"data-live/obtests/{rid}.json") as fh:
+        trades = json.load(fh)["trades"]
+    for tr in trades:
         k = (tr["symbol"], tr["signal_ts"], tr["side"])
         if k not in seen:
             seen.add(k)
             rows.append({"symbol": tr["symbol"], "day": tr["day"], "side": tr["side"], "r": tr["r"]})
 tr = pd.DataFrame(rows).assign(d=lambda z: pd.to_datetime(z.day)).sort_values("d")
 st = t[["symbol", "day", "score", "bias"]].assign(d=lambda z: pd.to_datetime(z.day) + pd.Timedelta(days=1)).drop(columns="day").sort_values("d")
-tr = pd.merge_asof(tr, st, on="d", by="symbol", direction="backward").dropna(subset=["score"])
+# the previous day's state, not one from weeks back when the stock has no row near the trade
+tr = pd.merge_asof(tr, st, on="d", by="symbol", direction="backward", tolerance=pd.Timedelta(days=5)).dropna(subset=["score"])
 print(f"\nSTRATEGY TRADES by the previous day's bias ({len(tr)} distinct trades)")
 print(f"{'':14s} | {'LONG n':>6} {'avg R':>6} | {'SHORT n':>7} {'avg R':>6}")
 for b in ["Strong Bull", "Bull", "Mild Bull", "Neutral", "Mild Bear", "Bear", "Strong Bear"]:

@@ -7,6 +7,7 @@ from datetime import date
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from kotsin_nse.market.session import ist_at
 from kotsin_nse.research.micro_ic import day_frame, run
@@ -49,3 +50,26 @@ def test_the_forward_return_starts_at_the_close_of_the_readings_own_minute(tmp_p
     c = bars[bars.scrip_code == "1000"].set_index("ts")["c"]
     row = f[(f.code == "1000")].iloc[3]
     assert row["fwd_5"] == c[row["ts"] + 300] / c[row["ts"]] - 1
+
+
+def test_a_minute_written_twice_keeps_its_fuller_row_and_a_gap_breaks_the_rolling_window(tmp_path):
+    _write(tmp_path, lead=False)
+    fp = tmp_path / "archive" / "flow" / f"{DAY}.parquet"
+    raw = pd.read_parquet(fp).assign(frames=10)
+    t0 = ist_at(DAY, "09:30")
+    one = (raw.code == "1000")
+    # minute 3 flushed again after a restart, with fewer frames and other readings; minute 10 never recorded
+    dup = raw[one & (raw.ts == t0 + 180)].assign(frames=4, ofi=99.0, delta=99.0)
+    pd.concat([raw[~(one & (raw.ts == t0 + 600))], dup]).sample(frac=1, random_state=0).to_parquet(fp)
+    f = day_frame(tmp_path / "archive", DAY)
+    assert f is not None
+    g = f[f.code == "1000"].set_index("ts").sort_index()
+    assert len(g) == 59 and not g.index.duplicated().any()
+    assert g.loc[t0 + 180, "frames"] == 10 and g.loc[t0 + 180, "ofi"] != 99.0, "the fuller row stays"
+    r = raw[one].set_index("ts")
+    expect = r.loc[[t0 + 60 * m for m in range(5, 10)], "delta"].sum() / 100.0  # five minutes' delta over their volume (5 × 20)
+    assert g.loc[t0 + 540, "delta_5m"] == pytest.approx(expect)
+    for m in range(10, 15):  # the four minutes after the gap hold fewer than five minutes in their window
+        assert np.isnan(g.get("delta_5m").get(t0 + 60 * m, np.nan))
+    assert np.isfinite(g.loc[t0 + 900, "delta_5m"]) and np.isfinite(g.loc[t0 + 240, "delta_5m"])
+    assert np.isnan(g.loc[t0 + 180, "delta_5m"]), "only four minutes recorded by then"

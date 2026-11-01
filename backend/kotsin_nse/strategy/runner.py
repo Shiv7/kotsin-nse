@@ -31,7 +31,7 @@ from ..domain import Instrument, InstrumentKind, OrderIntent, OrderSide, Purpose
 from ..exec.gateway import Gateway
 from ..instrument.universe import INDEX_ROOTS
 from ..ledger.db import Ledger
-from ..market.session import bucket_end, ist_day, ist_hm, session_close_ts, session_open_ts
+from ..market.session import bucket_end, continuous_end_ts, ist_day, ist_hm, session_open_ts
 from ..risk.costs import CostModel
 from ..scan.replay import guarded_adr
 from ..structure.engine import Bar5
@@ -121,13 +121,42 @@ class ShadowRunner:
     # -- the day -----------------------------------------------------------------------------------------
 
     def _roll(self, day: date) -> None:
-        if self.positions:  # a session that never saw its last bar: mark what is open at the last price
+        if self.positions:  # a session that never saw its last bar: mark what is open at ITS day's last price
             for pos in list(self.positions.values()):
-                last = self.store.last(pos["symbol"], TF)
-                self._close(pos, last.close if last else pos["entry"], "END", time.time())
+                own = [b for b in self.store.bars(pos["symbol"], TF) if ist_day(b.ts).isoformat() == self.day]
+                self._close(pos, own[-1].close if own else pos["entry"], "END", time.time())
+        if self.day and (self.signals or self.trades):
+            # the old day's file gets its final state (the END trades included) BEFORE the reset:
+            # with the reset first, a trade closed here never reached the day it belonged to
+            self._writes.append(asyncio.to_thread(self._dump, self.snapshot(), self.day))
         self.day = day.isoformat()
         self.syms, self.signals, self.trades, self.plans = {}, [], [], {}
         self.positions = {}
+        self._restored_entered: set[tuple[str, int]] = set()
+        self._restore(day)
+
+    def _restore(self, day: date) -> None:
+        """A restart inside the session: the day's book comes back from ``<day>.json`` — signals,
+        trades, the open positions and every rule's exit plan, stepped on from where they were.
+        Before 2026-11-01 the first bar after a restart overwrote the file with an empty book and
+        the open positions were orphaned (the 30 Oct 11:29 restart needed a hand-renamed file)."""
+        snap = self.read_day(day.isoformat())
+        if not snap or snap.get("day") != day.isoformat() or snap.get("strategy") != cr.NAME:
+            return
+        try:
+            self.signals = list(reversed(snap.get("signals") or []))
+            self.trades = list(reversed(snap.get("trades") or []))
+            for p in snap.get("positions") or []:
+                self.positions[p["id"]] = p
+            for pid, rules in (snap.get("plans") or {}).items():
+                self.plans[pid] = {rule: cr.ExitPlan.from_state(st) for rule, st in rules.items()}
+            self._restored_entered = {(s["symbol"], 1 if s["side"] == "LONG" else -1) for s in self.signals}
+        except (KeyError, TypeError, ValueError) as exc:
+            log.warning("strategy.restore_failed", day=day.isoformat(), error=repr(exc))
+            self.signals, self.trades, self.positions, self.plans = [], [], {}, {}
+            return
+        if self.signals or self.positions:
+            log.info("strategy.restored", day=day.isoformat(), signals=len(self.signals), open=len(self.positions), trades=len(self.trades))
 
     def _today_bars(self, symbol: str, day: date) -> list[Bar5]:
         open_ts = session_open_ts(self.segment, day)
@@ -161,6 +190,7 @@ class ShadowRunner:
         closes = {"official": prev.close, "last": last_trade, "used": self.pdc, "day": prev_day.isoformat(),
                   "hl": "continuous" if hl is not None else "daily", "high": high, "low": low, "high_official": prev.high, "low_official": prev.low}
         sd = SymbolDay(levels=levels, weekly=weekly, adr=adr, tol=cr.tolerance(adr, price), closes=closes)
+        sd.entered = {side for sym, side in getattr(self, "_restored_entered", set()) if sym == symbol}
         self.syms[symbol] = sd
         return sd
 
@@ -221,29 +251,55 @@ class ShadowRunner:
         if sd is None:
             return
         if bar.ts <= sd.last_ts:
-            return  # the reconciler re-installing an older bucket is not a new bar
+            # the reconciler installing an older bucket is not a new bar for the sequence (it is
+            # recomputed from the store on the next one) — but a position that was open across it
+            # never saw it: if its range crossed the initial stop, the trade was over then
+            if self._late_bar(bar):
+                self._writes.append(self._write_day())
+            return
         sd.last_ts = int(bar.ts)
         bars = self._today_bars(bar.symbol, day)
         if not bars:
             return
-        last = bucket_end(self.segment, bar.ts, TF) >= session_close_ts(self.segment, day)
+        # the session's last decision bar is the one that ends continuous trading (15:10 for NSE
+        # cash, whose 15:15 auction nothing can be sold into), not the one that ends at the close
+        last = bucket_end(self.segment, bar.ts, TF) >= continuous_end_ts(self.segment, day)
         changed = False
         # 1. the positions on this symbol — open ones, and closed ones whose other rules are still being scored
         for pos in [p for p in [*self.positions.values(), *self.trades] if p["symbol"] == bar.symbol and p["id"] in self.plans]:
             changed |= self._manage(pos, bar, last)
         # 2. the sequence on the bars so far; the confirmation bar is this one → entry
-        sd.stages = cr.sequence(bars, sd.levels, sd.tol)
+        sd.stages = cr.sequence(bars, sd.levels, sd.tol, open_ts=int(session_open_ts(self.segment, day)))
         n = len(bars)
         for side, st in sd.stages.items():
             if st.j is None or st.j != n - 1 or side in sd.entered or last:
                 continue
-            sd.entered.add(side)
             self._enter(inst, sd, bars, side, st, bar)
+            sd.entered.add(side)
             changed = True
         if last:
             changed |= self._eod_sweep(bar)
         if changed:
             self._writes.append(self._write_day())
+
+    def _late_bar(self, bar: UnifiedBar) -> bool:
+        """An older bucket installed after the positions on its symbol were stepped past it. The
+        plans cannot be re-run in order, so the honest reading is the one that cannot be wrong:
+        a range through the INITIAL stop (never further from the entry than any later stop)
+        means the stop was hit on that bar at the latest."""
+        changed = False
+        for pos in [p for p in self.positions.values() if p["symbol"] == bar.symbol]:
+            if not (pos["opened_ts"] - 300 < bar.ts < pos.get("last_stepped_ts", 0)):
+                continue
+            pos["late_bars"] = pos.get("late_bars", 0) + 1
+            side = 1 if pos["side"] == "LONG" else -1
+            touched = bar.low <= pos["initial_stop"] if side > 0 else bar.high >= pos["initial_stop"]
+            log.warning("strategy.late_bar", symbol=bar.symbol, ts=bar.ts, position=pos["id"], stop_touched=touched)
+            if touched:
+                pos["note"] = f"stopped on the {ist_hm(bar.ts)} bar the feed delivered late"
+                self._close(pos, pos["initial_stop"], "stop", int(bar.ts) + 300)
+            changed = True
+        return changed
 
     # -- entries -----------------------------------------------------------------------------------------
 
@@ -258,7 +314,10 @@ class ShadowRunner:
         tags = self._tags(inst.symbol, sd, bars, side, j, bar)
         ctx, bhav = self._context(inst.symbol, sd)
         sig: dict[str, Any] = {
-            "id": signal_id, "ts": int(bar.ts) + 300, "time": ist_hm(int(bar.ts) + 300), "bar": ist_hm(int(bar.ts)), "symbol": inst.symbol, "side": "LONG" if side > 0 else "SHORT",
+            # ``ts`` is the bar's close; ``decided_ts`` the wall clock of the decision (5–25 s later, after the
+            # exchange's candle) — both, as LEARNINGS asks, so a fill can be read against the instant it was ordered
+            "id": signal_id, "ts": int(bar.ts) + 300, "decided_ts": round(time.time(), 3), "time": ist_hm(int(bar.ts) + 300), "bar": ist_hm(int(bar.ts)),
+            "symbol": inst.symbol, "side": "LONG" if side > 0 else "SHORT",
             "entry": entry, "stop": stop, "risk_bps": round(risk_bps, 1), "walls": [{"name": k, "price": v, "bps": round(abs(v - entry) / entry * 1e4, 1)} for k, v in ws],
             "stage": st.to_json(), "retest_time": ist_hm(bars[i_rt].ts), "tol": sd.tol, "adr": sd.adr, "tags": tags, "taken": False, "why": "",
             "context": ctx, "bhav": bhav,
@@ -303,6 +362,11 @@ class ShadowRunner:
             sig["why"] = f"gateway {res.decision.value}: {res.order.note}"
             return
         fill = res.fill.price if res.fill is not None else entry
+        if res.fill is not None and 0 < res.fill.qty < qty:
+            # PAPER walked the book and stopped at the 10 % ceiling: the position is what filled,
+            # not what was asked — the exit must not sell shares the book never bought
+            sig["truncated"] = {"asked": qty, "filled": res.fill.qty}
+            qty = res.fill.qty
         sig["taken"] = True
         plans = {rule: cr.ExitPlan.open(rule, side, fill, stop, [v for _k, v in ws], sd.tol) for rule in cr.RULES}
         primary = plans[self.rule]
@@ -312,7 +376,7 @@ class ShadowRunner:
             "target_name": ws[0][0], "walls": sig["walls"], "risk_bps": round(abs(fill - stop) / fill * 1e4, 1),
             "reward_bps": round(abs(ws[0][1] - fill) / fill * 1e4, 1), "rule": self.rule, "signal_id": signal_id, "opened_ts": int(bar.ts) + 300,
             "entry_time": sig["time"], "entry_bar": sig["bar"], "retest_time": sig["retest_time"], "mode": res.order.mode, "tags": tags, "tol": sd.tol,
-            "context": ctx, "bhav": bhav,
+            "context": ctx, "bhav": bhav, "last_stepped_ts": int(bar.ts),
             "bars_held": 0, "mfe_bps": 0.0, "mae_bps": 0.0, "last": fill, "pnl_bps": 0.0, "closed_ts": None, "exit": None, "exit_reason": None,
             "gross_inr": None, "charges_inr": None, "net_inr": None, "r": None, "virtual": {},
         }
@@ -393,13 +457,23 @@ class ShadowRunner:
         plans = self.plans.get(pos["id"])
         if plans is None:
             return False
+        # every closed bar since the one last stepped, in order, this one last: a bucket the sweep
+        # installed between two live bars is stepped too (a stop touched inside it is not missed)
+        since = int(pos.get("last_stepped_ts") or pos["opened_ts"] - 300)
+        todo = [b for b in self.store.bars(pos["symbol"], TF) if since < b.ts < bar.ts]
+        todo.append(bar)
         exit_now: tuple[float, str] | None = None
-        for rule, plan in plans.items():
-            res = plan.step(bar.high, bar.low, bar.close, last=last)
-            if res is not None:
-                pos["virtual"][rule] = plan.to_json()
-            if rule == self.rule and res is not None:
-                exit_now = res
+        exit_ts = int(bar.ts)
+        for b in todo:
+            pos["last_stepped_ts"] = int(b.ts)
+            for rule, plan in plans.items():
+                res = plan.step(b.high, b.low, b.close, last=last and b is bar, open=b.open)
+                if res is not None:
+                    pos["virtual"][rule] = plan.to_json()
+                if rule == self.rule and res is not None and exit_now is None:
+                    exit_now, exit_ts = res, int(b.ts)
+            if exit_now is not None and all(pl.done is not None for pl in plans.values()):
+                break
         if all(pl.done is not None for pl in plans.values()):
             self.plans.pop(pos["id"], None)
         if pos["status"] != "OPEN":
@@ -415,7 +489,9 @@ class ShadowRunner:
         if exit_now is None:
             self._writes.append(self._ledger_position(pos))
             return True
-        self._close(pos, exit_now[0], exit_now[1], int(bar.ts) + 300)
+        if primary.gapped:
+            pos["gapped"] = True
+        self._close(pos, exit_now[0], exit_now[1], exit_ts + 300)
         return True
 
     def _close(self, pos: dict[str, Any], exit_px: float, how: str, ts: float) -> None:
@@ -432,7 +508,8 @@ class ShadowRunner:
             self._writes.append(self._ledger_order(res.order, res.decision.value))
             if res.fill is not None:
                 exit_px = res.fill.price
-            charges = self.costs.round_trip(inst, pos["entry"], exit_px, pos["qty"]).total
+            # a short's entry is the SELL: STT on it, stamp duty on the exit — not the other way round
+            charges = self.costs.round_trip(inst, pos["entry"], exit_px, pos["qty"], entry_side=OrderSide.BUY if side > 0 else OrderSide.SELL).total
         else:
             charges = 0.0
         gross = (exit_px - pos["entry"]) * side * pos["qty"]
@@ -465,11 +542,12 @@ class ShadowRunner:
         """The session's last bucket closed for one symbol: a position whose own last bar never came is
         marked at its last close rather than left open overnight."""
         changed = False
+        end_ts = continuous_end_ts(self.segment, ist_day(bar.ts))
         for pos in list(self.positions.values()):
             if pos["symbol"] == bar.symbol:
                 continue
             last = self.store.last(pos["symbol"], TF)
-            if last is not None and bucket_end(self.segment, last.ts, TF) >= session_close_ts(self.segment, ist_day(bar.ts)):
+            if last is not None and bucket_end(self.segment, last.ts, TF) >= end_ts:
                 self._close(pos, last.close, "close", int(bar.ts) + 300)
                 changed = True
         return changed
@@ -509,13 +587,13 @@ class ShadowRunner:
 
     async def _write_day(self) -> None:
         snap = self.snapshot()
-        await asyncio.to_thread(self._dump, snap)
+        await asyncio.to_thread(self._dump, snap, self.day)
 
-    def _dump(self, snap: dict[str, Any]) -> None:
+    def _dump(self, snap: dict[str, Any], day: str) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
-        tmp = self.dir / f"{self.day}.json.tmp"
+        tmp = self.dir / f"{day}.json.tmp"
         tmp.write_text(json.dumps(snap, default=str))
-        tmp.replace(self.dir / f"{self.day}.json")
+        tmp.replace(self.dir / f"{day}.json")
 
     def read_day(self, day: str) -> dict[str, Any] | None:
         p = self.dir / f"{day}.json"
@@ -555,6 +633,8 @@ class ShadowRunner:
             },
             "stages": stages, "signals": list(reversed(self.signals)), "positions": sorted(self.positions.values(), key=lambda p: -p["opened_ts"]),
             "trades": list(reversed(closed)),
+            # every rule's exit plan still running, so a restart steps on from here (``_restore``)
+            "plans": {pid: {rule: plan.state() for rule, plan in rules.items()} for pid, rules in self.plans.items()},
         }
 
 

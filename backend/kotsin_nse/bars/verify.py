@@ -41,9 +41,9 @@ from ..domain import Instrument
 from ..market.session import (
     TF_SECONDS,
     bucket_end,
+    continuous_end_ts,
     ist_day,
     ist_naive_to_ts,
-    session_close_ts,
     session_open_ts,
 )
 from .store import BarStore
@@ -339,7 +339,9 @@ class BarReconciler:
         if tf not in TF_SECONDS:
             return []
         seg = inst.segment
-        start, close = int(session_open_ts(seg, today)), int(session_close_ts(seg, today))
+        # buckets up to the end of CONTINUOUS trading: nothing trades in the closing auction, REST
+        # has no candle there, and asking for one every sweep for every stock was 648 wasted calls
+        start, close = int(session_open_ts(seg, today)), int(continuous_end_ts(seg, today))
         return [
             b0
             for b0 in range(start, close, TF_SECONDS[tf])

@@ -43,6 +43,7 @@ import pandas as pd
 from ..config import Settings
 from ..market.session import ist_at, ist_day
 from ..risk.costs import CostModel
+from .common import assert_exploration_window
 from .history import HistoryStore
 from .mtf import clean_5m, resample, swings
 from .obtest import _fut
@@ -485,11 +486,13 @@ def summarize(trades: list[SwingTrade]) -> dict[str, Any]:
     }
 
 
-def run(settings: Settings, start: date, end: date, p: SwingParams, *, symbols: list[str] | None = None, label: str = "") -> dict[str, Any]:
+def run(settings: Settings, start: date, end: date, p: SwingParams, *, symbols: list[str] | None = None, label: str = "",
+        allow_holdout: bool = False) -> dict[str, Any]:
     from ..market.fo_bhavcopy import OiDailyStore
     from ..market.fo_universe import load as load_members
     from .oi16 import state64_table
 
+    assert_exploration_window(start, end, allow_holdout=allow_holdout)
     store = HistoryStore(settings.data_dir / "history")
     costs = CostModel(settings)
     names = symbols or store.symbols("1d")

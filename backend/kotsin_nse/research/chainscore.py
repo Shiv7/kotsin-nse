@@ -16,6 +16,7 @@ apart, by year.
 
 from __future__ import annotations
 
+import bisect
 import json
 import math
 import time as _time
@@ -33,6 +34,15 @@ from .optsignals import HOLDOUT_START, SIGNALS, panel
 FIRST_TEST = "2022-04"
 HALVES = (("2022-04-01", "2023-12-31"), ("2024-01-01", "2025-09-30"))
 RIDGE_ALPHA = 1.0
+TARGET_H = 5  # the fit's target is ``fwd5``: the close 5 sessions on, from the next session's open
+
+
+def train_cut(sessions: list[str], first: str, horizon: int = TARGET_H) -> str | None:
+    """The exclusive upper bound on a training row's day so that its target — the close ``horizon``
+    sessions after the row — lands before ``first``, the test month's first session: the last
+    ``horizon`` rows before a month have targets inside it. None when the list is too short."""
+    p = bisect.bisect_left(sessions, first)
+    return sessions[p - horizon] if p >= horizon else None
 
 
 def ranks(f: pd.DataFrame) -> pd.DataFrame:
@@ -45,19 +55,25 @@ def ranks(f: pd.DataFrame) -> pd.DataFrame:
     return r.sort_values(["day", "symbol"]).reset_index(drop=True)
 
 
-def walk_forward_scores(r: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, list[float]]]:
-    """Each month's score from a ridge fit on the 12 months before it. Returns the scored rows and
-    the weights by month (for the read-out)."""
+def walk_forward_scores(r: pd.DataFrame, sessions: list[str] | None = None) -> tuple[pd.DataFrame, dict[str, list[float]]]:
+    """Each month's score from a ridge fit on the 12 months before it, less the last ``TARGET_H``
+    sessions, whose targets end inside the month (``train_cut``). Returns the scored rows and the
+    weights by month (for the read-out). ``sessions``: the session list, else the panel's own days
+    (a subset of the sessions, so the cut is never later than it should be)."""
     from sklearn.linear_model import Ridge
 
     cols = list(SIGNALS)
     r = r.assign(month=r["day"].str[:7])
+    sessions = sorted(sessions) if sessions is not None else sorted(r["day"].unique())
     months = sorted(m for m in r["month"].unique() if m >= FIRST_TEST)
     out, weights = [], {}
     for m in months:
         first = f"{m}-01"
         lo = (pd.Timestamp(first) - pd.DateOffset(months=12)).strftime("%Y-%m-%d")
-        train = r[(r["day"] >= lo) & (r["day"] < first)].dropna(subset=["fwd5"])
+        cut = train_cut(sessions, first)
+        if cut is None:
+            continue
+        train = r[(r["day"] >= lo) & (r["day"] < cut)].dropna(subset=["fwd5"])
         if len(train) < 5_000:
             continue
         model = Ridge(alpha=RIDGE_ALPHA).fit(train[cols].to_numpy(float), train["fwd5"].to_numpy(float))
@@ -177,4 +193,4 @@ def run(settings: Settings, end: date = date(2025, 9, 30), label: str = "") -> d
     return out
 
 
-__all__ = ["portfolio", "ranks", "run", "stats", "walk_forward_scores"]
+__all__ = ["portfolio", "ranks", "run", "stats", "train_cut", "walk_forward_scores"]

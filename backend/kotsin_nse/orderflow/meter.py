@@ -119,10 +119,16 @@ class _State:
 
 
 def classify(price: float, prev_bid: float, prev_ask: float, prev_ltp: float, last_side: int) -> int:
-    """+1 buyer-initiated, −1 seller-initiated, 0 unknown."""
-    if prev_ask > 0 and price >= prev_ask:
+    """+1 buyer-initiated, −1 seller-initiated, 0 unknown (the quote rule against the quote that
+    stood when the trade printed — the previous frame's — then the tick rule, then the last side).
+
+    A crossed previous quote (the pre-open auction's: RELIANCE 1302.9 / 1066.1) classifies nothing:
+    against it every price is "at or above the ask", and the first regular frame's whole
+    increment — the opening match — was booked as a buy every day."""
+    quoted = prev_bid > 0 and prev_ask > 0 and prev_bid < prev_ask
+    if quoted and price >= prev_ask:
         return 1
-    if prev_bid > 0 and price <= prev_bid:
+    if quoted and price <= prev_bid:
         return -1
     if prev_ltp > 0 and price > prev_ltp:
         return 1
@@ -217,7 +223,8 @@ class FlowMeter:
         fm = self._minute(code, ts)
         fm.frames += 1
         new = total_qty - st.last_total if st.last_total else 0
-        if new > 0 and (auction or (bid > 0 and ask > 0 and bid >= ask)):
+        crossed = bid > 0 and ask > 0 and bid >= ask
+        if new > 0 and (auction or crossed):
             fm.unknown += new
         elif new > 0:
             side = classify(ltp, st.bid, st.ask, st.ltp, st.last_side)
@@ -233,10 +240,15 @@ class FlowMeter:
             fm.cum_delta = st.cum
         if total_qty >= st.last_total:
             st.last_total = total_qty
-        st.bid, st.ask, st.ltp = bid, ask, ltp
+        # an auction's or crossed quote is not one the next trade printed against: forget it, so
+        # the next frame falls to the tick rule instead of the quote rule
+        st.bid, st.ask = (0.0, 0.0) if (auction or crossed) else (bid, ask)
+        st.ltp = ltp
 
     def on_depth(self, code: str, ts: float, bids: Sequence[tuple[float, int]], asks: Sequence[tuple[float, int]]) -> None:
-        if bids and asks and bids[0][0] >= asks[0][0]:
+        if not bids or not asks:
+            return  # one-sided: no imbalance to read (``imbalance([], asks)`` would say −1.0)
+        if bids[0][0] >= asks[0][0]:
             return  # a crossed book is the auction's, not a market anyone can trade against
         imb = imbalance(bids, asks)
         if imb is None:
@@ -305,12 +317,19 @@ class FlowMeter:
                 old.append(fm)
             if not old:
                 continue
+            # the live minutes started their cumulative delta at zero; shift them (and the running
+            # total) onto the restored tail so the day's CVD is one line. The restore normally
+            # lands after the feed has been live for a while (it reads parquet on a thread), and
+            # without the shift the day read +N up to the restart and ~0 after it.
+            off = old[-1].cum_delta
+            if live_from is not None and off:
+                for m in st.minutes:
+                    m.cum_delta += off
+            st.cum = old[-1].cum_delta if live_from is None else st.cum + off
             st.minutes = old + st.minutes
             if len(st.minutes) > self.keep:
                 del st.minutes[: len(st.minutes) - self.keep]
             st.day = day
-            if live_from is None:
-                st.cum = old[-1].cum_delta
             n += len(old)
         return n
 

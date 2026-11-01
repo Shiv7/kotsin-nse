@@ -125,9 +125,10 @@ def build_board(
                 sector=sectors.get(d.symbol, "Other"),
                 last=d.last,
                 pct=round(p, 3) if (p := pct_change(d)) is not None else None,
-                score=round(sc, 4),
+                score=(sc4 := round(sc, 4)),
                 gap_pct=round((d.open / d.prev_close - 1) * 100, 3) if d.prev_close > 0 and d.open > 0 else None,
-                side="BULLISH" if sc > 0 else "BEARISH" if sc < 0 else "NONE",
+                # from the ROUNDED score: a |score| under 5e-5 published 0.0 with a side, a rank and a breadth vote
+                side="BULLISH" if sc4 > 0 else "BEARISH" if sc4 < 0 else "NONE",
                 event_risk=drop_adrs <= -event_risk_adrs,
                 above_vwap=(d.last > d.vwap) if d.vwap else None,
                 oi_build_up=o.build_up if o else None,

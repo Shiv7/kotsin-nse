@@ -40,6 +40,7 @@ from ..domain import Instrument, InstrumentKind
 from ..market.session import ist_at
 from ..risk.costs import CostModel
 from ..scan.replay import DayReplay
+from .common import assert_exploration_window, trade_costs
 from .history import HistoryStore
 
 
@@ -126,13 +127,20 @@ def run_day(store: HistoryStore, day: date, p: Params, costs: CostModel) -> list
         sign = 1 if t.side == "BULLISH" else -1
         risk = abs(t.z - t.s1)
         t.gross = sum(sign * (e["price"] - t.entry) * t.qty * e["frac"] for e in t.exits)
-        avg_exit = sum(e["price"] * e["frac"] for e in t.exits)
-        t.costs = costs.round_trip(_fut(t.symbol), t.entry, avg_exit, t.qty).total
+        t.costs = trade_costs(costs, _fut(t.symbol), sign, t.entry, t.qty, t.exits)
         t.net = t.gross - t.costs
         t.r = round(t.net / (risk * t.qty), 3) if risk > 0 and t.qty else 0.0
         t.exit_reason = t.exits[-1]["why"] if t.exits else ""
         done.append(t)
         open_pos.pop(t.symbol, None)
+
+    def hard_stop(t: Trade) -> tuple[float, str]:
+        """The resting stop and its exit reason: S1 itself (``intrabar``), else the backstop
+        ``hard_stop_r`` × the risk beyond the entry."""
+        if p.stop_mode == "intrabar":
+            return t.s1, "S1_TOUCH"
+        sign = 1 if t.side == "BULLISH" else -1
+        return t.entry - sign * p.hard_stop_r * abs(t.z - t.s1), "HARD_STOP"
 
     for ts in range(ist_at(day, "09:20"), end_ts + 60, 60):
         # -- manage open positions on the minute that just closed --------------------------------------
@@ -147,11 +155,8 @@ def run_day(store: HistoryStore, day: date, p: Params, costs: CostModel) -> list
             adv = (t.entry - lo) if sign > 0 else (h - t.entry)
             t.mfe_r = max(t.mfe_r, fav / risk)
             t.mae_r = max(t.mae_r, adv / risk)
-            hard = t.entry - sign * p.hard_stop_r * risk
-            if p.stop_mode == "intrabar":
-                hard = t.s1
+            hard, why = hard_stop(t)
             if (sign > 0 and lo <= hard) or (sign < 0 and h >= hard):
-                why = "S1_TOUCH" if p.stop_mode == "intrabar" else "HARD_STOP"
                 fill(t, remaining[sym], min(o, hard) if sign > 0 else max(o, hard), ts, why, True)
                 close_out(t)
                 losses += 1
@@ -195,12 +200,21 @@ def run_day(store: HistoryStore, day: date, p: Params, costs: CostModel) -> list
                 pending.pop(sym)
                 if qty <= 0:
                     continue
-                open_pos[sym] = Trade(
+                t = Trade(
                     day.isoformat(), sym, su["side"], su["ts"], ts, round(entry, 4), z, su["s1"],
                     su["r1"], su["r2"], su["rr"], su["align"], su["rank"], qty,
                 )
                 remaining[sym] = 1.0
                 traded.add(sym)
+                # the fill bar's own range: a bar that reached Z and ran on through the stop was
+                # stopped before the next minute could manage it
+                hard, why = hard_stop(t)
+                if (bull and lo <= hard) or (not bull and h >= hard):
+                    fill(t, 1.0, min(o, hard) if bull else max(o, hard), ts, why, True)
+                    close_out(t)
+                    losses += 1
+                    continue
+                open_pos[sym] = t
 
         # -- new candidates, once each 5-minute bar closes --------------------------------------------------
         if (ts - open_ts) % 300:
@@ -281,7 +295,9 @@ def summarize(trades: list[Trade], days: list[str]) -> dict[str, Any]:
     }
 
 
-def run(settings: Settings, days: list[date], p: Params, *, label: str = "", on_day: Any = None) -> dict[str, Any]:
+def run(settings: Settings, days: list[date], p: Params, *, label: str = "", on_day: Any = None, allow_holdout: bool = False) -> dict[str, Any]:
+    if days:
+        assert_exploration_window(min(days), max(days), allow_holdout=allow_holdout)
     store = HistoryStore(settings.data_dir / "history")
     costs = CostModel(settings)
     trades: list[Trade] = []

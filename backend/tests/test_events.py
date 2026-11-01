@@ -6,8 +6,18 @@ from __future__ import annotations
 from datetime import date
 
 import pandas as pd
+import pytest
 
-from kotsin_nse.research.events import _weekly_stats, event_sessions, months
+from kotsin_nse.research.events import (
+    CAP,
+    EXEC_BAR,
+    _weekly_stats,
+    decision_px,
+    event_sessions,
+    holdout_se,
+    months,
+    study_book,
+)
 
 SESSIONS = ["2025-01-13", "2025-01-14", "2025-01-15", "2025-01-16", "2025-01-17", "2025-01-20", "2025-01-21"]
 
@@ -112,3 +122,52 @@ def test_book_pnl_sums_open_positions_and_charges_costs_on_the_exit_day():
     assert abs(pnl["gross_bps"].iloc[i + 1] - 100.0) < 1e-6  # A up 1 % (100 bps), B flat
     assert pnl["cost_bps"].iloc[i + 5] == 45.0 and pnl["cost_bps"].sum() == 45.0
     assert abs(pnl["net_bps"].sum() - (500.0 - 45.0)) < 1e-6
+
+
+def test_book_pnl_books_the_move_over_a_session_with_no_close_when_the_next_close_comes():
+    sess = _sessions("2025-01-01", "2025-01-31")
+    i = sess.index("2025-01-02")
+    c = [100.0] * len(sess)
+    c[i + 2] = float("nan")  # no close that session (pandas 3's pct_change does not pad: without ffill the 2 % would vanish)
+    c[i + 3] = 102.0
+    c[i + 4] = c[i + 5] = 102.0
+    closes = pd.DataFrame({"A": c}, index=sess)
+    adm = pd.DataFrame({"E": ["2025-01-02"], "symbol": ["A"], "side": [1.0], "cost": [0.0]})
+    pnl = book_pnl(adm, closes, sess, 5)
+    assert pnl["gross_bps"].iloc[i + 2] == 0.0 and abs(pnl["gross_bps"].iloc[i + 3] - 200.0) < 1e-6
+    assert abs(pnl["gross_bps"].sum() - 200.0) < 1e-6
+
+
+# ---- the holdout's standard errors, the 15:25 decision bar, the holdout's fixed book ----
+
+
+def test_holdout_se_weekly_takes_the_week_as_the_unit():
+    import math
+
+    # four weeks, two events a week; the weeks disagree far more than the events inside them
+    net = pd.Series([10.0, 12.0, 30.0, 32.0, -10.0, -8.0, 50.0, 52.0],
+                    index=["2025-10-06", "2025-10-07", "2025-10-13", "2025-10-14", "2025-10-20", "2025-10-21", "2025-10-27", "2025-10-28"])
+    se_naive, se_weekly = holdout_se(net)
+    assert se_naive == pytest.approx(net.std(ddof=1) / math.sqrt(8))
+    wk = pd.Series([22.0, 62.0, -18.0, 102.0])
+    assert se_weekly == pytest.approx(wk.std(ddof=1) / math.sqrt(4) / 2)
+    assert se_weekly > se_naive
+    assert all(math.isnan(v) for v in holdout_se(net.iloc[:1]))
+
+
+def test_the_1525_decision_reads_the_bar_that_closed_at_1525_not_the_one_labelled_1525():
+    from kotsin_nse.market.session import ist_at
+
+    day = date(2025, 1, 14)
+    c5 = pd.Series({ist_at(day, hm): px for hm, px in (("15:10", 101.0), ("15:15", 102.0), ("15:20", 103.0), ("15:25", 104.0))})
+    assert EXEC_BAR == "15:20"
+    assert decision_px(c5, day.isoformat()) == 103.0, "the 15:20 bar's close is the 15:24:59 trade; 104 is the 15:29:59 one"
+    assert decision_px(c5.drop(ist_at(day, "15:20")), day.isoformat()) == 102.0, "without it, the last bar closed by 15:25"
+    assert pd.isna(decision_px(c5[[ist_at(day, "15:25")]], day.isoformat())), "a bar that closes after the decision is not seen"
+
+
+def test_the_holdout_run_refuses_any_book_but_the_pre_registered_one(settings):
+    with pytest.raises(ValueError, match="pre-registered"):
+        study_book(settings, end=date(2026, 10, 16), cap=CAP + 20, allow_holdout=True)
+    with pytest.raises(ValueError, match="pre-registered"):
+        study_book(settings, end=date(2026, 10, 16), hold=5, allow_holdout=True)

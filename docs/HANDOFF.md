@@ -1,8 +1,15 @@
 # Kotsin — handoff for a new session (Claude / Codex)
 
-Last updated **2026-10-23**, on branch `fresh-base`. Read this whole file
+Last updated **2026-11-01**, on branch `fresh-base`. Read this whole file
 before changing anything. It records what has been tried across every Kotsin module, what the data
 said, and where the work stands. Numbers are from backtests unless marked otherwise.
+
+**2026-11-01: the end-to-end review** (`docs/REVIEW-2026-11-01.md`) — every formula, price-action
+rule, fill and cost checked and the defects fixed (58 files, 332 tests). Read it before quoting any
+number from §3: several are **unverified until re-run** (its §5 lists which and why — the IV clock,
+the Supertrend, the IB sweep, the chain-score window, renamed tickers in the events calendar), the
+live book's day now ends at 15:10 with gapped stops filled at the open, and **LIVE cannot be armed**
+until its §6 list is empty (the strategy's orders are not routed to the broker).
 
 ---
 
@@ -314,7 +321,10 @@ intraday scale already shown to lose.
 - Costs: `risk/costs.py` on a stock future; 5 bp slippage on market fills; statistics by day/week, not trade.
 - **Exploration window:** intraday strategies 2024-04-01 → 2025-09-30; daily strategies 2021-04-01 → 2025-09-30.
 - **Holdout: 2025-10-01 → 2026-10-16 — UNTOUCHED.** One run, for one finalised candidate, judged by
-  criteria written down *before* the run.
+  criteria written down *before* the run. Every harness refuses a range that reaches into it
+  (`research/common.assert_exploration_window`, 2026-11-01); only `allow_holdout` lifts the guard.
+  The 1m cache lies entirely inside it: the 1m backtests (rows 1–3, `ob-backtest`, `pb-backtest`)
+  are holdout-period runs by construction and say so with `--allow-holdout`.
 - Pass rule used so far: t(by week) ≥ 2 and ≥ 60 % of months positive. For a low-win, big-winner
   strategy (§5) the proposed criteria are: holdout total R > 0, profit factor ≥ 1.2, still positive
   after removing its single best trade, ≥ 15 trades. **Not yet run — awaiting the owner's go.**
@@ -377,6 +387,19 @@ The 64-state bias gate (`use_bias=true`) only has data from 2024, which left too
 
 ## 6. Open work / next steps
 
+0. **From the 2026-11-01 review (`docs/REVIEW-2026-11-01.md`), in this order.** (a) Re-run the
+   studies its §5 names — first `optsignals.build` and the regimes (the IV was solved on calendar
+   days against a √252 one-day move: the calm-regime 0.77 is ≈ 0.86 corrected, above the 0.8 bar —
+   the sellers'-regime "pass" is unverified), then condor, chainscore → nightpick, events, oi_daily,
+   rows 10–11c, row 2, row 14. (b) Its §4 OPEN list — the NSE_FO close at 15:40 (P1), one VWAP (P2),
+   the structure/levels readings the owner reviews against his chart (P3–P8), the symbol-rename
+   handling in the daily readers (P10), the stats helper and robustness block (P12). (c) Its §6
+   "before LIVE" list: the runner must go through `Gateway.submit_live` with a `LiveContext`,
+   `Reconciler` wired at boot and on a timer, `exec/live.py`'s partial fills, the force-flat;
+   `Engine.set_mode` refuses a live mode until then. (d) Its §7 refactor map. The 1m cache
+   (2026-08-03 → 10-16) lies inside the holdout window, so `ob-backtest` / `pb-backtest` need
+   `--allow-holdout` — rows 1–3 always ran on holdout-period days. Confirm the brokerage plan
+   (₹40 measured vs the published ₹20) from a contract note: 4 of the 13 bps modelled at ₹1L.
 1. **The lead is closed (2026-10-25): post-results drift, §3.4 row 13.** §7 (5-day hold) passed in-sample, was flat on 2024–25
    survivors; §7b (20-session hold, 20-position book, |z| priority, roll at expiry) passed its one in-sample run (+89.5, t 2.95)
    and **failed its pre-registered holdout bar by a hair (+64.8 bps per event, t 0.99 against 1.0) with worse facts underneath:

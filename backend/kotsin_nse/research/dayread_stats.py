@@ -58,6 +58,18 @@ def _by_hour(df: pd.DataFrame, icol: str = "i") -> pd.Series:
     return (df[icol] // 12).astype(int).map(lambda h: HOURS[min(int(h), 6)])
 
 
+def crowd_so_far(sel: pd.DataFrame) -> pd.Series:
+    """Per row, the number of distinct symbols within its (day, kind) with an event at a bar ≤ its own —
+    the crowd known at that bar, the same quantity ``day_total`` (distinct symbols over the whole day)
+    reaches by the close, so the two bin on one scale. Events, not symbols, would count a stock that
+    tests the level three times as three of the crowd."""
+    s = sel.sort_values(["day", "kind", "i"], kind="stable")
+    fresh = ~s.duplicated(["day", "kind", "sym"])  # the symbol's first event of the (day, kind)
+    seen = fresh.groupby([s["day"], s["kind"]]).cumsum()
+    seen = seen.groupby([s["day"], s["kind"], s["i"]]).transform("max")  # the same bar sees the same crowd
+    return seen.reindex(sel.index)
+
+
 def run(out: Path, data_dir: Path | None = None) -> dict[str, Any]:
     report: dict[str, Any] = {}
     lines: list[str] = []
@@ -225,9 +237,9 @@ def run(out: Path, data_dir: Path | None = None) -> dict[str, Any]:
     sel["x_day"] = (sel["rcl"] - sel["bd_rcl"]) * sel["sg"]
     sel["raw"] = sel["rcl"] * sel["sg"]
     sel["net"] = sel["raw"] - COST_BPS / 100
-    sel = sel.sort_values(["day", "kind", "i"])
+    sel = sel.sort_values(["day", "kind", "i"], kind="stable")
     sel["day_total"] = sel.groupby(["day", "kind"])["sym"].transform("nunique")
-    sel["seen_sofar"] = sel.groupby(["day", "kind"]).cumcount() + 1
+    sel["seen_sofar"] = crowd_so_far(sel)  # distinct symbols by that bar: the same count as day_total, known as it grows
     first = sel.sort_values("i").drop_duplicates(["sym", "day", "kind"]).copy()
     nifty_p = (data_dir / "history" / "5m" / "NIFTY.parquet") if data_dir else None
     if nifty_p and nifty_p.exists():

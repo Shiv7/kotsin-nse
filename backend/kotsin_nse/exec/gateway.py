@@ -21,12 +21,16 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
+import structlog
+
 from ..domain import Fill, Order, OrderIntent, Purpose, new_id
 from ..market.session import ist_day
 from .paper import BookSnapshot, NoBook, PaperMatcher
 
 if TYPE_CHECKING:
     from .live import LiveExecutor
+
+log = structlog.get_logger(__name__)
 
 
 class Mode(StrEnum):
@@ -112,6 +116,7 @@ class Gateway:
         self.orders_today = 0
         self.consecutive_rejects = 0
         self.breaker_tripped = False
+        self.unrouted_live_intents = 0
         self._day = ist_day(time.time()).isoformat()
 
     # -- bookkeeping -----------------------------------------------------------------------------
@@ -124,7 +129,9 @@ class Gateway:
     def _rollover(self) -> None:
         d = ist_day(time.time()).isoformat()
         if d != self._day:
-            self._day, self.orders_today = d, 0
+            # a new session starts its reject count at zero; a TRIPPED breaker still needs the
+            # explicit reset — someone has to look at why it tripped
+            self._day, self.orders_today, self.consecutive_rejects = d, 0, 0
 
     def _order_for(self, intent: OrderIntent, mode: Mode) -> Order:
         return Order(
@@ -144,21 +151,28 @@ class Gateway:
             ts=time.time(),
         )
 
+    #: rejects that count toward the breaker: the broker, the book or the risk model saying no.
+    #: A halt or a cap is *our* decision — three entries during an operator halt tripped the
+    #: breaker, which then kept the engine halted after the halt was lifted.
+    BREAKER_DECISIONS = frozenset({Decision.REJECTED_BROKER, Decision.REJECTED_BOOK, Decision.REJECTED_RISK})
+
     def _reject(self, order: Order, decision: Decision, note: str) -> OrderResult:
         order.status, order.note = "REJECTED", note
-        if decision is not Decision.DUP_BLOCKED:
+        if decision in self.BREAKER_DECISIONS:
             self.consecutive_rejects += 1
             if self.consecutive_rejects >= self.caps.breaker_consecutive_rejects:
                 self.breaker_tripped = True
         return OrderResult(decision, order)
 
     def _precheck(self, intent: OrderIntent, order: Order) -> OrderResult | None:
+        """halt → idempotency, in that order (ARCHITECTURE): an entry refused by a halt has not
+        spent its client_order_id — the same intent may be sent once the halt lifts."""
         if intent.client_order_id in self._seen:
             return self._reject(order, Decision.DUP_BLOCKED, "duplicate client_order_id")
-        self._seen.add(intent.client_order_id)
         halted, why = self._halted()
         if halted and intent.purpose is Purpose.ENTRY:
             return self._reject(order, Decision.REJECTED_HALT, why or "halted")
+        self._seen.add(intent.client_order_id)
         return None
 
     # -- SHADOW / PAPER ----------------------------------------------------------------------------
@@ -193,8 +207,14 @@ class Gateway:
             self.orders_today += 1
             return OrderResult(Decision.PAPER_FILLED, order, fill)
 
+        # No caller routes through ``submit_live`` yet (2026-11-01 review): in a live mode every
+        # intent that reaches here — EXITS INCLUDED — is refused, which the docstring's "exits are
+        # never blocked" does not survive. Counted and logged loudly; ``Engine.set_mode`` refuses
+        # to arm a live mode while this is so.
+        self.unrouted_live_intents += 1
+        log.error("gateway.live_unrouted", purpose=intent.purpose.value, symbol=intent.instrument.symbol, mode=mode.value)
         return self._reject(
-            order, Decision.REJECTED_BROKER, f"{mode.value} orders must go through submit_live()"
+            order, Decision.REJECTED_BROKER, f"{mode.value} orders must go through submit_live() — not wired; see HANDOFF §6"
         )
 
     # -- LIVE ---------------------------------------------------------------------------------------
@@ -266,6 +286,7 @@ class Gateway:
             "orders_today": self.orders_today,
             "consecutive_rejects": self.consecutive_rejects,
             "breaker_tripped": self.breaker_tripped,
+            "unrouted_live_intents": self.unrouted_live_intents,
             "seen_ids": len(self._seen),
             "live_configured": self.live is not None,
             "matcher": self._matcher.stats(),

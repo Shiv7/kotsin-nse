@@ -101,7 +101,13 @@ def _period_levels(rows: Sequence[tuple[date, float, float, float]], key: Any, p
 
 def pivot_levels(daily: Sequence[tuple[int, float, float, float]], today: date) -> list[PivotLevel]:
     """``daily`` = (ts, high, low, close) of completed sessions; only those before ``today`` count."""
-    rows = sorted((ist_day(int(ts)), h, lo, c) for ts, h, lo, c in daily if h > 0 and lo > 0 and ist_day(int(ts)) < today)
+    # a row with a zero / NaN close or an inverted range yields NaN pivots that then compare False
+    # everywhere (and silently break the cluster sort); such a row is no session
+    rows = sorted(
+        (ist_day(int(ts)), h, lo, c)
+        for ts, h, lo, c in daily
+        if h > 0 and lo > 0 and c > 0 and h >= lo and c == c and ist_day(int(ts)) < today
+    )
     if not rows:
         return []
     _d, h, lo, c = rows[-1]

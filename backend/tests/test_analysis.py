@@ -10,7 +10,7 @@ import pytest
 from kotsin_nse.analysis.bigpicture import big_picture, fibonacci
 from kotsin_nse.analysis.buildup import label, mtf, recent
 from kotsin_nse.analysis.hedge import setups
-from kotsin_nse.market.session import ist_at
+from kotsin_nse.market.session import ist_at, ist_day
 
 
 def _daily(closes: list[float]) -> list[tuple[int, float, float, float, float, float]]:
@@ -34,7 +34,10 @@ def test_a_down_move_retraced_by_a_third_reads_as_such():
 
 def test_the_big_picture_uses_only_sessions_before_today():
     rows = _daily([1000 + i for i in range(260)])
-    today = date.fromordinal(max(date.fromtimestamp(r[0]).toordinal() for r in rows))
+    # the rows are stamped at IST midnight (= 18:30 UTC the day before): the day must be read in
+    # IST, as the code does — ``date.fromtimestamp`` (local time) landed a day early on any box not
+    # set to IST and the test failed everywhere but the owner's Mac
+    today = max(ist_day(r[0]) for r in rows)
     bp = big_picture(rows, today)
     assert bp is not None and bp["prev_close"] == 1258.0, "today's own bar is not a previous session"
     assert bp["trend"].startswith("UP") and bp["1y"]["position_pct"] > 90

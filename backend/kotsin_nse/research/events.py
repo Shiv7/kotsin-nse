@@ -226,6 +226,7 @@ def event_table(settings: Settings, ev: pd.DataFrame, end: date, start: str = "2
     F&O member (point-in-time), E ≤ ``end`` − 20 sessions so every drift is observable inside the window."""
     import numpy as np
 
+    from ..market.fo_universe import canonical
     from ..market.fo_universe import load as load_members
     from .history import HistoryStore
     from .regimes import _daily
@@ -240,6 +241,9 @@ def event_table(settings: Settings, ev: pd.DataFrame, end: date, start: str = "2
     iv_p = settings.data_dir / "oi_daily" / "_optsignals.parquet"
     iv = pd.read_parquet(iv_p, columns=["symbol", "day", "iv_c", "iv_p"]) if iv_p.exists() else None
     iv_atm = iv.assign(iv=(iv["iv_c"] + iv["iv_p"]) / 2).set_index(["symbol", "day"])["iv"] if iv is not None else None
+    # a filing carries the ticker of its day; the price cache and the membership hold today's
+    changes = dict(fm.changes)
+    ev = ev.assign(symbol=[canonical(str(s), changes) for s in ev["symbol"]])
     rows = []
     for sym, g in ev.groupby("symbol"):
         try:
@@ -329,7 +333,9 @@ def book_pnl(adm: pd.DataFrame, closes: pd.DataFrame, sessions: list[str], hold:
 
     pos_of = {s: i for i, s in enumerate(sessions)}
     c = closes.reindex(sessions)
-    ret = c.pct_change().to_numpy(float)
+    # a session the stock has no close for carries the last close forward (pandas 3's pct_change no
+    # longer pads), so the move is booked when the next close comes, not dropped
+    ret = c.ffill().pct_change().to_numpy(float)
     col = {s: k for k, s in enumerate(c.columns)}
     pnl = np.zeros(len(sessions))
     cost = np.zeros(len(sessions))
@@ -342,6 +348,23 @@ def book_pnl(adm: pd.DataFrame, closes: pd.DataFrame, sessions: list[str], hold:
         n_open[i + 1 : j + 1] += 1
         cost[j] += x.cost
     return pd.DataFrame({"day": sessions, "gross_bps": pnl, "cost_bps": cost, "net_bps": pnl - cost, "open": n_open}).set_index("day")
+
+
+def holdout_se(net: pd.Series) -> tuple[float, float]:
+    """Two standard errors of the mean per-event net (bps, indexed by E): ``se_naive`` treats events
+    as i.i.d.; ``se_weekly`` takes the week as the unit — sd of the weekly sums / √weeks, divided by
+    the mean events a week, so it is on the per-event scale too. NaN when there is too little."""
+    import math
+
+    net = net.dropna()
+    if len(net) < 2:
+        return float("nan"), float("nan")
+    se_naive = float(net.std(ddof=1) / math.sqrt(len(net)))
+    wk = net.groupby(["{}-W{:02d}".format(*date.fromisoformat(d).isocalendar()[:2]) for d in net.index]).sum()
+    if len(wk) < 2:
+        return se_naive, float("nan")
+    se_weekly = float(wk.std(ddof=1) / math.sqrt(len(wk)) / (len(net) / len(wk)))
+    return se_naive, se_weekly
 
 
 def _drawdowns(net: pd.Series) -> dict[str, Any]:
@@ -393,21 +416,24 @@ def study(settings: Settings, end: date = date(2025, 9, 30), label: str = "") ->
     # the cross-check: board-meeting result dates of members with no filing within 3 sessions
     missing = None
     if len(board) and len(t):
+        from ..market.fo_universe import canonical
         from ..market.fo_universe import load as load_members
 
         fm, _ = load_members(settings.data_dir)
-        have = {(sym, e) for sym, e in zip(t["symbol"], t["E"], strict=True)}
+        changes = dict(fm.changes)
+        have = {(sym, e) for sym, e in zip(t["symbol"], t["E"], strict=True)}  # today's tickers (event_table)
         idx = pd.Index(sessions)
         b = board[(board["meeting_day"] >= "2021-04-01") & (board["meeting_day"] <= end.isoformat())]
         n_member = miss = 0
         for x in b.itertuples():
             d = date.fromisoformat(x.meeting_day)
-            if not (fm.covers(d) and fm.member(x.symbol, d)):
+            sym = canonical(str(x.symbol), changes)
+            if not (fm.covers(d) and fm.member(sym, d)):
                 continue  # not in F&O on that day: no event was expected
             n_member += 1
             p = idx.searchsorted(x.meeting_day)
             near = {sessions[j] for j in range(max(0, p - 1), min(len(sessions), p + 4))}
-            if not any((x.symbol, e) in have for e in near):
+            if not any((sym, e) in have for e in near):
                 miss += 1
         missing = {"board_result_dates_of_members": n_member, "without_a_filing_nearby": miss}
     bins = {"1-2": t[(t["z"].abs() >= 1) & (t["z"].abs() < 2)], "2-3": t[(t["z"].abs() >= 2) & (t["z"].abs() < 3)], ">3": t[t["z"].abs() >= 3]}
@@ -453,7 +479,8 @@ def study_book(settings: Settings, end: date = date(2025, 9, 30), label: str = "
                start: str = "2021-04-01", halves: tuple[tuple[str, str], ...] = HALVES, allow_holdout: bool = False) -> dict[str, Any]:
     """§7b as written: the §7 selection held ``hold`` sessions as a book of at most ``cap`` positions,
     |z| priority, a roll charged for every expiry inside the hold. Writes ``obtests/events7b-<id>.json``.
-    ``allow_holdout`` lifts the guard on purpose — the holdout is spent once, on the owner's word (prereg §7b, holdout)."""
+    ``allow_holdout`` lifts the guard on purpose — the holdout is spent once, on the owner's word (prereg §7b,
+    holdout) — and then only the pre-registered ``cap`` (``CAP``) and ``hold`` are accepted."""
     import math
     import uuid
 
@@ -467,6 +494,8 @@ def study_book(settings: Settings, end: date = date(2025, 9, 30), label: str = "
 
     if end >= HOLDOUT_START and not allow_holdout:
         raise ValueError(f"{end} is inside the holdout (from {HOLDOUT_START})")
+    if allow_holdout and (cap, hold) != (CAP, HOLD_BOOK):
+        raise ValueError(f"the holdout runs the pre-registered book only: cap {CAP}, hold {HOLD_BOOK} (got cap {cap}, hold {hold})")
     t0 = time.time()
     results = pd.read_parquet(settings.data_dir / "events" / "results.parquet")
     store = HistoryStore(settings.data_dir / "history")
@@ -503,10 +532,12 @@ def study_book(settings: Settings, end: date = date(2025, 9, 30), label: str = "
                              and primary["weeks_positive"] >= 55 and all(h is not None and h > 0 for h in primary["halves"]))
     if allow_holdout:
         # the holdout's bar (prereg §7b, holdout): a confirmation of the in-sample estimate, not a re-discovery
-        se = float(adm["net"].std(ddof=1) / math.sqrt(len(adm))) if len(adm) > 1 else float("nan")
+        se_naive, se_weekly = holdout_se(adm.set_index("E")["net"])
+        gap = abs(primary["avg_bps"] - IN_SAMPLE_NET_7B)
         primary["passes_holdout"] = bool(primary.get("t_by_week") and primary["t_by_week"] >= 1.0 and primary["avg_bps"] > 0 and primary["weeks_positive"] >= 50)
-        primary["vs_in_sample"] = {"in_sample_avg_bps": IN_SAMPLE_NET_7B, "se_per_event_bps": round(se, 2),
-                                   "within_2se_of_in_sample": bool(abs(primary["avg_bps"] - IN_SAMPLE_NET_7B) <= 2 * se) if se == se else None}
+        primary["vs_in_sample"] = {"in_sample_avg_bps": IN_SAMPLE_NET_7B,
+                                   "se_naive_bps": round(se_naive, 2), "within_2se_naive_of_in_sample": bool(gap <= 2 * se_naive) if se_naive == se_naive else None,
+                                   "se_weekly_bps": round(se_weekly, 2), "within_2se_weekly_of_in_sample": bool(gap <= 2 * se_weekly) if se_weekly == se_weekly else None}
     closes = pd.DataFrame({s: _daily(store, s).set_index("day")["c"] for s in sorted(adm["symbol"].unique())})
     pnl = book_pnl(adm, closes, sessions, hold)
     pnl = pnl[pnl.index >= start]
@@ -539,15 +570,33 @@ def study_book(settings: Settings, end: date = date(2025, 9, 30), label: str = "
     return out
 
 
+EXEC_BAR = "15:20"  # the 5m bar labelled 15:20 closes at 15:25: what a 15:25 decision can see
+EXEC_AT = "15:25"
+
+
+def decision_px(c5: pd.Series, day: str) -> float:
+    """The last 5m close known at ``EXEC_AT`` on ``day``: the bar labelled ``EXEC_BAR`` (its close is
+    the 15:24:59 trade; the bar labelled 15:25 closes at 15:30, after the decision), else the last bar
+    from 15:00 that closed by then; NaN without one. ``c5`` is indexed by the bar's start ts."""
+    from ..market.session import ist_at
+
+    ts = ist_at(date.fromisoformat(day), EXEC_BAR)
+    if ts in c5.index:
+        return float(c5.loc[ts])
+    w = c5[(c5.index >= ist_at(date.fromisoformat(day), "15:00")) & (c5.index <= ts)]
+    return float(w.iloc[-1]) if len(w) else float("nan")
+
+
 def execution_check(settings: Settings, events_parquet: Path, start: str = "2024-01-01", cost_bps: float = 14.62) -> dict[str, Any]:
-    """§7's execution check: select **and** enter on E's 15:25 bar, exit on E+k's 15:25 bar, every price from
+    """§7's execution check: select **and** enter at 15:25 on E — the close of the 5m bar labelled
+    ``EXEC_BAR`` (15:20), the last one closed by then — and exit on the same bar of E+k, every price from
     the 5m cache (it is not bonus/split adjusted while the daily cache is, so the two are never mixed); the
-    daily-close rule on the same events beside it. Only the stocks with 5m data (today's F&O list)."""
+    daily-close rule on the same events beside it. Only the stocks with 5m data (today's F&O list).
+    ``bar_used`` in the output says which bar it was."""
     import math
 
     import numpy as np
 
-    from ..market.session import ist_at
     from .history import HistoryStore
     from .regimes import _daily
 
@@ -556,13 +605,6 @@ def execution_check(settings: Settings, events_parquet: Path, start: str = "2024
     t = t[t["E"] >= start]
     sessions = list(_daily(store, "NIFTY")["day"])
     pos = {d: i for i, d in enumerate(sessions)}
-
-    def last_px(c5: pd.Series, day: str) -> float:
-        ts = ist_at(date.fromisoformat(day), "15:25")
-        if ts in c5.index:
-            return float(c5.loc[ts])
-        w = c5[(c5.index >= ist_at(date.fromisoformat(day), "15:00")) & (c5.index < ts + 300)]
-        return float(w.iloc[-1]) if len(w) else float("nan")
 
     n5 = store.load("NIFTY", "5m").set_index("ts")["c"]
     cache: dict[str, pd.Series | None] = {}
@@ -575,7 +617,7 @@ def execution_check(settings: Settings, events_parquet: Path, start: str = "2024
         if c5 is None:
             continue
         i = pos[x.E]
-        p_prev, p_e, n_prev, n_e = last_px(c5, sessions[i - 1]), last_px(c5, x.E), last_px(n5, sessions[i - 1]), last_px(n5, x.E)
+        p_prev, p_e, n_prev, n_e = decision_px(c5, sessions[i - 1]), decision_px(c5, x.E), decision_px(n5, sessions[i - 1]), decision_px(n5, x.E)
         if not all(np.isfinite(v) for v in (p_prev, p_e, n_prev, n_e)) or abs(p_e / p_prev - 1) > 0.5:
             continue
         z = ((p_e / p_prev - 1) - (n_e / n_prev - 1)) / x.sigma
@@ -587,7 +629,7 @@ def execution_check(settings: Settings, events_parquet: Path, start: str = "2024
             if j >= len(sessions):
                 ok = False
                 break
-            p_x = last_px(c5, sessions[j])
+            p_x = decision_px(c5, sessions[j])
             if not np.isfinite(p_x) or abs(p_x / p_e - 1) > 0.6:
                 ok = False
                 break
@@ -608,10 +650,11 @@ def execution_check(settings: Settings, events_parquet: Path, start: str = "2024
                 "weeks_positive": round(float((w > 0).mean()) * 100, 1)}
 
     sel_c, sel_i = r[r["z_close"].abs() >= Z_MIN].set_index("E"), r[r["z_1525"].abs() >= Z_MIN].set_index("E")
-    return {"events_with_5m": len(r), "selected_at_close": len(sel_c), "selected_at_1525": len(sel_i),
+    return {"bar_used": f"the 5m bar labelled {EXEC_BAR} (closes {EXEC_AT})", "decision_at": EXEC_AT,
+            "events_with_5m": len(r), "selected_at_close": len(sel_c), "selected_at_1525": len(sel_i),
             "z_corr": round(float(r[["z_close", "z_1525"]].corr().iloc[0, 1]), 3),
             "same_sign_pct": round(float((np.sign(r["z_close"]) == np.sign(r["z_1525"])).mean()) * 100, 1),
             "by_hold": {str(k): {"daily_rule": wk(sel_c[f"d_{k}"]), "select_and_trade_at_1525": wk(sel_i[f"i_{k}"])} for k in KS}}
 
 
-__all__ = ["SOURCES", "build_tables", "event_sessions", "event_table", "execution_check", "fetch", "months", "study"]
+__all__ = ["SOURCES", "build_tables", "decision_px", "event_sessions", "event_table", "execution_check", "fetch", "holdout_se", "months", "study"]

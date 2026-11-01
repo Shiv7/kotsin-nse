@@ -6,10 +6,11 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 import pandas as pd
+import pytest
 
 from kotsin_nse.config import Settings
 from kotsin_nse.market.session import ist_at
-from kotsin_nse.research.swing import SwingParams, SwingTrade, daily_frame, setups, simulate
+from kotsin_nse.research.swing import SwingParams, SwingTrade, daily_frame, run, setups, simulate
 from kotsin_nse.risk.costs import CostModel
 
 
@@ -57,3 +58,8 @@ def test_the_stop_follows_each_new_confirmed_higher_low_and_exits_on_the_trail()
     assert t.stop_path, "the stop never moved"
     assert t.exit_reason == "TRAIL" and t.exits[0]["price"] == t.stop_path[-1]["stop"] == 104.0
     assert t.r > 1.5
+
+
+def test_the_holdout_is_refused():
+    with pytest.raises(ValueError, match="holdout"):
+        run(Settings(_env_file=None), date(2025, 9, 1), date(2025, 10, 15), SwingParams())

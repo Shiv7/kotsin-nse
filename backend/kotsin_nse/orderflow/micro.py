@@ -140,7 +140,9 @@ class MicroMeter:
         st.last_side = side or st.last_side
         if total_qty >= st.last_total:
             st.last_total = total_qty
-        st.bid, st.ask, st.ltp = bid, ask, ltp
+        # an auction's or crossed quote is forgotten, so the next frame classifies by the tick rule
+        st.bid, st.ask = (0.0, 0.0) if (auction or crossed) else (bid, ask)
+        st.ltp = ltp
         self._trim(st, ts)
 
     def _absorption(self, st: _State, ts: float, side: int, new: int) -> None:

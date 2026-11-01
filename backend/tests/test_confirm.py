@@ -89,3 +89,12 @@ def test_the_cpr_rejection_enters_where_tc_rejects_with_the_stop_under_p_and_twi
     assert 106.4 < t.stop < 106.667, "just under the pivot"
     assert t.target == pytest.approx(t.entry + 2 * (t.entry - t.stop), abs=1e-3)
     assert set(t.tags) >= {"struct60", "st60", "weekly", "depth", "cpr_width"}
+
+
+def test_a_trigger_cannot_confirm_the_first_low_with_bars_after_itself():
+    # L1 at bar 4 (99.8), the neckline the bar after (102.2), the second low at bar 6, the breakout
+    # close at bar 7: with side=3 bar 7 has seen L1's three higher lows — with side=4 only bar 8 has
+    closes = [104, 103, 102, 101, 100, 102, 100.3, 103, 104]
+    h, lo, c, a = _bars(closes)
+    assert len(doubles(h, lo, c, a, ConfirmParams(side=3, min_gap=1), np.ones(len(c), bool))) == 1
+    assert doubles(h, lo, c, a, ConfirmParams(side=4, min_gap=1), np.ones(len(c), bool)) == []

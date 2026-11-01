@@ -33,6 +33,7 @@ from ..structure.levels import floor_pivots
 NAME = "cpr_retest"
 RULES: tuple[str, ...] = ("wall_then_trail", "fixed_wall", "fixed_1to2")
 #: the open test must be in by this bar index (09:45 on the 5m grid)
+BAR_S = 300  # the decision frame: one 5m bar
 OPEN_TEST_BARS = 6
 #: the break of structure within this many bars of the open test
 BOS_BARS = 12
@@ -80,9 +81,17 @@ def tolerance(adr: float | None, price: float) -> float:
     return (adr if adr and adr > 0 else price * 0.01) * TOL_ADR
 
 
-def sequence(bars: Sequence[Bar5], levels: dict[str, float], tol: float) -> dict[int, Stage]:
+def sequence(bars: Sequence[Bar5], levels: dict[str, float], tol: float, *, open_ts: int | None = None) -> dict[int, Stage]:
     """The sequence on the closed bars so far, per side (+1 bullish, −1 bearish) — the sweep's logic
-    (``dayread_sweep.day_tables``) verbatim, so a live stage equals the research's for the same bars."""
+    (``dayread_sweep.day_tables``) verbatim, so a live stage equals the research's for the same bars.
+
+    The stage fields (``i_os`` … ``j``) are list indices into ``bars``. The three *time* windows
+    (the open test by the sixth bar, the BOS within twelve bars of it, the confirmation within six of
+    the retest) are measured in bar POSITIONS from ``open_ts`` when it is given: a bucket the feed
+    never delivered (the 09:15 bar after a sleep, a reconnect gap) then shifts nothing, and the
+    sweep installing it later cannot move a stage retroactively. Without ``open_ts`` position =
+    index, which is the research's complete-day case.
+    """
     out = {1: Stage(1), -1: Stage(-1)}
     if not bars:
         return out
@@ -94,18 +103,19 @@ def sequence(bars: Sequence[Bar5], levels: dict[str, float], tol: float) -> dict
     ev = level_events(bars, bands(levels), tol)
     sev, _legs = structure_events(bars)
     idx = {b.ts: i for i, b in enumerate(bars)}
+    pos = [((b.ts - open_ts) // BAR_S) if open_ts is not None else i for i, b in enumerate(bars)]
     n = len(bars)
     for side, st in out.items():
         if side > 0:
-            os_ = [e for e in ev if e.kind == "SUPPORT" and idx[e.ts] <= OPEN_TEST_BARS and c[idx[e.ts]] < bc]
+            os_ = [e for e in ev if e.kind == "SUPPORT" and pos[idx[e.ts]] <= OPEN_TEST_BARS and c[idx[e.ts]] < bc]
         else:
-            os_ = [e for e in ev if e.kind == "RESISTANCE" and idx[e.ts] <= OPEN_TEST_BARS and c[idx[e.ts]] > tc]
+            os_ = [e for e in ev if e.kind == "RESISTANCE" and pos[idx[e.ts]] <= OPEN_TEST_BARS and c[idx[e.ts]] > tc]
         if not os_:
             continue
         e0 = min(os_, key=lambda e: idx[e.ts])
         st.i_os, st.lvl_os = idx[e0.ts], e0.level or ""
         bos_k = "BOS_UP" if side > 0 else "BOS_DOWN"
-        bos = [idx[e.ts] for e in sev if e.kind == bos_k and st.i_os < idx[e.ts] <= st.i_os + BOS_BARS]
+        bos = [idx[e.ts] for e in sev if e.kind == bos_k and st.i_os < idx[e.ts] and pos[idx[e.ts]] <= pos[st.i_os] + BOS_BARS]
         if not bos:
             continue
         st.i_bos = min(bos)
@@ -122,7 +132,7 @@ def sequence(bars: Sequence[Bar5], levels: dict[str, float], tol: float) -> dict
         if not held:
             continue
         trig = h[back] if side > 0 else lo[back]
-        st.j = next((k for k in range(back + 1, min(n, back + CONFIRM_BARS + 1)) if (c[k] > trig if side > 0 else c[k] < trig)), None)
+        st.j = next((k for k in range(back + 1, n) if pos[k] <= pos[back] + CONFIRM_BARS and (c[k] > trig if side > 0 else c[k] < trig)), None)
     return out
 
 
@@ -200,6 +210,7 @@ class ExitPlan:
     hh: float = 0.0  # best excursion (long space)
     ll: float = 0.0  # worst excursion (long space)
     done: tuple[float, str] | None = None  # (exit price in real terms, how)
+    gapped: bool = False  # the stop was crossed by a bar's open: filled there, not at the stop
 
     @classmethod
     def open(cls, rule: str, side: int, entry: float, stop: float, wall_prices: Sequence[float], tol: float) -> ExitPlan:
@@ -226,8 +237,17 @@ class ExitPlan:
     def pnl_bps(self, exit_px: float) -> float:
         return (exit_px - self.entry) * self.side / abs(self.entry) * 1e4
 
-    def step(self, high: float, low: float, close: float, *, last: bool = False) -> tuple[float, str] | None:
-        """One closed bar after the entry bar. Returns (exit price, how) once, when the trade ends."""
+    def step(self, high: float, low: float, close: float, *, last: bool = False, open: float | None = None) -> tuple[float, str] | None:
+        """One closed bar after the entry bar. Returns (exit price, how) once, when the trade ends.
+
+        With ``open``: a bar that OPENS through the stop fills at the open, not at the stop — the
+        stop is a market order once touched and the gap is paid. Booking the stop price across a
+        gap was the old ledger's optimism (LEARNINGS R16) and the artifact already removed from
+        the positional walk; the intraday plan had it until 2026-11-01. A target is still credited
+        at the target (a limit fills there or better). The research reference (``retest_mgmt``)
+        had no open and scored the stop price, so a shadow trade can read a little worse than its
+        backtest twin on a gapped bar — the difference is real money, not a convention.
+        """
         if self.done is not None:
             return None
         sg = self.side
@@ -238,7 +258,11 @@ class ExitPlan:
         self.ll = min(self.ll, lw)
         e = sg * self.entry
         if lw <= self.stop:
-            self.done = (sg * self.stop, "stop" if self.stop < e else "trail")
+            how = "stop" if self.stop < e else "trail"
+            op = sg * open if open is not None and open > 0 else None
+            fill = op if op is not None and op <= self.stop else self.stop
+            self.gapped = fill != self.stop
+            self.done = (sg * fill, how)
             return self.done
         if self.target is not None and hi >= self.target:
             if self.rule == "wall_then_trail":
@@ -261,8 +285,20 @@ class ExitPlan:
         sg = self.side
         return {"rule": self.rule, "stop": sg * self.stop, "target": self.target_price(), "wall_i": self.wall_i, "bars": self.bars,
                 "mfe_bps": (self.hh - sg * self.entry) / abs(self.entry) * 1e4, "mae_bps": (self.ll - sg * self.entry) / abs(self.entry) * 1e4,
-                "exit": self.done[0] if self.done else None, "how": self.done[1] if self.done else None,
+                "exit": self.done[0] if self.done else None, "how": self.done[1] if self.done else None, "gapped": self.gapped,
                 "pnl_bps": self.pnl_bps(self.done[0]) if self.done else None}
+
+    def state(self) -> dict[str, Any]:
+        """Every field, so a plan survives a restart (``from_state``)."""
+        return asdict(self)
+
+    @classmethod
+    def from_state(cls, d: dict[str, Any]) -> ExitPlan:
+        done = d.get("done")
+        return cls(rule=d["rule"], side=int(d["side"]), entry=float(d["entry"]), stop=float(d["stop"]), tol=float(d["tol"]),
+                   walls=[float(w) for w in d.get("walls", [])], target=None if d.get("target") is None else float(d["target"]),
+                   wall_i=int(d.get("wall_i", 0)), bars=int(d.get("bars", 0)), hh=float(d.get("hh", 0.0)), ll=float(d.get("ll", 0.0)),
+                   done=(float(done[0]), str(done[1])) if done else None, gapped=bool(d.get("gapped", False)))
 
 
 # -- context tags: what the research tested as "is this stock trending" (none of it helped) ---------------
