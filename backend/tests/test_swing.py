@@ -57,7 +57,9 @@ def test_the_stop_follows_each_new_confirmed_higher_low_and_exits_on_the_trail()
     simulate(t, d, i0, None, SwingParams(slip_bps=0, stop_buffer_adr=0.0), CostModel(Settings(_env_file=None)), adr=2.0)
     assert t.stop_path, "the stop never moved"
     assert t.exit_reason == "TRAIL" and t.exits[0]["price"] == t.stop_path[-1]["stop"] == 104.0
-    assert t.r > 1.5
+    # 104 from 100 on a 2-point risk is 2.0 R gross; the net R is that less the charges in force (it
+    # was 1.50 at the 2024 futures STT and 1.499 after the 2026-04-01 rise — a cost, not the trail)
+    assert 1.4 < t.r < 2.0
 
 
 def test_the_holdout_is_refused():

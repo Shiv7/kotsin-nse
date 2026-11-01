@@ -255,8 +255,13 @@ class Settings(BaseSettings):
     #: overnight (delivery) cash equity pays STT on BOTH legs at this rate; the intraday rate
     #: above applies to the sell leg only.
     cost_stt_pct_delivery_equity: float = 0.1
-    cost_stt_pct_sell_option_premium: float = 0.1  # 0.1 % of premium on sale since 2024-10-01 (was 0.0625)
-    cost_stt_pct_sell_future: float = 0.02  # since 2024-10-01 (was 0.0125)
+    # STT on derivatives, Budget 2026, effective 2026-04-01 (NSE/brokers' circulars of 1 Apr 2026): futures
+    # 0.02 → 0.05 % of turnover on the sell, options 0.10 → 0.15 % of premium on the sell (exercised
+    # options 0.125 → 0.15 % of intrinsic). Before that: 2024-10-01 → 2026-03-31 at 0.02 / 0.10; earlier
+    # 0.0125 / 0.0625. The model has ONE rate, today's: a backtest of 2021–2025 derivatives is charged
+    # the current (higher) STT — conservative, and stated here rather than hidden.
+    cost_stt_pct_sell_option_premium: float = 0.15
+    cost_stt_pct_sell_future: float = 0.05
     # NSE transaction charges, % of turnover (premium for options), the 2024-10-01 circular
     cost_exchange_txn_pct_equity: float = 0.00297
     #: 0.03503 % of premium since 2024-10-01. It was 0.05 % until then — and 0.05 was the value here
