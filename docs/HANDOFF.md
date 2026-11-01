@@ -388,6 +388,15 @@ The 64-state bias gate (`use_bias=true`) only has data from 2024, which left too
 
 ## 6. Open work / next steps
 
+0a. **The web check of the same day (`docs/research/2026-11-01-web-check.md`):** STT on derivatives
+   rose on 2026-04-01 (futures 0.05 %, options 0.15 % — the model now carries it); SEBI's retail-algo
+   framework (static IP, algo ID, ≤ 10 orders/s, 5paisa's limit-only API) is REVIEW §6.0 and makes a
+   static-IP VPS a precondition for LIVE; 5paisa's published tariff is ₹20 an order against the ₹40
+   "measured" — one contract note settles 2 of the 13 bps. Lanes with outside evidence we do not run:
+   insider/promoter-purchase drift (+6.7 % over 90 days, a second event type for `events.py`), the
+   closing-auction imbalance (on our feed since August, discarded as `auction_ticks` — record it), a
+   momentum sleeve as the beta book. Against 3–5 % a month: the current algo is −2 %/month on ₹5L in
+   expectation; 1–2 %/month with 10–15 % drawdowns is the defensible ambition.
 0. **From the 2026-11-01 review (`docs/REVIEW-2026-11-01.md`), in this order.** (a) Re-run the
    studies its §5 names — first `optsignals.build` and the regimes (the IV was solved on calendar
    days against a √252 one-day move: the calm-regime 0.77 is ≈ 0.86 corrected, above the 0.8 bar —
