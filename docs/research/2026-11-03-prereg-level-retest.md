@@ -51,3 +51,14 @@ generalized retest is recorded beside the CPR one and nothing changes in the eng
 Then the same rule on the live archive days (27, 29, 30 Oct, 2 Nov; 28 Oct lost) as a demonstration — not evidence.
 
 Script: `docs/research/scripts/2026-11-03-level-retest/level_retest.py`. Written before the first run.
+
+## Addendum (3 Nov 03:45 IST, before running): can a ranker pick two a day? (owner: "can we do this anyway from algo", on the hindsight best-two row)
+H3: a model trained on what is known at the entry — side, wall type, confluence, stop distance, first-wall distance and
+room in R, entry clock, gap at the open, the stock's move from the open at entry — ranks the day's confirmed flips well
+enough that its top two per day beat two picked at random. Data: the row-23 dev-window trades (first flips with the
+move). Fit on 2024, pick on 2025, and the reverse; a gradient-boosted classifier of "net > 0" (or logistic regression if
+sklearn is absent), the top two per day by predicted probability. Reported: the top-two's mean net per day against 200
+random two-a-day draws, the all-trades mean, the top-decile lift, and the day-t of (top-two − random). **Bar: the top
+two's mean net per day > 0 with day-t ≥ 2.5 in BOTH directions and above the random mean by ≥ 10 bps a day.** Below that,
+"the algo cannot choose" stands and the live book keeps first-two with the evening scoreboard. The four live days are
+only described (what the hindsight best-two had in common), not fitted — four days cannot train anything.

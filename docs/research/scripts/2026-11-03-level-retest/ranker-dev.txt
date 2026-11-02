@@ -1,0 +1,13 @@
+instances 98,259 days 433 | all-trades mean net -10.8 bps
+
+fit 2024 → pick in 2025: 187 days, 43,913 candidates (mean 0.398 predicted win)
+  top two a day: mean net -24.1 bps/day (day-t -2.38), win days 49 %
+  random two a day: mean net -20.7 bps/day | top-two − random -3.4 bps/day, day-t -0.36
+  all trades in 2025: mean net -10.6 bps a trade | top decile by score -6.9 on 4,392, bottom decile -13.3
+  what the model likes (top 3,000 by score): risk median 111 bps (all 70), room 0.58R (all 0.77), clock bar median 6 (all 11), long share 29 % (all 45), walls {'round': 0.63, 'pivot': 0.14, 'cpr': 0.07}
+
+fit 2025 → pick in 2024: 246 days, 54,346 candidates (mean 0.411 predicted win)
+  top two a day: mean net -26.1 bps/day (day-t -3.16), win days 49 %
+  random two a day: mean net -21.6 bps/day | top-two − random -4.5 bps/day, day-t -0.55
+  all trades in 2024: mean net -11.0 bps a trade | top decile by score -11.3 on 5,432, bottom decile -11.5
+  what the model likes (top 3,000 by score): risk median 120 bps (all 72), room 0.56R (all 0.76), clock bar median 5 (all 11), long share 45 % (all 44), walls {'round': 0.66, 'pivot': 0.1, 'cpr': 0.09}

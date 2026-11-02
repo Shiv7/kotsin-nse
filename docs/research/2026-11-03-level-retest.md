@@ -181,3 +181,25 @@ multiply the book, they do not change its sign.
 on this population, (c) risk > 80 bps only. The board and flow readings wait for ten sessions (9 Nov).
 
 **03:34 — the cap.** The owner's sizing: a ₹1L budget, at most two trades a day. `KN_STRATEGY_MAX_TRADES_PER_DAY=2`: the first two confirmed flips of the day are booked, the rest recorded with the cap as the reason. The evening scoreboard (`scripts/2026-11-03-level-retest/picker_scoreboard.py`) simulates every recorded signal's trade on the day's bars and scores the pickers; the learning curve is that table, day by day, against a random pick and the best possible two.
+
+## H3 — can a ranker pick two a day? (3 Nov 03:50, `scripts/2026-11-03-level-retest/ranker.py`, log `ranker-dev.txt`)
+Owner, on the hindsight best-two row: "can we do this anyway from algo". Pre-registered in the addendum before running.
+A gradient-boosted classifier of "net > 0" on what is known at the entry (side, wall type, confluence, stop distance,
+first-wall distance and room, entry bar, gap, tolerance), fit on one year of the 98,259 dev-window first flips, picking
+the two highest-scored flips each day in the other year:
+
+| fit → pick | days | top two a day, mean net | random two a day | top two − random (day-t) | top decile by score | all trades |
+|---|---|---|---|---|---|---|
+| 2024 → 2025 | 187 | −24.1 bps/day (day-t −2.4) | −20.7 | −3.4 (−0.4) | −6.9 on 4,392 | −10.6 a trade |
+| 2025 → 2024 | 246 | −26.1 bps/day (day-t −3.2) | −21.6 | −4.5 (−0.6) | −11.3 on 5,432 | −11.0 a trade |
+
+**Fails the bar in both directions: the model's two are no better than two at random, and both lose.** What the model
+learns to like is what the descriptive splits showed — a wide stop (median 111–120 bps vs 70), a near first wall (0.56R
+vs 0.77), an early bar (5–6 vs 11), round-number walls — and it does not pick on new days. The hindsight best-two over
+the four live days (PGEL, GVT&D, OBEROIRLTY, BANKBARODA, INOXWIND, DATAPATTNS, NBCC, POLICYBZR: +221 to +396 bps)
+share the same look — stop median 104 bps vs 67, room 0.54R vs 0.76, move from the open 0.59 ADR vs 0.31, 57 % already
+in the day's top-20 movers — and four of the eight were held to the close: they are the trend days, which nothing at the
+entry predicts (row 15). The one feature the dev window cannot test: 7 of the 8 had the future's state with the trade
+(long build-up under a long, short build-up under a short) against 53 % of the rest; that is the owner's confirmation
+and the day-10 pre-registration. The gap between first-two and hindsight-two (≈ ₹6,000 a day at ₹1L) is not reachable
+with price features; the evening scoreboard measures whether the board closes any of it.
