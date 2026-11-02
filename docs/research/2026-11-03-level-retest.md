@@ -179,3 +179,5 @@ multiply the book, they do not change its sign.
 **Next, pre-registered before running (not tonight, on battery):** on the dev window's 98,259 any-wall trades, (a) a breadth
 -at-entry filter (the universe's share above its open, in the trade's direction, 50–70 %), (b) the tighter trails of row 16
 on this population, (c) risk > 80 bps only. The board and flow readings wait for ten sessions (9 Nov).
+
+**03:34 — the cap.** The owner's sizing: a ₹1L budget, at most two trades a day. `KN_STRATEGY_MAX_TRADES_PER_DAY=2`: the first two confirmed flips of the day are booked, the rest recorded with the cap as the reason. The evening scoreboard (`scripts/2026-11-03-level-retest/picker_scoreboard.py`) simulates every recorded signal's trade on the day's bars and scores the pickers; the learning curve is that table, day by day, against a random pick and the best possible two.
