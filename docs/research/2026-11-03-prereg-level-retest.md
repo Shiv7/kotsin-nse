@@ -62,3 +62,13 @@ random two-a-day draws, the all-trades mean, the top-decile lift, and the day-t 
 two's mean net per day > 0 with day-t ≥ 2.5 in BOTH directions and above the random mean by ≥ 10 bps a day.** Below that,
 "the algo cannot choose" stands and the live book keeps first-two with the evening scoreboard. The four live days are
 only described (what the hindsight best-two had in common), not fitted — four days cannot train anything.
+
+## Addendum 2 (3 Nov 03:55 IST, before running): H4 — the price action at the entry (owner: "why we missing any signal use data and find real insight")
+H3's ranker saw only the setup's geometry. H4 adds what the owner reads on the chart and across the tape at the entry bar:
+the stock's move from the open (in ADR and in %), its rank against every other stock's move at that bar (signed the
+trade's way), the breadth at that bar (share of the universe moving the trade's way), NIFTY's move from its open, the
+day's range so far in ADR, where the close sits in the day's range, the break bar's volume against the day's earlier bars
+and its range in tolerances, the retest bar's volume and range, the bars from break to retest and from retest to
+confirmation. Same data (98,259 first flips with the move), same bar as H3 (top two a day > 0 with day-t ≥ 2.5 in both
+directions and ≥ 10 bps/day over random); one-way splits of every new feature are reported too (pooled, both years), with
+the caution that a split that holds in one year only is noise.

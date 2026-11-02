@@ -101,6 +101,24 @@ def main() -> None:
         if D.empty:
             print(f"{day}: no simulable signals")
             continue
+        # the market around the trade at its entry bar (H4): breadth the trade's way and the stock's rank among the universe's moves
+        try:
+            arch = _archive_5m(day)
+            opens = {sym: b[0].o for sym, b in arch.items() if b}
+            def ctx(ts: int, sym: str, side: int) -> tuple[float, float]:
+                mv = {s2: (next((x.c for x in reversed(b) if x.ts <= ts - 300), None)) for s2, b in arch.items()}
+                mv = {s2: (c / opens[s2] - 1) for s2, c in mv.items() if c is not None and opens.get(s2)}
+                if len(mv) < 20:
+                    return np.nan, np.nan
+                br = sum(1 for v in mv.values() if v > 0) / len(mv)
+                mine = mv.get(sym)
+                rk = (sum(1 for v in mv.values() if v < mine) / len(mv)) if mine is not None else np.nan
+                return (br if side > 0 else 1 - br), (rk if side > 0 else 1 - rk)
+            bw, rk = zip(*[ctx(int(r.ts), r.sym, 1 if r.side == "LONG" else -1) for r in D.itertuples()], strict=False)
+            D["breadth_with"], D["xs_rank_with"] = bw, rk
+        except Exception as exc:  # noqa: BLE001
+            print(f"  (no archive bars for the context pickers: {exc!r})")
+            D["breadth_with"], D["xs_rank_with"] = np.nan, np.nan
         pickers = {
             "first two (the live book)": D.head(2),
             "first two with risk ≥ 80 bps": D[D.risk_bps >= 80].head(2),
@@ -109,6 +127,8 @@ def main() -> None:
             "first two with the future's state with the trade": D[D.fut_with].head(2),
             "first two longs": D[D.side == "LONG"].head(2),
             "first two after 10:15": D[(D.ts + 19800) % 86400 >= 10 * 3600 + 15 * 60].head(2),
+            "first two with breadth ≥ 60 % the trade's way": D[D.breadth_with >= 0.6].head(2),
+            "first two: breadth ≥ 60 % and not a top-10 % leader": D[(D.breadth_with >= 0.6) & (D.xs_rank_with < 0.9)].head(2),
             "best possible two (hindsight)": D.nlargest(2, "pnl_bps"),
         }
         rand = [D.sample(2, random_state=rng.randint(0, 10**6)).net_bps.sum() for _ in range(200)] if len(D) >= 2 else [0]

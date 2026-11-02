@@ -203,3 +203,40 @@ entry predicts (row 15). The one feature the dev window cannot test: 7 of the 8 
 (long build-up under a long, short build-up under a short) against 53 % of the rest; that is the owner's confirmation
 and the day-10 pre-registration. The gap between first-two and hindsight-two (≈ ₹6,000 a day at ₹1L) is not reachable
 with price features; the evening scoreboard measures whether the board closes any of it.
+
+## H4 — the price action at the entry (3 Nov 04:00, `scripts/2026-11-03-level-retest/features.py`, log `features-dev.txt`)
+Owner: "why we missing any signal use data and find real insight". Thirteen features built from the dev cache's 5m bars for
+all 98,259 first flips: the stock's move from the open (ADR), its rank among every stock's move at that bar, the breadth
+at that bar, NIFTY's move, the day's range so far, the close's place in the range, the break bar's volume and range, the
+retest bar's volume and range, the bars break → retest and retest → confirmation. One-way splits, net bps, both years:
+
+**The retest's own anatomy says nothing** (98k instances): the break bar's volume (high volume is *worse*, −13 vs −10), its
+range, the retest bar's volume and range, how fast the pullback came, how fast the confirmation came, where the close sits
+in the day's range, the day's range so far — every bucket −9 to −13, no order, no year agreement. The folklore of the
+"breakout on volume" and the "clean retest" has no information in it.
+
+**The market around the trade does, monotonically and in both years:**
+| breadth moving the trade's way at the entry bar | n | net | 2024 | 2025 |
+|---|---|---|---|---|
+| ≤ 30 % | 6,007 | −19.6 | −17.5 | −21.4 |
+| 30–40 % | 9,000 | −15.5 | −16.6 | −14.2 |
+| 40–50 % | 17,193 | −14.5 | −13.8 | −15.8 |
+| 50–60 % | 21,674 | −12.9 | −13.2 | −12.6 |
+| 60–70 % | 18,558 | −7.8 | −6.6 | −9.3 |
+| > 70 % | 25,827 | **−5.1** | −6.1 | −4.2 |
+NIFTY's own move the trade's way is the same shape (< −0.5 % → −17.1; > +0.5 % → −8.2, both years). This is the first
+conditioning variable in the whole project that is ordered, stable across years and large (a 15 bps spread on tens of
+thousands of instances). It is still negative net in its best bucket (+10 gross against the 15 bps round trip).
+**The leaders lose:** the stocks ranked in the top 10 % of the universe's move at the entry bar make −14.0 (both years),
+the middle −8 to −9; a stock already 1.5 ADR from the open −15.7. The hindsight best-two of the live week were all leaders
+— the exceptions in the worst group, which is why no picker finds them in advance.
+**The ranker with everything (H4):** 2024 → 2025 the top two a day −17.9 vs random −20.7 (+2.8, day-t 0.3), the top decile
+by score −0.8 against −10.6 for all (the model finds the breadth, not enough of it); 2025 → 2024 the top two −31.8 vs
+−21.6. Fails the bar both ways. Picking the two highest-breadth flips of a day is the *worst* single-feature picker
+(−67 to −71 bps/day): the most extreme breadth sits on the 09:30 flips of a one-way open, which reverse.
+**The insight, plainly:** the money in this family is in the day, not in the trade. The entry contributes +4 gross
+whatever its shape; whether the day's breadth and the index keep going the trade's way moves the result by 15 bps, and the
+best stocks to be in are not the leaders but the middle of the pack on a broad day. A two-a-day book should therefore
+(a) refuse flips against the breadth (< 50 % the trade's way), (b) avoid the top-decile leaders, and (c) accept that the
+remaining expectancy is about −5 net until something not in the price (the board's state) is shown to add to it. (a) and
+(b) go into the evening scoreboard as pickers from tonight; a pre-registered test of (a)+(b) as a live filter follows.
