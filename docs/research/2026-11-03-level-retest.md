@@ -150,3 +150,32 @@ in full), a trail is slow (theta and the bid). The option leg loses on the same 
 leverage, plus the spread; it turns a −6 bps book into −1.3 % of premium a trade. Monday, the broad up day, was the only
 positive day for both legs. Nothing here changes the rule; the live leg records the same thing with real quote ages from
 3 Nov, and the owner's confirmation (the board's SC → LB turn) is the open question for the day-10 pre-registration.
+
+## What made Tue 27 Oct lose and Mon 2 Nov win (3 Nov 03:05–03:10, `scripts/2026-11-03-level-retest/attribution.py`, tables in `attribution-week.txt`)
+Owner: "find out what make us loss and what make us profit act as quant developer". Four replayed days, 991 trades, 977
+option legs; every split below is a description on four days (day-clustered), not a test.
+**The two days were the same NIFTY (+0.45 % / +0.46 % open to close) and a different breadth path.** 27 Oct: 78 % of the
+universe above its open at 09:30, 77 % at 12:15, 60 % at 14:15 — a broad morning that faded; 133 entries by 09:45 (mostly
+longs on the opening range and round numbers) were trailed out at a fraction of their excursion or stopped (108 stops, 39 %);
+entries after 12:15 −11.3 on 43; the 94 shorts −6.0; PDH/PDL walls −22 on 40 (expiry day, the board blind). 2 Nov: 68–75 %
+above the open all day and 68 % at 15:10 — the breadth held, so the same early longs trailed to +50 and closed at +45
+(52 closes, 10 targets at +196); even the 79 shorts made +13.8 (the few real decliners); wide stops (> 120 bps, the
+gap-and-go names) +57.5. **The rule's P&L is breadth persistence; the entry chooses the stock, the market chooses the day.**
+**Across the four days, the structure that repeats:** 35 % stops at −67 bps, 43 % trails at +44, 19 % closes at +45, 2 %
+targets — ≈ +7 bps gross before the 13–15 bps round trip, the dev window's number. Only 24 % of stops had been +0.5R before
+stopping (4 % +1R): stops are trades that never worked, not give-backs. Trails keep a third of their excursion (median
+give-back 44 bps, 66 % of the MFE): the wall-to-wall trail is loose, and row 16 says tighter trails cut the winners as much.
+Wider stops do better (> 120 bps +30.5 on 73; the dev window +7.8 gross / −7.2 net): a wide retest bar is a stock already
+moving. The first wall within 0.5R wins 69 % (+11.3), beyond 2R wins 42 % (+2.3): mechanical, the near wall locks the trail.
+**Pooled splits that flip by day (not edges yet):** the future's state with the trade at entry (LB for a long / SB for a
+short) +11.9 on 524 vs +1.6 on 467 pooled — but +1.9 vs −0.6 on 27 Oct and +15.4 vs +27.7 on 2 Nov (reversed); the board
+score with the trade > 2: +11.0 on 713 vs −1 to −13 on 268, the same inconsistency; a stock in the day's top-20 movers
++11.2 vs +2.8 here, the *worst* subset on the dev window (row 15); breadth the trade's way at entry 50–70 % +25 to +30
+(266, win 70 %) vs 40–50 % −31.6 (103) vs > 70 % +5.6 (372): non-monotonic. Delta, queue imbalance, NIFTY's own move: nothing.
+**The option leg's cost:** option % ≈ −1.5 + 14.7 × stock % (per day −1.3 to −2.0 intercept, 12–17× slope); the spread at
+entry is 1.2–1.3 % of premium (p75 1.7 %), a flat stock trade costs −1.1 % of premium; 11 % of entries were priced off a
+stale last trade. The stock has to make ≈ +10 bps gross to pay the option's round trip — the same hurdle as cash. Options
+multiply the book, they do not change its sign.
+**Next, pre-registered before running (not tonight, on battery):** on the dev window's 98,259 any-wall trades, (a) a breadth
+-at-entry filter (the universe's share above its open, in the trade's direction, 50–70 %), (b) the tighter trails of row 16
+on this population, (c) risk > 80 bps only. The board and flow readings wait for ten sessions (9 Nov).
