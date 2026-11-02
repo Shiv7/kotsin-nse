@@ -240,3 +240,43 @@ best stocks to be in are not the leaders but the middle of the pack on a broad d
 (a) refuse flips against the breadth (< 50 % the trade's way), (b) avoid the top-decile leaders, and (c) accept that the
 remaining expectancy is about −5 net until something not in the price (the board's state) is shown to add to it. (a) and
 (b) go into the evening scoreboard as pickers from tonight; a pre-registered test of (a)+(b) as a live filter follows.
+
+## The trader's stack on every stock, three sessions (3 Nov 04:10–04:40, `scripts/2026-11-03-level-retest/stack_day.py`, logs `stack-<day>.txt`, rows `stack-<day>.csv`)
+Owner: "pick up one company, see the whole price action, how PCR moves, how order blocks move, which are volume nodes … do
+at least 50 companies the same process … check where the 1h, 4h, daily, weekly, monthly candle had a retest and volume
+node, then tell me what we get." RELIANCE on 2 Nov was read by hand first (in the chat: the 09:15–09:25 flush absorbed at
+1216–1222 — 22 % of the day's volume on one price, 16:1 bid depth, the 1220 put written under it, the futures turning to
+long build-up at 09:22; the 10:00 pullback holding the unfilled 1232–1234 gap; the 1250 call writers trapped at 121 lakh;
+three hours of flat price with futures OI +0.46 → +1.07 % and puts +168 → +232 % — accumulation — then 1260 → 1281 into
+the close with the 1280 call wall as the target). Then the same stack on all 215 stocks for 2 Nov, 30 Oct and 29 Oct,
+with the direction fixed at 10:00 (the 10:00 close against the open, no hindsight) and the outcome from 10:00 to the close
+in that direction. Conditions: the first 15-minute bar absorbed (close in the top 40 % of its range for an up direction),
+the futures' state with the direction at 09:45, the put (call) wall stepped the direction's way by 11:00, the first
+pullback holding above the first-15-minute point of control, OI building through a flat 11:00–14:00.
+
+| | 2 Nov (broad up day) | 30 Oct (down day) | 29 Oct (up day) |
+|---|---|---|---|
+| stack (flush absorbed + futures with + pullback above the POC): n | 34 | 48 | 48 |
+| 10:00 → close in the 10:00 direction, stack vs the rest (median) | +0.28 % vs +0.16 % | **+0.82 % vs +0.20 %** | **+0.62 % vs +0.04 %** |
+| share > +0.5 %, stack vs rest | 41 % vs 36 % | 65 % vs 38 % | 54 % vs 37 % |
+| reversed < −0.75 %, stack vs rest | 24 % vs 20 % | 12 % vs 17 % | 23 % vs 29 % |
+
+By element, the share among the names that ran (> +1.5 % from 10:00) against the names that reversed: the pullback above
+the first-15-minute POC 73–79 % vs 23–57 % (ordered on all three days); the put/call wall stepped the direction's way by
+11:00 29–41 % vs 3–18 % (ordered on all three days — the one board reading that held every day); the flush absorbed
+64–68 % vs 51–63 % (weak); the futures' state with the direction at 09:45 79 vs 34 on 30 Oct, 55 vs 63 on 29 Oct, 41 vs
+53 on 2 Nov (**not** ordered: Monday's runners were squeezing on short covering, not long build-up — the 2 Nov ran-hard
+names had a 20-day return of −7.7 % and only 23 % were above their 20-DMA; the losers were the names that had gapped up
+above their 20-DMA and faded); OI building through the flat midday 9–18 % vs 14–29 % (reversed; the RELIANCE read does
+not generalise on these days). So two of the three "trader" conditions that are not price-only order the outcome on
+every day looked at, on 215 names a day, three days — a description with the right sign, still not a test.
+**The higher-frame "retest" cannot be asked the way it was asked.** With the 1h, 4h, daily, weekly and monthly swings
+and order blocks, the pivots, the CPR, the DMAs and the 20- and 60-session volume nodes all on the chart, a random price
+inside the day's range sits within 0.25 ADR of *some* level 98–99 % of the time. Every low and every pullback "retests a
+level" — the daily set alone covers half of them. The question only has content when one level is chosen in advance and
+the rest are ignored, which is a trader's judgment, not a rule the data can score. The monthly and weekly levels did not
+stand out on their own (5–26 % of the lows, no order across days).
+**What we get:** the thing that distinguished the stocks that kept going after 10:00 was not the level they bounced from
+but what the options market did behind the move — the wall stepping the trade's way — together with the pullback
+staying above the opening auction's volume. Both go into the day-10 pre-registration as the owner's confirmation
+alongside the futures' state, with the three days as the hypothesis, not the evidence. Nothing changes in the engine.

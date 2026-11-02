@@ -1,0 +1,58 @@
+2026-10-30: 215 stocks | direction at 10:00: up 74 down 141 | from 10:00 to the close in that direction: {'flat': 85, 'continued (+0.5 to +1.5 %)': 61, 'reversed (< −0.75 %)': 35, 'ran (> +1.5 %)': 34}
+   level density control: a random price inside the day's range sits within 0.25 ADR of some level 98 % of the time
+
+== share (%) of each group with the condition, and medians
+                            flush_abs  pb_held  pb_above_poc  fut_with_0945  fut_with_1100  wall_step  oi_build_flat  above_dma20   n  gap_pct  mv10_pct  range_adr  late_pct  oi_bal_with  pcr_move  open_beyond_htf  ret20
+grp                                                                                                                                                                                                                         
+reversed (< −0.75 %)             51.0     83.0          23.0           34.0           29.0        3.0           14.0         40.0  35    -0.03      0.37       1.06     -0.15         0.03      0.08             0.31   -3.3
+flat                             61.0     89.0          40.0           61.0           51.0       20.0           25.0         45.0  85    -0.12      0.49       0.77      0.04         0.06      0.00             0.36   -2.7
+continued (+0.5 to +1.5 %)       59.0     90.0          41.0           74.0           79.0       15.0           18.0         41.0  61    -0.07      1.11       0.95      0.25        -0.23     -0.08             0.47   -3.2
+ran (> +1.5 %)                   68.0     97.0          79.0           79.0           79.0       29.0           12.0         44.0  34    -0.28      1.28       1.38      0.44        -0.63     -0.09             0.43   -0.5
+
+== where the day's extreme (low for an up day, high for a down day) sat on the higher frames, by group (within 0.25 ADR)
+  reversed (< −0.75 %): {'daily': 57.0, 'weekly': 26.0, '4h': 6.0, 'node20': 6.0, '1h': 3.0, 'none': 3.0}
+  flat: {'daily': 59.0, '1h': 16.0, 'weekly': 13.0, 'monthly': 6.0, 'node20': 4.0, '4h': 2.0}
+  continued (+0.5 to +1.5 %): {'daily': 74.0, '1h': 10.0, '4h': 8.0, 'weekly': 5.0, 'none': 3.0}
+  ran (> +1.5 %): {'daily': 62.0, '1h': 15.0, 'weekly': 12.0, 'node20': 9.0, '4h': 3.0}
+
+== where the first pullback sat, by group
+  reversed (< −0.75 %): {'daily': 54.0, '1h': 11.0, 'node20': 11.0, '4h': 11.0, 'weekly': 11.0}
+  flat: {'daily': 72.0, '1h': 18.0, 'weekly': 8.0, 'monthly': 1.0, 'none': 1.0}
+  continued (+0.5 to +1.5 %): {'daily': 64.0, '1h': 20.0, 'weekly': 7.0, '4h': 5.0, 'node20': 3.0, 'monthly': 2.0}
+  ran (> +1.5 %): {'daily': 50.0, 'weekly': 15.0, 'none': 12.0, '1h': 12.0, 'node20': 6.0, '4h': 3.0, 'monthly': 3.0}
+
+== the stack (flush absorbed + futures with by 09:45 + pullback held above the first-15-min POC): share and outcome
+  stack False: n 167, 10:00→close in the 10:00 direction: median +0.20 %, mean +0.21 %, share > +0.5 %: 38 %, reversed < −0.75 %: 17 %
+  stack True: n 48, 10:00→close in the 10:00 direction: median +0.82 %, mean +0.90 %, share > +0.5 %: 65 %, reversed < −0.75 %: 12 %
+  stack+OI build through the balance False: n 212, 14:00→close median +0.10 %, share > +0.5 %: 15 %
+  stack+OI build through the balance True: n 3, 14:00→close median +0.07 %, share > +0.5 %: 33 %
+
+== the names with the full stack:
+       sym  dir10  mv10_pct  fwd_pct  oc_pct  late_pct pb_hm    low_on    pb_on  oi_bal_with          nodes
+NAVINFLUOR      1      2.75     2.31    5.06      2.40 10:20 daily:PDL daily:TC         2.32 8621,8579,8517
+PERSISTENT      1      1.46     0.72    2.18      0.07 09:55 daily:PDH daily:R2         0.44 6001,6030,5986
+   ETERNAL      1      2.41    -0.42    2.00     -0.33 09:45  daily:TC daily:R1         1.24    344,343,345
+
+== the biggest movers either way:
+       sym  dir10  mv10_pct  fwd_pct  flush_abs  pb_above_poc  fut_with_0945  wall_step  oi_build_flat               low_on         pb_on  open_beyond_htf  ret20
+       VBL      1      0.00    -5.50      False         False          False      False          False weekly:prev_week_low       daily:P             0.13  -3.26
+    RADICO      1      0.05    -2.46      False         False          False      False          False           weekly:WS1      daily:BC             0.00  -3.25
+ ABCAPITAL     -1      1.13    -2.32       True          True           True      False          False           4h:ob_bear     daily:PDL             0.62  -4.96
+  SONACOMS     -1      0.07    -2.11       True         False          False      False          False             daily:R2       daily:P             0.00   7.46
+    NAUKRI     -1      0.71    -1.96      False         False           True      False          False             daily:R1      daily:BC             0.71  -6.02
+PHOENIXLTD      1      0.10    -1.58       True         False           True      False          False        daily:ob_bear     daily:PDH             0.73   2.57
+POWERINDIA      1      0.49    -1.58      False         False          False      False          False                           daily:S2             0.00  -8.57
+      PGEL      1      0.98    -1.54      False         False          False      False          False        1h:swing_high 4h:swing_high             0.50   9.09
+       sym  dir10  mv10_pct  fwd_pct  flush_abs  pb_above_poc  fut_with_0945  wall_step  oi_build_flat          low_on            pb_on  open_beyond_htf  ret20
+ATHERENERG      1      1.50     4.33      False          True           True      False          False        daily:TC         daily:R1             0.67  18.19
+     AMBER     -1      1.57     3.81       True          True           True      False          False     node20:hvn1         daily:S2             0.73  -5.68
+  INOXWIND     -1      3.60     3.11       True          True           True       True          False       daily:PDH         daily:S2             0.71 -17.34
+UJJIVANSFB     -1      2.11     3.01       True          True           True      False          False       weekly:WP      node20:hvn2             0.79 -14.42
+ ZYDUSLIFE      1      1.45     2.97       True         False          False       True           True         daily:P daily:swing_high             0.67  -1.07
+MOTILALOFS     -1      3.27     2.93       True          True           True      False          False        daily:R1         daily:S1             0.13  -0.42
+       UPL     -1      1.18     2.77       True          True           True      False          False     node20:hvn1        monthly:P             0.40   1.24
+BANDHANBNK     -1      3.34     2.62       True          True           True      False          False       daily:PDH       4h:ob_bull             0.27 -12.58
+       CUB     -1      1.60     2.59       True          True           True       True          False        daily:TC                              0.00  56.06
+       LTM      1      0.37     2.39      False         False          False      False          False   1h:swing_high         daily:R1             0.07   4.15
+PNBHOUSING     -1      0.66     2.35      False         False           True      False          False    1h:swing_low  daily:swing_low             0.27   1.17
+    SUZLON     -1      5.71     2.34       True          True          False       True          False daily:swing_low                              1.00  -6.66
