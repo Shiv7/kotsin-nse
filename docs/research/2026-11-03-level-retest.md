@@ -14,7 +14,7 @@ gross, 53 % wins): the retest makes the entry a little cleaner, not profitable. 
 drifted down). Gap-and-go longs (gap ≥ +2 %, with the move): +3.1 gross on 3,492, 62 % wins and small. Gap-down
 shorts: +23.2 gross on 665, day-t −1.5 (a few days carry it; not a result). Wider stops look better (risk > 120 bps:
 +7.8 gross) because a wide stop is a trend day that already moved — the fee is the same, the risk doubles.
-**Nothing ships; the engine is unchanged.** The owner's concept is not wrong as a description of how a trend day
+**Shipped anyway (owner, 02:10: "no i want it to ship properly and check it tomorrow"; 02:46 restart, `strategy/level_retest.py`, `KN_STRATEGY_SEQUENCE=level`, round walls on, no ADR cap, with a shadow option leg per trade).** The book is to be read against +4.2 gross / −10.8 net; Monday replayed through the runner: 224 trades, +18.1 bps, +₹10,944 at ₹1L. The owner's concept is not wrong as a description of how a trend day
 looks; as a rule it has no expectancy after cost, exactly like the CPR version (rows 15–17).
 
 ## The dev-window tables (from `dev-summary.txt`)
