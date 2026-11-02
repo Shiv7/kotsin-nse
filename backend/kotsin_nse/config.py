@@ -214,6 +214,9 @@ class Settings(BaseSettings):
     #: (LT, 29 Oct) cannot be reached; the rest moved −10.6 → −10.2, below the pre-registered bar, shipped on the
     #: owner's call as hygiene.
     strategy_entry_cutoff: str = "14:30"
+    #: which detector the shadow book runs: the CPR sequence (research rows 15–17) or the held retest of ANY wall
+    #: with the day's move (row 23, `strategy/level_retest.py`; shipped to SHADOW 2026-11-03 on the owner's call)
+    strategy_sequence: Literal["cpr", "level"] = "cpr"
 
     # ---- the positional book: the daily order block (strategy/daily_ob.py, strategy/positional.py) ------
     #: off by default: the book FAILED its pre-registered test on 2026-10-29 (docs/research/2026-10-29-

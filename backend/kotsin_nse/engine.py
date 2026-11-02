@@ -39,7 +39,16 @@ from .bars.unified import BarSource, UnifiedBar
 from .bars.verify import BarReconciler
 from .bus import Bus, Topic
 from .config import Segment, Settings
-from .domain import Instrument, InstrumentKind, Order, OrderIntent, OrderSide, Purpose, to_json
+from .domain import (
+    Instrument,
+    InstrumentKind,
+    OptionType,
+    Order,
+    OrderIntent,
+    OrderSide,
+    Purpose,
+    to_json,
+)
 from .exec.events import OrderEvents
 from .exec.gateway import LIVE_MODES, Decision, Gateway, LiveCaps, LiveContext, Mode, OrderResult
 from .exec.live import LiveExecutor
@@ -242,6 +251,8 @@ class Engine:
         if self.strategy is not None:  # the same readings on every intraday signal, taken at the signal
             self.strategy.enrich = self._positional_context
             self.strategy.bhav = self._positional_bhav
+            self.strategy.option_pick = self._option_pick
+            self.strategy.option_mark = self._option_mark
         self._bhav_cache: dict[date, Any] = {}
         self._future_to_underlying: dict[str, str] = {}
         self._mode = Mode.SHADOW
@@ -1630,6 +1641,32 @@ class Engine:
         if ms:
             out["micro"] = {k: ms.get(k) for k in ("micro_bps", "queue_imbalance", "book_skew", "spread_bps", "spread_z", "kyle_lambda_bps_per_10k", "frames")}
         return out
+
+    def _option_mark(self, code: str) -> dict[str, Any] | None:
+        """A contract's latest quote from the feed, with its age — options tick sparsely, so the age is the honesty."""
+        q = self.quotes.get(code)
+        if q is None:
+            return None
+        return {"ltp": q.ltp, "bid": q.bid or None, "ask": q.ask or None, "age_s": round(time.time() - q.ts, 1)}
+
+    def _option_pick(self, symbol: str, side: int, price: float) -> dict[str, Any] | None:
+        """The shadow option leg's contract for a signal: the strike nearest ``price`` (at the money) on the nearest
+        tracked expiry strictly after today (on expiry day the next series, where the premium still has a day),
+        a call for a long and a put for a short, with its quote now. None when the root has no options tracked."""
+        g = self.groups.get(symbol)
+        if g is None or not g.options:
+            return None
+        today = ist_day(time.time()).isoformat()
+        expiries = sorted({o.expiry for o in g.options})
+        later = [e for e in expiries if e > today]
+        expiry = later[0] if later else expiries[0]
+        want = OptionType.CE if side > 0 else OptionType.PE
+        cands = [o for o in g.options if o.expiry == expiry and o.option_type is want]
+        if not cands:
+            return None
+        o = min(cands, key=lambda x: (abs(x.strike - price), x.strike))
+        return {"scrip_code": o.scrip_code, "name": o.name, "expiry": expiry, "strike": o.strike, "kind": want.value, "lot": o.lot_size,
+                "days": (date.fromisoformat(expiry) - date.fromisoformat(today)).days, "instrument": o, "quote": self._option_mark(o.scrip_code)}
 
     def _positional_bhav(self, symbol: str, day: date) -> dict[str, Any] | None:
         """NSE's official closing OI for ``day``: the stock future's OI and price change against the previous

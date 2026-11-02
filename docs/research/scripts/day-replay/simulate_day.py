@@ -53,7 +53,9 @@ async def main():
         store.seed(sym, "30m", [ubar(inst, "30m", b) for b in m30 if b["ts"] < OPEN])
         today += [ubar(inst, "5m", b) for b in m5 if OPEN <= b["ts"] < CLOSE]
     today.sort(key=lambda b: (b.ts, b.symbol))
-    s = Settings(_env_file=None, data_dir=S / "sim" / "data", engine_enabled=False, strategy_pdc="last")
+    import os
+    extra = json.loads(os.environ.get("SIM_SETTINGS", "{}"))  # e.g. {"strategy_sequence": "level", "strategy_walls_round": true, "strategy_max_move_adr": 0}
+    s = Settings(_env_file=None, data_dir=S / "sim" / "data", engine_enabled=False, strategy_pdc="last", **extra)
     costs = CostModel(s)
     gw = Gateway(matcher=PaperMatcher(costs), mode=lambda: Mode.SHADOW, halted=lambda: (False, ""), book_for=lambda _c: None, ltp_for=lambda _c: None)
     tasks: list[asyncio.Task] = []
@@ -71,6 +73,9 @@ async def main():
     print("levels for", snap["with_levels"], "| stages:", Counter(st["stage"] for st in snap["stages"]).most_common())
     sm = snap["summary"]; print("summary:", {k: sm[k] for k in ("signals", "taken", "skipped", "closed", "wins", "losses", "avg_pnl_bps", "sum_gross_inr", "sum_net_inr", "sum_r")})
     print("by rule:", {k: (v["closed"], v["avg_pnl_bps"], v["win_pct"]) for k, v in sm["by_rule"].items()})
+    if snap.get("sequence") == "level":
+        from collections import Counter as _C
+        print("walls taken:", _C(t.get("wall") for t in snap["trades"]).most_common(12), "| by wtype:", _C(t.get("wtype") for t in snap["trades"]).most_common())
     print("\nsignals (bar = Kite label):")
     for g in sorted(snap["signals"], key=lambda x: x["ts"]):
         nr = g.get('nearest') or {}

@@ -36,6 +36,7 @@ from ..risk.costs import CostModel
 from ..scan.replay import guarded_adr
 from ..structure.engine import Bar5
 from . import cpr_retest as cr
+from . import level_retest as lr
 
 log = structlog.get_logger(__name__)
 
@@ -60,6 +61,8 @@ class SymbolDay:
     closes: dict[str, Any] = field(default_factory=dict)
     daily: dict[int, dict[str, Any]] = field(default_factory=dict)
     stages: dict[int, cr.Stage] = field(default_factory=lambda: {1: cr.Stage(1), -1: cr.Stage(-1)})
+    #: the any-wall detector's flips on the bars so far (``strategy_sequence = level``)
+    flips: list[lr.Flip] = field(default_factory=list)
     entered: set[int] = field(default_factory=set)
     last_ts: int = 0
 
@@ -91,6 +94,9 @@ class ShadowRunner:
         self._underlyings = underlyings
         self.segment = segment
         self.rule = settings.strategy_rule
+        #: the detector: the CPR sequence, or the held retest of any wall with the day's move (row 23)
+        self.sequence = settings.strategy_sequence
+        self.name = lr.NAME if self.sequence == "level" else cr.NAME
         self.filter = settings.strategy_filter
         self.notional = settings.strategy_notional_inr
         self.pdc = settings.strategy_pdc
@@ -115,6 +121,12 @@ class ShadowRunner:
         #: session's official closing OI (NSE's build-up label). Set by the engine; None in tests and replays.
         self.enrich: Callable[[str], dict[str, Any]] | None = None
         self.bhav: Callable[[str, date], dict[str, Any] | None] | None = None
+        #: the option leg (owner, 3 Nov 2026: "get trigger on equity and buy its option"): the engine's picker returns the
+        #: nearest at-the-money option of the nearest expiry for a signal (CE for a long, PE for a short) with its quote,
+        #: and the marker returns a contract's latest quote. One lot is scored beside every booked trade, in SHADOW only.
+        self.option_pick: Callable[[str, int, float], dict[str, Any] | None] | None = None
+        self.option_mark: Callable[[str], dict[str, Any] | None] | None = None
+        self._opt_inst: dict[str, Instrument] = {}
 
     @property
     def underlyings(self) -> Mapping[str, Instrument]:
@@ -144,7 +156,7 @@ class ShadowRunner:
         Before 2026-11-01 the first bar after a restart overwrote the file with an empty book and
         the open positions were orphaned (the 30 Oct 11:29 restart needed a hand-renamed file)."""
         snap = self.read_day(day.isoformat())
-        if not snap or snap.get("day") != day.isoformat() or snap.get("strategy") != cr.NAME:
+        if not snap or snap.get("day") != day.isoformat() or snap.get("strategy") != self.name:
             return
         try:
             self.signals = list(reversed(snap.get("signals") or []))
@@ -276,11 +288,18 @@ class ShadowRunner:
         # 1. the positions on this symbol — open ones, and closed ones whose other rules are still being scored
         for pos in [p for p in [*self.positions.values(), *self.trades] if p["symbol"] == bar.symbol and p["id"] in self.plans]:
             changed |= self._manage(pos, bar, last)
-        # 2. the sequence on the bars so far; the confirmation bar is this one → entry
-        sd.stages = cr.sequence(bars, sd.levels, sd.tol, open_ts=int(session_open_ts(self.segment, day)))
+        # 2. the detector on the bars so far; a confirmation on this bar → entry (the first per side and day)
         n = len(bars)
-        for side, st in sd.stages.items():
-            if st.j is None or st.j != n - 1 or side in sd.entered or last:
+        open_ts = int(session_open_ts(self.segment, day))
+        cands: list[tuple[int, Any]]
+        if self.sequence == "level":
+            sd.flips = lr.flips(bars, sd.levels, sd.weekly, sd.tol, open_ts=open_ts)
+            cands = [(f.side, f) for f in lr.confirmed_now(sd.flips, n) if f.with_move]
+        else:
+            sd.stages = cr.sequence(bars, sd.levels, sd.tol, open_ts=open_ts)
+            cands = [(side, st) for side, st in sd.stages.items() if st.j is not None and st.j == n - 1]
+        for side, st in cands:
+            if side in sd.entered or last:
                 continue
             self._enter(inst, sd, bars, side, st, bar)
             sd.entered.add(side)
@@ -311,7 +330,7 @@ class ShadowRunner:
 
     # -- entries -----------------------------------------------------------------------------------------
 
-    def _enter(self, inst: Instrument, sd: SymbolDay, bars: list[Bar5], side: int, st: cr.Stage, bar: UnifiedBar) -> None:
+    def _enter(self, inst: Instrument, sd: SymbolDay, bars: list[Bar5], side: int, st: Any, bar: UnifiedBar) -> None:
         j, i_rt = int(st.j or 0), int(st.i_rt or 0)
         entry = bars[j].c
         stop = (bars[i_rt].l - sd.tol) if side > 0 else (bars[i_rt].h + sd.tol)
@@ -328,6 +347,8 @@ class ShadowRunner:
             "symbol": inst.symbol, "side": "LONG" if side > 0 else "SHORT",
             "entry": entry, "stop": stop, "risk_bps": round(risk_bps, 1), "walls": [{"name": k, "price": v, "bps": round(abs(v - entry) / entry * 1e4, 1)} for k, v in ws],
             "stage": st.to_json(), "retest_time": ist_hm(bars[i_rt].ts), "tol": sd.tol, "adr": sd.adr, "tags": tags, "taken": False, "why": "",
+            # the wall that flipped (the CPR sequence: always the CPR), its kind, its confluence and whether the break was with the day's move
+            "wall": getattr(st, "wall", "CPR"), "wtype": getattr(st, "kind", "cpr"), "conf": getattr(st, "conf", None), "with_move": getattr(st, "with_move", None),
             "context": ctx, "bhav": bhav,
             # the nearest real level beyond the entry at any distance, and its distance in R: the one inside the
             # tolerance is the one that stops the trade (the 27 Oct BANKNIFTY short, S1 32 points below)
@@ -359,10 +380,10 @@ class ShadowRunner:
         qty = max(inst.qty_step, int(self.notional / entry) // inst.qty_step * inst.qty_step)
         pos_id = new_id("pos")
         intent = OrderIntent(
-            strategy=cr.NAME, instrument=inst, side=OrderSide.BUY if side > 0 else OrderSide.SELL, qty=qty, purpose=Purpose.ENTRY,
+            strategy=self.name, instrument=inst, side=OrderSide.BUY if side > 0 else OrderSide.SELL, qty=qty, purpose=Purpose.ENTRY,
             # ≤ 38 characters: the broker's RemoteOrderID limit (sig-… 16 + |E| 3 + pos-… 16 = 35)
             signal_id=signal_id, client_order_id=f"{signal_id}|E|{pos_id}", position_id=pos_id, ref_price=entry,
-            reason=f"CPR retest held {sig['retest_time']} → first close beyond: the {sig['bar']} bar (fires {sig['time']}); stop {stop:.2f}, next wall {ws[0][0]} {ws[0][1]:.2f}",
+            reason=f"{sig['wall']} retest held {sig['retest_time']} → first close beyond: the {sig['bar']} bar (fires {sig['time']}); stop {stop:.2f}, next wall {ws[0][0]} {ws[0][1]:.2f}",
         )
         res = self.gateway.submit(intent)
         self.orders += 1
@@ -387,7 +408,7 @@ class ShadowRunner:
         plans = {rule: cr.ExitPlan.open(rule, side, fill, stop, [v for _k, v in ws], sd.tol) for rule in cr.RULES}
         primary = plans[self.rule]
         pos: dict[str, Any] = {
-            "id": pos_id, "strategy": cr.NAME, "symbol": inst.symbol, "scrip_code": inst.scrip_code, "status": "OPEN", "day": self.day,
+            "id": pos_id, "strategy": self.name, "symbol": inst.symbol, "scrip_code": inst.scrip_code, "status": "OPEN", "day": self.day,
             "side": sig["side"], "qty": qty, "entry": fill, "initial_stop": stop, "stop": primary.stop_price(), "target": primary.target_price(),
             "target_name": ws[0][0], "walls": sig["walls"], "risk_bps": round(abs(fill - stop) / fill * 1e4, 1),
             "reward_bps": round(abs(ws[0][1] - fill) / fill * 1e4, 1), "rule": self.rule, "signal_id": signal_id, "opened_ts": int(bar.ts) + 300,
@@ -395,10 +416,11 @@ class ShadowRunner:
             "context": ctx, "bhav": bhav, "last_stepped_ts": int(bar.ts),
             "bars_held": 0, "mfe_bps": 0.0, "mae_bps": 0.0, "last": fill, "pnl_bps": 0.0, "closed_ts": None, "exit": None, "exit_reason": None,
             "gross_inr": None, "charges_inr": None, "net_inr": None, "r": None, "virtual": {},
-            "live": live, "live_exit": None,
+            "live": live, "live_exit": None, "wall": sig["wall"], "wtype": sig["wtype"], "with_move": sig["with_move"],
         }
         self.positions[pos_id] = pos
         self.plans[pos_id] = plans
+        self._option_open(pos, inst.symbol, side, fill, ctx)
         self._writes.append(self._ledger_position(pos))
         self._writes.append(self._ledger_event("strategy.entry", {k: pos[k] for k in ("id", "symbol", "side", "qty", "entry", "stop", "target", "target_name", "risk_bps", "reward_bps", "mode")}))
         log.info("strategy.entry", symbol=inst.symbol, side=pos["side"], entry=fill, stop=stop, target=ws[0], mode=res.order.mode)
@@ -503,6 +525,7 @@ class ShadowRunner:
         pos["mae_bps"] = round((primary.ll - primary.side * primary.entry) / primary.entry * 1e4, 1)
         pos["last"] = bar.close
         pos["pnl_bps"] = round(primary.pnl_bps(bar.close), 1)
+        self._option_touch(pos)
         if exit_now is None:
             self._writes.append(self._ledger_position(pos))
             return True
@@ -516,7 +539,7 @@ class ShadowRunner:
         side = 1 if pos["side"] == "LONG" else -1
         if inst is not None:
             intent = OrderIntent(
-                strategy=cr.NAME, instrument=inst, side=OrderSide.SELL if side > 0 else OrderSide.BUY, qty=pos["qty"], purpose=Purpose.EXIT,
+                strategy=self.name, instrument=inst, side=OrderSide.SELL if side > 0 else OrderSide.BUY, qty=pos["qty"], purpose=Purpose.EXIT,
                 signal_id=pos["signal_id"], client_order_id=f"{pos['signal_id']}|X|{pos['id']}", position_id=pos["id"], ref_price=exit_px,
                 reason=f"{how} at {exit_px:.2f}",
             )
@@ -548,6 +571,7 @@ class ShadowRunner:
                     plan.done = (exit_px, "END")
                 pos["virtual"][rule] = plan.to_json()
             self.plans.pop(pos["id"], None)
+        self._option_close(pos)
         self.positions.pop(pos["id"], None)
         self.trades.append(pos)
         trade = {**pos, "id": new_id("trd"), "position_id": pos["id"], "underlying": pos["symbol"], "net": pos["net_inr"], "charges": charges,
@@ -556,6 +580,84 @@ class ShadowRunner:
         self._writes.append(self._ledger_trade(trade))
         self._writes.append(self._ledger_event("strategy.exit", {k: pos[k] for k in ("id", "symbol", "side", "entry", "exit", "exit_reason", "pnl_bps", "net_inr", "r")}))
         log.info("strategy.exit", symbol=pos["symbol"], side=pos["side"], how=how, exit=exit_px, pnl_bps=pos["pnl_bps"])
+
+    # -- the option leg (shadow): the same signal bought as its nearest ATM option, one lot ---------------------
+
+    @staticmethod
+    def _opt_px(q: dict[str, Any] | None, side: str, fallback: float | None) -> float | None:
+        """A buy pays the ask and a sell gets the bid when the quote is fresh; else the last trade; else ``fallback``.
+        Options tick sparsely (the feed's p90 gap is minutes), so the quote's age is kept beside every price."""
+        if not q:
+            return fallback
+        fresh = (q.get("age_s") or 1e9) <= 120
+        px = q.get(side) if fresh else None
+        return px or q.get("ltp") or fallback
+
+    def _option_open(self, pos: dict[str, Any], symbol: str, side: int, ref: float, ctx: dict[str, Any]) -> None:
+        if self.option_pick is None:
+            return
+        try:
+            pick = self.option_pick(symbol, side, ref)
+        except Exception as exc:  # noqa: BLE001 - the option leg never blocks the book
+            log.warning("strategy.option_pick_failed", symbol=symbol, error=repr(exc))
+            pos["opt"] = {"status": "ERROR", "error": repr(exc)[:80]}
+            return
+        if not pick:
+            pos["opt"] = None
+            return
+        inst = pick.pop("instrument", None)
+        q = pick.get("quote")
+        px = self._opt_px(q, "ask", None)
+        pos["opt"] = {**pick, "status": "OPEN" if px else "NO_QUOTE", "ref": ref, "entry": px, "entry_quote": q, "iv": (ctx.get("fno") or {}).get("x_iv"),
+                      "last": px, "pnl_pct": 0.0, "exit": None, "exit_quote": None, "gross_inr": None, "charges_inr": None, "net_inr": None}
+        if inst is not None:
+            self._opt_inst[pos["id"]] = inst
+
+    def _option_touch(self, pos: dict[str, Any]) -> None:
+        rec = pos.get("opt")
+        if not rec or rec.get("status") != "OPEN" or self.option_mark is None:
+            return
+        try:
+            q = self.option_mark(rec["scrip_code"])
+        except Exception:  # noqa: BLE001
+            return
+        if q and q.get("ltp") and rec.get("entry"):
+            rec["last"], rec["last_quote"] = q["ltp"], q
+            rec["pnl_pct"] = round((q["ltp"] / rec["entry"] - 1) * 100, 1)
+
+    def _option_close(self, pos: dict[str, Any]) -> None:
+        rec = pos.get("opt")
+        self._opt_inst.pop(pos["id"], None) if not rec else None
+        if not rec or rec.get("status") != "OPEN" or not rec.get("entry"):
+            return
+        q = None
+        if self.option_mark is not None:
+            try:
+                q = self.option_mark(rec["scrip_code"])
+            except Exception:  # noqa: BLE001
+                q = None
+        px = self._opt_px(q, "bid", rec.get("last") or rec["entry"])
+        lot = int(rec.get("lot") or 1)
+        inst = self._opt_inst.pop(pos["id"], None) or Instrument(
+            scrip_code=str(rec["scrip_code"]), symbol=rec.get("name") or pos["symbol"], segment=Segment.NSE_FO, kind=InstrumentKind.OPTION,
+            lot_size=lot, expiry=rec.get("expiry") or "", strike=float(rec.get("strike") or 0), underlying=pos["symbol"],
+        )
+        gross = (px - rec["entry"]) * lot
+        charges = self.costs.round_trip(inst, rec["entry"], px, lot, entry_side=OrderSide.BUY).total
+        pct = (px / rec["entry"] - 1) * 100
+        eq = pos.get("pnl_bps") or 0.0
+        rec.update({"status": "CLOSED", "exit": px, "exit_quote": q, "last": px, "pnl_pct": round(pct, 1), "gross_inr": round(gross, 2),
+                    "charges_inr": round(charges, 2), "net_inr": round(gross - charges, 2), "equity_bps": eq,
+                    # the option's % move per 1 % of the stock: realised leverage (ATM ≈ 10–25 with theta against it)
+                    "leverage": round(pct / (eq / 100), 1) if abs(eq) >= 1 else None})
+
+    def option_summary(self) -> dict[str, Any]:
+        legs = [t["opt"] for t in self.trades if t.get("opt") and t["opt"].get("status") == "CLOSED"]
+        open_ = [p["opt"] for p in self.positions.values() if p.get("opt") and p["opt"].get("status") == "OPEN"]
+        return {"closed": len(legs), "open": len(open_), "wins": sum(1 for o in legs if (o.get("net_inr") or 0) > 0),
+                "avg_pct": round(sum(o["pnl_pct"] for o in legs) / len(legs), 1) if legs else None,
+                "sum_gross_inr": round(sum(o["gross_inr"] or 0 for o in legs), 2), "sum_net_inr": round(sum(o["net_inr"] or 0 for o in legs), 2),
+                "no_quote": sum(1 for t in [*self.trades, *self.positions.values()] if (t.get("opt") or {}).get("status") == "NO_QUOTE")}
 
     def _eod_sweep(self, bar: UnifiedBar) -> bool:
         """The session's last bucket closed for one symbol: a position whose own last bar never came is
@@ -702,12 +804,17 @@ class ShadowRunner:
                              "exits": {how: sum(1 for t in closed if t.get("virtual", {}).get(rule, {}).get("how") == how) for how in ("stop", "target", "trail", "close")}}
         stages = []
         for sym, sd in sorted(self.syms.items()):
+            if self.sequence == "level":
+                # the flips that reached a retest today, the latest twenty per symbol (every break would be thousands of rows)
+                for f in [x for x in sd.flips if x.k is not None][-20:]:
+                    stages.append({"symbol": sym, "side": "bullish" if f.side > 0 else "bearish", **f.to_json(), "tol": round(sd.tol, 2)})
+                continue
             for side, st in sd.stages.items():
                 if st.name != "none":
                     stages.append({"symbol": sym, "side": "bullish" if side > 0 else "bearish", **st.to_json(), "tol": round(sd.tol, 2), "levels": sd.levels, "closes": sd.closes})
         taken = [s for s in self.signals if s["taken"]]
         return {
-            "strategy": cr.NAME, "day": self.day, "rule": self.rule, "filter": self.filter, "pdc": self.pdc, "notional_inr": self.notional,
+            "strategy": self.name, "sequence": self.sequence, "day": self.day, "rule": self.rule, "filter": self.filter, "pdc": self.pdc, "notional_inr": self.notional,
             "walls_round": self.s.strategy_walls_round, "max_move_adr": self.s.strategy_max_move_adr, "levels_hl": self.s.strategy_levels_hl, "entry_cutoff": self.s.strategy_entry_cutoff,
             "universe": sum(1 for sym, i in self.underlyings.items() if i.kind is InstrumentKind.EQUITY and sym not in INDEX_ROOTS), "with_levels": len(self.syms),
             "orders": self.orders, "errors": self.errors,
@@ -719,6 +826,7 @@ class ShadowRunner:
                 "sum_r": round(sum(t["r"] or 0 for t in closed), 2), "open_pnl_bps": round(sum(p["pnl_bps"] for p in self.positions.values()), 1),
                 "by_rule": by_rule,
                 "live": self.live_summary(),
+                "options": self.option_summary(),
             },
             "stages": stages, "signals": list(reversed(self.signals)), "positions": sorted(self.positions.values(), key=lambda p: -p["opened_ts"]),
             "trades": list(reversed(closed)),
