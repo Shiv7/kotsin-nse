@@ -351,6 +351,9 @@ class Engine:
                 band_pct=self.s.universe_band_pct,
                 strikes_per_side=self.s.universe_strikes_per_side,
                 include_indices=self.s.universe_include_indices,
+                focus_roots=tuple(x.strip().upper() for x in self.s.focus_indices.split(",") if x.strip()),
+                focus_min_days_to_expiry=self.s.focus_min_days_to_expiry,
+                focus_next_expiry_days=self.s.focus_next_expiry_days,
             ),
         )
         groups = self._apply_universe_filters(

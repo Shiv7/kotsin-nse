@@ -359,6 +359,16 @@ class ShadowRunner:
             # day 1 (2026-10-27) booked NIFTY and BANKNIFTY as ₹25,000 of "stock": the index roots carry an
             # NSE_EQ leg in the catalogue. The sequence stays visible; the book is cash equities only.
             sig["why"] = "index: no cash leg to trade — recorded, not booked"
+            # the option the shadow leg would have bought, with its quote at the signal — the evening marks it from the
+            # tick archive (owner, 3 Nov 2026: NIFTY observed and traded on its options)
+            if self.option_pick is not None:
+                try:
+                    pick = self.option_pick(inst.symbol, side, entry)
+                    if pick:
+                        pick.pop("instrument", None)
+                        sig["opt_pick"] = pick
+                except Exception as exc:  # noqa: BLE001
+                    sig["opt_pick"] = {"error": repr(exc)[:80]}
             return
         if risk_bps <= 0:
             sig["why"] = "no risk: the stop is at the entry"

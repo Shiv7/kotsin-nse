@@ -56,6 +56,12 @@ class UniversePolicy:
     #: all expiry noise. Cheap there: ten roots, against NSE's two hundred.
     mcx_strikes_per_side: int = 20
     mcx_next_expiry_days: int = 7
+    #: the focus indices (``Settings.focus_indices``) keep the expiry that is about to expire — on a NIFTY weekly
+    #: expiry day the 0-DTE chain is where the positioning is — and, when that nearest expiry is within
+    #: ``focus_next_expiry_days``, the next one too (owner, 3 Nov 2026: "we will trade nifty only tomorrow")
+    focus_roots: tuple[str, ...] = ()
+    focus_min_days_to_expiry: int = 0
+    focus_next_expiry_days: int = 3
 
 
 @dataclass(slots=True)
@@ -186,10 +192,12 @@ class UniverseBuilder:
             group.options, group.option_expiry, group.option_expiries, group.center = [], None, [], ref
             group.note = (group.note + "; " if group.note else "") + "no close — strikes not selected"
             return
+        focus = group.root in self.policy.focus_roots
+        min_days = self.policy.focus_min_days_to_expiry if focus else self.policy.min_days_to_expiry
         expiries = [
             e
             for e in self.cat.expiries(group.root, on=today)
-            if (date.fromisoformat(e) - today).days >= self.policy.min_days_to_expiry
+            if (date.fromisoformat(e) - today).days >= min_days
         ]
         if not expiries:
             group.options, group.option_expiry, group.option_expiries, group.center = [], None, [], ref
@@ -197,6 +205,8 @@ class UniverseBuilder:
         mcx = group.segment is Segment.MCX_FO
         chosen_expiries = expiries[:1]
         if mcx and len(expiries) > 1 and (date.fromisoformat(expiries[0]) - today).days <= self.policy.mcx_next_expiry_days:
+            chosen_expiries = expiries[:2]
+        if focus and len(expiries) > 1 and (date.fromisoformat(expiries[0]) - today).days <= self.policy.focus_next_expiry_days:
             chosen_expiries = expiries[:2]
         band = self.policy.mcx_band_pct if mcx else self.policy.band_pct
         per_side = self.policy.mcx_strikes_per_side if mcx else self.policy.strikes_per_side

@@ -170,6 +170,10 @@ class Settings(BaseSettings):
     focus_top_n: int = 10
     focus_indices: str = "NIFTY,BANKNIFTY"
     focus_strikes_each_side: int = 4
+    #: the focus indices keep the expiry about to expire (0 = the expiry day itself) and the next one too when the nearest
+    #: is within this many days — the 0-DTE chain is the positioning on a NIFTY weekly expiry day
+    focus_min_days_to_expiry: int = 0
+    focus_next_expiry_days: int = 3
     #: re-centre a root's strikes on its live future once it has moved a strike from the centre
     strike_recenter: bool = True
 

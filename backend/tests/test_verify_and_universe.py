@@ -437,3 +437,23 @@ def test_strikes_follow_the_live_price_and_the_focus_takes_atm_plus_minus_n():
     assert 1550.0 in ce and 1500.0 in ce and len(ce) <= 3 and ce == sorted(ce)
     b.select_strikes(g, 1500.0, TODAY)
     assert g.center == 1500.0, "no live price: the close is the centre"
+
+
+def test_a_focus_index_keeps_the_expiring_chain_and_the_next_one():
+    """NIFTY on its weekly expiry day (owner, 3 Nov 2026): the 0-DTE chain is the positioning, so the focus roots skip no
+    expiry, and when the nearest is within ``focus_next_expiry_days`` the next one is tracked beside it."""
+    b = UniverseBuilder(_catalogue(), UniversePolicy(band_pct=12.0, strikes_per_side=3, min_days_to_expiry=2, focus_roots=("RELIANCE",), focus_min_days_to_expiry=0, focus_next_expiry_days=3))
+    g = b.build_underlyings([Segment.NSE_FO], TODAY)["RELIANCE"]
+    b.select_strikes(g, 1500.0, TODAY, each_side=1)
+    assert g.option_expiries == ["2026-09-22", "2026-09-29"] and g.option_expiry == "2026-09-22"
+    assert {o.expiry for o in g.options} == {"2026-09-22", "2026-09-29"}
+    # a root outside the focus list keeps the usual rule: tomorrow's expiry is skipped
+    b2 = UniverseBuilder(_catalogue(), UniversePolicy(band_pct=12.0, strikes_per_side=3, min_days_to_expiry=2, focus_roots=("NIFTY",)))
+    g2 = b2.build_underlyings([Segment.NSE_FO], TODAY)["RELIANCE"]
+    b2.select_strikes(g2, 1500.0, TODAY)
+    assert g2.option_expiries == ["2026-09-29"]
+    # the next expiry is only added when the nearest is close
+    b3 = UniverseBuilder(_catalogue(), UniversePolicy(focus_roots=("RELIANCE",), focus_min_days_to_expiry=0, focus_next_expiry_days=0))
+    g3 = b3.build_underlyings([Segment.NSE_FO], TODAY)["RELIANCE"]
+    b3.select_strikes(g3, 1500.0, TODAY)
+    assert g3.option_expiries == ["2026-09-22"]

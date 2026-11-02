@@ -237,3 +237,19 @@ async def test_the_daily_cap_books_the_first_flips_and_records_the_rest(tmp_path
     skipped = [s for s in snap["signals"] if not s["taken"]][0]
     assert skipped["symbol"] == "XYZ" and skipped["why"].startswith("daily cap: 1 trades already taken")
     assert snap["trades"][0]["symbol"] == "ABC"
+
+
+async def test_an_index_signal_records_the_option_it_would_have_bought(tmp_path):
+    from .test_strategy import DAY_BARS
+
+    store = BarStore()
+    _seed_daily(store, "NIFTY", "999920000")
+    r = _runner(tmp_path, store, symbols=("NIFTY",))
+    r.option_pick = lambda sym, side, px: {"scrip_code": "123", "name": "NIFTY 03 NOV 2026 CE 23300.00", "expiry": "2026-11-03", "strike": 23300.0, "kind": "CE", "lot": 65, "days": 0,
+                                          "instrument": None, "quote": {"ltp": 80.0, "bid": 79.5, "ask": 80.5, "age_s": 2.0}}
+    await _feed(r, store, DAY_BARS, symbol="NIFTY", code="999920000", pad_to=75)
+    snap = r.snapshot()
+    sig = snap["signals"][0]
+    assert sig["taken"] is False and sig["why"].startswith("index")
+    assert sig["opt_pick"]["kind"] == "CE" and sig["opt_pick"]["quote"]["ask"] == 80.5 and "instrument" not in sig["opt_pick"]
+    assert snap["summary"]["taken"] == 0 and snap["positions"] == []
