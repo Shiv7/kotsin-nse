@@ -123,3 +123,30 @@ minute to the close: mean +0.49 %, 62 % positive; with the puts in short build-u
 market's drift, not a selection. RELIANCE's turn came at 09:22 (then +4.9 % to the close); TCS (09:52) and CDSL
 (09:38), the day's two shadow shorts, turned too and then fell 2.1 % and 2.3 %. One day; the turn needs a robust
 definition (sustained ≥ 15 min, OI up ≥ 0.5 % from the open) before the day-10 pre-registration.
+
+## The option leg on the archive week (3 Nov 02:50–03:04 IST, `scripts/2026-11-03-level-retest/option_leg_replay.py`, log `option-leg-week.txt`)
+Owner (02:25): "we want get trigger on equity and buy its option … backtest on week or today how much option data we have."
+Data: the feed's tick archive holds every subscribed F&O contract's frames (ltp, bid, ask) for 14 days since 19 Oct; the
+full sessions with bars, ticks and the board are 27, 29, 30 Oct and 2 Nov (28 Oct lost to sleep; 19–26 Oct partial). On
+2 Nov 3,049 F&O contracts ticked in session, median 199 frames a contract, 985 with one a minute, bid and ask on every
+frame — enough to price an ATM leg at the signal's minute (entry quote age median 13–26 s, 5–16 % of entries priced off a
+stale last trade).
+Method: each day replayed through the runner in level mode (the book that runs from 3 Nov), then one lot of the nearest
+ATM option of the nearest expiry after the day (the 23 Nov series on all four days), bought at the first ask at or after
+the entry, sold at the last bid at or before the stock's exit, charges from the cost model.
+
+| day | stock trades | stock mean bps / net ₹1L | option legs | option mean % | win | sum net ₹ (one lot each) | premium ₹ |
+|---|---|---|---|---|---|---|---|
+| Tue 27 Oct | 275 | 0.0 / −35,960 | 268 | −2.3 | 32 % | −180,570 | 5.9 M |
+| Thu 29 Oct | 239 | +4.4 / −19,690 | 237 | −0.9 | 37 % | −67,011 | 4.8 M |
+| Fri 30 Oct | 249 | +4.1 / −21,868 | 246 | −1.1 | 39 % | −75,657 | 4.7 M |
+| Mon 2 Nov | 228 | +21.4 / +18,529 | 226 | +2.4 | 48 % | +60,288 | 4.2 M |
+| pooled | 991 | ≈ −6 net | 977 | −0.6 (median −1.6) | 39 % | −262,949 | 19.7 M (−1.3 % of premium) |
+
+Longs +0.5 % (567 legs), shorts −2.0 % (410). By the stock's exit: stops −11.2 % on 345 legs, trails +5.1 % on 423,
+close +3.6 % on 189, target +24.9 % on 20. **Realised leverage is asymmetric: the option moves 10.3 % per 1 % of the stock
+on winners and 17.6 % on losers** (median 14.4) — a stop is fast (the spread and the ask-in/bid-out round trip are paid
+in full), a trail is slow (theta and the bid). The option leg loses on the same trades the stock leg loses on, times the
+leverage, plus the spread; it turns a −6 bps book into −1.3 % of premium a trade. Monday, the broad up day, was the only
+positive day for both legs. Nothing here changes the rule; the live leg records the same thing with real quote ages from
+3 Nov, and the owner's confirmation (the board's SC → LB turn) is the open question for the day-10 pre-registration.

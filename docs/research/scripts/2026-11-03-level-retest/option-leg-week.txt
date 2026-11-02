@@ -1,0 +1,25 @@
+2026-10-27: stock trades 275 avg 0.0 bps net ₹-35960 | option legs priced 268
+2026-10-29: stock trades 239 avg 4.4 bps net ₹-19690 | option legs priced 237
+2026-10-30: stock trades 249 avg 4.1 bps net ₹-21868 | option legs priced 246
+2026-11-02: stock trades 228 avg 21.4 bps net ₹18529 | option legs priced 226
+
+== the option leg, one lot per booked trade (nearest ATM, nearest expiry after the day; ask in, bid out)
+statuses: {'ok': 977, 'no_quote': 14}
+2026-10-27: legs 268 | option: mean -2.3 % median -2.6 % win 32 % sum net ₹-180,570 on ₹5,945,385 premium | stock leg same trades: mean -2.4 bps, sum net ₹-41,525 at ₹1L | entry quote age median 26 s, stale entries 15 %
+2026-10-29: legs 237 | option: mean -0.9 % median -1.3 % win 37 % sum net ₹-67,011 on ₹4,831,009 premium | stock leg same trades: mean +4.1 bps, sum net ₹-20,190 at ₹1L | entry quote age median 13 s, stale entries 16 %
+2026-10-30: legs 246 | option: mean -1.1 % median -1.9 % win 39 % sum net ₹-75,657 on ₹4,728,352 premium | stock leg same trades: mean +4.9 bps, sum net ₹-19,722 at ₹1L | entry quote age median 15 s, stale entries 8 %
+2026-11-02: legs 226 | option: mean +2.4 % median +0.3 % win 48 % sum net ₹+60,288 on ₹4,202,180 premium | stock leg same trades: mean +22.2 bps, sum net ₹+20,243 at ₹1L | entry quote age median 16 s, stale entries 5 %
+pooled: legs 977 | option mean -0.6 % median -1.6 % win 39 % sum net ₹-262,949 on ₹19,706,926 premium (-1.3 % of premium) | stock sum net ₹-61,194
+  LONG: legs 567 option mean +0.5 % win 42 % sum net ₹-44,188 | stock mean +14.3 bps
+  SHORT: legs 410 option mean -2.0 % win 34 % sum net ₹-218,761 | stock mean -3.8 bps
+  exit close: legs 189 option mean +3.6 % | stock mean +44.4 bps
+  exit stop: legs 345 option mean -11.2 % | stock mean -66.6 bps
+  exit target: legs 20 option mean +24.9 % | stock mean +142.4 bps
+  exit trail: legs 423 option mean +5.1 % | stock mean +43.3 bps
+  realised leverage (option % per 1 % of stock): median 14.4 | winners 10.3 | losers 17.6
+  best: [('10-29', 'PAYTM', 'LONG', 'PAYTM 23 NOV 2026 CE 1640.00', 30.4, 15594), ('11-02', 'DIXON', 'LONG', 'DIXON 23 NOV 2026 CE 11500.00', 59.8, 12832), ('10-29', 'UPL', 'LONG', 'UPL 23 NOV 2026 CE 545.00', 57.2, 11690), ('11-02', 'SHRIRAMFIN', 'LONG', 'SHRIRAMFIN 23 NOV 2026 CE 840.00', 52.7, 11669), ('11-02', 'NBCC', 'LONG', 'NBCC 23 NOV 2026 CE 72.00', 60.3, 11085)]
+  worst: [('10-27', 'ALKEM', 'LONG', 'ALKEM 23 NOV 2026 CE 5050.00', -32.0, -6749), ('10-27', 'ADANIENSOL', 'SHORT', 'ADANIENSOL 23 NOV 2026 PE 1260.00', -19.7, -6776), ('10-29', 'BLUESTARCO', 'LONG', 'BLUESTARCO 23 NOV 2026 CE 1620.00', -31.9, -6891), ('11-02', 'UPL', 'SHORT', 'UPL 23 NOV 2026 PE 515.00', -24.7, -6921), ('10-29', 'LAURUSLABS', 'SHORT', 'LAURUSLABS 23 NOV 2026 PE 2180.00', -22.3, -8196)]
+ -InternalBattery-0 (id=22675555)	33%; discharging; 1:09 remaining present: true
+Tue Nov  3 03:03:50 IST 2026
+
+[exited with code 0]
