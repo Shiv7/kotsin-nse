@@ -217,6 +217,10 @@ class Settings(BaseSettings):
     #: which detector the shadow book runs: the CPR sequence (research rows 15–17) or the held retest of ANY wall
     #: with the day's move (row 23, `strategy/level_retest.py`; shipped to SHADOW 2026-11-03 on the owner's call)
     strategy_sequence: Literal["cpr", "level"] = "cpr"
+    #: the shadow book takes at most this many trades a session (0 = no cap); every later confirmation is still
+    #: recorded as a signal with ``why`` = the cap, so the evening read can score other pickers (owner, 3 Nov: a ₹1L
+    #: budget, "max 2 trade in one day", "learning curve to get best trades")
+    strategy_max_trades_per_day: int = 0
 
     # ---- the positional book: the daily order block (strategy/daily_ob.py, strategy/positional.py) ------
     #: off by default: the book FAILED its pre-registered test on 2026-10-29 (docs/research/2026-10-29-

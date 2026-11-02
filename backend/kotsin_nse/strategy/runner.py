@@ -377,6 +377,12 @@ class ShadowRunner:
         if not cr.passes(self.filter, tags):
             sig["why"] = f"filter {self.filter!r} not met"
             return
+        cap = self.s.strategy_max_trades_per_day
+        if cap > 0:
+            taken_today = sum(1 for x in self.signals if x.get("taken"))
+            if taken_today >= cap:
+                sig["why"] = f"daily cap: {cap} trades already taken (recorded for the picker scoreboard)"
+                return
         qty = max(inst.qty_step, int(self.notional / entry) // inst.qty_step * inst.qty_step)
         pos_id = new_id("pos")
         intent = OrderIntent(
@@ -816,6 +822,7 @@ class ShadowRunner:
         return {
             "strategy": self.name, "sequence": self.sequence, "day": self.day, "rule": self.rule, "filter": self.filter, "pdc": self.pdc, "notional_inr": self.notional,
             "walls_round": self.s.strategy_walls_round, "max_move_adr": self.s.strategy_max_move_adr, "levels_hl": self.s.strategy_levels_hl, "entry_cutoff": self.s.strategy_entry_cutoff,
+            "max_trades_per_day": self.s.strategy_max_trades_per_day,
             "universe": sum(1 for sym, i in self.underlyings.items() if i.kind is InstrumentKind.EQUITY and sym not in INDEX_ROOTS), "with_levels": len(self.syms),
             "orders": self.orders, "errors": self.errors,
             "summary": {

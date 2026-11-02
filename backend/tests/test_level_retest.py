@@ -215,3 +215,25 @@ def test_cpr_mode_is_unchanged():
     b = bars5(DAY_BARS)
     assert cr.sequence(b, LEVELS, TOL)[1].name == "confirmed"
     assert DAY and OPEN and Bar5  # the helpers import cleanly
+
+
+async def test_the_daily_cap_books_the_first_flips_and_records_the_rest(tmp_path):
+    store = BarStore()
+    for sym, code in (("ABC", "1"), ("XYZ", "2")):
+        _seed_daily(store, sym, code)
+    r = _runner(tmp_path, store, symbols=("ABC", "XYZ"), strategy_sequence="level", strategy_walls_round=True, strategy_max_move_adr=0, strategy_max_trades_per_day=1)
+    # both names print the same up day; ABC's bars arrive first on every bucket, so ABC is booked and XYZ is only recorded
+    from .test_strategy import _ubar
+
+    for i, (o, h, lo, c) in enumerate([*UP_DAY[:10], *([(111.0, 111.3, 110.9, 111.2)] * 65)]):
+        for sym, code in (("ABC", "1"), ("XYZ", "2")):
+            b = _ubar(sym, code, "5m", OPEN + 300 * i, o, h, lo, c)
+            store.close(b)
+            await r.on_bar(b)
+    await __import__("asyncio").gather(*r._tasks)  # type: ignore[attr-defined]
+    snap = r.snapshot()
+    assert snap["max_trades_per_day"] == 1
+    assert snap["summary"]["signals"] == 2 and snap["summary"]["taken"] == 1 and snap["summary"]["closed"] == 1
+    skipped = [s for s in snap["signals"] if not s["taken"]][0]
+    assert skipped["symbol"] == "XYZ" and skipped["why"].startswith("daily cap: 1 trades already taken")
+    assert snap["trades"][0]["symbol"] == "ABC"
