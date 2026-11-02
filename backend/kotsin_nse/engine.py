@@ -517,13 +517,15 @@ class Engine:
     def _focus_list(self, roots: set[str] | None = None) -> list[str]:
         """The last session's most traded option roots among ``roots`` (the loaded universe) plus the
         configured indices, fixed for the day."""
+        indices = [x.strip().upper() for x in self.s.focus_indices.split(",") if x.strip()]
         days = [d for d in self.oi_daily.days() if d < date.today()]
         if not days or self.s.focus_top_n <= 0:
-            return []
+            # the configured indices are the focus even with no stock list (focus_top_n = 0: NIFTY alone, 3 Nov 2026)
+            # or before any bhavcopy exists
+            return [i for i in indices if roots is None or i in roots]
         bhav = self.oi_daily.load(days[-1], columns=("symbol", "kind", "close", "volume"))
         f = self.s.data_dir / SYMBOL_CHANGES_FILE
         renames = parse_symbol_changes(f.read_text(errors="replace")) if f.exists() else {}
-        indices = [x.strip().upper() for x in self.s.focus_indices.split(",") if x.strip()]
         return focus_roots(bhav, self.s.focus_top_n, indices, renames=renames, among=roots)
 
     def _select_strikes(self, g: ScripGroup, around: float | None) -> None:
