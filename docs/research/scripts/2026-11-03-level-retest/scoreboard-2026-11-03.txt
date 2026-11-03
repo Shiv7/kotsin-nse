@@ -1,0 +1,28 @@
+
+== 2026-11-03: 235 simulable signals (booked 2), all-signal mean +0.2 bps, win 55 %
+  first two (the live book)                            net   -95.9 bps  (CAMS L +58, ADANIENSOL L -128)
+  first two with risk ≥ 80 bps                         net   -91.5 bps  (ADANIENSOL L -128, BIOCON S +63)
+  first two with the first wall ≤ 0.5R                 net   -95.9 bps  (CAMS L +58, ADANIENSOL L -128)
+  first two with the board with the trade (score ≥ 2)  net   -95.9 bps  (CAMS L +58, ADANIENSOL L -128)
+  first two with the future's state with the trade     net   -91.5 bps  (ADANIENSOL L -128, BIOCON S +63)
+  first two longs                                      net   -95.9 bps  (CAMS L +58, ADANIENSOL L -128)
+  first two after 10:15                                net   +54.9 bps  (KEI L +1, COFORGE S +80)
+  first two with breadth ≥ 60 % the trade's way        net  +138.4 bps  (ANGELONE L +145, ASHOKLEY L +19)
+  first two: breadth ≥ 60 % and not a top-10 % leader  net  -115.0 bps  (BAJAJFINSV L +24, BRITANNIA L -113)
+  best possible two (hindsight)                        net  +566.2 bps  (MCX L +312, INDUSTOWER L +280)
+  random two (mean of 200 draws)                       net   -36.7 bps  (p90 +96)
+
+== pickers across the days given (net bps of the two trades, summed)
+day                                                  2026-11-03  total
+picker                                                                
+best possible two (hindsight)                             566.2  566.2
+first two with breadth ≥ 60 % the trade's way             138.4  138.4
+first two after 10:15                                      54.9   54.9
+random two                                                -36.7  -36.7
+first two with risk ≥ 80 bps                              -91.5  -91.5
+first two with the future's state with the trade          -91.5  -91.5
+first two (the live book)                                 -95.9  -95.9
+first two longs                                           -95.9  -95.9
+first two with the board with the trade (score ≥ 2)       -95.9  -95.9
+first two with the first wall ≤ 0.5R                      -95.9  -95.9
+first two: breadth ≥ 60 % and not a top-10 % leader      -115.0 -115.0

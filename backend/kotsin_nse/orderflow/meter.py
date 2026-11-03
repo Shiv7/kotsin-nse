@@ -222,6 +222,13 @@ class FlowMeter:
         st = self._st.setdefault(code, _State())
         fm = self._minute(code, ts)
         fm.frames += 1
+        if st.last_total and total_qty < st.last_total:
+            # the counter went backwards: the session's first frame after the broker's pre-open snapshot
+            # (which carries the previous session's total — re-sent on every reconnect, so it can land on the
+            # session's own UTC day) or a reset. Re-prime and count nothing, as the bar aggregator does;
+            # otherwise no volume is classified until the day's total passes yesterday's (NIFTY future 3 Nov:
+            # nothing until 14:13).
+            st.last_total = total_qty
         new = total_qty - st.last_total if st.last_total else 0
         crossed = bid > 0 and ask > 0 and bid >= ask
         if new > 0 and (auction or crossed):

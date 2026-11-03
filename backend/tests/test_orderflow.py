@@ -102,3 +102,15 @@ def test_restored_minutes_go_ahead_of_live_ones_and_the_cumulative_delta_continu
     mins = m.minutes("X")
     assert [x.ts for x in mins] == [t, t + 60, t + 180]
     assert mins[1].buy == 30 and mins[0].to_json()["qi"] == 0.5 and mins[0].imbalance == 0.2
+
+
+def test_a_pre_open_snapshot_with_yesterdays_total_does_not_block_the_days_delta():
+    # 3 Nov 2026: the broker re-sent the NIFTY future's closing snapshot (total 3,783,585) at 06:07 IST, the
+    # session's own UTC day; the day's counter restarted at 1,755 and nothing was classified until 14:13.
+    m = FlowMeter()
+    m.on_tick("F", T0 - 7_200, 23_415.3, 3_783_585, 23_415.3, 23_427.0)  # yesterday's snapshot primes the total
+    m.on_tick("F", T0, 23_535.0, 1_755, 23_530.0, 23_535.0)  # the session's first frame: a smaller total re-primes
+    m.on_tick("F", T0 + 1, 23_535.0, 2_755, 23_530.0, 23_535.0)  # +1,000 at the ask → buy
+    m.on_tick("F", T0 + 2, 23_530.0, 3_255, 23_530.0, 23_535.0)  # +500 at the bid → sell
+    fm = m.minutes("F")[-1]
+    assert (fm.buy, fm.sell, fm.unknown, fm.cum_delta) == (1_000, 500, 0, 500)

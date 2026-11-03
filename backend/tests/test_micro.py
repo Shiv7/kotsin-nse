@@ -104,3 +104,12 @@ def test_efficiency_ratio_trend_vs_chop_and_roll_spread_from_the_bounce():
     assert chop.snapshot("X")["efficiency_ratio"] < 0.5
     roll = chop.snapshot("X")["roll_spread"]
     assert roll is not None and 0.05 <= roll <= 0.25, "the bid-ask bounce shows as a spread of the order of 0.1"
+
+
+def test_a_backwards_total_re_primes_the_micro_counter_without_a_print():
+    m = MicroMeter()
+    m.on_tick("F", T0 - 7_200, 100.0, 3_000_000, 99.9, 100.1)  # yesterday's snapshot
+    m.on_tick("F", T0, 100.1, 1_000, 100.0, 100.1)  # the session's first frame re-primes
+    m.on_tick("F", T0 + 1, 100.1, 1_500, 100.0, 100.1)  # +500 at the ask
+    st = m._st["F"]
+    assert st.last_total == 1_500 and [f[2] for f in st.frames] == [0, 500]  # the snapshot fell out of the window

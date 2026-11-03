@@ -129,7 +129,9 @@ class MicroMeter:
         if ltp <= 0:
             return
         st = self._st.setdefault(code, _State())
-        new = total_qty - st.last_total if st.last_total and total_qty >= st.last_total else 0
+        if st.last_total and total_qty < st.last_total:  # a backwards counter re-primes, count nothing (see FlowMeter)
+            st.last_total = total_qty
+        new = total_qty - st.last_total if st.last_total else 0
         crossed = bid > 0 and ask > 0 and bid >= ask
         side = 0 if (auction or crossed or new <= 0) else classify(ltp, st.bid, st.ask, st.ltp, st.last_side)
         mid = (bid + ask) / 2 if bid > 0 and ask > bid else ltp
