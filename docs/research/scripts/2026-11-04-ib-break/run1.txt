@@ -1,0 +1,102 @@
+== universe 50 stocks; development 2024-01-01 → 2025-09-30; forward 2026-10-17 → 2026-11-04 (history to 2026-10-28, archive bars after); cost 15 bps, ₹100,000 a trade, cap 2/day
+
+== V1: stop IB midpoint
+  development: 866 trades on 433 days (2.00/day), win 45 %, gross -1.5 bps, net -16.5 bps (t -4.52), median net -33.0, stopped 35 %, avg win +85 / avg loss -84, total ₹-142,856 at ₹1L a trade, worst day ₹-6,826, max drawdown ₹-148,281, longs 457 / shorts 409
+    2024: 492 trades on 246 days (2.00/day), win 47 %, gross +5.5 bps, net -9.5 bps (t -1.90), median net -25.2, stopped 35 %, avg win +90 / avg loss -83, total ₹-46,896 at ₹1L a trade, worst day ₹-4,378, max drawdown ₹-52,322, longs 267 / shorts 225
+    2025: 374 trades on 187 days (2.00/day), win 41 %, gross -10.7 bps, net -25.7 bps (t -4.88), median net -41.2, stopped 35 %, avg win +78 / avg loss -85, total ₹-95,959 at ₹1L a trade, worst day ₹-6,826, max drawdown ₹-100,674, longs 190 / shorts 184
+    first half: 432 trades on 216 days (2.00/day), win 49 %, gross +9.1 bps, net -5.9 bps (t -1.15), median net -16.8, stopped 33 %, avg win +88 / avg loss -81, total ₹-25,621 at ₹1L a trade, worst day ₹-4,378, max drawdown ₹-33,755, longs 239 / shorts 193
+    second half: 434 trades on 217 days (2.00/day), win 40 %, gross -12.0 bps, net -27.0 bps (t -5.26), median net -46.2, stopped 38 %, avg win +82 / avg loss -87, total ₹-117,235 at ₹1L a trade, worst day ₹-6,826, max drawdown ₹-120,808, longs 218 / shorts 216
+    entry 10:20-10:45: 866 trades on 433 days (2.00/day), win 45 %, gross -1.5 bps, net -16.5 bps (t -4.52), median net -33.0, stopped 35 %, avg win +85 / avg loss -84, total ₹-142,856 at ₹1L a trade, worst day ₹-6,826, max drawdown ₹-148,281, longs 457 / shorts 409
+    move <0.1 ADR: 15 trades on 14 days (1.07/day), win 27 %, gross -35.3 bps, net -50.3 bps (t -4.25), median net -65.3, stopped 67 %, avg win +33 / avg loss -63, total ₹-7,548 at ₹1L a trade, worst day ₹-1,705, max drawdown ₹-7,622, longs 12 / shorts 3
+    0.1-0.2: 52 trades on 45 days (1.16/day), win 42 %, gross -7.9 bps, net -22.9 bps (t -2.02), median net -46.2, stopped 52 %, avg win +69 / avg loss -72, total ₹-11,901 at ₹1L a trade, worst day ₹-3,537, max drawdown ₹-18,411, longs 37 / shorts 15
+    0.2-0.4: 173 trades on 142 days (1.22/day), win 42 %, gross +4.0 bps, net -11.0 bps (t -1.41), median net -42.2, stopped 44 %, avg win +93 / avg loss -72, total ₹-18,965 at ₹1L a trade, worst day ₹-2,588, max drawdown ₹-23,025, longs 93 / shorts 80
+    >0.4: 626 trades on 373 days (1.68/day), win 46 %, gross -1.7 bps, net -16.7 bps (t -3.73), median net -26.5, stopped 31 %, avg win +84 / avg loss -90, total ₹-104,442 at ₹1L a trade, worst day ₹-6,826, max drawdown ₹-112,211, longs 315 / shorts 311
+    IB <0.4 ADR: 47 trades on 42 days (1.12/day), win 40 %, gross -0.6 bps, net -15.6 bps (t -1.59), median net -42.2, stopped 55 %, avg win +66 / avg loss -57, total ₹-7,318 at ₹1L a trade, worst day ₹-1,612, max drawdown ₹-10,651, longs 24 / shorts 23
+    0.4-0.6: 197 trades on 162 days (1.22/day), win 39 %, gross -3.6 bps, net -18.6 bps (t -2.84), median net -55.9, stopped 47 %, avg win +88 / avg loss -69, total ₹-36,581 at ₹1L a trade, worst day ₹-2,051, max drawdown ₹-39,379, longs 106 / shorts 91
+    0.6-0.9: 319 trades on 260 days (1.23/day), win 47 %, gross +1.4 bps, net -13.6 bps (t -2.45), median net -23.5, stopped 35 %, avg win +81 / avg loss -84, total ₹-43,417 at ₹1L a trade, worst day ₹-2,915, max drawdown ₹-49,045, longs 149 / shorts 170
+    >0.9: 302 trades on 224 days (1.35/day), win 47 %, gross -3.9 bps, net -18.9 bps (t -2.56), median net -25.2, stopped 25 %, avg win +90 / avg loss -101, total ₹-57,207 at ₹1L a trade, worst day ₹-6,826, max drawdown ₹-67,679, longs 177 / shorts 125
+  forward 17 Oct → 4 Nov 2026 (description): 16 trades on 9 days (1.78/day), win 56 %, gross +13.5 bps, net -1.5 bps (t -0.06), median net +26.6, stopped 38 %, avg win +83 / avg loss -110, total ₹-246 at ₹1L a trade, worst day ₹-2,765, max drawdown ₹-3,812, longs 8 / shorts 8
+         d        sym  dir entry_hm    entry     stop exit_hm     exit   how  gross_bps  net_bps      inr  move_adr  ib_adr
+2026-10-19 ULTRACEMCO    1    10:25 11204.00 11045.50   11:35 11045.50  stop    -141.47  -156.47 -1564.67      0.93    1.07
+2026-10-19         LT    1    10:25  3672.80  3652.00   12:15  3652.00  stop     -56.63   -71.63  -716.33      0.28    0.67
+2026-10-21    ETERNAL   -1    11:00   314.45   319.58   15:10   308.80 close     179.68   164.68  1646.79     -0.81    1.27
+2026-10-22    ETERNAL   -1    13:45   306.00   312.85   15:10   304.55 close      47.39    32.39   323.86     -0.34    1.51
+2026-10-28 APOLLOHOSP    1    10:20  8027.50  7869.75   15:10  8148.00 close     150.11   135.11  1351.09      1.12    1.73
+2026-10-28       ONGC   -1    10:20   223.33   225.73   15:10   224.35 close     -45.67   -60.67  -606.72     -1.07    1.12
+2026-10-29  POWERGRID    1    10:20   259.05   254.82   15:10   262.00 close     113.88    98.88   988.78      1.27    1.51
+2026-10-29  KOTAKBANK    1    10:20   450.50   444.62   15:10   458.00 close     166.48   151.48  1514.82      1.12    1.32
+2026-10-30 SHRIRAMFIN   -1    10:20   828.75   835.10   15:10   823.45 close      63.95    48.95   489.52     -0.39    0.44
+2026-10-30   ADANIENT   -1    10:20  2569.40  2591.85   12:50  2591.85  stop     -87.37  -102.37 -1023.74     -0.34    0.44
+2026-11-02  SUNPHARMA    1    10:20  1773.80  1746.25   13:25  1746.25  stop    -155.32  -170.32 -1703.16      1.42    1.48
+2026-11-02      TRENT   -1    10:20  2995.10  3022.40   13:00  3022.40  stop     -91.15  -106.15 -1061.49     -0.51    0.78
+2026-11-03   HDFCBANK    1    10:20   719.90   712.50   15:10   724.70 close      66.68    51.68   516.76      0.84    0.99
+2026-11-03 ADANIPORTS   -1    10:25  1845.90  1862.15   13:20  1862.15  stop     -88.03  -103.03 -1030.33     -0.53    0.64
+2026-11-04   ADANIENT    1    10:20  2686.10  2632.65   15:10  2701.40 close      56.96    41.96   419.60      1.10    1.34
+2026-11-04  KOTAKBANK   -1    10:20   459.90   462.95   15:10   458.25 close      35.88    20.88   208.77     -0.37    0.61
+
+== V2: stop opposite IB edge
+  development: 866 trades on 433 days (2.00/day), win 48 %, gross -2.7 bps, net -17.7 bps (t -4.51), median net -19.7, stopped 12 %, avg win +83 / avg loss -93, total ₹-153,411 at ₹1L a trade, worst day ₹-6,690, max drawdown ₹-154,842, longs 457 / shorts 409
+    2024: 492 trades on 246 days (2.00/day), win 51 %, gross +2.9 bps, net -12.1 bps (t -2.22), median net -10.8, stopped 13 %, avg win +86 / avg loss -96, total ₹-59,464 at ₹1L a trade, worst day ₹-6,201, max drawdown ₹-62,571, longs 267 / shorts 225
+    2025: 374 trades on 187 days (2.00/day), win 44 %, gross -10.1 bps, net -25.1 bps (t -4.49), median net -27.3, stopped 10 %, avg win +78 / avg loss -89, total ₹-93,947 at ₹1L a trade, worst day ₹-6,690, max drawdown ₹-96,728, longs 190 / shorts 184
+    first half: 432 trades on 216 days (2.00/day), win 52 %, gross +6.4 bps, net -8.6 bps (t -1.55), median net -7.2, stopped 13 %, avg win +85 / avg loss -92, total ₹-37,245 at ₹1L a trade, worst day ₹-6,201, max drawdown ₹-41,131, longs 239 / shorts 193
+    second half: 434 trades on 217 days (2.00/day), win 44 %, gross -11.8 bps, net -26.8 bps (t -4.85), median net -29.4, stopped 11 %, avg win +80 / avg loss -93, total ₹-116,166 at ₹1L a trade, worst day ₹-6,690, max drawdown ₹-119,448, longs 218 / shorts 216
+    entry 10:20-10:45: 866 trades on 433 days (2.00/day), win 48 %, gross -2.7 bps, net -17.7 bps (t -4.51), median net -19.7, stopped 12 %, avg win +83 / avg loss -93, total ₹-153,411 at ₹1L a trade, worst day ₹-6,690, max drawdown ₹-154,842, longs 457 / shorts 409
+    move <0.1 ADR: 15 trades on 14 days (1.07/day), win 40 %, gross -32.3 bps, net -47.3 bps (t -2.46), median net -30.1, stopped 33 %, avg win +43 / avg loss -80, total ₹-7,097 at ₹1L a trade, worst day ₹-2,399, max drawdown ₹-7,170, longs 12 / shorts 3
+    0.1-0.2: 52 trades on 45 days (1.16/day), win 50 %, gross -10.0 bps, net -25.0 bps (t -1.59), median net -18.3, stopped 27 %, avg win +75 / avg loss -98, total ₹-12,997 at ₹1L a trade, worst day ₹-6,201, max drawdown ₹-18,557, longs 37 / shorts 15
+    0.2-0.4: 173 trades on 142 days (1.22/day), win 47 %, gross +1.6 bps, net -13.4 bps (t -1.63), median net -19.9, stopped 18 %, avg win +86 / avg loss -83, total ₹-23,215 at ₹1L a trade, worst day ₹-3,616, max drawdown ₹-27,759, longs 93 / shorts 80
+    >0.4: 626 trades on 373 days (1.68/day), win 48 %, gross -2.6 bps, net -17.6 bps (t -3.71), median net -18.1, stopped 8 %, avg win +83 / avg loss -95, total ₹-110,103 at ₹1L a trade, worst day ₹-6,690, max drawdown ₹-112,688, longs 315 / shorts 311
+    IB <0.4 ADR: 47 trades on 42 days (1.12/day), win 51 %, gross +1.0 bps, net -14.0 bps (t -1.29), median net -5.3, stopped 26 %, avg win +55 / avg loss -70, total ₹-6,586 at ₹1L a trade, worst day ₹-2,065, max drawdown ₹-9,904, longs 24 / shorts 23
+    0.4-0.6: 197 trades on 162 days (1.22/day), win 43 %, gross -11.2 bps, net -26.2 bps (t -3.53), median net -34.0, stopped 25 %, avg win +84 / avg loss -87, total ₹-51,571 at ₹1L a trade, worst day ₹-3,492, max drawdown ₹-53,961, longs 106 / shorts 91
+    0.6-0.9: 319 trades on 260 days (1.23/day), win 50 %, gross +1.5 bps, net -13.5 bps (t -2.27), median net -15.5, stopped 9 %, avg win +78 / avg loss -88, total ₹-42,993 at ₹1L a trade, worst day ₹-4,301, max drawdown ₹-48,941, longs 149 / shorts 170
+    >0.9: 302 trades on 224 days (1.35/day), win 49 %, gross -2.9 bps, net -17.9 bps (t -2.28), median net -17.7, stopped 4 %, avg win +90 / avg loss -105, total ₹-53,927 at ₹1L a trade, worst day ₹-6,690, max drawdown ₹-61,364, longs 177 / shorts 125
+  forward 17 Oct → 4 Nov 2026 (description): 16 trades on 9 days (1.78/day), win 62 %, gross +17.4 bps, net +2.4 bps (t 0.08), median net +26.6, stopped 12 %, avg win +83 / avg loss -101, total ₹+381 at ₹1L a trade, worst day ₹-3,214, max drawdown ₹-2,646, longs 8 / shorts 8
+         d        sym  dir entry_hm    entry     stop exit_hm     exit   how  gross_bps  net_bps      inr  move_adr  ib_adr
+2026-10-19 ULTRACEMCO    1    10:25 11204.00 10941.00   12:35 10941.00  stop    -234.74  -249.74 -2497.38      0.93    1.07
+2026-10-19         LT    1    10:25  3672.80  3632.00   15:10  3652.00 close     -56.63   -71.63  -716.33      0.28    0.67
+2026-10-21    ETERNAL   -1    11:00   314.45   324.55   15:10   308.80 close     179.68   164.68  1646.79     -0.81    1.27
+2026-10-22    ETERNAL   -1    13:45   306.00   319.00   15:10   304.55 close      47.39    32.39   323.86     -0.34    1.51
+2026-10-28 APOLLOHOSP    1    10:20  8027.50  7714.50   15:10  8148.00 close     150.11   135.11  1351.09      1.12    1.73
+2026-10-28       ONGC   -1    10:20   223.33   227.90   15:10   224.35 close     -45.67   -60.67  -606.72     -1.07    1.12
+2026-10-29  POWERGRID    1    10:20   259.05   251.10   15:10   262.00 close     113.88    98.88   988.78      1.27    1.51
+2026-10-29  KOTAKBANK    1    10:20   450.50   439.25   15:10   458.00 close     166.48   151.48  1514.82      1.12    1.32
+2026-10-30 SHRIRAMFIN   -1    10:20   828.75   841.00   15:10   823.45 close      63.95    48.95   489.52     -0.39    0.44
+2026-10-30   ADANIENT   -1    10:20  2569.40  2609.50   15:10  2568.00 close       5.45    -9.55   -95.51     -0.34    0.44
+2026-11-02  SUNPHARMA    1    10:20  1773.80  1722.00   15:10  1766.60 close     -40.59   -55.59  -555.91      1.42    1.48
+2026-11-02      TRENT   -1    10:20  2995.10  3046.50   14:30  3046.50  stop    -171.61  -186.61 -1866.14     -0.51    0.78
+2026-11-03   HDFCBANK    1    10:20   719.90   706.05   15:10   724.70 close      66.68    51.68   516.76      0.84    0.99
+2026-11-03 ADANIPORTS   -1    10:25  1845.90  1875.20   15:10  1856.80 close     -59.05   -74.05  -740.50     -0.53    0.64
+2026-11-04   ADANIENT    1    10:20  2686.10  2579.30   15:10  2701.40 close      56.96    41.96   419.60      1.10    1.34
+2026-11-04  KOTAKBANK   -1    10:20   459.90   465.45   15:10   458.25 close      35.88    20.88   208.77     -0.37    0.61
+
+== V3: stop IB midpoint, first-hour move ≥ 0.2 ADR
+  development: 866 trades on 433 days (2.00/day), win 45 %, gross +2.2 bps, net -12.8 bps (t -3.22), median net -28.5, stopped 33 %, avg win +91 / avg loss -84, total ₹-110,907 at ₹1L a trade, worst day ₹-6,826, max drawdown ₹-130,949, longs 439 / shorts 427
+    2024: 492 trades on 246 days (2.00/day), win 48 %, gross +9.5 bps, net -5.5 bps (t -0.98), median net -23.4, stopped 33 %, avg win +97 / avg loss -84, total ₹-27,064 at ₹1L a trade, worst day ₹-4,378, max drawdown ₹-47,233, longs 263 / shorts 229
+    2025: 374 trades on 187 days (2.00/day), win 42 %, gross -7.4 bps, net -22.4 bps (t -4.12), median net -36.9, stopped 33 %, avg win +83 / avg loss -84, total ₹-83,843 at ₹1L a trade, worst day ₹-6,826, max drawdown ₹-96,420, longs 176 / shorts 198
+    first half: 432 trades on 216 days (2.00/day), win 50 %, gross +13.3 bps, net -1.7 bps (t -0.28), median net -16.6, stopped 31 %, avg win +95 / avg loss -82, total ₹-7,232 at ₹1L a trade, worst day ₹-4,378, max drawdown ₹-29,983, longs 235 / shorts 197
+    second half: 434 trades on 217 days (2.00/day), win 41 %, gross -8.9 bps, net -23.9 bps (t -4.52), median net -42.8, stopped 35 %, avg win +86 / avg loss -86, total ₹-103,675 at ₹1L a trade, worst day ₹-6,826, max drawdown ₹-107,247, longs 204 / shorts 230
+    entry 10:20-10:45: 863 trades on 433 days (1.99/day), win 45 %, gross +2.4 bps, net -12.6 bps (t -3.15), median net -28.4, stopped 33 %, avg win +91 / avg loss -84, total ₹-108,493 at ₹1L a trade, worst day ₹-6,826, max drawdown ₹-128,536, longs 438 / shorts 425
+    entry 10:50-11:15: 3 trades on 3 days (1.00/day), win 0 %, gross -65.5 bps, net -80.5 bps (t -4.92), median net -66.0, stopped 67 %, avg win +nan / avg loss -80, total ₹-2,414 at ₹1L a trade, worst day ₹-1,131, max drawdown ₹-1,283, longs 1 / shorts 2
+    0.2-0.4: 188 trades on 153 days (1.23/day), win 42 %, gross +3.2 bps, net -11.8 bps (t -1.61), median net -44.3, stopped 45 %, avg win +93 / avg loss -73, total ₹-22,275 at ₹1L a trade, worst day ₹-2,588, max drawdown ₹-25,746, longs 98 / shorts 90
+    >0.4: 678 trades on 398 days (1.70/day), win 46 %, gross +1.9 bps, net -13.1 bps (t -2.81), median net -26.2, stopped 30 %, avg win +91 / avg loss -87, total ₹-88,632 at ₹1L a trade, worst day ₹-6,826, max drawdown ₹-107,186, longs 341 / shorts 337
+    IB <0.4 ADR: 26 trades on 23 days (1.13/day), win 42 %, gross +3.1 bps, net -11.9 bps (t -0.86), median net -38.8, stopped 50 %, avg win +71 / avg loss -56, total ₹-3,081 at ₹1L a trade, worst day ₹-1,612, max drawdown ₹-5,190, longs 8 / shorts 18
+    0.4-0.6: 176 trades on 145 days (1.21/day), win 40 %, gross -0.1 bps, net -15.1 bps (t -2.12), median net -50.4, stopped 45 %, avg win +90 / avg loss -69, total ₹-26,503 at ₹1L a trade, worst day ₹-2,053, max drawdown ₹-28,675, longs 82 / shorts 94
+    0.6-0.9: 337 trades on 269 days (1.25/day), win 47 %, gross +2.8 bps, net -12.2 bps (t -2.24), median net -24.8, stopped 34 %, avg win +84 / avg loss -82, total ₹-40,993 at ₹1L a trade, worst day ₹-2,915, max drawdown ₹-47,842, longs 160 / shorts 177
+    >0.9: 326 trades on 242 days (1.35/day), win 46 %, gross +2.1 bps, net -12.9 bps (t -1.61), median net -24.9, stopped 24 %, avg win +101 / avg loss -97, total ₹-41,998 at ₹1L a trade, worst day ₹-6,826, max drawdown ₹-60,877, longs 188 / shorts 138
+  forward 17 Oct → 4 Nov 2026 (description): 16 trades on 9 days (1.78/day), win 56 %, gross +13.5 bps, net -1.5 bps (t -0.06), median net +26.6, stopped 38 %, avg win +83 / avg loss -110, total ₹-246 at ₹1L a trade, worst day ₹-2,765, max drawdown ₹-3,812, longs 8 / shorts 8
+         d        sym  dir entry_hm    entry     stop exit_hm     exit   how  gross_bps  net_bps      inr  move_adr  ib_adr
+2026-10-19 ULTRACEMCO    1    10:25 11204.00 11045.50   11:35 11045.50  stop    -141.47  -156.47 -1564.67      0.93    1.07
+2026-10-19         LT    1    10:25  3672.80  3652.00   12:15  3652.00  stop     -56.63   -71.63  -716.33      0.28    0.67
+2026-10-21    ETERNAL   -1    11:00   314.45   319.58   15:10   308.80 close     179.68   164.68  1646.79     -0.81    1.27
+2026-10-22    ETERNAL   -1    13:45   306.00   312.85   15:10   304.55 close      47.39    32.39   323.86     -0.34    1.51
+2026-10-28 APOLLOHOSP    1    10:20  8027.50  7869.75   15:10  8148.00 close     150.11   135.11  1351.09      1.12    1.73
+2026-10-28       ONGC   -1    10:20   223.33   225.73   15:10   224.35 close     -45.67   -60.67  -606.72     -1.07    1.12
+2026-10-29  POWERGRID    1    10:20   259.05   254.82   15:10   262.00 close     113.88    98.88   988.78      1.27    1.51
+2026-10-29  KOTAKBANK    1    10:20   450.50   444.62   15:10   458.00 close     166.48   151.48  1514.82      1.12    1.32
+2026-10-30 SHRIRAMFIN   -1    10:20   828.75   835.10   15:10   823.45 close      63.95    48.95   489.52     -0.39    0.44
+2026-10-30   ADANIENT   -1    10:20  2569.40  2591.85   12:50  2591.85  stop     -87.37  -102.37 -1023.74     -0.34    0.44
+2026-11-02  SUNPHARMA    1    10:20  1773.80  1746.25   13:25  1746.25  stop    -155.32  -170.32 -1703.16      1.42    1.48
+2026-11-02      TRENT   -1    10:20  2995.10  3022.40   13:00  3022.40  stop     -91.15  -106.15 -1061.49     -0.51    0.78
+2026-11-03   HDFCBANK    1    10:20   719.90   712.50   15:10   724.70 close      66.68    51.68   516.76      0.84    0.99
+2026-11-03 ADANIPORTS   -1    10:25  1845.90  1862.15   13:20  1862.15  stop     -88.03  -103.03 -1030.33     -0.53    0.64
+2026-11-04   ADANIENT    1    10:20  2686.10  2632.65   15:10  2701.40 close      56.96    41.96   419.60      1.10    1.34
+2026-11-04  KOTAKBANK   -1    10:20   459.90   462.95   15:10   458.25 close      35.88    20.88   208.77     -0.37    0.61
