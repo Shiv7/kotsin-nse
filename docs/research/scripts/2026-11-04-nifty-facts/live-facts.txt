@@ -1,0 +1,94 @@
+-- 2026-10-19: future 48704 has 295 minutes of ticks — skipped
+-- 2026-10-20: future 48704 has 0 minutes of ticks — skipped
+-- 2026-10-23 done: NIFTY 27 OCT 2026 dte 4, 314 min, idx ticks from 09:15, bars rest 0
+-- 2026-10-26 done: NIFTY 27 OCT 2026 dte 1, 375 min, idx ticks from 09:15, bars rest 0
+-- 2026-10-27 done: NIFTY 27 OCT 2026 dte 0, 369 min, idx ticks from 09:19, bars rest 0
+-- 2026-10-29 done: NIFTY 23 NOV 2026 dte 25, 357 min, idx ticks from 09:15, bars rest 18
+-- 2026-10-30 done: NIFTY 23 NOV 2026 dte 24, 372 min, idx ticks from 09:15, bars rest 0
+-- 2026-11-02 done: NIFTY 23 NOV 2026 dte 21, 375 min, idx ticks from 09:15, bars rest 0
+-- 2026-11-03 done: NIFTY 23 NOV 2026 dte 20, 375 min, idx ticks from 09:15, bars rest 0
+-- 2026-11-04 done: NIFTY 23 NOV 2026 dte 19, 313 min, idx ticks from 10:17, bars rest 57
+
+== 8 sessions: 2026-10-23, 2026-10-26, 2026-10-27, 2026-10-29, 2026-10-30, 2026-11-02, 2026-11-03, 2026-11-04
+         d               fut  dte  minutes idx_first  bars_rest    open    high     low   close  ret_bps  range_pct  vol_lots
+2026-10-23 NIFTY 27 OCT 2026    4      314     09:15          0 22743.2 22787.2 22372.0 22600.0    -62.9        1.8   86307.0
+2026-10-26 NIFTY 27 OCT 2026    1      375     09:15          0 22508.2 22753.2 22387.4 22753.2    108.8        1.6   99582.0
+2026-10-27 NIFTY 27 OCT 2026    0      369     09:19          0 22660.6 22829.8 22636.8 22749.8     39.4        0.9   75657.0
+2026-10-29 NIFTY 23 NOV 2026   25      357     09:15         18 22694.2 22962.0 22656.8 22936.8    106.9        1.3   51121.0
+2026-10-30 NIFTY 23 NOV 2026   24      372     09:15          0 22966.2 23118.1 22905.1 23053.1     37.8        0.9   47123.0
+2026-11-02 NIFTY 23 NOV 2026   21      375     09:15          0 23224.6 23360.5 23207.0 23330.4     45.5        0.7   54986.0
+2026-11-03 NIFTY 23 NOV 2026   20      375     09:15          0 23576.6 23746.2 23482.8 23731.8     65.8        1.1   70876.0
+2026-11-04 NIFTY 23 NOV 2026   19      313     10:17         57 23734.2 23945.7 23700.8 23912.7     75.2        1.0   49176.0
+
+== FUTURES: basis (future − index, points), OI, delta
+         d  dte  basis_open  basis_med  basis_close  spread_med    oi_open  oi_chg_1h_pct  oi_chg_pct   delta_1h  delta_day  ret_bps fstate10      bias10
+2026-10-23    4       58.40      60.55        40.70        5.12 14473745.0          -5.03       -7.45 -1107665.0 -1282255.0   -62.94       SC Strong Bull
+2026-10-26    1       58.15      59.65        48.95        4.80 13394940.0         -16.80      -16.22    13715.0   169910.0   108.85       SC         nan
+2026-10-27    0        6.12       3.75        16.85        3.50 11222250.0         -26.69      -42.14  -133705.0  -337025.0    39.36       SB Strong Bear
+2026-10-29   25       72.75      83.05       105.25        4.70 16313115.0          -0.96       -2.50    95940.0   493155.0   106.86       LB        Bull
+2026-10-30   24       59.05      50.85        85.00        4.40 15905370.0          -0.17       -1.54   -13845.0   -56225.0    37.82       SB Strong Bear
+2026-11-02   21       67.05      63.42          NaN        5.00 15659735.0          -1.80       -1.54    14820.0   136435.0    45.51       SC Strong Bull
+2026-11-03   20       36.35      40.32          NaN        4.15 15418650.0          -2.70       -6.28    86190.0   508885.0    65.79       SC Strong Bull
+2026-11-04   19       10.80      31.32          NaN        3.70 14450670.0           0.00       -4.34        0.0   267735.0    75.23       LB Strong Bull
+  basis per DTE: dte 0 → 4, dte 1 → 60, dte 4 → 61, dte 19 → 31, dte 20 → 40, dte 21 → 63, dte 24 → 51, dte 25 → 83
+  basis close − open: median +10.7 pts over 8 days; days it rose 3
+  day delta sign = day direction: 6 of 8; first-hour delta sign = day direction: 5 of 8
+  OI change by 10:00 sign = day direction (long build-up → up): 1 of 8
+  lead/lag corr of 1m returns, corr(fut_t, idx_t+k): k=-2 -0.01, k=-1 0.06, k=+0 0.80, k=+1 0.03, k=+2 -0.01  (k>0 = the future leads the index)
+
+== VOLUME and MICRO by half hour (pooled medians across days): share of the day's volume, spread, basis, big prints (≥10 lots)
+       vol_share  spread  basis    big  n
+b                                        
+09:15      12.57    5.40  58.35  247.0  7
+09:45       9.52    4.54  65.25  137.5  6
+10:15       8.38    4.16  48.66  137.5  8
+10:45       6.11    3.70  51.73   96.0  8
+11:15       6.73    4.44  47.95   80.0  8
+11:45       7.04    4.23  55.64  119.5  8
+12:15       4.50    4.99  50.01   59.0  8
+12:45       5.75    5.01  44.90   93.0  8
+13:15       7.50    5.05  49.41  115.0  8
+13:45       6.04    4.57  52.78   92.0  8
+14:15       5.87    4.92  57.28  105.5  8
+14:45       7.52    3.68  54.58  130.0  8
+15:15       4.49    3.20  48.95   69.0  8
+
+== FLOW → forward index return (Spearman rank IC, pooled 5m bars across days; + means the signal's sign predicts the move); delta = tick-rule from the future's frames, ofi/imb from its five-level book
+  delta   fwd  5m IC +0.008  fwd 15m IC +0.001  fwd 30m IC +0.004  fwd 60m IC -0.042   same-bar +0.384  (N 558)
+  ofi     fwd  5m IC +0.021  fwd 15m IC -0.013  fwd 30m IC -0.025  fwd 60m IC -0.019   same-bar +0.574  (N 558)
+  imb     fwd  5m IC -0.038  fwd 15m IC -0.029  fwd 30m IC +0.003  fwd 60m IC +0.025   same-bar -0.181  (N 555)
+  ret     fwd  5m IC -0.017  fwd 15m IC +0.001  fwd 30m IC +0.023  fwd 60m IC -0.011   same-bar +1.000  (N 572)
+  vol     fwd  5m IC -0.012  fwd 15m IC -0.007  fwd 30m IC -0.037  fwd 60m IC -0.055   same-bar +0.091  (N 558)
+  bar-return autocorrelation (5m, lag 1): +0.017
+  cum delta vs price, same day, Spearman per day: 2026-10-23 +0.06, 2026-10-26 +0.55, 2026-10-27 +0.11, 2026-10-29 +0.76, 2026-10-30 +0.68, 2026-11-02 +0.66, 2026-11-03 +0.87, 2026-11-04 +0.90
+
+== SWINGS of the index (5m local extremes ±30 min): delta into the swing (last 30 min) vs out (next 30 min), bar volume vs the day's median bar
+  high  N 25  delta_in < 0 36 %  delta_out > 0 28 %  bar volume ≥ 2× median 32 %  book imbalance at the bar median -0.10  next-30m move median -12 bps
+  low   N 23  delta_in < 0 70 %  delta_out > 0 52 %  bar volume ≥ 2× median 17 %  book imbalance at the bar median -0.07  next-30m move median +12 bps
+  control: all 30-min windows — delta < 0 51 %; all bars — volume ≥ 2× its day median 12 %
+
+== OPTIONS: the 10:00 walls vs the rest of the day, straddle vs realised, IV, PCR, max pain
+         d     expiry    px10    cw10    pw10  hi_after10  lo_after10  cw10_held  pw10_held  cw_open  cw_close  pw_open  pw_close  cw_changes  pw_changes
+2026-10-23 2026-10-27 22719.0 22800.0 22700.0     22600.0     22372.0       True      False  22800.0   22800.0  22700.0   22500.0           6          10
+2026-10-26        nan 22638.0     NaN     NaN     22753.0     22524.0      False      False      NaN       NaN      NaN       NaN           0           0
+2026-10-27 2026-11-03 22779.0 22800.0 22700.0     22830.0     22637.0      False      False  22800.0   22800.0  22800.0   22700.0           6           7
+2026-10-29 2026-11-03 22761.0 23000.0 22700.0     22962.0     22750.0       True       True  22700.0   23000.0  22700.0   22900.0           2           3
+2026-10-30 2026-11-03 22966.0 23000.0 22900.0     23118.0     22905.0      False       True  23000.0   23200.0  22800.0   22900.0           4          20
+2026-11-02 2026-11-09 23303.0 23500.0 23300.0     23360.0     23207.0       True      False  23500.0   23500.0  23200.0   23200.0          12           7
+2026-11-03 2026-11-03 23636.0 23700.0 23600.0     23746.0     23610.0      False       True  23600.0   23800.0  23000.0   23700.0          42          10
+2026-11-04 2026-11-09 23902.0 24000.0 23500.0     23935.0     23737.0       True       True      NaN   24500.0      NaN   23500.0           1          10
+  the 10:00 call wall held the rest of the day 4 of 8; the put wall 4 of 8; both 2
+         d  straddle10  impl10_pct  real_pct  abs_move_pct  iv_open  iv_close  pcr10  pcr15  ret_after10_bps  pain10  pain15    close  ce_add_k     ce_add  pe_add_k     pe_add
+2026-10-23      307.40        1.35      1.00          0.52    16.13     14.65   1.08   1.09           -52.49 22700.0 22650.0 22600.00   22700.0  3661645.0   22800.0 -2529865.0
+2026-10-26         NaN         NaN      1.01          0.51      NaN       NaN    NaN    NaN            50.75 22600.0 22600.0 22753.20   22400.0        0.0   22400.0        0.0
+2026-10-27      441.20        1.94      0.85          0.13    18.30     15.22   0.93   0.88           -12.67 22800.0 22800.0 22749.75   22800.0  2526485.0   22700.0  1947465.0
+2026-10-29      318.55        1.40      0.93          0.77    15.73     12.91   0.67   0.56            77.13 22750.0 22800.0 22936.75   22950.0   513500.0   22800.0  5417100.0
+2026-10-30      280.85        1.22      0.93          0.38    14.55     12.10   0.73   0.81            38.14 22900.0 22900.0 23053.10   23100.0  1637935.0   22800.0  3698760.0
+2026-11-02      394.85        1.69      0.66          0.12    15.03     14.41   0.53   0.58            11.69 23350.0 23350.0 23330.35   23300.0   835835.0   23300.0  1226290.0
+2026-11-03      125.85        0.53      0.58          0.41    27.12     54.27   1.20   1.03            40.51 23500.0 23600.0 23731.75   23850.0 10198500.0   23700.0 19955390.0
+2026-11-04      372.80        1.56      0.83          0.04      NaN     14.52   0.88   0.71             4.33 23650.0 23850.0 23912.70   24500.0  3721380.0   23900.0  5072795.0
+  implied move (straddle/spot at 10:00) vs realised range after 10:00: realised/implied median 0.67; vs |close − 10:00| median 0.31; days the close moved more than implied 0 of 8
+  IV close − open: median -1.96 vol points; fell on 5 of 8 days
+  PCR at 10:00 above 1 and the day rose after 10:00: 1; below 1 and fell: 1; of 8
+  close − max pain at 15:00: median |distance| 97 pts; expiry days: 2026-11-03 +132
+  the day's biggest CE OI add strike vs the day's high: within 100 pts 5 of 8; biggest PE add vs the low: 3 of 8

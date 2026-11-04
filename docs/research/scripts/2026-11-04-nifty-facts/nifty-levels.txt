@@ -1,0 +1,154 @@
+== NIFTY: 433 symbol-sessions 2024-01-01 → 2025-09-30; ADR median 231, tol median 23.1 (0.1 ADR)
+
+== A. the day: gaps, extremes, initial balance (first hour), previous-day levels
+  gap vs previous close (ADR units): |gap| median 0.22; P(|gap| > 0.3 ADR) 39 %; P(|gap| > 0.6 ADR) 13 %
+    |gap| 0–0.1 ADR: N 106, previous close touched during the day 100 %, within the first hour 100 %, day closes on the gap's side of PDC 55 %
+    |gap| 0.1–0.3 ADR: N 159, previous close touched during the day 89 %, within the first hour 84 %, day closes on the gap's side of PDC 62 %
+    |gap| 0.3–0.6 ADR: N 113, previous close touched during the day 66 %, within the first hour 46 %, day closes on the gap's side of PDC 71 %
+    |gap| 0.6–9 ADR: N 55, previous close touched during the day 25 %, within the first hour 11 %, day closes on the gap's side of PDC 91 %
+  day high in the first hour 42 %, day low in the first hour 40 %, both (the first hour is the day's range) 4 %, neither 22 %
+  day high in the first 5m bar 22 %, day low in the first 5m bar 15 %; the first bar's range is 28 % of the day's (median)
+  when the day's HIGH forms (half-hour, % of days): 09:15 34  09:45 8  10:15 6  10:45 3  11:15 5  11:45 2  12:15 4  12:45 3  13:15 3  13:45 4  14:15 6  14:45 22
+  when the day's LOW  forms (half-hour, % of days): 09:15 31  09:45 9  10:15 4  10:45 6  11:15 3  11:45 5  12:15 3  12:45 3  13:15 3  13:45 4  14:15 8  14:45 21
+  IB range median 0.50 ADR; day range median 0.88 ADR
+  after the first hour: close beyond IBH only 37 %, beyond IBL only 38 %, both 15 %, neither (inside all day) 9 %
+  IBH broken (a close above): day closes above IBH 59 % (N 227); extension beyond IBH median 0.63 × IB range, P(≥ 0.5 IB) 60 %
+  IBL broken (a close below): day closes below IBL 58 % (N 231); extension beyond IBL median 0.59 × IB range, P(≥ 0.5 IB) 61 %
+  first-hour direction (close of bar 12 vs open) matches the day's close direction 69 % (N 433)
+  trend day (close in the top/bottom 20 % of the range): 48 %; close in the middle 40 % 32 %
+  PDH touched 60 %, PDL touched 52 %, both 20 %, neither (inside day) 8 %; CPR band touched 80 %; open inside the CPR 12 %
+    CPR narrow (width 0.00–0.09 ADR, N 145): day range median 0.87 ADR, trend day 47 %, IB broken on one side only 79 %, CPR touched 76 %
+    CPR mid (width 0.09–0.22 ADR, N 144): day range median 0.84 ADR, trend day 48 %, IB broken on one side only 76 %, CPR touched 83 %
+    CPR wide (width 0.22–1.01 ADR, N 144): day range median 0.90 ADR, trend day 48 %, IB broken on one side only 72 %, CPR touched 81 %
+  range formed per bucket (median, ADR): 09:15-10:15 0.50, 10:15-12:15 0.42, 12:15-14:15 0.39, 14:15-15:00 0.25 | median 5m bar range (tol units): 09:15-10:15 1.21, 10:15-12:15 0.76, 12:15-14:15 0.70, 14:15-15:00 0.79
+
+== B. wall touches: hold rate, bounce, undercut (all in tol = 0.1 ADR units; K = 6 bars). 'ctl' = the same walls moved ±0.43 ADR
+  by wall kind — each real kind, then its own control:
+  TC               N   1596  held  76.2 %  bounce≥1   67 %  bounce≥2   33 %  fwd med +0.11  | held: undercut p50 -0.38 p75 0.12 p90 0.52  through at all  31 %  next wall reached  91 %
+    ctl TC         N   2228  held  75.7 %  bounce≥1   68 %  bounce≥2   34 %  fwd med -0.04  | held: undercut p50 -0.29 p75 0.19 p90 0.56  through at all  34 %  next wall reached  84 %
+  BC               N   1583  held  75.4 %  bounce≥1   69 %  bounce≥2   35 %  fwd med +0.10  | held: undercut p50 -0.35 p75 0.21 p90 0.59  through at all  32 %  next wall reached  90 %
+    ctl BC         N   2285  held  76.1 %  bounce≥1   69 %  bounce≥2   35 %  fwd med +0.05  | held: undercut p50 -0.38 p75 0.10 p90 0.49  through at all  30 %  next wall reached  87 %
+  P                N   1695  held  75.2 %  bounce≥1   68 %  bounce≥2   32 %  fwd med +0.05  | held: undercut p50 -0.33 p75 0.12 p90 0.51  through at all  31 %  next wall reached  90 %
+    ctl P          N   2313  held  76.2 %  bounce≥1   68 %  bounce≥2   34 %  fwd med +0.05  | held: undercut p50 -0.31 p75 0.19 p90 0.55  through at all  34 %  next wall reached  84 %
+  R1               N   1242  held  81.0 %  bounce≥1   60 %  bounce≥2   27 %  fwd med -0.02  | held: undercut p50 -0.42 p75 0.07 p90 0.50  through at all  28 %  next wall reached  83 %
+    ctl R1         N   1980  held  74.2 %  bounce≥1   66 %  bounce≥2   32 %  fwd med -0.02  | held: undercut p50 -0.28 p75 0.14 p90 0.60  through at all  33 %  next wall reached  79 %
+  S1               N   1018  held  72.5 %  bounce≥1   70 %  bounce≥2   36 %  fwd med -0.03  | held: undercut p50 -0.26 p75 0.20 p90 0.54  through at all  33 %  next wall reached  88 %
+    ctl S1         N   2098  held  73.7 %  bounce≥1   66 %  bounce≥2   33 %  fwd med +0.03  | held: undercut p50 -0.36 p75 0.08 p90 0.50  through at all  29 %  next wall reached  79 %
+  R2               N    493  held  77.7 %  bounce≥1   61 %  bounce≥2   26 %  fwd med -0.03  | held: undercut p50 -0.44 p75 0.03 p90 0.44  through at all  27 %  next wall reached  80 %
+    ctl R2         N   1216  held  79.4 %  bounce≥1   60 %  bounce≥2   26 %  fwd med -0.01  | held: undercut p50 -0.35 p75 0.12 p90 0.57  through at all  31 %  next wall reached  68 %
+  S2               N    584  held  77.1 %  bounce≥1   71 %  bounce≥2   32 %  fwd med +0.11  | held: undercut p50 -0.38 p75 0.07 p90 0.41  through at all  28 %  next wall reached  84 %
+    ctl S2         N   1159  held  75.8 %  bounce≥1   68 %  bounce≥2   35 %  fwd med -0.02  | held: undercut p50 -0.35 p75 0.22 p90 0.63  through at all  33 %  next wall reached  77 %
+  PDH              N   1223  held  77.4 %  bounce≥1   63 %  bounce≥2   29 %  fwd med -0.04  | held: undercut p50 -0.35 p75 0.14 p90 0.52  through at all  31 %  next wall reached  87 %
+    ctl PDH        N   1868  held  77.3 %  bounce≥1   65 %  bounce≥2   31 %  fwd med +0.02  | held: undercut p50 -0.33 p75 0.12 p90 0.56  through at all  31 %  next wall reached  77 %
+  PDL              N   1046  held  74.3 %  bounce≥1   69 %  bounce≥2   35 %  fwd med +0.05  | held: undercut p50 -0.31 p75 0.26 p90 0.61  through at all  33 %  next wall reached  87 %
+    ctl PDL        N   2088  held  76.1 %  bounce≥1   66 %  bounce≥2   33 %  fwd med +0.01  | held: undercut p50 -0.31 p75 0.21 p90 0.58  through at all  32 %  next wall reached  79 %
+  PDC              N   1812  held  72.8 %  bounce≥1   65 %  bounce≥2   33 %  fwd med -0.01  | held: undercut p50 -0.35 p75 0.20 p90 0.59  through at all  31 %  next wall reached  87 %
+    ctl PDC        N   2237  held  76.6 %  bounce≥1   67 %  bounce≥2   33 %  fwd med -0.02  | held: undercut p50 -0.29 p75 0.18 p90 0.55  through at all  32 %  next wall reached  88 %
+  ORH              N   1877  held  77.9 %  bounce≥1   65 %  bounce≥2   30 %  fwd med +0.04  | held: undercut p50 -0.37 p75 0.07 p90 0.52  through at all  28 %  next wall reached  86 %
+    ctl ORH        N   2258  held  76.9 %  bounce≥1   68 %  bounce≥2   33 %  fwd med +0.02  | held: undercut p50 -0.32 p75 0.17 p90 0.54  through at all  33 %  next wall reached  83 %
+  ORL              N   1997  held  77.3 %  bounce≥1   66 %  bounce≥2   33 %  fwd med +0.05  | held: undercut p50 -0.36 p75 0.10 p90 0.52  through at all  28 %  next wall reached  86 %
+    ctl ORL        N   2291  held  74.6 %  bounce≥1   63 %  bounce≥2   31 %  fwd med +0.00  | held: undercut p50 -0.31 p75 0.15 p90 0.51  through at all  32 %  next wall reached  81 %
+  IBH              N   1368  held  80.3 %  bounce≥1   60 %  bounce≥2   24 %  fwd med +0.03  | held: undercut p50 -0.44 p75 0.02 p90 0.47  through at all  26 %  next wall reached  86 %
+    ctl IBH        N   1783  held  76.6 %  bounce≥1   64 %  bounce≥2   27 %  fwd med -0.03  | held: undercut p50 -0.36 p75 0.11 p90 0.55  through at all  30 %  next wall reached  80 %
+  IBL              N   1595  held  80.4 %  bounce≥1   61 %  bounce≥2   24 %  fwd med +0.00  | held: undercut p50 -0.35 p75 0.09 p90 0.55  through at all  30 %  next wall reached  86 %
+    ctl IBL        N   1853  held  78.4 %  bounce≥1   64 %  bounce≥2   30 %  fwd med +0.05  | held: undercut p50 -0.37 p75 0.16 p90 0.52  through at all  32 %  next wall reached  79 %
+  H1H              N   5389  held  82.9 %  bounce≥1   57 %  bounce≥2   24 %  fwd med -0.01  | held: undercut p50 -0.43 p75 0.01 p90 0.43  through at all  26 %  next wall reached  86 %
+    ctl H1H        N   4996  held  74.4 %  bounce≥1   69 %  bounce≥2   32 %  fwd med -0.01  | held: undercut p50 -0.32 p75 0.20 p90 0.59  through at all  33 %  next wall reached  85 %
+  H1L              N   5992  held  80.1 %  bounce≥1   61 %  bounce≥2   24 %  fwd med +0.00  | held: undercut p50 -0.37 p75 0.09 p90 0.53  through at all  29 %  next wall reached  86 %
+    ctl H1L        N   4896  held  76.5 %  bounce≥1   68 %  bounce≥2   34 %  fwd med +0.03  | held: undercut p50 -0.32 p75 0.16 p90 0.54  through at all  32 %  next wall reached  84 %
+  RNstep           N   5572  held  73.0 %  bounce≥1   68 %  bounce≥2   35 %  fwd med +0.01  | held: undercut p50 -0.31 p75 0.15 p90 0.58  through at all  33 %  next wall reached  88 %
+    ctl RNstep     N  11376  held  73.7 %  bounce≥1   68 %  bounce≥2   35 %  fwd med +0.02  | held: undercut p50 -0.32 p75 0.18 p90 0.55  through at all  33 %  next wall reached  80 %
+  RNhalf           N   5466  held  75.1 %  bounce≥1   68 %  bounce≥2   36 %  fwd med +0.01  | held: undercut p50 -0.28 p75 0.19 p90 0.59  through at all  34 %  next wall reached  86 %
+    ctl RNhalf     N  11030  held  75.2 %  bounce≥1   68 %  bounce≥2   35 %  fwd med +0.00  | held: undercut p50 -0.30 p75 0.20 p90 0.59  through at all  34 %  next wall reached  79 %
+  ALL real         N  41548  held  77.3 %  bounce≥1   64 %  bounce≥2   30 %  fwd med +0.02  | held: undercut p50 -0.36 p75 0.12 p90 0.54  through at all  30 %  next wall reached  87 %
+  ALL control      N  59955  held  75.4 %  bounce≥1   67 %  bounce≥2   33 %  fwd med +0.01  | held: undercut p50 -0.32 p75 0.17 p90 0.56  through at all  33 %  next wall reached  81 %
+  by touch number of the day (real, then control):
+  real 1st         N  12301  held  71.9 %  bounce≥1   68 %  bounce≥2   37 %  fwd med -0.01  | held: undercut p50 -0.27 p75 0.24 p90 0.62  through at all  35 %  next wall reached  86 %
+    ctl 1st        N  17839  held  68.8 %  bounce≥1   73 %  bounce≥2   41 %  fwd med +0.01  | held: undercut p50 -0.22 p75 0.28 p90 0.65  through at all  38 %  next wall reached  86 %
+  real 2nd         N   8767  held  76.1 %  bounce≥1   66 %  bounce≥2   33 %  fwd med +0.01  | held: undercut p50 -0.35 p75 0.14 p90 0.55  through at all  31 %  next wall reached  87 %
+    ctl 2nd        N  12688  held  74.3 %  bounce≥1   70 %  bounce≥2   36 %  fwd med +0.01  | held: undercut p50 -0.30 p75 0.18 p90 0.56  through at all  33 %  next wall reached  84 %
+  real 3rd+        N  20480  held  81.1 %  bounce≥1   61 %  bounce≥2   25 %  fwd med +0.03  | held: undercut p50 -0.41 p75 0.05 p90 0.47  through at all  27 %  next wall reached  87 %
+    ctl 3rd+       N  29428  held  79.9 %  bounce≥1   62 %  bounce≥2   28 %  fwd med +0.01  | held: undercut p50 -0.38 p75 0.10 p90 0.51  through at all  30 %  next wall reached  78 %
+  by confluence within tol (itself included) (real, then control):
+  real confl 1     N   2169  held  67.6 %  bounce≥1   76 %  bounce≥2   46 %  fwd med -0.03  | held: undercut p50 -0.23 p75 0.27 p90 0.67  through at all  37 %  next wall reached  91 %
+    ctl confl 1    N   7937  held  73.2 %  bounce≥1   69 %  bounce≥2   38 %  fwd med +0.00  | held: undercut p50 -0.30 p75 0.20 p90 0.59  through at all  34 %  next wall reached  80 %
+  real confl 2     N   5839  held  71.4 %  bounce≥1   74 %  bounce≥2   44 %  fwd med +0.06  | held: undercut p50 -0.30 p75 0.21 p90 0.62  through at all  33 %  next wall reached  91 %
+    ctl confl 2    N  14354  held  73.7 %  bounce≥1   69 %  bounce≥2   37 %  fwd med +0.01  | held: undercut p50 -0.28 p75 0.23 p90 0.61  through at all  35 %  next wall reached  80 %
+  real confl 3+    N  33540  held  79.0 %  bounce≥1   62 %  bounce≥2   27 %  fwd med +0.01  | held: undercut p50 -0.37 p75 0.09 p90 0.51  through at all  29 %  next wall reached  86 %
+    ctl confl 3+   N  37664  held  76.5 %  bounce≥1   66 %  bounce≥2   31 %  fwd med +0.01  | held: undercut p50 -0.34 p75 0.14 p90 0.53  through at all  31 %  next wall reached  82 %
+  by TIGHT confluence within 0.3 tol (real, then control):
+  real tight 1     N  14883  held  74.0 %  bounce≥1   69 %  bounce≥2   36 %  fwd med +0.00  | held: undercut p50 -0.29 p75 0.19 p90 0.58  through at all  34 %  next wall reached  88 %
+    ctl tight 1    N  28817  held  74.0 %  bounce≥1   69 %  bounce≥2   36 %  fwd med +0.01  | held: undercut p50 -0.30 p75 0.20 p90 0.59  through at all  34 %  next wall reached  81 %
+  real tight 2     N  12122  held  77.2 %  bounce≥1   64 %  bounce≥2   30 %  fwd med +0.04  | held: undercut p50 -0.36 p75 0.09 p90 0.53  through at all  29 %  next wall reached  87 %
+    ctl tight 2    N  15635  held  75.2 %  bounce≥1   68 %  bounce≥2   35 %  fwd med +0.02  | held: undercut p50 -0.32 p75 0.17 p90 0.58  through at all  33 %  next wall reached  82 %
+  real tight 3+    N  14543  held  80.9 %  bounce≥1   59 %  bounce≥2   24 %  fwd med +0.01  | held: undercut p50 -0.41 p75 0.05 p90 0.49  through at all  27 %  next wall reached  85 %
+    ctl tight 3+   N  15503  held  78.2 %  bounce≥1   64 %  bounce≥2   28 %  fwd med +0.01  | held: undercut p50 -0.36 p75 0.11 p90 0.49  through at all  30 %  next wall reached  81 %
+  by time of the touch:
+  real 09:15-10:15 N   7148  held  66.4 %  bounce≥1   77 %  bounce≥2   48 %  fwd med -0.02  | held: undercut p50 -0.22 p75 0.30 p90 0.69  through at all  38 %  next wall reached  90 %
+    ctl 09:15-10:15 N  11518  held  65.7 %  bounce≥1   78 %  bounce≥2   49 %  fwd med -0.02  | held: undercut p50 -0.20 p75 0.32 p90 0.69  through at all  39 %  next wall reached  88 %
+  real 10:15-12:15 N  12913  held  78.7 %  bounce≥1   62 %  bounce≥2   27 %  fwd med +0.03  | held: undercut p50 -0.35 p75 0.09 p90 0.49  through at all  29 %  next wall reached  82 %
+    ctl 10:15-12:15 N  19458  held  77.5 %  bounce≥1   64 %  bounce≥2   29 %  fwd med +0.01  | held: undercut p50 -0.35 p75 0.14 p90 0.52  through at all  30 %  next wall reached  77 %
+  real 12:15-14:15 N  14790  held  80.9 %  bounce≥1   60 %  bounce≥2   24 %  fwd med +0.01  | held: undercut p50 -0.41 p75 0.05 p90 0.50  through at all  27 %  next wall reached  87 %
+    ctl 12:15-14:15 N  20046  held  78.9 %  bounce≥1   64 %  bounce≥2   28 %  fwd med +0.02  | held: undercut p50 -0.35 p75 0.13 p90 0.53  through at all  32 %  next wall reached  81 %
+  real 14:15-15:00 N   6697  held  78.7 %  bounce≥1   66 %  bounce≥2   30 %  fwd med +0.01  | held: undercut p50 -0.36 p75 0.11 p90 0.53  through at all  30 %  next wall reached  90 %
+    ctl 14:15-15:00 N   8933  held  75.5 %  bounce≥1   69 %  bounce≥2   35 %  fwd med +0.00  | held: undercut p50 -0.30 p75 0.15 p90 0.56  through at all  32 %  next wall reached  82 %
+  by side and position vs the open:
+  res below open   N  11704  held  77.7 %  bounce≥1   62 %  bounce≥2   30 %  fwd med -0.03  | held: undercut p50 -0.38 p75 0.08 p90 0.49  through at all  29 %  next wall reached  87 %
+  res above open   N   8647  held  78.4 %  bounce≥1   67 %  bounce≥2   34 %  fwd med +0.01  | held: undercut p50 -0.34 p75 0.11 p90 0.51  through at all  30 %  next wall reached  87 %
+  sup below open   N  14569  held  75.6 %  bounce≥1   65 %  bounce≥2   30 %  fwd med +0.03  | held: undercut p50 -0.34 p75 0.16 p90 0.59  through at all  32 %  next wall reached  87 %
+  sup above open   N   6628  held  79.3 %  bounce≥1   63 %  bounce≥2   27 %  fwd med +0.10  | held: undercut p50 -0.37 p75 0.09 p90 0.52  through at all  29 %  next wall reached  86 %
+  CPR edges (TC/BC/P pooled) by touch number, real then control:
+  CPR touch 1      N   1299  held  66.6 %  bounce≥1   75 %  bounce≥2   43 %  fwd med +0.10  | held: undercut p50 -0.19 p75 0.32 p90 0.70  through at all  40 %  next wall reached  92 %
+    ctl touch 1    N   1913  held  68.0 %  bounce≥1   75 %  bounce≥2   42 %  fwd med +0.00  | held: undercut p50 -0.17 p75 0.29 p90 0.66  through at all  40 %  next wall reached  89 %
+  CPR touch 2      N    967  held  73.3 %  bounce≥1   70 %  bounce≥2   37 %  fwd med +0.04  | held: undercut p50 -0.30 p75 0.18 p90 0.56  through at all  34 %  next wall reached  91 %
+    ctl touch 2    N   1394  held  73.8 %  bounce≥1   71 %  bounce≥2   38 %  fwd med -0.01  | held: undercut p50 -0.28 p75 0.21 p90 0.59  through at all  35 %  next wall reached  88 %
+  CPR touch 3      N   2608  held  80.9 %  bounce≥1   63 %  bounce≥2   27 %  fwd med +0.10  | held: undercut p50 -0.43 p75 0.05 p90 0.48  through at all  27 %  next wall reached  89 %
+    ctl touch 3    N   3519  held  81.2 %  bounce≥1   64 %  bounce≥2   29 %  fwd med +0.05  | held: undercut p50 -0.40 p75 0.07 p90 0.46  through at all  28 %  next wall reached  82 %
+
+== C. what a hold pays: enter at the touch bar's close, stop one tol beyond the wall; the next 12 bars (60 min); R = risk in tol
+  all touches real N  41548  risk med 2.07 tol  stopped within 60 min  31 %  reached 1R  31 %  2R  11 %  mfe med 1.25 tol  mae med 1.23 tol  close+6 med +0.02
+  all touches ctl  N  59955  risk med 2.07 tol  stopped within 60 min  34 %  reached 1R  34 %  2R  12 %  mfe med 1.34 tol  mae med 1.33 tol  close+6 med +0.01
+  held@6 real      N  32135  risk med 2.11 tol  stopped within 60 min  13 %  reached 1R  34 %  2R  11 %  mfe med 1.48 tol  mae med 0.91 tol  close+6 med +0.30
+  held@6 ctl       N  45194  risk med 2.11 tol  stopped within 60 min  14 %  reached 1R  38 %  2R  13 %  mfe med 1.60 tol  mae med 0.95 tol  close+6 med +0.34
+  held touches by kind (real):
+  TC               N   1216  risk med 2.13 tol  stopped within 60 min  12 %  reached 1R  37 %  2R  13 %  mfe med 1.61 tol  mae med 0.90 tol  close+6 med +0.40
+  BC               N   1194  risk med 2.11 tol  stopped within 60 min  14 %  reached 1R  42 %  2R  13 %  mfe med 1.78 tol  mae med 0.86 tol  close+6 med +0.40
+  P                N   1274  risk med 2.11 tol  stopped within 60 min  13 %  reached 1R  37 %  2R  13 %  mfe med 1.55 tol  mae med 0.87 tol  close+6 med +0.39
+  R1               N   1006  risk med 2.12 tol  stopped within 60 min  11 %  reached 1R  32 %  2R  10 %  mfe med 1.29 tol  mae med 0.90 tol  close+6 med +0.19
+  S1               N    738  risk med 2.14 tol  stopped within 60 min  19 %  reached 1R  41 %  2R  14 %  mfe med 1.82 tol  mae med 1.04 tol  close+6 med +0.42
+  R2               N    383  risk med 2.09 tol  stopped within 60 min   9 %  reached 1R  29 %  2R  13 %  mfe med 1.41 tol  mae med 0.76 tol  close+6 med +0.29
+  S2               N    450  risk med 2.13 tol  stopped within 60 min  14 %  reached 1R  41 %  2R  11 %  mfe med 1.67 tol  mae med 0.84 tol  close+6 med +0.46
+  PDH              N    947  risk med 2.10 tol  stopped within 60 min  13 %  reached 1R  33 %  2R  11 %  mfe med 1.41 tol  mae med 0.89 tol  close+6 med +0.26
+  PDL              N    777  risk med 2.11 tol  stopped within 60 min  17 %  reached 1R  36 %  2R  12 %  mfe med 1.58 tol  mae med 0.89 tol  close+6 med +0.37
+  PDC              N   1319  risk med 2.11 tol  stopped within 60 min  13 %  reached 1R  35 %  2R  13 %  mfe med 1.49 tol  mae med 0.92 tol  close+6 med +0.30
+  ORH              N   1463  risk med 2.10 tol  stopped within 60 min  13 %  reached 1R  35 %  2R  10 %  mfe med 1.49 tol  mae med 0.88 tol  close+6 med +0.34
+  ORL              N   1544  risk med 2.11 tol  stopped within 60 min  12 %  reached 1R  37 %  2R  11 %  mfe med 1.56 tol  mae med 0.85 tol  close+6 med +0.39
+  IBH              N   1099  risk med 2.08 tol  stopped within 60 min  12 %  reached 1R  32 %  2R   8 %  mfe med 1.41 tol  mae med 0.84 tol  close+6 med +0.32
+  IBL              N   1282  risk med 2.08 tol  stopped within 60 min  15 %  reached 1R  29 %  2R   9 %  mfe med 1.30 tol  mae med 0.95 tol  close+6 med +0.23
+  H1H              N   4466  risk med 2.09 tol  stopped within 60 min  11 %  reached 1R  29 %  2R   7 %  mfe med 1.30 tol  mae med 0.83 tol  close+6 med +0.18
+  H1L              N   4801  risk med 2.10 tol  stopped within 60 min  15 %  reached 1R  27 %  2R   8 %  mfe med 1.28 tol  mae med 0.94 tol  close+6 med +0.21
+  RNstep           N   4069  risk med 2.13 tol  stopped within 60 min  15 %  reached 1R  38 %  2R  14 %  mfe med 1.63 tol  mae med 0.96 tol  close+6 med +0.40
+  RNhalf           N   4107  risk med 2.11 tol  stopped within 60 min  13 %  reached 1R  39 %  2R  14 %  mfe med 1.67 tol  mae med 0.98 tol  close+6 med +0.36
+  held touches by touch number (real then control):
+  real 1           N   8850  risk med 2.07 tol  stopped within 60 min  15 %  reached 1R  41 %  2R  15 %  mfe med 1.72 tol  mae med 0.98 tol  close+6 med +0.40
+    ctl 1          N  12270  risk med 2.09 tol  stopped within 60 min  17 %  reached 1R  46 %  2R  18 %  mfe med 1.93 tol  mae med 1.02 tol  close+6 med +0.52
+  real 2           N   6671  risk med 2.12 tol  stopped within 60 min  14 %  reached 1R  36 %  2R  12 %  mfe med 1.56 tol  mae med 0.95 tol  close+6 med +0.31
+    ctl 2          N   9425  risk med 2.14 tol  stopped within 60 min  14 %  reached 1R  41 %  2R  14 %  mfe med 1.71 tol  mae med 0.97 tol  close+6 med +0.40
+  real 3           N  16614  risk med 2.12 tol  stopped within 60 min  12 %  reached 1R  29 %  2R   8 %  mfe med 1.33 tol  mae med 0.86 tol  close+6 med +0.25
+    ctl 3          N  23499  risk med 2.12 tol  stopped within 60 min  13 %  reached 1R  32 %  2R  10 %  mfe med 1.42 tol  mae med 0.91 tol  close+6 med +0.26
+  held touches by tight confluence (real then control):
+  real tight 1     N  11012  risk med 2.12 tol  stopped within 60 min  14 %  reached 1R  39 %  2R  15 %  mfe med 1.68 tol  mae med 0.97 tol  close+6 med +0.39
+    ctl tight 1    N  21319  risk med 2.12 tol  stopped within 60 min  15 %  reached 1R  39 %  2R  14 %  mfe med 1.67 tol  mae med 0.98 tol  close+6 med +0.37
+  real tight 2     N   9362  risk med 2.12 tol  stopped within 60 min  13 %  reached 1R  35 %  2R  11 %  mfe med 1.49 tol  mae med 0.91 tol  close+6 med +0.31
+    ctl tight 2    N  11754  risk med 2.12 tol  stopped within 60 min  14 %  reached 1R  39 %  2R  13 %  mfe med 1.65 tol  mae med 0.96 tol  close+6 med +0.37
+  real tight 3     N  11761  risk med 2.09 tol  stopped within 60 min  12 %  reached 1R  28 %  2R   8 %  mfe med 1.31 tol  mae med 0.85 tol  close+6 med +0.23
+    ctl tight 3    N  12121  risk med 2.11 tol  stopped within 60 min  13 %  reached 1R  34 %  2R  11 %  mfe med 1.45 tol  mae med 0.90 tol  close+6 med +0.27
+  held touches by time (real then control):
+  real 09:15-10:15 N   4745  risk med 2.20 tol  stopped within 60 min  16 %  reached 1R  49 %  2R  20 %  mfe med 2.23 tol  mae med 1.07 tol  close+6 med +0.66
+    ctl 09:15-10:15 N   7572  risk med 2.20 tol  stopped within 60 min  17 %  reached 1R  50 %  2R  21 %  mfe med 2.29 tol  mae med 1.10 tol  close+6 med +0.66
+  real 10:15-12:15 N  10163  risk med 2.09 tol  stopped within 60 min  13 %  reached 1R  34 %  2R  11 %  mfe med 1.41 tol  mae med 0.89 tol  close+6 med +0.30
+    ctl 10:15-12:15 N  15073  risk med 2.10 tol  stopped within 60 min  14 %  reached 1R  36 %  2R  12 %  mfe med 1.50 tol  mae med 0.92 tol  close+6 med +0.29
+  real 12:15-14:15 N  11959  risk med 2.10 tol  stopped within 60 min  14 %  reached 1R  30 %  2R   9 %  mfe med 1.36 tol  mae med 0.90 tol  close+6 med +0.23
+    ctl 12:15-14:15 N  15808  risk med 2.10 tol  stopped within 60 min  15 %  reached 1R  35 %  2R  11 %  mfe med 1.50 tol  mae med 0.96 tol  close+6 med +0.28
+  real 14:15-15:00 N   5268  risk med 2.11 tol  stopped within 60 min  10 %  reached 1R  29 %  2R   8 %  mfe med 1.40 tol  mae med 0.82 tol  close+6 med +0.28
+    ctl 14:15-15:00 N   6741  risk med 2.12 tol  stopped within 60 min   9 %  reached 1R  34 %  2R  11 %  mfe med 1.53 tol  mae med 0.87 tol  close+6 med +0.37
