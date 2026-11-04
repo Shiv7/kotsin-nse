@@ -1,0 +1,93 @@
+
+== 2026-10-27: 4 simulable signals (booked 4), all-signal mean +21.4 bps, win 100 %
+  first two (the live book)                            net    -8.4 bps  (CROMPTON L +12, PIIND L +5)
+  first two with risk ≥ 80 bps                         net    -0.8 bps  (CROMPTON L +12)
+  first two with the first wall ≤ 0.5R                 —
+  first two with the board with the trade (score ≥ 2)  —
+  first two with the future's state with the trade     —
+  first two longs                                      net    -8.4 bps  (CROMPTON L +12, PIIND L +5)
+  first two after 10:15                                net    -8.4 bps  (CROMPTON L +12, PIIND L +5)
+  first two with breadth ≥ 60 % the trade's way        net    -8.4 bps  (CROMPTON L +12, PIIND L +5)
+  first two: breadth ≥ 60 % and not a top-10 % leader  net    -8.4 bps  (CROMPTON L +12, PIIND L +5)
+  best possible two (hindsight)                        net   +52.1 bps  (POLICYBZR S +66, CROMPTON L +12)
+  random two (mean of 200 draws)                       net   +13.7 bps  (p90 +52)
+
+== 2026-10-29: 7 simulable signals (booked 6), all-signal mean +44.3 bps, win 57 %
+  first two (the live book)                            net   +29.9 bps  (TATAPOWER L +104, SHREECEM L -48)
+  first two with risk ≥ 80 bps                         net  +291.3 bps  (ETERNAL L +183, TIINDIA L +135)
+  first two with the first wall ≤ 0.5R                 —
+  first two with the board with the trade (score ≥ 2)  —
+  first two with the future's state with the trade     —
+  first two longs                                      net   +29.9 bps  (TATAPOWER L +104, SHREECEM L -48)
+  first two after 10:15                                net   +29.9 bps  (TATAPOWER L +104, SHREECEM L -48)
+  first two with breadth ≥ 60 % the trade's way        net   +29.9 bps  (TATAPOWER L +104, SHREECEM L -48)
+  first two: breadth ≥ 60 % and not a top-10 % leader  net   +29.9 bps  (TATAPOWER L +104, SHREECEM L -48)
+  best possible two (hindsight)                        net  +291.3 bps  (ETERNAL L +183, TIINDIA L +135)
+  random two (mean of 200 draws)                       net   +61.0 bps  (p90 +213)
+
+== 2026-10-30: 2 simulable signals (booked 2), all-signal mean -56.9 bps, win 0 %
+  first two (the live book)                            net  -139.8 bps  (LUPIN S -44, ADANIPOWER S -70)
+  first two with risk ≥ 80 bps                         —
+  first two with the first wall ≤ 0.5R                 —
+  first two with the board with the trade (score ≥ 2)  —
+  first two with the future's state with the trade     —
+  first two longs                                      —
+  first two after 10:15                                net  -139.8 bps  (LUPIN S -44, ADANIPOWER S -70)
+  first two with breadth ≥ 60 % the trade's way        net  -139.8 bps  (LUPIN S -44, ADANIPOWER S -70)
+  first two: breadth ≥ 60 % and not a top-10 % leader  net  -139.8 bps  (LUPIN S -44, ADANIPOWER S -70)
+  best possible two (hindsight)                        net  -139.8 bps  (LUPIN S -44, ADANIPOWER S -70)
+  random two (mean of 200 draws)                       net  -139.8 bps  (p90 -140)
+
+== 2026-11-02: 2 simulable signals (booked 2), all-signal mean +24.3 bps, win 100 %
+  first two (the live book)                            net   +22.6 bps  (CDSL S +7, TCS S +42)
+  first two with risk ≥ 80 bps                         —
+  first two with the first wall ≤ 0.5R                 net    -6.0 bps  (CDSL S +7)
+  first two with the board with the trade (score ≥ 2)  net   +22.6 bps  (CDSL S +7, TCS S +42)
+  first two with the future's state with the trade     net   +22.6 bps  (CDSL S +7, TCS S +42)
+  first two longs                                      —
+  first two after 10:15                                net   +22.6 bps  (CDSL S +7, TCS S +42)
+  first two with breadth ≥ 60 % the trade's way        —
+  first two: breadth ≥ 60 % and not a top-10 % leader  —
+  best possible two (hindsight)                        net   +22.6 bps  (TCS S +42, CDSL S +7)
+  random two (mean of 200 draws)                       net   +22.6 bps  (p90 +23)
+
+== 2026-11-03: 235 simulable signals (booked 2), all-signal mean +1.0 bps, win 56 %
+  first two (the live book)                            net   -95.9 bps  (CAMS L +58, ADANIENSOL L -128)
+  first two with risk ≥ 80 bps                         net   -91.5 bps  (ADANIENSOL L -128, BIOCON S +63)
+  first two with the first wall ≤ 0.5R                 net   -95.9 bps  (CAMS L +58, ADANIENSOL L -128)
+  first two with the board with the trade (score ≥ 2)  net   -95.9 bps  (CAMS L +58, ADANIENSOL L -128)
+  first two with the future's state with the trade     net   -91.5 bps  (ADANIENSOL L -128, BIOCON S +63)
+  first two longs                                      net   -95.9 bps  (CAMS L +58, ADANIENSOL L -128)
+  first two after 10:15                                net   +54.9 bps  (KEI L +1, COFORGE S +80)
+  first two with breadth ≥ 60 % the trade's way        net  +138.4 bps  (ANGELONE L +145, ASHOKLEY L +19)
+  first two: breadth ≥ 60 % and not a top-10 % leader  net  -115.0 bps  (BAJAJFINSV L +24, BRITANNIA L -113)
+  best possible two (hindsight)                        net  +566.2 bps  (MCX L +312, INDUSTOWER L +280)
+  random two (mean of 200 draws)                       net   -23.8 bps  (p90 +92)
+
+== 2026-11-04: 230 simulable signals (booked 2), all-signal mean +18.7 bps, win 67 %
+  first two (the live book)                            net  +161.1 bps  (ADANIENSOL L +108, ADANIENT L +79)
+  first two with risk ≥ 80 bps                         net  +161.1 bps  (ADANIENSOL L +108, ADANIENT L +79)
+  first two with the first wall ≤ 0.5R                 net   +60.0 bps  (ADANIENT L +79, ADANIGREEN L +7)
+  first two with the board with the trade (score ≥ 2)  net   +26.3 bps  (ADANIGREEN L +7, AMBER L +46)
+  first two with the future's state with the trade     net   +26.3 bps  (ADANIGREEN L +7, AMBER L +46)
+  first two longs                                      net  +161.1 bps  (ADANIENSOL L +108, ADANIENT L +79)
+  first two after 10:15                                net   -52.8 bps  (BANDHANBNK L -88, BPCL L +62)
+  first two with breadth ≥ 60 % the trade's way        net  +161.1 bps  (ADANIENSOL L +108, ADANIENT L +79)
+  first two: breadth ≥ 60 % and not a top-10 % leader  net  +161.1 bps  (ADANIENSOL L +108, ADANIENT L +79)
+  best possible two (hindsight)                        net  +734.7 bps  (BDL L +387, HINDZINC L +374)
+  random two (mean of 200 draws)                       net    +8.6 bps  (p90 +128)
+
+== pickers across the days given (net bps of the two trades, summed)
+day                                                  2026-10-27  2026-10-29  2026-10-30  2026-11-02  2026-11-03  2026-11-04   total
+picker                                                                                                                             
+best possible two (hindsight)                              52.1       291.3      -139.8        22.6       566.2       734.7  1527.0
+first two with risk ≥ 80 bps                               -0.8       291.3         NaN         NaN       -91.5       161.1   360.1
+first two with breadth ≥ 60 % the trade's way              -8.4        29.9      -139.8         NaN       138.4       161.1   181.2
+first two longs                                            -8.4        29.9         NaN         NaN       -95.9       161.1    86.7
+first two (the live book)                                  -8.4        29.9      -139.8        22.6       -95.9       161.1   -30.6
+first two with the first wall ≤ 0.5R                        NaN         NaN         NaN        -6.0       -95.9        60.0   -41.9
+first two with the future's state with the trade            NaN         NaN         NaN        22.6       -91.5        26.3   -42.6
+first two with the board with the trade (score ≥ 2)         NaN         NaN         NaN        22.6       -95.9        26.3   -47.1
+random two                                                 13.7        61.0      -139.8        22.6       -23.8         8.6   -57.7
+first two: breadth ≥ 60 % and not a top-10 % leader        -8.4        29.9      -139.8         NaN      -115.0       161.1   -72.2
+first two after 10:15                                      -8.4        29.9      -139.8        22.6        54.9       -52.8   -93.6

@@ -1,3 +1,7 @@
+# WITHDRAWN 4 Nov 2026 for every day except 2026-11-03: this run took bars from the engine's API, which serves its latest
+# ~200 5m bars and ignores the day asked, so the 27/29/30 Oct and 2 Nov signals were scored on later days' bars (27 Oct read
+# +915 here; +52 best possible on its own bars). The 2026-11-03 section reproduces exactly on the archive. The corrected
+# six-day table is scoreboard-2026-11-04.txt; the script now reads the day's archive window only.
 
 == 2026-11-03: 235 simulable signals (booked 2), all-signal mean +0.2 bps, win 55 %
   first two (the live book)                            net   -95.9 bps  (CAMS L +58, ADANIENSOL L -128)

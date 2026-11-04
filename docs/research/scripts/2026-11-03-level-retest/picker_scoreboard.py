@@ -7,6 +7,7 @@ Bars come from the running engine's API (GET /api/bars/<sym>?tf=5m); set BARS_AP
 """
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import random
@@ -40,15 +41,31 @@ def _archive_5m(day: str) -> dict[str, list[Bar5]]:
     return _ARCH[day]
 
 
+def _day_window(day: str) -> tuple[int, int]:
+    d = datetime.date.fromisoformat(day)
+    start = int(datetime.datetime(d.year, d.month, d.day, 9, 15, tzinfo=datetime.timezone(datetime.timedelta(hours=5, minutes=30))).timestamp())
+    return start, start + 6 * 3600 + 15 * 60
+
+
 def bars_for(sym: str, day: str) -> list[Bar5]:
+    """The day's 5m bars, the archive first: it holds every session day by day (the feed's bars plus the REST
+    refills, 4 Nov 2026), so a day's simulation never walks into the next day's bars. The engine's API serves
+    only its last ~200 bars of 5m and ignores ``day`` — until 4 Nov this function took those for any day asked,
+    so a 3 Nov signal could be scored on 4 Nov's bars (the first scoreboard, 3 Nov evening, is withdrawn)."""
+    lo, hi = _day_window(day)
     try:
-        with urllib.request.urlopen(f"{API}/api/bars/{sym}?tf=5m&day={day}", timeout=30) as r:
-            rows = json.load(r)["bars"]
+        rows = _archive_5m(day).get(sym, [])
+        rows = [b for b in rows if lo <= b.ts < hi]
         if rows:
-            return [Bar5(int(b["ts"]), b["o"], b["h"], b["l"], b["c"], b["v"]) for b in rows]
-    except Exception:  # noqa: BLE001 - the archive is the fallback
+            return rows
+    except Exception:  # noqa: BLE001 - no archive for the day: the API, filtered to the day
         pass
-    return _archive_5m(day).get(sym, [])
+    try:
+        with urllib.request.urlopen(f"{API}/api/bars/{sym}?tf=5m&n=1000", timeout=30) as r:
+            api_rows = json.load(r)["bars"]
+        return [Bar5(int(b["ts"]), b["o"], b["h"], b["l"], b["c"], b["v"]) for b in api_rows if lo <= int(b["ts"]) < hi]
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def simulate(sig: dict, bars: list[Bar5], last_ts: int) -> dict | None:
