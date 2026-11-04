@@ -41,6 +41,8 @@ from . import level_retest as lr
 log = structlog.get_logger(__name__)
 
 TF = "5m"
+#: an option quote older than this is no price: the broker re-sends the previous close as a pre-open snapshot
+OPT_QUOTE_MAX_AGE_S = 900.0
 #: NSE cash since 2026-08-03: continuous trading in the F&O stocks ends here and a closing auction sets the
 #: official close. A chart drawn from ticks (the owner's Kite) takes the last continuous trade as the previous
 #: day's close — AXISBANK 26 Oct 2026: 1225.0, against the auction's 1220.0.
@@ -602,12 +604,18 @@ class ShadowRunner:
     @staticmethod
     def _opt_px(q: dict[str, Any] | None, side: str, fallback: float | None) -> float | None:
         """A buy pays the ask and a sell gets the bid when the quote is fresh; else the last trade; else ``fallback``.
-        Options tick sparsely (the feed's p90 gap is minutes), so the quote's age is kept beside every price."""
-        if not q:
+        Options tick sparsely (the feed's p90 gap is minutes), so the quote's age is kept beside every price — but
+        a quote older than ``OPT_QUOTE_MAX_AGE_S`` is not a price at all: 4 Nov 2026 the socket was dead from 09:20
+        and the 09:30 legs were booked at the broker's pre-open snapshot (the previous close, 3.5 hours old)."""
+        if not q or (q.get("age_s") or 1e9) > OPT_QUOTE_MAX_AGE_S:
             return fallback
         fresh = (q.get("age_s") or 1e9) <= 120
         px = q.get(side) if fresh else None
         return px or q.get("ltp") or fallback
+
+    @staticmethod
+    def _opt_stale(q: dict[str, Any] | None) -> bool:
+        return not q or (q.get("age_s") or 1e9) > OPT_QUOTE_MAX_AGE_S
 
     def _option_open(self, pos: dict[str, Any], symbol: str, side: int, ref: float, ctx: dict[str, Any]) -> None:
         if self.option_pick is None:
@@ -637,7 +645,7 @@ class ShadowRunner:
             q = self.option_mark(rec["scrip_code"])
         except Exception:  # noqa: BLE001
             return
-        if q and q.get("ltp") and rec.get("entry"):
+        if q and q.get("ltp") and rec.get("entry") and not self._opt_stale(q):
             rec["last"], rec["last_quote"] = q["ltp"], q
             rec["pnl_pct"] = round((q["ltp"] / rec["entry"] - 1) * 100, 1)
 
@@ -664,13 +672,17 @@ class ShadowRunner:
         eq = pos.get("pnl_bps") or 0.0
         rec.update({"status": "CLOSED", "exit": px, "exit_quote": q, "last": px, "pnl_pct": round(pct, 1), "gross_inr": round(gross, 2),
                     "charges_inr": round(charges, 2), "net_inr": round(gross - charges, 2), "equity_bps": eq,
+                    # no usable quote at the exit (a dead feed): marked at the last fresh mark, kept out of the tally
+                    "stale_exit": self._opt_stale(q),
                     # the option's % move per 1 % of the stock: realised leverage (ATM ≈ 10–25 with theta against it)
                     "leverage": round(pct / (eq / 100), 1) if abs(eq) >= 1 else None})
 
     def option_summary(self) -> dict[str, Any]:
-        legs = [t["opt"] for t in self.trades if t.get("opt") and t["opt"].get("status") == "CLOSED"]
+        closed = [t["opt"] for t in self.trades if t.get("opt") and t["opt"].get("status") == "CLOSED"]
+        legs = [o for o in closed if not o.get("stale_exit")]
         open_ = [p["opt"] for p in self.positions.values() if p.get("opt") and p["opt"].get("status") == "OPEN"]
-        return {"closed": len(legs), "open": len(open_), "wins": sum(1 for o in legs if (o.get("net_inr") or 0) > 0),
+        return {"closed": len(legs), "open": len(open_), "stale_exit": len(closed) - len(legs),
+                "wins": sum(1 for o in legs if (o.get("net_inr") or 0) > 0),
                 "avg_pct": round(sum(o["pnl_pct"] for o in legs) / len(legs), 1) if legs else None,
                 "sum_gross_inr": round(sum(o["gross_inr"] or 0 for o in legs), 2), "sum_net_inr": round(sum(o["net_inr"] or 0 for o in legs), 2),
                 "no_quote": sum(1 for t in [*self.trades, *self.positions.values()] if (t.get("opt") or {}).get("status") == "NO_QUOTE")}

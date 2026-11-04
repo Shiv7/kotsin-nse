@@ -206,7 +206,7 @@ async def test_level_mode_without_a_picker_books_the_stock_leg_only(tmp_path):
     await _feed(r, store, UP_DAY[:10], pad_to=75)
     t = r.snapshot()["trades"][0]
     assert "opt" not in t or t["opt"] is None
-    assert r.snapshot()["summary"]["options"] == {"closed": 0, "open": 0, "wins": 0, "avg_pct": None, "sum_gross_inr": 0, "sum_net_inr": 0, "no_quote": 0}
+    assert r.snapshot()["summary"]["options"] == {"closed": 0, "open": 0, "wins": 0, "avg_pct": None, "sum_gross_inr": 0, "sum_net_inr": 0, "no_quote": 0, "stale_exit": 0}
 
 
 def test_cpr_mode_is_unchanged():
@@ -237,6 +237,49 @@ async def test_the_daily_cap_books_the_first_flips_and_records_the_rest(tmp_path
     skipped = [s for s in snap["signals"] if not s["taken"]][0]
     assert skipped["symbol"] == "XYZ" and skipped["why"].startswith("daily cap: 1 trades already taken")
     assert snap["trades"][0]["symbol"] == "ABC"
+
+
+async def test_the_option_leg_refuses_a_quote_older_than_fifteen_minutes_and_keeps_a_stale_exit_out_of_the_tally(tmp_path):
+    """4 Nov 2026: the socket was dead from 09:20 and the 09:30 legs were booked at the broker's pre-open snapshot
+    (the previous close, 3.5 hours old); one exit was marked at the same stale number and read as 0 %. A quote
+    older than ``OPT_QUOTE_MAX_AGE_S`` is no price: the entry becomes NO_QUOTE, a stale mark never updates the
+    leg, and a stale exit is flagged and kept out of the option summary."""
+    from kotsin_nse.strategy.runner import OPT_QUOTE_MAX_AGE_S
+
+    assert OPT_QUOTE_MAX_AGE_S == 900.0
+    store = BarStore()
+    _seed_daily(store, "ABC", "1")
+    r = _runner(tmp_path, store, strategy_sequence="level", strategy_walls_round=True, strategy_max_move_adr=0)
+    stale = {"ltp": 3.0, "bid": None, "ask": None, "age_s": 12565.7}  # the 06:09 snapshot read at 09:30
+    r.option_pick = lambda symbol, side, price: {"scrip_code": "777", "name": "ABC 05 Nov 110 CE", "expiry": "2026-01-29", "strike": 110.0,
+                                                 "kind": "CE", "lot": 100, "days": 24, "instrument": None, "quote": dict(stale)}
+    r.option_mark = lambda code: dict(stale)
+    await _feed(r, store, [*UP_DAY[:10], *([(111.0, 111.3, 110.9, 111.2)] * 65)])
+    snap = r.snapshot()
+    assert snap["summary"]["taken"] == 1 and snap["trades"][0]["opt"]["status"] == "NO_QUOTE"
+    assert snap["trades"][0]["opt"]["entry"] is None and snap["summary"]["options"]["no_quote"] == 1
+    assert snap["summary"]["options"]["closed"] == 0
+
+    # a fresh entry whose exit finds only the stale snapshot: marked at the last fresh mark, flagged, not tallied
+    store2 = BarStore()
+    _seed_daily(store2, "ABC", "1")
+    r2 = _runner(tmp_path / "two", store2, strategy_sequence="level", strategy_walls_round=True, strategy_max_move_adr=0)
+    marks = {"n": 0}
+
+    def mark(code):
+        marks["n"] += 1
+        return {"ltp": 4.0, "bid": 3.9, "ask": 4.1, "age_s": 3.0} if marks["n"] <= 2 else dict(stale)
+
+    r2.option_pick = lambda symbol, side, price: {"scrip_code": "777", "name": "ABC 05 Nov 110 CE", "expiry": "2026-01-29", "strike": 110.0,
+                                                  "kind": "CE", "lot": 100, "days": 24, "instrument": None,
+                                                  "quote": {"ltp": 3.0, "bid": 2.9, "ask": 3.1, "age_s": 5.0}}
+    r2.option_mark = mark
+    await _feed(r2, store2, [*UP_DAY[:10], *([(111.0, 111.3, 110.9, 111.2)] * 65)])
+    o = r2.snapshot()["trades"][0]["opt"]
+    assert o["status"] == "CLOSED" and o["entry"] == 3.1 and o["stale_exit"] is True
+    assert o["exit"] == 4.0 and o["last_quote"]["age_s"] == 3.0  # the last fresh mark, never the snapshot
+    summ = r2.snapshot()["summary"]["options"]
+    assert summ["closed"] == 0 and summ["stale_exit"] == 1 and summ["sum_net_inr"] == 0
 
 
 async def test_an_index_signal_records_the_option_it_would_have_bought(tmp_path):
