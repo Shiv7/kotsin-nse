@@ -3,6 +3,7 @@ often that source really updates each contract instead of trusting its brochure.
 
 from __future__ import annotations
 
+import time
 from datetime import date
 
 import pandas as pd
@@ -16,6 +17,7 @@ from kotsin_nse.feed.base import Channel
 from kotsin_nse.feed.fivepaisa import FivePaisaSource
 from kotsin_nse.feed.rate import FeedRateMeter
 from kotsin_nse.market.session import ist_at
+from kotsin_nse.venue.fivepaisa.ws import FeedHealth
 
 
 def _tick(code: str, recv: float, total: int, ltp: float = 100.0, source: str = "fivepaisa") -> dict:
@@ -232,3 +234,41 @@ def test_rows_added_while_a_flush_runs_are_kept_for_the_next(tmp_path, monkeypat
     monkeypatch.setattr(arc, "_write", real_write)
     assert arc.flush() == 1
     assert set(arc.first_oi("2026-10-23", ["A", "B"])) == {"A", "B"}
+
+
+class _SilentFeed:
+    def __init__(self, silent_for_s: float) -> None:
+        self.health = FeedHealth(connected=True, last_message_ts=time.time() - silent_for_s)
+        self.kicks: list[str] = []
+
+    async def reconnect(self, reason: str = "") -> None:
+        self.kicks.append(reason)
+
+
+async def test_a_silent_socket_during_the_session_is_dropped_once_per_cooldown(settings, monkeypatch):
+    """4 Nov 2026: the socket answered the library's pings and streamed nothing from 09:20:11 while
+    reporting connected — fifty minutes of no ticks, books or OI until a manual restart. During an open
+    session a connected socket with no message for ``feed_silence_reconnect_s`` is dropped so the run loop
+    reconnects; a closed session does not count (pre-open and nights are quiet by nature), fresh messages
+    clear it, a socket already reconnecting is left alone, and one kick per cooldown keeps a slow
+    handshake from looping."""
+    e = Engine(settings.model_copy(update={"feed_silence_reconnect_s": 120.0}))
+    feed = _SilentFeed(silent_for_s=300)
+    e.feed = feed  # type: ignore[assignment]
+    now = time.time()
+    monkeypatch.setattr(e, "market_open_now", lambda: False)
+    assert await e._kick_silent_socket(now) is False
+    monkeypatch.setattr(e, "market_open_now", lambda: True)
+    assert await e._kick_silent_socket(now) is True
+    assert len(feed.kicks) == 1 and "300s" in feed.kicks[0]
+    assert await e._kick_silent_socket(now + 100) is False  # inside the cooldown (limit + 60 s)
+    assert await e._kick_silent_socket(now + 181) is True and len(feed.kicks) == 2
+    feed.health.last_message_ts = time.time() - 30
+    assert await e._kick_silent_socket(now + 400) is False  # messages flow again
+    feed.health.last_message_ts = time.time() - 300
+    feed.health.connected = False
+    assert await e._kick_silent_socket(now + 400) is False  # the run loop is already reconnecting
+    off = Engine(settings.model_copy(update={"feed_silence_reconnect_s": 0}))
+    off.feed = _SilentFeed(silent_for_s=3000)  # type: ignore[assignment]
+    monkeypatch.setattr(off, "market_open_now", lambda: True)
+    assert await off._kick_silent_socket(now) is False  # 0 disables the watchdog

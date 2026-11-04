@@ -166,6 +166,7 @@ class Engine:
         self._open_cache: dict[tuple[Segment, date], float] = {}
         self._cont_end_cache: dict[tuple[Segment, date], float] = {}
         self._reconnects_seen = 0
+        self._silence_kick_ts = 0.0  # when the housekeeping loop last dropped a silent socket
         self.scanner = LiveScanner(self.store)
         self._scanned_minute = 0
         #: near-future OI change % by underlying symbol, for the board's build-up label
@@ -1331,6 +1332,7 @@ class Engine:
                     and now > self.feed.token_expires_at + 60
                 ):
                     await self.feed.reconnect(reason="token expired")
+                await self._kick_silent_socket(now)
 
                 # Periodic REST sweep of the finer frames: the fidelity metric, and exact chart bars.
                 if (
@@ -1730,6 +1732,27 @@ class Engine:
         now = time.time()
         segments = {g.segment for g in self.groups.values()} or set(self.s.segment_list)
         return any(is_open(seg, now, self.calendar) for seg in segments)
+
+    async def _kick_silent_socket(self, now: float) -> bool:
+        """Drop a socket that answers the library's pings but streams nothing during the session, so the
+        run loop reconnects (the broker re-sends every subscription's snapshot on reconnect). 4 Nov 2026:
+        the socket connected at 06:09, delivered 554 ticks at the open and went silent at 09:20:11 while
+        reporting connected — fifty minutes of no ticks, books or OI until a manual restart. Pre-open is
+        quiet by nature, so only an open session counts, and one kick per cooldown keeps a slow handshake
+        from looping. Returns True when it kicked."""
+        limit = float(self.s.feed_silence_reconnect_s or 0)
+        fh = self.feed.health
+        if limit <= 0 or not self.s.feed_enabled or not fh.connected:
+            return False
+        silence = fh.silence_s
+        if silence is None or silence < limit or not self.market_open_now():
+            return False
+        if now - self._silence_kick_ts < limit + 60:
+            return False
+        self._silence_kick_ts = now
+        log.warning("feed.silent_socket", silence_s=round(silence), limit_s=limit)
+        await self.feed.reconnect(reason=f"no message for {silence:.0f}s during the session")
+        return True
 
     def health_snapshot(self) -> dict[str, Any]:
         fh = self.feed.health

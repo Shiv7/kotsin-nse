@@ -134,6 +134,10 @@ class Settings(BaseSettings):
     api_port: int = 8500
     engine_enabled: bool = True  # false → API only (tests and UI work with no broker session)
     feed_enabled: bool = True  # false → REST-polled bars only, no WebSocket
+    #: during the session, a socket that still answers pings but has streamed nothing for this long
+    #: is dropped so the run loop reconnects with a fresh login (4 Nov 2026: silent from 09:20:11
+    #: while "connected", fifty minutes until a manual restart); 0 disables the watchdog
+    feed_silence_reconnect_s: float = 120.0
     #: who streams market data (``feed/``). Orders always go to 5paisa; data may later come from a
     #: vendor. Only sources with a tested adapter are accepted.
     data_source: Literal["fivepaisa"] = "fivepaisa"
