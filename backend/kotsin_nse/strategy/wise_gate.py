@@ -2,7 +2,7 @@
 option, market profile — do wise trading"). A signal is taken only when all four layers agree with the trade, judged at
 the decision bar from what the engine already holds; the rest are recorded with ``why`` so the evening read can score
 them. Scored on the two recorded days with every signal's context (docs/research/scripts/2026-11-04-wise-gate):
-17 of 467 signals passed, gross +32 bps a signal against +9 for the rest, the gated first two +78 / +388 bps against the
+15 of 467 signals passed, gross +36 bps a signal against +9 for the rest, the gated first two +78 / +388 bps against the
 book's −96 / +161 — two days, a description, not a test.
 
   equity   the retest fired on the move's side of the day's open (``with_move``) and the 1H supertrend is with the trade.

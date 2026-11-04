@@ -11,6 +11,9 @@ Layers, all judged at the signal's decision bar, nothing after it:
            area 70 %): the entry on the trade's side of the POC, and the retest's extreme not through the far edge of
            the value area by more than a tolerance (the pullback held value). Signals before 09:45 have no profile: fail.
 Two full days carry every signal with context (3 and 4 Nov 2026; 2 Nov has three). Descriptions, not a test.
+The layers and the profile are the engine's own (strategy/wise_gate.py, profile.core.volume_profile), so this count is the
+count the shadow book will make; the first run (run1.txt) binned closes on its own and let a signal without an ADR pass the
+option layer — 17 of 467 then, see run2.txt for the engine's figure.
 Usage: wise_gate.py OUT_DIR DAY_JSON [DAY_JSON ...]
 """
 from __future__ import annotations
@@ -25,7 +28,10 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, "/Users/shivendrapratap/Downloads/kotsin/kotsin-nse/docs/research/scripts/2026-11-03-level-retest")
-from picker_scoreboard import COST_BPS, _archive_5m, bars_for, simulate  # noqa: E402
+from picker_scoreboard import COST_BPS, bars_for, simulate  # noqa: E402
+
+from kotsin_nse.profile.core import bin_size, volume_profile  # noqa: E402
+from kotsin_nse.strategy import wise_gate as wg  # noqa: E402
 
 DD = Path("/Users/shivendrapratap/Downloads/kotsin/kotsin-nse/backend/data-live")
 IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
@@ -36,19 +42,13 @@ def hm(ts: float) -> str:
     return datetime.datetime.fromtimestamp(ts, IST).strftime("%H:%M")
 
 
-def profile(m1: pd.DataFrame, upto_ts: int, width: float) -> tuple[float, float, float] | None:
-    d = m1[m1.ts < upto_ts]
-    if len(d) < 30 or width <= 0 or d.v.sum() <= 0:
+def profile(m1: pd.DataFrame, upto_ts: int) -> dict | None:
+    """The engine's developing profile (strategy/runner._developing_profile): the 1m bars closed before the decision."""
+    d = m1[m1.ts + 60 <= upto_ts]
+    if len(d) < wg.MIN_PROFILE_MINUTES:
         return None
-    b = (d.c // width) * width
-    vp = d.groupby(b).v.sum().sort_values(ascending=False)
-    poc = float(vp.index[0])
-    acc, tot, lo, hi = 0.0, vp.sum(), poc, poc
-    for px, v in vp.items():
-        acc += v; lo, hi = min(lo, float(px)), max(hi, float(px))
-        if acc >= 0.7 * tot:
-            break
-    return poc, lo, hi + width
+    vp = volume_profile(list(d[["h", "l", "v"]].itertuples(index=False, name=None)), bin_size(float(d.c.iloc[-1])))
+    return {"poc": vp.poc, "val": vp.val, "vah": vp.vah, "minutes": len(d)} if vp else None
 
 
 def main() -> None:
@@ -57,7 +57,7 @@ def main() -> None:
     allrows = []
     for path in sys.argv[2:]:
         snap = json.load(open(path)); day = snap["day"]
-        m1 = pd.read_parquet(DD / "archive" / "bars" / f"{day}.parquet", columns=["symbol", "ts", "c", "v"])
+        m1 = pd.read_parquet(DD / "archive" / "bars" / f"{day}.parquet", columns=["symbol", "ts", "h", "l", "c", "v"])
         m1["hm"] = [hm(x) for x in m1.ts]; m1 = m1[(m1.hm >= "09:15") & (m1.hm < "15:30")]
         by_sym = {s: g.sort_values("ts") for s, g in m1.groupby("symbol")}
         sigs = [s for s in snap["signals"] if s.get("symbol") and s.get("walls") and s["symbol"] not in INDEX]
@@ -81,27 +81,17 @@ def main() -> None:
             tags = s.get("tags") or {}
             st = s.get("stage") or {}
             adr = s.get("adr") or 0.0; tol = s.get("tol") or 0.0; entry = s["entry"]
-            fut = fno.get("futures_state")
-            bias = str(fno.get("bias") or "")
-            cw, pw = fno.get("x_call_wall"), fno.get("x_put_wall")
-            room = ((cw - entry) if side > 0 and cw else (entry - pw) if side < 0 and pw else np.nan)
-            eq = bool(s.get("with_move")) and bool(tags.get("st60_al"))
-            fut_strict = fut == ("LB" if side > 0 else "SB")
-            fut_loose = fut in (("LB", "SC") if side > 0 else ("SB", "LU"))
-            opt = (("Bull" in bias) if side > 0 else ("Bear" in bias)) and (room == room and room >= adr)
-            pr = profile(by_sym.get(sym, pd.DataFrame(columns=["ts", "c", "v"])), s["ts"], tol / 2) if sym in by_sym else None
-            if pr is None:
-                poc_with = va_held = False; poc = np.nan
-            else:
-                poc, val, vah = pr
-                poc_with = (entry - poc) * side > 0
-                ext = st.get("lo") if side > 0 else st.get("hi")
-                va_held = (ext is not None) and ((ext >= val - tol) if side > 0 else (ext <= vah + tol))
-            prof = bool(poc_with and va_held)
+            ext = st.get("lo") if side > 0 else st.get("hi")
+            vp = profile(by_sym[sym], s["ts"]) if sym in by_sym else None
+            g_strict = wg.layers(side, entry, tol, adr, with_move=s.get("with_move"), tags=tags, fno=fno, retest_ext=ext, vp=vp)
+            g_loose = wg.layers(side, entry, tol, adr, with_move=s.get("with_move"), tags=tags, fno=fno, retest_ext=ext, vp=vp, future_loose=True)
+            fut = g_strict["fut_state"]; bias = g_strict["bias"]; poc = g_strict["poc"]
+            eq, fut_strict, fut_loose, opt, prof = g_strict["equity"], g_strict["future"], g_loose["future"], g_strict["option"], g_strict["profile"]
+            poc_with, va_held = g_strict["poc_with"], g_strict["va_held"]
             layers = int(eq) + int(fut_strict) + int(opt) + int(prof)
             rows.append({"day": day, "ts": s["ts"], "time": hm(s["ts"]), "sym": sym, "side": s["side"], "wall": s.get("wall"), "entry": entry, "stop": s["stop"], "risk_bps": s["risk_bps"],
                          "taken": bool(s.get("taken")), "eq": eq, "fut": fut_strict, "fut_loose": fut_loose, "opt": opt, "prof": prof, "poc_with": poc_with, "va_held": va_held,
-                         "layers": layers, "gate": layers == 4, "gate_loose": eq and fut_loose and opt and prof, "owner_stack": bool(tags.get("owner_stack")),
+                         "layers": layers, "gate": g_strict["passed"], "gate_loose": g_loose["passed"], "owner_stack": bool(tags.get("owner_stack")),
                          "fut_state": fut, "bias": bias, "poc": poc, "pnl_bps": sim["pnl_bps"], "net_bps": sim["pnl_bps"] - COST_BPS, "how": sim["how"], "bars": sim["bars"]})
         D = pd.DataFrame(rows)
         if D.empty:

@@ -1,0 +1,125 @@
+How the pair is selected: every confirmed retest is a signal; at its decision bar the four layers are judged; the book takes the first TWO signals by clock time that pass all four (cap 2 a day), the rest are recorded. The engine's own gate and profile code (strategy/wise_gate.py, profile.core) produced this list.
+
+==== 2026-11-03: 235 signals recorded, 9 passed all four, in clock order; the first two = the pair
+
+1. 09:45 BAJFINANCE LONG at R970 (round, confluence 1); retest held at 09:30, confirmed by the 09:40 bar   <== TAKEN: the pair
+   trade   : entry 976.05  stop 968.66  risk 75.7 bps; next walls ROUND 980.0 (+40 bps), R3 980.5 (+46 bps), WR2 983.5 (+77 bps)
+   equity  : break bar on the move's side of the open = True; 1H supertrend up = with the trade True; moved 0.54 ADR from the open, at 0.93 of the day's range
+   future  : LB (OI +0.27 %, price +1.85 %) = long build-up, the trade needs LB
+   option  : board Strong Bull (score 3.5; calls SC, puts SB, PCR 0.44); call wall 1000 / put wall 970 → room the trade's way 23.95 = 1.07 ADR (needs ≥ 1 ADR = 22.4)
+   profile : 30 min of 1m bars → POC 972.75, value area 971.25–975.25; entry 976.05 is above the POC; the retest's low 970 stayed inside the value area + tol 2.24
+   outcome : stop after 20 bars (11:20): -75.7 bps gross, -88.7 net = ₹-887 at ₹1L
+
+2. 09:45 KFINTECH LONG at R855 (round, confluence 2); retest held at 09:25, confirmed by the 09:40 bar   <== TAKEN: the pair
+   trade   : entry 863.8  stop 854.45  risk 108.2 bps; next walls R2 872.3 (+98 bps), R3 882.0 (+211 bps), WR1 899.9 (+418 bps)
+   equity  : break bar on the move's side of the open = True; 1H supertrend up = with the trade True; moved 0.27 ADR from the open, at 0.96 of the day's range
+   future  : LB (OI +0.10 %, price +1.24 %) = long build-up, the trade needs LB
+   option  : board Strong Bull (score 3.5; calls SC, puts SB, PCR 0.58); call wall 900 / put wall 860 → room the trade's way 36.2 = 1.34 ADR (needs ≥ 1 ADR = 27.0)
+   profile : 30 min of 1m bars → POC 861.52, value area 857.02–863.77; entry 863.8 is above the POC; the retest's low 855 stayed inside the value area + tol 2.70
+   outcome : trail after 6 bars (10:10): +179.5 bps gross, +166.5 net = ₹+1,665 at ₹1L
+
+3. 09:50 AMBER LONG at PDH (pd, confluence 2); retest held at 09:30, confirmed by the 09:45 bar   (recorded: the cap of two was full)
+   trade   : entry 6306.0  stop 6260.86  risk 71.6 bps; next walls R1 6354.5 (+77 bps), WR2 6463.3 (+250 bps), R2 6486.0 (+285 bps)
+   equity  : break bar on the move's side of the open = True; 1H supertrend up = with the trade True; moved 0.35 ADR from the open, at 0.89 of the day's range
+   future  : LB (OI +0.43 %, price +0.84 %) = long build-up, the trade needs LB
+   option  : board Strong Bull (score 4.0; calls LB, puts SB, PCR 0.72); call wall 6500 / put wall 6200 → room the trade's way 194.0 = 1.01 ADR (needs ≥ 1 ADR = 191.4)
+   profile : 35 min of 1m bars → POC 6292.80, value area 6270.40–6308.80; entry 6306.0 is above the POC; the retest's low 6265.5 stayed inside the value area + tol 19.14
+   outcome : stop after 33 bars (12:30): -71.6 bps gross, -84.6 net = ₹-846 at ₹1L
+
+4. 09:50 HINDZINC LONG at ORH (or, confluence 2); retest held at 09:40, confirmed by the 09:45 bar   (recorded: the cap of two was full)
+   trade   : entry 523.4  stop 520.47  risk 55.9 bps; next walls WR2 530.5 (+136 bps), R2 531.1 (+147 bps), R3 543.5 (+383 bps)
+   equity  : break bar on the move's side of the open = True; 1H supertrend up = with the trade True; moved 0.3 ADR from the open, at 0.99 of the day's range
+   future  : LB (OI +1.36 %, price +0.83 %) = long build-up, the trade needs LB
+   option  : board Strong Bull (score 4.0; calls LB, puts SB, PCR 0.57); call wall 540 / put wall 500 → room the trade's way 16.6 = 1.16 ADR (needs ≥ 1 ADR = 14.3)
+   profile : 35 min of 1m bars → POC 522.45, value area 517.95–523.35; entry 523.4 is above the POC; the retest's low 520.95 stayed inside the value area + tol 1.43
+   outcome : stop after 62 bars (14:55): -55.9 bps gross, -68.9 net = ₹-689 at ₹1L
+
+5. 10:15 SUZLON LONG at PDH (pd, confluence 1); retest held at 09:40, confirmed by the 10:10 bar   (recorded: the cap of two was full)
+   trade   : entry 35.87  stop 35.48  risk 108.6 bps; next walls ROUND 36.0 (+36 bps), R1 36.1 (+53 bps), WR1 36.8 (+258 bps)
+   equity  : break bar on the move's side of the open = True; 1H supertrend up = with the trade True; moved 0.39 ADR from the open, at 0.73 of the day's range
+   future  : LB (OI +0.37 %, price +1.67 %) = long build-up, the trade needs LB
+   option  : board Strong Bull (score 3.5; calls SC, puts SB, PCR 0.67); call wall 38 / put wall 35 → room the trade's way 2.13 = 1.78 ADR (needs ≥ 1 ADR = 1.2)
+   profile : 60 min of 1m bars → POC 35.77, value area 35.42–35.88; entry 35.87 is above the POC; the retest's low 35.57 stayed inside the value area + tol 0.12
+   outcome : stop after 14 bars (11:20): -108.6 bps gross, -121.6 net = ₹-1,216 at ₹1L
+
+6. 10:20 INDHOTEL LONG at R1 (pivot, confluence 3); retest held at 10:10, confirmed by the 10:15 bar   (recorded: the cap of two was full)
+   trade   : entry 832.4  stop 829.07  risk 40.0 bps; next walls ROUND 835.0 (+31 bps), WR1 835.9 (+42 bps), R2 837.4 (+60 bps)
+   equity  : break bar on the move's side of the open = True; 1H supertrend up = with the trade True; moved 0.2 ADR from the open, at 0.95 of the day's range
+   future  : LB (OI +0.72 %, price +1.07 %) = long build-up, the trade needs LB
+   option  : board Strong Bull (score 3.5; calls SC, puts SB, PCR 0.43); call wall 850 / put wall 820 → room the trade's way 17.6 = 1.02 ADR (needs ≥ 1 ADR = 17.3)
+   profile : 65 min of 1m bars → POC 830.48, value area 828.23–831.83; entry 832.4 is above the POC; the retest's low 830.13 stayed inside the value area + tol 1.73
+   outcome : stop after 14 bars (11:25): -40.0 bps gross, -53.0 net = ₹-530 at ₹1L
+
+7. 10:30 CUB SHORT at P (pivot, confluence 4); retest held at 10:20, confirmed by the 10:25 bar   (recorded: the cap of two was full)
+   trade   : entry 210.18  stop 211.86  risk 80.0 bps; next walls PDL 206.4 (+179 bps), S1 205.3 (+234 bps), WS1 202.8 (+353 bps)
+   equity  : break bar on the move's side of the open = True; 1H supertrend down = with the trade True; moved 0.15 ADR from the open, at 0.16 of the day's range
+   future  : SB (OI +4.76 %, price -0.82 %) = short build-up, the trade needs SB
+   option  : board Strong Bear (score -3.0; calls LU, puts SC, PCR 1.16); call wall 220 / put wall 200 → room the trade's way 10.18 = 1.18 ADR (needs ≥ 1 ADR = 8.6)
+   profile : 75 min of 1m bars → POC 211.28, value area 210.38–211.88; entry 210.18 is below the POC; the retest's high 210.86 stayed inside the value area + tol 0.86
+   outcome : close after 57 bars (15:10): +151.3 bps gross, +138.3 net = ₹+1,383 at ₹1L
+
+8. 11:30 ALKEM LONG at R5160 (round, confluence 2); retest held at 11:15, confirmed by the 11:25 bar   (recorded: the cap of two was full)
+   trade   : entry 5176.5  stop 5143.66  risk 63.4 bps; next walls R2 5219.0 (+82 bps), WR1 5226.8 (+97 bps), R3 5283.0 (+206 bps)
+   equity  : break bar on the move's side of the open = True; 1H supertrend up = with the trade True; moved 0.26 ADR from the open, at 0.95 of the day's range
+   future  : LB (OI +0.72 %, price +1.06 %) = long build-up, the trade needs LB
+   option  : board Strong Bull (score 4.0; calls LB, puts SB, PCR 0.20); call wall 5300 / put wall 5100 → room the trade's way 123.5 = 1.09 ADR (needs ≥ 1 ADR = 113.4)
+   profile : 134 min of 1m bars → POC 5162.30, value area 5131.10–5177.90; entry 5176.5 is above the POC; the retest's low 5160 stayed inside the value area + tol 11.34
+   outcome : trail after 11 bars (12:20): +75.3 bps gross, +62.3 net = ₹+623 at ₹1L
+
+9. 12:10 SBIN LONG at R995 (round, confluence 1); retest held at 11:40, confirmed by the 12:05 bar   (recorded: the cap of two was full)
+   trade   : entry 997.6  stop 994.64  risk 29.7 bps; next walls ROUND 1000.0 (+24 bps), R2 1002.2 (+46 bps), R3 1016.7 (+192 bps)
+   equity  : break bar on the move's side of the open = True; 1H supertrend up = with the trade True; moved 0.28 ADR from the open, at 0.8 of the day's range
+   future  : LB (OI +0.62 %, price +1.00 %) = long build-up, the trade needs LB
+   option  : board Strong Bull (score 4.0; calls LB, puts SB, PCR 0.43); call wall 1020 / put wall 1000 → room the trade's way 22.4 = 1.35 ADR (needs ≥ 1 ADR = 16.6)
+   profile : 175 min of 1m bars → POC 996.25, value area 993.75–997.25; entry 997.6 is above the POC; the retest's low 995 stayed inside the value area + tol 1.66
+   outcome : stop after 8 bars (12:45): -29.7 bps gross, -42.7 net = ₹-427 at ₹1L
+
+==== 2026-11-04: 230 signals recorded, 6 passed all four, in clock order; the first two = the pair
+
+1. 09:45 HINDZINC LONG at P (pivot, confluence 3); retest held at 09:35, confirmed by the 09:40 bar   <== TAKEN: the pair
+   trade   : entry 525.5  stop 519.96  risk 105.5 bps; next walls PDH 529.0 (+67 bps), R1 530.0 (+86 bps), WR2 530.5 (+96 bps)
+   equity  : break bar on the move's side of the open = True; 1H supertrend up = with the trade True; moved 0.54 ADR from the open, at 0.96 of the day's range
+   future  : LB (OI +4.78 %, price +0.51 %) = long build-up, the trade needs LB
+   option  : board Strong Bull (score 3.0; calls SC, puts LU, PCR 0.69); call wall 540 / put wall 500 → room the trade's way 14.5 = 1.00 ADR (needs ≥ 1 ADR = 14.4)
+   profile : 30 min of 1m bars → POC 522.45, value area 520.65–523.65; entry 525.5 is above the POC; the retest's low 521.97 stayed inside the value area + tol 1.44
+   outcome : target after 47 bars (13:35): +373.5 bps gross, +360.5 net = ₹+3,605 at ₹1L
+
+2. 10:50 YESBANK LONG at P (pivot, confluence 3); retest held at 10:40, confirmed by the 10:45 bar   <== TAKEN: the pair
+   trade   : entry 15.53  stop 15.39  risk 88.3 bps; next walls R1 15.7 (+77 bps), PDH 15.7 (+110 bps), WR1 15.8 (+165 bps)
+   equity  : break bar on the move's side of the open = True; 1H supertrend up = with the trade True; moved 0.37 ADR from the open, at 0.97 of the day's range
+   future  : LB (OI +0.15 %, price +1.04 %) = long build-up, the trade needs LB
+   option  : board Strong Bull (score 4.0; calls LB, puts SB, PCR 0.87); call wall 17 / put wall 15 → room the trade's way 1.47 = 2.57 ADR (needs ≥ 1 ADR = 0.6)
+   profile : 90 min of 1m bars → POC 15.28, value area 15.28–15.43; entry 15.53 is above the POC; the retest's low 15.45 stayed inside the value area + tol 0.06
+   outcome : trail after 25 bars (12:50): +40.5 bps gross, +27.5 net = ₹+275 at ₹1L
+
+3. 12:00 ASTRAL LONG at R1385 (round, confluence 1); retest held at 11:50, confirmed by the 11:55 bar   (recorded: the cap of two was full)
+   trade   : entry 1409.3  stop 1384.09  risk 178.9 bps; next walls R2 1418.8 (+67 bps), WR2 1421.4 (+86 bps), R3 1443.2 (+240 bps)
+   equity  : break bar on the move's side of the open = True; 1H supertrend up = with the trade True; moved 0.96 ADR from the open, at 0.99 of the day's range
+   future  : LB (OI +0.78 %, price +2.19 %) = long build-up, the trade needs LB
+   option  : board Strong Bull (score 3.5; calls LB, puts LU, PCR 0.25); call wall 1460 / put wall 1400 → room the trade's way 50.7 = 1.53 ADR (needs ≥ 1 ADR = 33.1)
+   profile : 160 min of 1m bars → POC 1389.38, value area 1379.62–1393.88; entry 1409.3 is above the POC; the retest's low 1385 stayed inside the value area + tol 3.31
+   outcome : trail after 38 bars (15:05): +62.6 bps gross, +49.6 net = ₹+496 at ₹1L
+
+4. 12:40 M&M LONG at PDH (pd, confluence 0); retest held at 12:05, confirmed by the 12:35 bar   (recorded: the cap of two was full)
+   trade   : entry 2920.0  stop 2902.94  risk 58.4 bps; next walls ROUND 2940.0 (+68 bps), R2 2941.0 (+72 bps), WR2 2953.0 (+113 bps)
+   equity  : break bar on the move's side of the open = True; 1H supertrend up = with the trade True; moved 0.15 ADR from the open, at 0.58 of the day's range
+   future  : LB (OI +2.11 %, price +0.62 %) = long build-up, the trade needs LB
+   option  : board Strong Bull (score 4.0; calls LB, puts SB, PCR 0.58); call wall 3000 / put wall 2900 → room the trade's way 80.0 = 1.32 ADR (needs ≥ 1 ADR = 60.6)
+   profile : 200 min of 1m bars → POC 2913.75, value area 2907.75–2918.25; entry 2920.0 is above the POC; the retest's low 2911.0 stayed inside the value area + tol 6.06
+   outcome : trail after 15 bars (13:50): +47.8 bps gross, +34.8 net = ₹+348 at ₹1L
+
+5. 12:45 COLPAL LONG at R1 (pivot, confluence 1); retest held at 12:25, confirmed by the 12:40 bar   (recorded: the cap of two was full)
+   trade   : entry 1651.6  stop 1642.07  risk 57.7 bps; next walls ROUND 1660.0 (+51 bps), R2 1661.6 (+60 bps), WR2 1668.6 (+103 bps)
+   equity  : break bar on the move's side of the open = True; 1H supertrend up = with the trade True; moved 0.63 ADR from the open, at 0.55 of the day's range
+   future  : LB (OI +0.17 %, price +1.42 %) = long build-up, the trade needs LB
+   option  : board Strong Bull (score 3.5; calls SC, puts SB, PCR 0.40); call wall 1700 / put wall 1620 → room the trade's way 48.4 = 1.09 ADR (needs ≥ 1 ADR = 44.3)
+   profile : 205 min of 1m bars → POC 1645.17, value area 1632.42–1661.33; entry 1651.6 is above the POC; the retest's low 1643.8 stayed inside the value area + tol 4.43
+   outcome : stop after 13 bars (13:45): -57.7 bps gross, -70.7 net = ₹-707 at ₹1L
+
+6. 13:25 SBICARD LONG at R548 (round, confluence 1); retest held at 13:05, confirmed by the 13:20 bar   (recorded: the cap of two was full)
+   trade   : entry 550.45  stop 547.53  risk 53.0 bps; next walls R3 555.4 (+90 bps), WR2 561.6 (+203 bps)
+   equity  : break bar on the move's side of the open = True; 1H supertrend up = with the trade True; moved 0.92 ADR from the open, at 0.93 of the day's range
+   future  : LB (OI +0.10 %, price +2.50 %) = long build-up, the trade needs LB
+   option  : board Strong Bull (score 3.5; calls SC, puts SB, PCR 0.69); call wall 570 / put wall 530 → room the trade's way 19.55 = 1.14 ADR (needs ≥ 1 ADR = 17.2)
+   profile : 245 min of 1m bars → POC 547.65, value area 545.85–550.65; entry 550.45 is above the POC; the retest's low 548 stayed inside the value area + tol 1.72
+   outcome : close after 22 bars (15:10): +46.3 bps gross, +33.3 net = ₹+333 at ₹1L

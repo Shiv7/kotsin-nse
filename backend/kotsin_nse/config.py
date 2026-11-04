@@ -234,7 +234,7 @@ class Settings(BaseSettings):
     #: "don't trade until you have equity, future, option, market profile"): a signal is taken only when the four
     #: layers agree with the trade (``strategy/wise_gate.py``); the rest are recorded with ``why``. ``stack4_loose``
     #: also accepts a future in short covering for a long / long unwinding for a short. On the two recorded days
-    #: 17 of 467 signals passed (docs/research/scripts/2026-11-04-wise-gate) — a description, not a test.
+    #: 15 of 467 signals passed (docs/research/scripts/2026-11-04-wise-gate) — a description, not a test.
     strategy_picker: Literal["first", "stack4", "stack4_loose"] = "first"
 
     # ---- the positional book: the daily order block (strategy/daily_ob.py, strategy/positional.py) ------
