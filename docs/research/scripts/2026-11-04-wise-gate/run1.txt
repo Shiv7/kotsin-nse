@@ -1,0 +1,94 @@
+
+== 2026-11-02: 2 simulable signals, all-signal mean +24.3 bps gross, win 100 %
+  equity: with the move and the 1H                           pass   0 of   2  mean gross   +nan bps  win nan %   | fail: mean  +24.3, win 100 %
+  future: build-up with the trade (strict)                   pass   2 of   2  mean gross  +24.3 bps  win 100 %   | fail: mean   +nan, win nan %
+  future: strict or covering/unwinding                       pass   2 of   2  mean gross  +24.3 bps  win 100 %   | fail: mean   +nan, win nan %
+  option: board bias with the trade and room ≥ 1 ADR         pass   0 of   2  mean gross   +nan bps  win nan %   | fail: mean  +24.3, win 100 %
+  profile: on the POC's side and the pullback held value     pass   0 of   2  mean gross   +nan bps  win nan %   | fail: mean  +24.3, win 100 %
+  the engine's owner_stack tag                               pass   0 of   2  mean gross   +nan bps  win nan %   | fail: mean  +24.3, win 100 %
+  by the number of layers agreeing:
+    1 of 4: N   2  mean gross  +24.3 bps  net  +11.3  win 100 %  median   +24
+  ALL FOUR agree: 0 signals
+  all four, loose future: 0 signals
+  the live book (first two)                  net   +22.6 bps  (CDSL S +7, TCS S +42)
+  first two with all four layers             —
+  first two with all four, loose future      —
+  first two with ≥ 3 layers                  —
+  best possible two (hindsight)              net   +22.6 bps  (TCS S +42, CDSL S +7)
+  random two (mean of 200 draws)             net   +22.6 bps
+
+== 2026-11-03: 235 simulable signals, all-signal mean +1.0 bps gross, win 56 %
+  equity: with the move and the 1H                           pass 112 of 235  mean gross   -5.1 bps  win  54 %   | fail: mean   +6.6, win  58 %
+  future: build-up with the trade (strict)                   pass 128 of 235  mean gross   -3.4 bps  win  53 %   | fail: mean   +6.3, win  59 %
+  future: strict or covering/unwinding                       pass 192 of 235  mean gross   -1.8 bps  win  53 %   | fail: mean  +13.4, win  70 %
+  option: board bias with the trade and room ≥ 1 ADR         pass  31 of 235  mean gross   -1.7 bps  win  48 %   | fail: mean   +1.4, win  57 %
+  profile: on the POC's side and the pullback held value     pass 192 of 235  mean gross   +6.1 bps  win  58 %   | fail: mean  -21.8, win  47 %
+  the engine's owner_stack tag                               pass  73 of 235  mean gross   -0.6 bps  win  58 %   | fail: mean   +1.7, win  55 %
+  by the number of layers agreeing:
+    0 of 4: N   6  mean gross  -23.9 bps  net  -36.9  win  50 %  median   -15
+    1 of 4: N  76  mean gross   +8.5 bps  net   -4.5  win  58 %  median   +15
+    2 of 4: N  83  mean gross   -3.0 bps  net  -16.0  win  57 %  median    +8
+    3 of 4: N  59  mean gross   -1.0 bps  net  -14.0  win  54 %  median    +1
+    4 of 4: N  11  mean gross   +2.8 bps  net  -10.2  win  45 %  median   -30
+  ALL FOUR agree: 11 signals, mean gross +2.8 bps, net -10.2, win 45 %, sum net -112 bps
+ time        sym  side  wall  entry   stop  risk_bps fut_state        bias    poc   how  bars  pnl_bps  net_bps
+09:45 BAJFINANCE  LONG  R970  976.0  968.7      75.7        LB Strong Bull  974.9  stop    20    -75.7    -88.7
+09:45   KFINTECH  LONG  R855  863.8  854.5     108.2        LB Strong Bull  858.7 trail     6    179.5    166.5
+09:50      AMBER  LONG   PDH 6306.0 6260.9      71.6        LB Strong Bull 6287.8  stop    33    -71.6    -84.6
+09:50   HINDZINC  LONG   ORH  523.4  520.5      55.9        LB Strong Bull  514.7  stop    62    -55.9    -68.9
+10:15     SUZLON  LONG   PDH   35.9   35.5     108.6        LB Strong Bull   35.8  stop    14   -108.6   -121.6
+10:20   INDHOTEL  LONG    R1  832.4  829.1      40.0        LB Strong Bull  830.6  stop    14    -40.0    -53.0
+10:30        CUB SHORT     P  210.2  211.9      80.0        SB Strong Bear  210.9 close    57    151.3    138.3
+10:35   HDFCLIFE  LONG     P  525.4  522.7      52.2        LB Strong Bull  524.5 trail     7      4.3     -8.7
+11:30      ALKEM  LONG R5160 5176.5 5143.7      63.4        LB Strong Bull 5155.4 trail    11     75.3     62.3
+12:10       SBIN  LONG  R995  997.6  994.6      29.7        LB Strong Bull  994.9  stop     8    -29.7    -42.7
+14:00  POLICYBZR SHORT   ORL  921.1  926.9      63.3        SB Strong Bear  932.1 trail     3      1.8    -11.2
+  all four, loose future: 18 signals, mean gross +12.0, win 50 %, sum net -18
+  the live book (first two)                  net   -95.9 bps  (CAMS L +58, ADANIENSOL L -128)
+  first two with all four layers             net   +77.8 bps  (BAJFINANCE L -76, KFINTECH L +179)
+  first two with all four, loose future      net   -92.3 bps  (BAJFINANCE L -76, BPCL L +9)
+  first two with ≥ 3 layers                  net   -82.5 bps  (ASHOKLEY L +19, BAJFINANCE L -76)
+  best possible two (hindsight)              net  +566.2 bps  (MCX L +312, INDUSTOWER L +280)
+  random two (mean of 200 draws)             net   -26.4 bps
+
+== 2026-11-04: 230 simulable signals, all-signal mean +18.7 bps gross, win 67 %
+  equity: with the move and the 1H                           pass 154 of 230  mean gross  +18.5 bps  win  67 %   | fail: mean  +19.0, win  66 %
+  future: build-up with the trade (strict)                   pass 158 of 230  mean gross  +13.4 bps  win  64 %   | fail: mean  +30.2, win  72 %
+  future: strict or covering/unwinding                       pass 181 of 230  mean gross  +14.1 bps  win  64 %   | fail: mean  +35.7, win  76 %
+  option: board bias with the trade and room ≥ 1 ADR         pass  16 of 230  mean gross  +47.1 bps  win  81 %   | fail: mean  +16.6, win  65 %
+  profile: on the POC's side and the pullback held value     pass 158 of 230  mean gross  +14.5 bps  win  65 %   | fail: mean  +28.0, win  71 %
+  the engine's owner_stack tag                               pass 101 of 230  mean gross   +9.0 bps  win  62 %   | fail: mean  +26.3, win  70 %
+  by the number of layers agreeing:
+    0 of 4: N  10  mean gross  +63.7 bps  net  +50.7  win  80 %  median   +67
+    1 of 4: N  42  mean gross  +31.9 bps  net  +18.9  win  76 %  median   +15
+    2 of 4: N  96  mean gross   +8.3 bps  net   -4.7  win  59 %  median    +6
+    3 of 4: N  76  mean gross  +13.2 bps  net   +0.2  win  67 %  median   +10
+    4 of 4: N   6  mean gross  +85.5 bps  net  +72.5  win  83 %  median   +47
+  ALL FOUR agree: 6 signals, mean gross +85.5 bps, net +72.5, win 83 %, sum net +435 bps
+ time      sym side  wall  entry   stop  risk_bps fut_state        bias    poc    how  bars  pnl_bps  net_bps
+09:45 HINDZINC LONG     P  525.5  520.0     105.5        LB Strong Bull  521.6 target    47    373.5    360.5
+10:50  YESBANK LONG     P   15.5   15.4      88.3        LB Strong Bull   15.3  trail    25     40.5     27.5
+12:00   ASTRAL LONG R1385 1409.3 1384.1     178.9        LB Strong Bull 1388.8  trail    38     62.6     49.6
+12:40      M&M LONG   PDH 2920.0 2902.9      58.4        LB Strong Bull 2909.8  trail    15     47.8     34.8
+12:45   COLPAL LONG    R1 1651.6 1642.1      57.7        LB Strong Bull 1642.2   stop    13    -57.7    -70.7
+13:25  SBICARD LONG  R548  550.4  547.5      53.0        LB Strong Bull  547.5  close    22     46.3     33.3
+  all four, loose future: 9 signals, mean gross +63.7, win 89 %, sum net +457
+  the live book (first two)                  net  +161.1 bps  (ADANIENSOL L +108, ADANIENT L +79)
+  first two with all four layers             net  +388.0 bps  (HINDZINC L +374, YESBANK L +40)
+  first two with all four, loose future      net  +382.5 bps  (HINDZINC L +374, IDEA L +35)
+  first two with ≥ 3 layers                  net  +124.0 bps  (BAJFINANCE L +16, BOSCHLTD L +134)
+  best possible two (hindsight)              net  +734.7 bps  (BDL L +387, HINDZINC L +374)
+  random two (mean of 200 draws)             net   +23.1 bps
+
+== all days pooled: 467 signals
+    0 of 4: N  16  mean gross  +30.8 bps  net  +17.8  win  69 %
+    1 of 4: N 120  mean gross  +17.0 bps  net   +4.0  win  65 %
+    2 of 4: N 179  mean gross   +3.1 bps  net   -9.9  win  58 %
+    3 of 4: N 135  mean gross   +7.0 bps  net   -6.0  win  61 %
+    4 of 4: N  17  mean gross  +32.0 bps  net  +19.0  win  59 %
+  equity           pass 266: mean gross   +8.6, win  61 %  | fail 201:  +11.5,  61 %
+  future strict    pass 288: mean gross   +6.0, win  59 %  | fail 179:  +15.9,  64 %
+  option           pass  47: mean gross  +14.9, win  60 %  | fail 420:   +9.2,  61 %
+  profile          pass 350: mean gross   +9.9, win  61 %  | fail 117:   +9.6,  62 %
+  ALL FOUR         pass  17: mean gross  +32.0, win  59 %  | fail 450:   +9.0,  61 %
+  all four loose   pass  27: mean gross  +29.3, win  63 %  | fail 440:   +8.6,  61 %

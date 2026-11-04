@@ -528,3 +528,15 @@ async def test_a_restart_inside_the_session_picks_the_book_up_from_the_day_file(
         assert got[k] == expect[k], k
     assert got["virtual"]["fixed_1to2"]["bars"] == expect["virtual"]["fixed_1to2"]["bars"]
     assert second.read_day(DAY)["summary"]["closed"] == 1 and len(second.read_day(DAY)["signals"]) == 1
+
+
+async def test_the_stack_picker_records_a_signal_without_the_four_layers_and_does_not_take_it(tmp_path):
+    store = BarStore()
+    _seed_daily(store, "ABC", "1")
+    r = _runner(tmp_path, store, strategy_picker="stack4")  # no F&O board in the harness → the future and option layers say no
+    await _feed(r, store, DAY_BARS)
+    s = r.snapshot()["summary"]
+    assert s["signals"] == 1 and s["taken"] == 0 and s["skipped"] == 1 and r.orders == 0 and r.snapshot()["picker"] == "stack4"
+    sig = r.snapshot()["signals"][0]
+    assert sig["why"].startswith("stack:") and "future" in sig["why"] and sig["stack"]["passed"] is False and sig["stack"]["future"] is False
+

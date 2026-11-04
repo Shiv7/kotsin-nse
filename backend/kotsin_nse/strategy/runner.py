@@ -32,11 +32,13 @@ from ..exec.gateway import Decision, Gateway
 from ..instrument.universe import INDEX_ROOTS
 from ..ledger.db import Ledger
 from ..market.session import bucket_end, continuous_end_ts, ist_day, ist_hm, session_open_ts
+from ..profile.core import bin_size, volume_profile
 from ..risk.costs import CostModel
 from ..scan.replay import guarded_adr
 from ..structure.engine import Bar5
 from . import cpr_retest as cr
 from . import level_retest as lr
+from . import wise_gate as wg
 
 log = structlog.get_logger(__name__)
 
@@ -100,6 +102,8 @@ class ShadowRunner:
         self.sequence = settings.strategy_sequence
         self.name = lr.NAME if self.sequence == "level" else cr.NAME
         self.filter = settings.strategy_filter
+        #: first come, or the owner's four-layer gate (equity, future, option, profile) — strategy/wise_gate.py
+        self.picker = settings.strategy_picker
         self.notional = settings.strategy_notional_inr
         self.pdc = settings.strategy_pdc
         self.dir = settings.data_dir / "strategy"
@@ -389,6 +393,15 @@ class ShadowRunner:
         if not cr.passes(self.filter, tags):
             sig["why"] = f"filter {self.filter!r} not met"
             return
+        if self.picker != "first":
+            # the owner's gate: all four layers with the trade, or the signal is recorded and not taken
+            gate = wg.layers(side, entry, sd.tol, sd.adr or 0.0, with_move=sig["with_move"], tags=tags, fno=(ctx or {}).get("fno") or {},
+                             retest_ext=getattr(st, "lo", None) if side > 0 else getattr(st, "hi", None),
+                             vp=self._developing_profile(inst.symbol, int(bar.ts) + 300), future_loose=self.picker == "stack4_loose")
+            sig["stack"] = gate
+            if not gate["passed"]:
+                sig["why"] = wg.why(gate)
+                return
         cap = self.s.strategy_max_trades_per_day
         if cap > 0:
             taken_today = sum(1 for x in self.signals if x.get("taken"))
@@ -442,6 +455,14 @@ class ShadowRunner:
         self._writes.append(self._ledger_position(pos))
         self._writes.append(self._ledger_event("strategy.entry", {k: pos[k] for k in ("id", "symbol", "side", "qty", "entry", "stop", "target", "target_name", "risk_bps", "reward_bps", "mode")}))
         log.info("strategy.entry", symbol=inst.symbol, side=pos["side"], entry=fill, stop=stop, target=ws[0], mode=res.order.mode)
+
+    def _developing_profile(self, symbol: str, now: int) -> dict[str, Any] | None:
+        """The day's volume profile from the store's 1m bars closed before ``now``: None under thirty minutes."""
+        m1 = [b for b in self.store.bars(symbol, "1m") if ist_day(b.ts).isoformat() == self.day and b.ts + 60 <= now]
+        if len(m1) < wg.MIN_PROFILE_MINUTES:
+            return None
+        vp = volume_profile([(b.high, b.low, b.volume) for b in m1], bin_size(m1[-1].close))
+        return {"poc": vp.poc, "val": vp.val, "vah": vp.vah, "minutes": len(m1)} if vp else None
 
     def _context(self, symbol: str, sd: SymbolDay) -> tuple[dict[str, Any], dict[str, Any] | None]:
         """The engine's readings at the signal and the previous session's official OI. A reader that fails is
@@ -842,7 +863,7 @@ class ShadowRunner:
                     stages.append({"symbol": sym, "side": "bullish" if side > 0 else "bearish", **st.to_json(), "tol": round(sd.tol, 2), "levels": sd.levels, "closes": sd.closes})
         taken = [s for s in self.signals if s["taken"]]
         return {
-            "strategy": self.name, "sequence": self.sequence, "day": self.day, "rule": self.rule, "filter": self.filter, "pdc": self.pdc, "notional_inr": self.notional,
+            "strategy": self.name, "sequence": self.sequence, "day": self.day, "rule": self.rule, "filter": self.filter, "picker": self.picker, "pdc": self.pdc, "notional_inr": self.notional,
             "walls_round": self.s.strategy_walls_round, "max_move_adr": self.s.strategy_max_move_adr, "levels_hl": self.s.strategy_levels_hl, "entry_cutoff": self.s.strategy_entry_cutoff,
             "max_trades_per_day": self.s.strategy_max_trades_per_day,
             "universe": sum(1 for sym, i in self.underlyings.items() if i.kind is InstrumentKind.EQUITY and sym not in INDEX_ROOTS), "with_levels": len(self.syms),

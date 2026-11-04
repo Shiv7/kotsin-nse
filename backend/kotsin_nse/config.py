@@ -229,6 +229,13 @@ class Settings(BaseSettings):
     #: recorded as a signal with ``why`` = the cap, so the evening read can score other pickers (owner, 3 Nov: a ₹1L
     #: budget, "max 2 trade in one day", "learning curve to get best trades")
     strategy_max_trades_per_day: int = 0
+    #: how the shadow book picks among confirmed signals. ``first`` = first come (the research's population; the
+    #: picker scoreboard scores the rest in the evening). ``stack4`` = the owner's "wise trading" gate (4 Nov 2026:
+    #: "don't trade until you have equity, future, option, market profile"): a signal is taken only when the four
+    #: layers agree with the trade (``strategy/wise_gate.py``); the rest are recorded with ``why``. ``stack4_loose``
+    #: also accepts a future in short covering for a long / long unwinding for a short. On the two recorded days
+    #: 17 of 467 signals passed (docs/research/scripts/2026-11-04-wise-gate) — a description, not a test.
+    strategy_picker: Literal["first", "stack4", "stack4_loose"] = "first"
 
     # ---- the positional book: the daily order block (strategy/daily_ob.py, strategy/positional.py) ------
     #: off by default: the book FAILED its pre-registered test on 2026-10-29 (docs/research/2026-10-29-
