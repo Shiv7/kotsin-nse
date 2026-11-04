@@ -540,3 +540,41 @@ async def test_the_stack_picker_records_a_signal_without_the_four_layers_and_doe
     sig = r.snapshot()["signals"][0]
     assert sig["why"].startswith("stack:") and "future" in sig["why"] and sig["stack"]["passed"] is False and sig["stack"]["future"] is False
 
+
+async def test_an_enforced_extra_check_records_the_signal_and_every_signal_carries_the_extras(tmp_path):
+    store = BarStore()
+    _seed_daily(store, "ABC", "1")
+    r = _runner(tmp_path, store, strategy_gate_extra="fno_full")  # no F&O board in the harness → the build-up cannot be full
+    await _feed(r, store, DAY_BARS)
+    s = r.snapshot()["summary"]
+    assert s["signals"] == 1 and s["taken"] == 0 and r.orders == 0
+    sig = r.snapshot()["signals"][0]
+    assert sig["why"] == "stack extra: fno_full" and sig["extra"]["fno_full"] is False and sig["extra"]["retest_hm"] == sig["retest_time"]
+    assert set(wg_extras := sig["extra"]) >= {"doji", "pin", "engulf", "pcr_with", "near_monthly", "rt_before_1230"} and isinstance(wg_extras["combo"], str)
+
+
+async def test_the_owners_stop_is_the_retest_bars_own_low(tmp_path):
+    store = BarStore()
+    _seed_daily(store, "ABC", "1")
+    r = _runner(tmp_path, store, strategy_stop="retest")
+    await _feed(r, store, DAY_BARS)
+    snap = r.snapshot()
+    pos = list(snap["positions"]) + list(snap["trades"])
+    assert pos, "the harness day books one trade"
+    p = pos[0]
+    sig = snap["signals"][0]
+    rt = DAY_BARS[int(sig["stage"]["i_rt"])]
+    assert p["initial_stop"] == rt[2]  # the retest bar's low, nothing taken off it
+    assert sig["extra"]["fib_ratio"] is not None and "tpo_with" in sig["extra"]
+
+
+async def test_a_signal_below_the_minimum_reward_to_risk_is_recorded_not_taken(tmp_path):
+    store = BarStore()
+    _seed_daily(store, "ABC", "1")
+    r = _runner(tmp_path, store, strategy_min_rr=50.0)  # nothing offers fifty to one
+    await _feed(r, store, DAY_BARS)
+    s = r.snapshot()["summary"]
+    assert s["signals"] == 1 and s["taken"] == 0 and r.orders == 0
+    sig = r.snapshot()["signals"][0]
+    assert sig["why"].startswith("reward-to-risk") and sig["rr"]["last"] is not None and sig["rr"]["last"] >= sig["rr"]["first"]
+

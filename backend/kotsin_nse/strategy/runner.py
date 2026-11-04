@@ -32,7 +32,7 @@ from ..exec.gateway import Decision, Gateway
 from ..instrument.universe import INDEX_ROOTS
 from ..ledger.db import Ledger
 from ..market.session import bucket_end, continuous_end_ts, ist_day, ist_hm, session_open_ts
-from ..profile.core import bin_size, volume_profile
+from ..profile.core import bin_size, market_profile, volume_profile
 from ..risk.costs import CostModel
 from ..scan.replay import guarded_adr
 from ..structure.engine import Bar5
@@ -61,6 +61,10 @@ class SymbolDay:
     weekly: dict[str, float] | None
     adr: float | None
     tol: float
+    #: the previous calendar month's pivots and extremes (the owner's monthly levels, 4 Nov 2026) — tags, not walls
+    monthly: dict[str, float] | None = None
+    #: the bigger trend's swing for the retracement tags: the last 20 sessions' high, low and the close before the day
+    swing: dict[str, float] | None = None
     #: the previous session's closes — the official one, the last traded, which one built the levels, its date
     closes: dict[str, Any] = field(default_factory=dict)
     daily: dict[int, dict[str, Any]] = field(default_factory=dict)
@@ -71,7 +75,7 @@ class SymbolDay:
     last_ts: int = 0
 
     def to_json(self) -> dict[str, Any]:
-        return {"levels": self.levels, "weekly": self.weekly, "adr": self.adr, "tol": self.tol, "closes": self.closes,
+        return {"levels": self.levels, "weekly": self.weekly, "monthly": self.monthly, "adr": self.adr, "tol": self.tol, "closes": self.closes,
                 "stages": {("bullish" if s > 0 else "bearish"): st.to_json() for s, st in self.stages.items()}}
 
 
@@ -213,9 +217,22 @@ class ShadowRunner:
         if done:
             g = weeks[max(done)]
             weekly = cr.weekly_pivots([(max(b.high for b in g), min(b.low for b in g), g[-1].close)])
+        months: dict[tuple[int, int], list[UnifiedBar]] = {}
+        for b in rows:
+            d_ = ist_day(b.ts)
+            months.setdefault((d_.year, d_.month), []).append(b)
+        done_m = [k for k in months if k < (day.year, day.month)]
+        monthly = None
+        if done_m:
+            g = months[max(done_m)]
+            mh, ml = max(b.high for b in g), min(b.low for b in g)
+            lvm = cr.day_levels(mh, ml, g[-1].close)
+            monthly = {"MP": lvm["P"], "MTC": lvm["TC"], "MBC": lvm["BC"], "MR1": lvm["R1"], "MR2": lvm["R2"], "MS1": lvm["S1"], "MS2": lvm["S2"], "PMH": mh, "PML": ml}
         closes = {"official": prev.close, "last": last_trade, "used": self.pdc, "day": prev_day.isoformat(),
                   "hl": "continuous" if hl is not None else "daily", "high": high, "low": low, "high_official": prev.high, "low_official": prev.low}
-        sd = SymbolDay(levels=levels, weekly=weekly, adr=adr, tol=cr.tolerance(adr, price), closes=closes)
+        last20 = rows[-20:]
+        swing = {"high": max(b.high for b in last20), "low": min(b.low for b in last20), "close": last20[-1].close} if last20 else None
+        sd = SymbolDay(levels=levels, weekly=weekly, adr=adr, tol=cr.tolerance(adr, price), closes=closes, monthly=monthly, swing=swing)
         sd.entered = {side for sym, side in getattr(self, "_restored_entered", set()) if sym == symbol}
         self.syms[symbol] = sd
         return sd
@@ -339,7 +356,8 @@ class ShadowRunner:
     def _enter(self, inst: Instrument, sd: SymbolDay, bars: list[Bar5], side: int, st: Any, bar: UnifiedBar) -> None:
         j, i_rt = int(st.j or 0), int(st.i_rt or 0)
         entry = bars[j].c
-        stop = (bars[i_rt].l - sd.tol) if side > 0 else (bars[i_rt].h + sd.tol)
+        pad = 0.0 if self.s.strategy_stop == "retest" else sd.tol
+        stop = (bars[i_rt].l - pad) if side > 0 else (bars[i_rt].h + pad)
         risk_bps = abs(entry - stop) / entry * 1e4
         ws = cr.walls(side, entry, sd.levels, sd.weekly, sd.tol, use_round=self.s.strategy_walls_round)
         near = cr.nearest_level(side, entry, sd.levels, sd.weekly)
@@ -393,6 +411,12 @@ class ShadowRunner:
         if not cr.passes(self.filter, tags):
             sig["why"] = f"filter {self.filter!r} not met"
             return
+        # the owner's five extra checks, recorded on every signal; enforced only when named in strategy_gate_extra
+        ex = wg.extras(side, retest_hm=sig["retest_time"], retest_bar=bars[i_rt], confirm_bar=bars[j], prev_bar=bars[j - 1] if j >= 1 else None,
+                       fno=(ctx or {}).get("fno") or {}, monthly=sd.monthly, lo=getattr(st, "lo", None), hi=getattr(st, "hi", None), tol=sd.tol)
+        ex.update(wg.market_profile_tags(side, entry, self._tpo_profile(inst.symbol, int(bar.ts) + 300), sd.tol))
+        ex.update(wg.fib_tags(side, bars[i_rt].l if side > 0 else bars[i_rt].h, sd.swing, sd.tol))
+        sig["extra"] = ex
         if self.picker != "first":
             # the owner's gate: all four layers with the trade, or the signal is recorded and not taken
             gate = wg.layers(side, entry, sd.tol, sd.adr or 0.0, with_move=sig["with_move"], tags=tags, fno=(ctx or {}).get("fno") or {},
@@ -401,6 +425,18 @@ class ShadowRunner:
             sig["stack"] = gate
             if not gate["passed"]:
                 sig["why"] = wg.why(gate)
+                return
+        rr_first = (abs(ws[0][1] - entry) / abs(entry - stop)) if ws and entry != stop else None
+        rr_last = (abs(ws[-1][1] - entry) / abs(entry - stop)) if ws and entry != stop else None
+        sig["rr"] = {"first": round(rr_first, 2) if rr_first else None, "last": round(rr_last, 2) if rr_last else None}
+        if self.s.strategy_min_rr > 0 and (rr_last is None or rr_last < self.s.strategy_min_rr):
+            sig["why"] = f"reward-to-risk {rr_last:.2f} to the last wall, below {self.s.strategy_min_rr:g}" if rr_last else "reward-to-risk: no wall"
+            return
+        required = tuple(x.strip() for x in self.s.strategy_gate_extra.split(",") if x.strip())
+        if required:
+            ok, missing = wg.extra_passed(ex, required)
+            if not ok:
+                sig["why"] = "stack extra: " + ", ".join(missing)
                 return
         cap = self.s.strategy_max_trades_per_day
         if cap > 0:
@@ -455,6 +491,14 @@ class ShadowRunner:
         self._writes.append(self._ledger_position(pos))
         self._writes.append(self._ledger_event("strategy.entry", {k: pos[k] for k in ("id", "symbol", "side", "qty", "entry", "stop", "target", "target_name", "risk_bps", "reward_bps", "mode")}))
         log.info("strategy.entry", symbol=inst.symbol, side=pos["side"], entry=fill, stop=stop, target=ws[0], mode=res.order.mode)
+
+    def _tpo_profile(self, symbol: str, now: int) -> dict[str, Any] | None:
+        """The day's market profile (30-minute TPO letters) from the store's 1m bars closed before ``now``."""
+        m1 = [b for b in self.store.bars(symbol, "1m") if ist_day(b.ts).isoformat() == self.day and b.ts + 60 <= now]
+        if len(m1) < wg.MIN_PROFILE_MINUTES:
+            return None
+        mp = market_profile([(int(b.ts), b.high, b.low) for b in m1], int(session_open_ts(self.segment, ist_day(now))), bin_size(m1[-1].close))
+        return {"poc": mp.poc, "val": mp.val, "vah": mp.vah, "day_type": mp.day_type, "ib_high": mp.ib_high, "ib_low": mp.ib_low, "single_prints": len(mp.single_prints), "poor_high": mp.poor_high, "poor_low": mp.poor_low} if mp else None
 
     def _developing_profile(self, symbol: str, now: int) -> dict[str, Any] | None:
         """The day's volume profile from the store's 1m bars closed before ``now``: None under thirty minutes."""
@@ -863,7 +907,7 @@ class ShadowRunner:
                     stages.append({"symbol": sym, "side": "bullish" if side > 0 else "bearish", **st.to_json(), "tol": round(sd.tol, 2), "levels": sd.levels, "closes": sd.closes})
         taken = [s for s in self.signals if s["taken"]]
         return {
-            "strategy": self.name, "sequence": self.sequence, "day": self.day, "rule": self.rule, "filter": self.filter, "picker": self.picker, "pdc": self.pdc, "notional_inr": self.notional,
+            "strategy": self.name, "sequence": self.sequence, "day": self.day, "rule": self.rule, "filter": self.filter, "picker": self.picker, "stop": self.s.strategy_stop, "min_rr": self.s.strategy_min_rr, "gate_extra": self.s.strategy_gate_extra, "pdc": self.pdc, "notional_inr": self.notional,
             "walls_round": self.s.strategy_walls_round, "max_move_adr": self.s.strategy_max_move_adr, "levels_hl": self.s.strategy_levels_hl, "entry_cutoff": self.s.strategy_entry_cutoff,
             "max_trades_per_day": self.s.strategy_max_trades_per_day,
             "universe": sum(1 for sym, i in self.underlyings.items() if i.kind is InstrumentKind.EQUITY and sym not in INDEX_ROOTS), "with_levels": len(self.syms),

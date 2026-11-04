@@ -64,3 +64,84 @@ def why(gate: Mapping[str, Any]) -> str:
         parts.append("profile (no profile yet)" if gate.get("poc") is None else f"profile (poc {gate.get('poc')}, value {gate.get('val')}–{gate.get('vah')})")
     return "stack: " + "; ".join(parts) if parts else "stack: all four"
 
+
+# ---- the owner's five extra checks (4 Nov 2026 23:45: "the time of the retest, what PCR says, all 16 build-up
+# combinations, monthly pivots, candle patterns") — recorded on every signal as ``extra``; enforced only when named in
+# ``strategy_gate_extra``. On the two recorded days (docs/research/scripts/2026-11-04-wise-gate/extra-checks.txt) none
+# improved the outcome and PCR, the full build-up and the candle patterns were worse when present; the retest after
+# 12:30 was the one weak support (−0.2 to −6.5 bps gross by half-hour). Tags first, layers only after ten sessions.
+EXTRAS = ("rt_before_1230", "rt_after_open", "pcr_with", "fno_full", "options_with", "near_monthly", "candle_any", "engulf", "doji_or_pin")
+
+
+def candle_flags(side: int, retest: Any, confirm: Any, prev: Any) -> dict[str, bool]:
+    """The retest bar a doji (body ≤ 15 % of its range) or a hammer / shooting star the trade's way (the far wick at
+    least twice the body and half the range); the confirmation bar engulfing the bar before it in the trade's direction."""
+    out = {"doji": False, "pin": False, "engulf": False}
+    if retest is not None and retest.h > retest.l:
+        body = abs(retest.c - retest.o)
+        rng = retest.h - retest.l
+        out["doji"] = body <= 0.15 * rng
+        far = (min(retest.o, retest.c) - retest.l) if side > 0 else (retest.h - max(retest.o, retest.c))
+        out["pin"] = far >= 2 * body and far >= 0.5 * rng
+    if confirm is not None and prev is not None:
+        if side > 0:
+            out["engulf"] = confirm.c > confirm.o and confirm.o <= min(prev.o, prev.c) and confirm.c >= max(prev.o, prev.c) and (confirm.c - confirm.o) > abs(prev.c - prev.o)
+        else:
+            out["engulf"] = confirm.c < confirm.o and confirm.o >= max(prev.o, prev.c) and confirm.c <= min(prev.o, prev.c) and (confirm.o - confirm.c) > abs(prev.c - prev.o)
+    return out
+
+
+def extras(side: int, *, retest_hm: str, retest_bar: Any, confirm_bar: Any, prev_bar: Any, fno: Mapping[str, Any] | None,
+           monthly: Mapping[str, float] | None, lo: float | None, hi: float | None, tol: float) -> dict[str, Any]:
+    """The five checks' facts and verdicts at the decision bar."""
+    fno = fno or {}
+    fs, cs, ps = fno.get("futures_state"), fno.get("calls_state"), fno.get("puts_state")
+    pcr, pcr_chg = fno.get("x_pcr_oi"), fno.get("x_pcr_oi_chg")
+    calls_with = (cs in ("LB", "SC")) if side > 0 else (cs in ("SB", "LU"))
+    puts_with = (ps in ("SB", "LU")) if side > 0 else (ps in ("LB", "SC"))
+    near = [k for k, v in (monthly or {}).items() if lo is not None and hi is not None and lo - tol <= v <= hi + tol]
+    cf = candle_flags(side, retest_bar, confirm_bar, prev_bar)
+    return {"retest_hm": retest_hm, "rt_before_1230": retest_hm < "12:30", "rt_after_open": retest_hm >= "09:45",
+            "pcr": pcr, "pcr_chg": pcr_chg, "pcr_with": pcr_chg is not None and ((pcr_chg > 0) if side > 0 else (pcr_chg < 0)),
+            "combo": f"{fs}/{cs}/{ps}", "fno_full": (fs == "LB" and cs == "LB" and ps == "SB") if side > 0 else (fs == "SB" and cs == "SB" and ps == "LB"),
+            "calls_with": calls_with, "puts_with": puts_with, "options_with": calls_with and puts_with,
+            "near_monthly": bool(near), "monthly": near, **cf, "candle_any": cf["doji"] or cf["pin"] or cf["engulf"], "doji_or_pin": cf["doji"] or cf["pin"]}
+
+
+def extra_passed(ex: Mapping[str, Any], required: tuple[str, ...]) -> tuple[bool, list[str]]:
+    """Every named check must be true; the names that are not come back."""
+    missing = [k for k in required if k and not ex.get(k)]
+    return not missing, missing
+
+
+FIB = (0.382, 0.5, 0.618)
+
+
+def market_profile_tags(side: int, entry: float, mp: Mapping[str, Any] | None, tol: float) -> dict[str, Any]:
+    """The day's market profile (TPO) at the decision bar: the entry's place against its value area and POC, the day
+    type so far, and whether the retest side of the profile is poor (an unfinished auction) — the owner's market
+    profile (5 Nov 2026), recorded, not enforced."""
+    if not mp:
+        return {"tpo": None, "tpo_with": False, "tpo_in_value": None, "tpo_day_type": None}
+    poc, val, vah = mp.get("poc"), mp.get("val"), mp.get("vah")
+    with_ = (entry > poc) if side > 0 else (entry < poc)
+    in_value = (val is not None and vah is not None) and (val - tol <= entry <= vah + tol)
+    poor_behind = bool(mp.get("poor_low")) if side > 0 else bool(mp.get("poor_high"))
+    return {"tpo": {"poc": poc, "val": val, "vah": vah, "ib_high": mp.get("ib_high"), "ib_low": mp.get("ib_low"), "single_prints": mp.get("single_prints")},
+            "tpo_with": bool(with_), "tpo_in_value": bool(in_value), "tpo_day_type": mp.get("day_type"), "tpo_poor_behind": poor_behind}
+
+
+def fib_tags(side: int, retest_px: float, swing: Mapping[str, float] | None, tol: float) -> dict[str, Any]:
+    """Where the retest sits in the bigger trend's swing (the last 20 sessions' high to low): the retracement ratio
+    measured from the swing's extreme the trade leans on (0 = at the swing high for a long, 1 = at its low), the
+    nearest Fibonacci level and whether the retest is within a tolerance of one — the owner's Fibonacci (5 Nov 2026)."""
+    if not swing or swing["high"] <= swing["low"]:
+        return {"fib_ratio": None, "fib_level": None, "fib_near": False, "trend20": None}
+    rng = swing["high"] - swing["low"]
+    ratio = (swing["high"] - retest_px) / rng if side > 0 else (retest_px - swing["low"]) / rng
+    nearest = min(FIB, key=lambda f: abs(ratio - f))
+    near = abs(ratio - nearest) * rng <= tol
+    mid = (swing["high"] + swing["low"]) / 2
+    trend = "up" if swing["close"] > mid else "down"
+    return {"fib_ratio": round(ratio, 3), "fib_level": nearest if near else None, "fib_near": bool(near), "trend20": trend, "trend20_with": (trend == "up") if side > 0 else (trend == "down")}
+

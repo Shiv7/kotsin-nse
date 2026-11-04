@@ -1,0 +1,24 @@
+
+== stop a tolerance past the retest (as run): 465 signals; RR to the first wall median 0.69, to the last wall median 8.38
+  all                                                        N 465  gross   +9.7  net   -3.3  win  61 %  stopped  32 %  risk med   68 bps  net/risk -0.08 R
+  RR to the LAST wall ≥ 3                                    N 378  gross   +6.7  net   -6.3  win  58 %  stopped  34 %  risk med   64 bps  net/risk -0.11 R
+  RR to the last wall < 3                                    N  87  gross  +23.0  net  +10.0  win  72 %  stopped  20 %  risk med  102 bps  net/risk +0.07 R
+  RR to the FIRST wall ≥ 3                                   N  25  gross   +7.7  net   -5.3  win  52 %  stopped  32 %  risk med   56 bps  net/risk -0.12 R
+  RR to the first wall ≥ 1                                   N 140  gross   +7.2  net   -5.8  win  52 %  stopped  40 %  risk med   59 bps  net/risk -0.05 R
+  the four-layer gate                                        N  15  gross  +35.8  net  +22.8  win  53 %  stopped  47 %  risk med   72 bps  net/risk +0.05 R
+  gate AND RR to the last wall ≥ 3                           N  12  gross  +41.9  net  +28.9  win  50 %  stopped  50 %  risk med   68 bps  net/risk +0.09 R
+  gate AND RR to the first wall ≥ 1                          N   6  gross  +32.2  net  +19.2  win  67 %  stopped  33 %  risk med   61 bps  net/risk +0.25 R
+    2026-11-03 first two gated with RR ≥ 3: KFINTECH L rr 9.1 → +179 trail, HINDZINC L rr 6.8 → -56 stop
+    2026-11-04 first two gated with RR ≥ 3: HINDZINC L rr 3.5 → +374 target, YESBANK L rr 6.5 → +40 trail
+
+== stop AT the retest bar's extreme (the owner's): 465 signals; RR to the first wall median 1.20, to the last wall median 14.12
+  all                                                        N 465  gross   +7.5  net   -5.5  win  49 %  stopped  47 %  risk med   43 bps  net/risk -0.22 R
+  RR to the LAST wall ≥ 3                                    N 413  gross   +7.2  net   -5.8  win  47 %  stopped  49 %  risk med   38 bps  net/risk -0.23 R
+  RR to the last wall < 3                                    N  52  gross  +10.7  net   -2.3  win  63 %  stopped  29 %  risk med   87 bps  net/risk -0.12 R
+  RR to the FIRST wall ≥ 3                                   N  69  gross  +10.8  net   -2.2  win  43 %  stopped  54 %  risk med   25 bps  net/risk +0.04 R
+  RR to the first wall ≥ 1                                   N 278  gross   +7.2  net   -5.8  win  41 %  stopped  56 %  risk med   30 bps  net/risk -0.26 R
+  the four-layer gate                                        N  15  gross  +11.5  net   -1.5  win  40 %  stopped  60 %  risk med   41 bps  net/risk -0.18 R
+  gate AND RR to the last wall ≥ 3                           N  13  gross  +12.5  net   -0.5  win  38 %  stopped  62 %  risk med   39 bps  net/risk -0.14 R
+  gate AND RR to the first wall ≥ 1                          N  11  gross  +28.7  net  +15.7  win  45 %  stopped  55 %  risk med   38 bps  net/risk +0.05 R
+    2026-11-03 first two gated with RR ≥ 3: KFINTECH L rr 12.8 → +179 trail, HINDZINC L rr 13.4 → -29 stop
+    2026-11-04 first two gated with RR ≥ 3: HINDZINC L rr 4.8 → -78 stop, YESBANK L rr 11.2 → -52 stop

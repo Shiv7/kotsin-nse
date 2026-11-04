@@ -1,0 +1,58 @@
+== 465 recorded signals on 2026-11-03, 2026-11-04; all: gross +9.7 bps, win 61 %; the four-layer gate passes 15: gross +35.8, win 53 %
+
+== each check alone (all signals)
+  retest in the opening half-hour (09:15-09:45) pass 187: gross   +8.4 bps, win  60 %   | fail 278:  +10.7,  62 %
+  retest 09:45-10:15                           pass  76: gross  +19.8 bps, win  67 %   | fail 389:   +7.8,  60 %
+  retest after 10:15                           pass 202: gross   +7.2 bps, win  59 %   | fail 263:  +11.7,  62 %
+  PCR change with the trade (rising for a long) pass 134: gross   +0.6 bps, win  60 %   | fail 331:  +13.5,  62 %
+  PCR level ≥ 0.7 long / ≤ 0.7 short           pass 197: gross   +5.2 bps, win  58 %   | fail 268:  +13.1,  63 %
+  full build-up: fut+calls+puts all with       pass 111: gross   +2.9 bps, win  57 %   | fail 354:  +11.9,  62 %
+  calls with the trade                         pass 357: gross   +6.4 bps, win  59 %   | fail 108:  +20.8,  69 %
+  puts with the trade                          pass 353: gross   +5.5 bps, win  58 %   | fail 112:  +23.0,  70 %
+  calls and puts with                          pass 321: gross   +5.8 bps, win  59 %   | fail 144:  +18.6,  67 %
+  retested wall on a monthly level             pass  92: gross   +7.5 bps, win  58 %   | fail 373:  +10.3,  62 %
+  retest bar a doji                            pass  76: gross   +3.1 bps, win  59 %   | fail 389:  +11.0,  61 %
+  retest bar a hammer/star the trade's way     pass  84: gross   +9.1 bps, win  62 %   | fail 381:   +9.9,  61 %
+  confirmation bar engulfing                   pass  99: gross   +2.1 bps, win  57 %   | fail 366:  +11.8,  62 %
+  any of the three candle patterns             pass 186: gross   +5.4 bps, win  59 %   | fail 279:  +12.6,  62 %
+
+== on top of the four-layer gate
+  retest in the opening half-hour          gate+yes  6: gross  +40.2, win  33 %  | gate+no  9:  +32.9,  67 %
+  retest after 10:15                       gate+yes  8: gross  +42.0, win  75 %  | gate+no  7:  +28.7,  29 %
+  PCR change with                          gate+yes  6: gross   +1.1, win  50 %  | gate+no  9:  +59.0,  56 %
+  full build-up                            gate+yes  6: gross   +1.1, win  50 %  | gate+no  9:  +59.0,  56 %
+  calls and puts with                      gate+yes 15: gross  +35.8, win  53 %  | gate+no  0:   +nan, nan %
+  on a monthly level                       gate+yes  2: gross +158.8, win  50 %  | gate+no 13:  +16.9,  54 %
+  any candle pattern                       gate+yes  7: gross  +41.7, win  57 %  | gate+no  8:  +30.7,  50 %
+  engulfing confirmation                   gate+yes  4: gross   +9.2, win  50 %  | gate+no 11:  +45.5,  55 %
+  doji or hammer retest                    gate+yes  4: gross  +79.4, win  75 %  | gate+no 11:  +20.0,  45 %
+
+== the build-up combinations (futures/calls/puts), signals with ≥ 8, by side
+  LONG  LB/LB/LU   N  44  gross   -2.0  win  59 %
+  LONG  LB/LB/SB   N  69  gross   +0.6  win  58 %
+  LONG  LB/SC/LU   N  24  gross   +5.5  win  42 %
+  LONG  LB/SC/SB   N  48  gross  +16.2  win  67 %
+  LONG  SB/LU/LB   N   8  gross  +77.8  win 100 %
+  LONG  SC/LB/SB   N  28  gross  -11.4  win  50 %
+  LONG  SC/SC/SB   N  27  gross  +11.9  win  67 %
+  SHORT LB/LB/SB   N  11  gross  +11.1  win  64 %
+  SHORT LB/SC/SB   N  11  gross   -2.7  win  64 %
+  SHORT LU/SB/LB   N   8  gross  -12.0  win  25 %
+  SHORT SB/SB/LB   N  42  gross   +6.6  win  55 %
+  SHORT SB/SB/SB   N  12  gross  -28.7  win  33 %
+  SHORT SB/SB/SC   N  11  gross  +23.2  win  82 %
+
+== by the retest's half-hour (all signals)
+  09:00  N  84  gross  +16.1  win  69 %
+  09:30  N 155  gross   +7.5  win  58 %
+  10:00  N  59  gross  +18.3  win  69 %
+  10:30  N  35  gross  +11.0  win  54 %
+  11:00  N  26  gross   +5.4  win  69 %
+  11:30  N  15  gross   +8.4  win  53 %
+  12:00  N  22  gross  +20.0  win  59 %
+  12:30  N  19  gross   +0.5  win  58 %
+  13:00  N  15  gross   -0.2  win  53 %
+  13:30  N  15  gross   -6.5  win  60 %
+  14:00  N  11  gross   -2.5  win  45 %
+  14:30  N   7  gross   -4.3  win  43 %
+  15:00  N   2  gross   +1.0  win  50 %

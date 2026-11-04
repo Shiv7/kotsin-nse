@@ -236,6 +236,21 @@ class Settings(BaseSettings):
     #: also accepts a future in short covering for a long / long unwinding for a short. On the two recorded days
     #: 15 of 467 signals passed (docs/research/scripts/2026-11-04-wise-gate) — a description, not a test.
     strategy_picker: Literal["first", "stack4", "stack4_loose"] = "first"
+    #: the owner's extra checks (``strategy/wise_gate.EXTRAS``: rt_before_1230, rt_after_open, pcr_with, fno_full,
+    #: options_with, near_monthly, candle_any, engulf, doji_or_pin) — every signal records all of them as ``extra``;
+    #: the ones named here, comma-separated, must also be true for the book to take it ("" = none enforced). On
+    #: the two recorded days none helped (extra-checks.txt): tags first, layers after the ten-session read.
+    strategy_gate_extra: str = ""
+    #: where the initial stop sits: ``retest_tol`` = a tolerance beyond the retest bar's extreme (the research's), ``retest``
+    #: = the retest bar's own low / high (the owner, 5 Nov 2026: "no tolerance — if price comes back, get out"). On the two
+    #: recorded days the owner's stop cut the loss per stop (−63 → −41 bps) and raised the stop rate (32 → 47 %), net
+    #: −3.3 → −5.5 bps a signal; on the gated pairs HINDZINC +374 became −78 (docs/research/scripts/2026-11-04-wise-gate/
+    #: stop-at-retest-low.txt). The owner chooses; the research default stays.
+    strategy_stop: Literal["retest_tol", "retest"] = "retest_tol"
+    #: the least reward-to-risk a signal must offer to be taken, measured to the LAST wall of its exit plan (the trade's
+    #: full run if the trail carries it there) over the risk to the initial stop; 0 = off. The owner, 5 Nov 2026: "RR should
+    #: be at least 1:3". Every signal records ``rr`` = {first, last} whatever the setting.
+    strategy_min_rr: float = 0.0
 
     # ---- the positional book: the daily order block (strategy/daily_ob.py, strategy/positional.py) ------
     #: off by default: the book FAILED its pre-registered test on 2026-10-29 (docs/research/2026-10-29-

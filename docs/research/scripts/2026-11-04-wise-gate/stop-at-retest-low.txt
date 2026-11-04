@@ -1,0 +1,12 @@
+
+== all recorded signals: 465 signals
+  stop one tolerance past the retest (as run)          risk med  67.6 bps  gross   +9.7  net   -3.3  win  61 %  stopped  32 %  avg loss  -63.2  avg win  +56.2  net ₹ sum -15,120
+  stop AT the retest candle's low/high (the owner's)   risk med  42.5 bps  gross   +7.5  net   -5.5  win  49 %  stopped  47 %  avg loss  -40.5  avg win  +57.5  net ₹ sum -25,345
+  per rupee risked (net / risk): tol -0.08 R   low -0.22 R
+
+== the signals that passed the four-layer gate: 15 signals
+  stop one tolerance past the retest (as run)          risk med  71.6 bps  gross  +35.8  net  +22.8  win  53 %  stopped  47 %  avg loss  -62.7  avg win +122.1  net ₹ sum +3,426
+  stop AT the retest candle's low/high (the owner's)   risk med  41.2 bps  gross  +11.5  net   -1.5  win  40 %  stopped  60 %  avg loss  -43.4  avg win  +93.8  net ₹ sum -228
+  per rupee risked (net / risk): tol +0.05 R   low -0.18 R
+  2026-11-03 the gated pair: as run +46 bps gross (SBIN -30 stop, ALKEM +75 trail) | stop at the low +62 (SBIN -13 stop, ALKEM +75 trail)
+  2026-11-04 the gated pair: as run -11 bps gross (SBICARD +46 close, COLPAL -58 stop) | stop at the low +15 (SBICARD +46 close, COLPAL -31 stop)
