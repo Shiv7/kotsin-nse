@@ -1,7 +1,51 @@
-Traceback (most recent call last):
-  File "/Users/shivendrapratap/Downloads/kotsin/kotsin-nse/docs/research/scripts/2026-11-06-swing-screen/option_structures.py", line 98, in <module>
-    main()
-  File "/Users/shivendrapratap/Downloads/kotsin/kotsin-nse/docs/research/scripts/2026-11-06-swing-screen/option_structures.py", line 35, in main
-    lots = {sym: int(m[names.str.startswith(sym + " ")]["LotSize"].max() or 0) for sym in sys.argv[1:]}
-                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-ValueError: cannot convert float NaN to integer
+== 2026-11-05 close, NSE bhavcopy settlement prices; structures on the monthly expiry; the probabilities are the option prices' own (lognormal under the ATM IV)
+
+INDIANB: spot 891.5 fut 896.1 expiry 2026-11-23 (17 d) lot 1000 | ATM 890.0 IV 27.6 rv20 30.43 IV/RV 0.91 straddle 4.81 % of spot
+   bull call spread, one strike   {'k': (890.0, 900.0), 'debit': 5.0, 'cost_inr': 5000, 'max_profit_inr': 5000, 'be': 895.0, 'be_pct': 0.39, 'rr': 1.0, 'p_above_be': 0.496, 'vol': (1317, 3607)}
+   bull call spread, two strikes  {'k': (890.0, 910.0), 'debit': 9.5, 'cost_inr': 9500, 'max_profit_inr': 10500, 'be': 899.5, 'be_pct': 0.9, 'rr': 1.11, 'p_above_be': 0.463, 'vol': (1317, 554)}
+   bull put spread                {'k': (880.0, 870.0), 'credit': 3.25, 'credit_inr': 3250, 'max_loss_inr': 6750, 'be': 876.8, 'be_pct': -1.65, 'p_keep': 0.631, 'vol': (665, 568)}
+
+TCS: spot 2490.0 fut 2505.1 expiry 2026-11-23 (17 d) lot 250 | ATM 2480.0 IV 29.2 rv20 36.09 IV/RV 0.81 straddle 5.12 % of spot
+   bull call spread, one strike   {'k': (2480.0, 2500.0), 'debit': 11.1, 'cost_inr': 2775, 'max_profit_inr': 2225, 'be': 2491.1, 'be_pct': 0.04, 'rr': 0.8, 'p_above_be': 0.522, 'vol': (5247, 15554)}
+   bull call spread, two strikes  {'k': (2480.0, 2520.0), 'debit': 20.75, 'cost_inr': 5188, 'max_profit_inr': 4812, 'be': 2500.8, 'be_pct': 0.43, 'rr': 0.93, 'p_above_be': 0.498, 'vol': (5247, 7055)}
+   bull put spread                {'k': (2460.0, 2440.0), 'credit': 7.05, 'credit_inr': 1762, 'max_loss_inr': 3238, 'be': 2452.9, 'be_pct': -1.49, 'p_keep': 0.618, 'vol': (3557, 3104)}
+
+JIOFIN: spot 229.55 fut 231.06 expiry 2026-11-23 (17 d) lot 2350 | ATM 230.0 IV 28.6 rv20 30.51 IV/RV 0.94 straddle 4.98 % of spot
+   bull call spread, one strike   {'k': (230.0, 232.5), 'debit': 1.23, 'cost_inr': 2891, 'max_profit_inr': 2984, 'be': 231.2, 'be_pct': 0.73, 'rr': 1.03, 'p_above_be': 0.483, 'vol': (15046, 3160)}
+   bull call spread, two strikes  {'k': (230.0, 235.0), 'debit': 2.23, 'cost_inr': 5241, 'max_profit_inr': 6509, 'be': 232.2, 'be_pct': 1.17, 'rr': 1.24, 'p_above_be': 0.455, 'vol': (15046, 6886)}
+   bull put spread                {'k': (227.5, 225.0), 'credit': 0.86, 'credit_inr': 2021, 'max_loss_inr': 3854, 'be': 226.6, 'be_pct': -1.27, 'p_keep': 0.61, 'vol': (2286, 3785)}
+
+LT: spot 4047.0 fut 4062.7 expiry 2026-11-23 (17 d) lot 175 | ATM 4050.0 IV 20.4 rv20 22.91 IV/RV 0.89 straddle 3.55 % of spot
+   bull call spread, one strike   {'k': (4050.0, 4100.0), 'debit': 23.6, 'cost_inr': 4130, 'max_profit_inr': 4620, 'be': 4073.6, 'be_pct': 0.66, 'rr': 1.12, 'p_above_be': 0.467, 'vol': (7147, 8698)}
+   bull call spread, two strikes  {'k': (4050.0, 4150.0), 'debit': 40.7, 'cost_inr': 7123, 'max_profit_inr': 10378, 'be': 4090.7, 'be_pct': 1.08, 'rr': 1.46, 'p_above_be': 0.43, 'vol': (7147, 3991)}
+   bull put spread                {'k': (4000.0, 3950.0), 'credit': 13.95, 'credit_inr': 2441, 'max_loss_inr': 6309, 'be': 3986.1, 'be_pct': -1.51, 'p_keep': 0.658, 'vol': (7577, 4125)}
+
+EICHERMOT: spot 7697.0 fut 7730.0 expiry 2026-11-23 (17 d) lot 100 | ATM 7700.0 IV 28.1 rv20 29.06 IV/RV 0.97 straddle 4.88 % of spot
+   bull call spread, one strike   {'k': (7700.0, 7800.0), 'debit': 47.55, 'cost_inr': 4755, 'max_profit_inr': 5245, 'be': 7747.6, 'be_pct': 0.66, 'rr': 1.1, 'p_above_be': 0.473, 'vol': (4067, 3175)}
+   bull call spread, two strikes  {'k': (7700.0, 7900.0), 'debit': 86.7, 'cost_inr': 8670, 'max_profit_inr': 11330, 'be': 7786.7, 'be_pct': 1.17, 'rr': 1.31, 'p_above_be': 0.44, 'vol': (4067, 1568)}
+   bull put spread                {'k': (7600.0, 7500.0), 'credit': 34.4, 'credit_inr': 3440, 'max_loss_inr': 6560, 'be': 7565.6, 'be_pct': -1.71, 'p_keep': 0.626, 'vol': (1831, 2597)}
+
+INFY: spot 1164.8 fut 1173.0 expiry 2026-11-23 (17 d) lot 500 | ATM 1160.0 IV 31.0 rv20 38.4 IV/RV 0.81 straddle 5.43 % of spot
+   bull call spread, one strike   {'k': (1160.0, 1174.0), 'debit': 7.8, 'cost_inr': 3900, 'max_profit_inr': 3100, 'be': 1167.8, 'be_pct': 0.26, 'rr': 0.79, 'p_above_be': 0.513, 'vol': (9921, 11578)}
+   bull call spread, two strikes  {'k': (1160.0, 1180.0), 'debit': 10.15, 'cost_inr': 5075, 'max_profit_inr': 4925, 'be': 1170.2, 'be_pct': 0.46, 'rr': 0.97, 'p_above_be': 0.501, 'vol': (9921, 8185)}
+   bull put spread                {'k': (1154.0, 1140.0), 'credit': 5.0, 'credit_inr': 2500, 'max_loss_inr': 4500, 'be': 1149.0, 'be_pct': -1.36, 'p_keep': 0.608, 'vol': (4842, 6057)}
+
+GRASIM: spot 3225.0 fut 3236.6 expiry 2026-11-23 (17 d) lot 250 | ATM 3220.0 IV 24.4 rv20 22.58 IV/RV 1.08 straddle 4.25 % of spot
+   bull call spread, one strike   {'k': (3220.0, 3240.0), 'debit': 9.4, 'cost_inr': 2350, 'max_profit_inr': 2650, 'be': 3229.4, 'be_pct': 0.14, 'rr': 1.13, 'p_above_be': 0.506, 'vol': (999, 1172)}
+   bull call spread, two strikes  {'k': (3220.0, 3260.0), 'debit': 17.8, 'cost_inr': 4450, 'max_profit_inr': 5550, 'be': 3237.8, 'be_pct': 0.4, 'rr': 1.25, 'p_above_be': 0.487, 'vol': (999, 695)}
+   bull put spread                {'k': (3200.0, 3180.0), 'credit': 8.1, 'credit_inr': 2025, 'max_loss_inr': 2975, 'be': 3191.9, 'be_pct': -1.03, 'p_keep': 0.593, 'vol': (1736, 810)}
+
+MPHASIS: spot 2530.0 fut 2508.4 expiry 2026-11-23 (17 d) lot 275 | ATM 2550.0 IV 38.4 rv20 36.73 IV/RV 1.05 straddle 6.77 % of spot
+   bull call spread, one strike   {'k': (2550.0, 2600.0), 'debit': 17.25, 'cost_inr': 4744, 'max_profit_inr': 9006, 'be': 2567.2, 'be_pct': 1.47, 'rr': 1.9, 'p_above_be': 0.375, 'vol': (2302, 4591)}
+   bull call spread, two strikes  {'k': (2550.0, 2650.0), 'debit': 31.6, 'cost_inr': 8690, 'max_profit_inr': 18810, 'be': 2581.6, 'be_pct': 2.04, 'rr': 2.16, 'p_above_be': 0.35, 'vol': (2302, 1013)}
+   bull put spread                {'k': (2500.0, 2450.0), 'credit': 21.75, 'credit_inr': 5981, 'max_loss_inr': 7769, 'be': 2478.2, 'be_pct': -2.05, 'p_keep': 0.541, 'vol': (2954, 2747)}
+
+BANKINDIA: spot 138.4 fut 139.25 expiry 2026-11-23 (17 d) lot 5200 | ATM 137.5 IV 29.0 rv20 36.14 IV/RV 0.8 straddle 5.12 % of spot
+   bull call spread, one strike   {'k': (137.5, 140.0), 'debit': 1.29, 'cost_inr': 6708, 'max_profit_inr': 6292, 'be': 138.8, 'be_pct': 0.28, 'rr': 0.94, 'p_above_be': 0.508, 'vol': (312, 1520)}
+   bull call spread, two strikes  {'k': (137.5, 142.5), 'debit': 2.29, 'cost_inr': 11908, 'max_profit_inr': 14092, 'be': 139.8, 'be_pct': 1.0, 'rr': 1.18, 'p_above_be': 0.463, 'vol': (312, 332)}
+   bull put spread                {'k': (135.0, 132.5), 'credit': 0.58, 'credit_inr': 3016, 'max_loss_inr': 9984, 'be': 134.4, 'be_pct': -2.88, 'p_keep': 0.701, 'vol': (651, 128)}
+
+TATASTEEL: spot 182.3 fut 183.07 expiry 2026-11-23 (17 d) lot 2750 | ATM 182.5 IV 29.7 rv20 27.99 IV/RV 1.06 straddle 5.15 % of spot
+   bull call spread, one strike   {'k': (182.5, 185.0), 'debit': 1.19, 'cost_inr': 3272, 'max_profit_inr': 3602, 'be': 183.7, 'be_pct': 0.76, 'rr': 1.1, 'p_above_be': 0.466, 'vol': (7946, 11398)}
+   bull call spread, two strikes  {'k': (182.5, 187.5), 'debit': 2.12, 'cost_inr': 5830, 'max_profit_inr': 7920, 'be': 184.6, 'be_pct': 1.27, 'rr': 1.36, 'p_above_be': 0.435, 'vol': (7946, 4005)}
+   bull put spread                {'k': (180.0, 177.5), 'credit': 0.86, 'credit_inr': 2365, 'max_loss_inr': 4510, 'be': 179.1, 'be_pct': -1.73, 'p_keep': 0.619, 'vol': (7192, 3564)}

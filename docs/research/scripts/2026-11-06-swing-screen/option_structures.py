@@ -18,7 +18,6 @@ import pyarrow.parquet as pq
 
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, "/Users/shivendrapratap/Downloads/kotsin/kotsin-nse/docs/research/scripts/2026-11-04-nifty-facts")
-import live_facts as lf  # noqa: E402
 from kotsin_nse.fno.chain import YEAR_S, black76, implied_vol  # noqa: E402
 from kotsin_nse.strategy.straddle import p_between, realised_vol  # noqa: E402
 from screen import DD, WINDOW, archive_daily, history  # noqa: E402
@@ -29,10 +28,10 @@ IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 
 def main() -> None:
     bh = pq.read_table(DD / "oi_daily" / f"{DAY}.parquet").to_pandas()
-    m = lf.master_for(DAY)
-    # the lot by root: the master's future rows (ScripType XX) for "SYMBOL DD MON YYYY"
-    names = m["Name"].astype(str)
-    lots = {sym: int(m[names.str.startswith(sym + " ")]["LotSize"].max() or 0) for sym in sys.argv[1:]}
+    # the full scrip master (live_facts.master_for keeps NIFTY only): the lot by SymbolRoot
+    fs = sorted(q for q in (DD / "scripmaster").glob("nse_fo-*.csv*") if q.name[7:17] <= DAY)
+    m = pd.read_csv(fs[-1], dtype={"ScripCode": str}, low_memory=False)
+    lots = {sym: int(m[m["SymbolRoot"].astype(str) == sym]["LotSize"].max() or 0) for sym in sys.argv[1:]}
     arch = archive_daily(DAY).set_index("symbol")
     now = datetime.datetime(2026, 11, 6, 9, 15, tzinfo=IST).timestamp()
     rows = []
