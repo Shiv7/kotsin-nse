@@ -1,0 +1,20 @@
+== 90805 stock-days (10–40 days to expiry) with the same-strike straddle five sessions later
+   all: mean -0.4 % of cost, median -8.8, positive 35%
+
+== by IV / realised-20 quintile: buy the ATM straddle at the close, sell it five sessions later (% of cost)
+                n    lo    hi  mean_pnl  median_pnl    win
+q                                                         
+1 cheapest  17570  0.05  0.86      1.22       -8.97  35.55
+2           17569  0.86  1.01      0.23       -8.64  35.94
+3           17569  1.01  1.15     -0.36       -8.60  35.31
+4           17569  1.15  1.33     -0.97       -8.49  35.61
+5 richest   17569  1.33  4.26     -2.57       -9.68  33.64
+
+== by IV percentile vs own year quintile: buy the ATM straddle at the close, sell it five sessions later (% of cost)
+                n     lo      hi  mean_pnl  median_pnl    win
+q                                                            
+1 cheapest  14890   0.00    7.63      3.41       -7.35  37.25
+2           14872   7.63   23.61      0.21       -8.86  35.14
+3           14896  23.61   45.45     -0.64       -9.26  34.86
+4           14926  45.49   72.69     -1.59       -9.05  34.69
+5 richest   14812  72.73  100.00     -2.56       -9.99  34.59
