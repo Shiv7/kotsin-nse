@@ -118,13 +118,13 @@ async def test_the_runner_records_the_straddle_and_the_book_from_the_engines_min
 
     r.straddle_pick = pick
     r.option_mark = lambda code: None
-    r.on_minute(OPEN + 44 * 60)  # 09:59: nothing before the hour
-    assert r.straddle is None and r.menu == [] and r.book is None
+    r.on_minute(OPEN + 44 * 60)  # 09:59: the menu already runs, the sale and the book wait for the hour
+    assert r.straddle is None and len(r.menu) == 1 and r.menu[0]["hm"] == "09:59" and r.book is None
     r.on_minute(AT_10)
     rec = r.straddle
     assert rec is not None and rec["status"] == "OPEN" and rec["strike"] == 24400.0 and rec["opened_hm"] == "10:00" and rec["late"] is False
     assert rec["cond"]["rv20"] == 0.0 and rec["cond"]["iv_open"] == rec["cond"]["iv"] and rec["cond"]["fno"] == {}
-    assert len(r.menu) == 1 and r.menu[0]["d_iv"] == 0.0 and r.menu[0]["straddle"]["credit"] == rec["credit"]
+    assert len(r.menu) == 2 and r.menu[0]["d_iv"] == 0.0 and r.menu[1]["straddle"]["credit"] == rec["credit"]
     book = r.book
     assert book is not None and book["status"] == "OPEN" and book["future"]["entry"] == f + 1 and book["lot"] == 65
     assert book["call"]["delta"] <= 0.30 and book["call"]["strike"] >= 24400.0 and book["events"][0]["what"] == "buy_future"
@@ -132,19 +132,19 @@ async def test_the_runner_records_the_straddle_and_the_book_from_the_engines_min
     # the close: a cheaper chain, the record settled, the book marked
     state["chain"] = chain_at(f, t=stx.expiry_t(EXPIRY, AT_1529), iv=0.10)
     r.on_minute(AT_1529)
-    assert rec["status"] == "CLOSED" and rec["pnl_pts"] > 0 and rec["net_inr"] > 0 and rec["closed_hm"] == "15:29" and len(r.menu) == 2
+    assert rec["status"] == "CLOSED" and rec["pnl_pts"] > 0 and rec["net_inr"] > 0 and rec["closed_hm"] == "15:29" and len(r.menu) == 3
     assert r.book["status"] == "OPEN" and r.book["equity"] > 2_000_000  # the call decayed, the future unchanged
     await asyncio.gather(*r._tasks)  # type: ignore[attr-defined]
     snap = json.loads((tmp_path / "strategy" / f"{DAY}.json").read_text())
     assert snap["straddle_on"] is True and snap["covered_on"] is True
-    assert snap["straddle"]["status"] == "CLOSED" and snap["straddle"]["pnl_pts"] == rec["pnl_pts"] and len(snap["menu"]) == 2
+    assert snap["straddle"]["status"] == "CLOSED" and snap["straddle"]["pnl_pts"] == rec["pnl_pts"] and len(snap["menu"]) == 3
     assert snap["covered"]["status"] == "OPEN" and snap["covered"]["calls_closed"] == 0 and len(snap["covered"]["events_today"]) == 2
     assert json.loads((tmp_path / "strategy" / "book.json").read_text())["status"] == "OPEN"
     # a restart inside the day: the record, the menu and the book come back
     r2 = _runner(tmp_path, store, strategy_sequence="level", strategy_straddle=True, strategy_covered=True)
     assert r2.book is not None and r2.book["call"]["strike"] == book["call"]["strike"]
     r2._roll(date.fromisoformat(DAY))
-    assert r2.straddle is not None and r2.straddle["status"] == "CLOSED" and len(r2.menu) == 2 and r2._iv_open == r.menu[0]["iv"]
+    assert r2.straddle is not None and r2.straddle["status"] == "CLOSED" and len(r2.menu) == 3 and r2._iv_open == r.menu[0]["iv"]
     assert r2.errors == 0 and r.errors == 0
 
 
