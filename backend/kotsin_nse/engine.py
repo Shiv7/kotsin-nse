@@ -96,6 +96,7 @@ from .scan.board import OIRead, attach_setups
 from .scan.live import LiveScanner
 from .strategy.positional import PositionalRunner
 from .strategy.runner import ShadowRunner
+from .strategy.straddle import pick_expiry
 from .structure.service import from_store as structure_from_store
 from .venue.fivepaisa.auth import Authenticator
 from .venue.fivepaisa.rest import FivePaisaREST
@@ -254,6 +255,7 @@ class Engine:
             self.strategy.bhav = self._positional_bhav
             self.strategy.option_pick = self._option_pick
             self.strategy.option_mark = self._option_mark
+            self.strategy.straddle_pick = self._straddle_pick
         self._bhav_cache: dict[date, Any] = {}
         self._future_to_underlying: dict[str, str] = {}
         self._mode = Mode.SHADOW
@@ -1165,6 +1167,8 @@ class Engine:
                         since=self.oi_ref_since.get(sym),
                     )
             now = time.time()
+            if self.strategy is not None:  # the shadow straddle and the covered-call book read the chain at this minute
+                self.strategy.on_minute(now)
 
             def _run() -> None:
                 if self.s.archive_enabled:
@@ -1674,6 +1678,35 @@ class Engine:
         o = min(cands, key=lambda x: (abs(x.strike - price), x.strike))
         return {"scrip_code": o.scrip_code, "name": o.name, "expiry": expiry, "strike": o.strike, "kind": want.value, "lot": o.lot_size,
                 "days": (date.fromisoformat(expiry) - date.fromisoformat(today)).days, "instrument": o, "quote": self._option_mark(o.scrip_code)}
+
+    def _straddle_pick(self, symbol: str, spot: float) -> dict[str, Any] | None:
+        """The chain the shadow straddle and the covered-call book price from (strategy/straddle.py): every tracked strike
+        of the nearest expiry strictly after today (on expiry day the following week's) with both legs' quotes now, the
+        lot, and the front future's quote. None when the root has no options tracked."""
+        g = self.groups.get(symbol)
+        if g is None or not g.options:
+            return None
+        today = ist_day(time.time()).isoformat()
+        expiry, skipped = pick_expiry([o.expiry for o in g.options], today)
+        if expiry is None:
+            return None
+        strikes: dict[float, dict[str, Any]] = {}
+        insts: dict[str, Instrument] = {}
+        lot = 0
+        for o in g.options:
+            if o.expiry != expiry or o.option_type not in (OptionType.CE, OptionType.PE):
+                continue
+            strikes.setdefault(float(o.strike), {})[o.option_type.value] = {"scrip_code": o.scrip_code, "name": o.name, "quote": self._option_mark(o.scrip_code)}
+            insts[o.scrip_code] = o
+            lot = lot or o.lot_size
+        future = None
+        if g.futures:
+            fut = g.futures[0]
+            insts[fut.scrip_code] = fut
+            future = {"scrip_code": fut.scrip_code, "name": fut.name, "expiry": fut.expiry, "lot": fut.lot_size, "ltp": self.ltps.get(fut.scrip_code),
+                      "quote": self._option_mark(fut.scrip_code)}
+        return {"expiry": expiry, "expiry_day": skipped, "days": (date.fromisoformat(expiry) - date.fromisoformat(today)).days, "lot": lot,
+                "future": future, "strikes": strikes, "instruments": insts}
 
     def _positional_bhav(self, symbol: str, day: date) -> dict[str, Any] | None:
         """NSE's official closing OI for ``day``: the stock future's OI and price change against the previous

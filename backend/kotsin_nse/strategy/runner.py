@@ -36,8 +36,10 @@ from ..profile.core import bin_size, market_profile, volume_profile
 from ..risk.costs import CostModel
 from ..scan.replay import guarded_adr
 from ..structure.engine import Bar5
+from . import covered as cv
 from . import cpr_retest as cr
 from . import level_retest as lr
+from . import straddle as stx
 from . import wise_gate as wg
 
 log = structlog.get_logger(__name__)
@@ -137,6 +139,15 @@ class ShadowRunner:
         self.option_pick: Callable[[str, int, float], dict[str, Any] | None] | None = None
         self.option_mark: Callable[[str], dict[str, Any] | None] | None = None
         self._opt_inst: dict[str, Instrument] = {}
+        #: the shadow straddle (strategy/straddle.py) and the ₹20 lakh covered-call book (strategy/covered.py), both driven by
+        #: the engine's minute: the picker hands over the chain the engine tracks (every strike's quotes, the lot, the front
+        #: future); the straddle record and the minute menu live in the day json, the book across days in book.json
+        self.straddle_pick: Callable[[str, float], dict[str, Any] | None] | None = None
+        self.straddle: dict[str, Any] | None = None
+        self.menu: list[dict[str, Any]] = []
+        self._iv_open: float | None = None
+        self._nifty: dict[str, Any] | None = None
+        self.book: dict[str, Any] | None = self.read_book() if settings.strategy_covered else None
 
     @property
     def underlyings(self) -> Mapping[str, Instrument]:
@@ -150,13 +161,16 @@ class ShadowRunner:
             for pos in list(self.positions.values()):
                 own = [b for b in self.store.bars(pos["symbol"], TF) if ist_day(b.ts).isoformat() == self.day]
                 self._close(pos, own[-1].close if own else pos["entry"], "END", time.time())
-        if self.day and (self.signals or self.trades):
+        if self.straddle and self.straddle.get("status") == "OPEN":  # a session that never saw 15:29: settled at the last fresh marks
+            stx.close_record(self.straddle, {}, self.costs, now=time.time(), how="END")
+        if self.day and (self.signals or self.trades or self.straddle or self.menu):
             # the old day's file gets its final state (the END trades included) BEFORE the reset:
             # with the reset first, a trade closed here never reached the day it belonged to
             self._writes.append(asyncio.to_thread(self._dump, self.snapshot(), self.day))
         self.day = day.isoformat()
         self.syms, self.signals, self.trades, self.plans = {}, [], [], {}
         self.positions = {}
+        self.straddle, self.menu, self._iv_open, self._nifty = None, [], None, None
         self._restored_entered: set[tuple[str, int]] = set()
         self._restore(day)
 
@@ -171,6 +185,9 @@ class ShadowRunner:
         try:
             self.signals = list(reversed(snap.get("signals") or []))
             self.trades = list(reversed(snap.get("trades") or []))
+            self.straddle = snap.get("straddle") or None
+            self.menu = list(snap.get("menu") or [])
+            self._iv_open = next((r["iv"] for r in self.menu if r.get("iv") is not None), None)
             for p in snap.get("positions") or []:
                 self.positions[p["id"]] = p
                 for key in ("live", "live_exit"):
@@ -672,15 +689,15 @@ class ShadowRunner:
         Options tick sparsely (the feed's p90 gap is minutes), so the quote's age is kept beside every price — but
         a quote older than ``OPT_QUOTE_MAX_AGE_S`` is not a price at all: 4 Nov 2026 the socket was dead from 09:20
         and the 09:30 legs were booked at the broker's pre-open snapshot (the previous close, 3.5 hours old)."""
-        if not q or (q.get("age_s") or 1e9) > OPT_QUOTE_MAX_AGE_S:
+        if not q or stx.age_of(q) > OPT_QUOTE_MAX_AGE_S:
             return fallback
-        fresh = (q.get("age_s") or 1e9) <= 120
-        px = q.get(side) if fresh else None
+        px = q.get(side) if stx.age_of(q) <= 120 else None
         return px or q.get("ltp") or fallback
 
     @staticmethod
     def _opt_stale(q: dict[str, Any] | None) -> bool:
-        return not q or (q.get("age_s") or 1e9) > OPT_QUOTE_MAX_AGE_S
+        # an age of exactly 0.0 (a frame this instant) was read as missing by ``q.get("age_s") or 1e9`` until 6 Nov 2026
+        return not q or stx.age_of(q) > OPT_QUOTE_MAX_AGE_S
 
     def _option_open(self, pos: dict[str, Any], symbol: str, side: int, ref: float, ctx: dict[str, Any]) -> None:
         if self.option_pick is None:
@@ -765,6 +782,117 @@ class ShadowRunner:
                 self._close(pos, last.close, "close", int(bar.ts) + 300)
                 changed = True
         return changed
+
+    # -- the shadow straddle and the covered-call book, every minute (strategy/straddle.py, strategy/covered.py) ----------
+
+    def on_minute(self, now: float) -> None:
+        """The engine's minute (``Engine._scan``): the shadow straddle sold at 10:00 and bought back at 15:29 with its
+        menu of what each structure collects now, and the ₹20 lakh covered-call book's management — all from the chain
+        the engine tracks at this minute. Nothing here orders; a failure never reaches the book."""
+        if self.straddle_pick is None or not (self.s.strategy_straddle or self.s.strategy_covered):
+            return
+        day = ist_day(now)
+        if day.isoformat() != self.day:
+            return  # the day rolls on its first bar; nothing before it
+        hm = ist_hm(now)
+        if hm < stx.OPEN_HM or hm > "15:30":
+            return
+        try:
+            self._minute(now, day, hm)
+        except Exception as exc:  # noqa: BLE001 - the minute's failure must not stop the bars
+            self.errors += 1
+            log.warning("strategy.minute_failed", hm=hm, error=repr(exc))
+        self._flush_writes()
+
+    def _nifty_day(self, day: date) -> dict[str, Any]:
+        """The index's session frame, once a day: its ADR, the 20-session realised volatility, the previous close and today's open."""
+        if self._nifty is None:
+            rows = self._sessions_before(NIFTY, day)
+            win = rows[-60:]
+            adr = guarded_adr([b.high for b in win], [b.low for b in win], [b.close for b in win]) if len(win) >= 21 else None
+            today = [b for b in self.store.bars(NIFTY, "1m") if b.ts >= session_open_ts(self.segment, day)]
+            self._nifty = {"adr": adr, "rv20": stx.realised_vol([b.close for b in rows]), "prev_close": rows[-1].close if rows else None,
+                           "open": today[0].open if today else None}
+        return self._nifty
+
+    def _minute(self, now: float, day: date, hm: str) -> None:
+        last = self.store.last(NIFTY, "1m")
+        if last is None or ist_day(last.ts) != day:
+            return
+        spot = last.close
+        pick = self.straddle_pick(NIFTY, spot)
+        if not pick or not pick.get("strikes"):
+            return
+        chain = pick["strikes"]
+        f = (pick.get("future") or {}).get("ltp") or spot
+        t = stx.expiry_t(pick["expiry"], now)
+        nd = self._nifty_day(day)
+        bars = [b for b in self.store.bars(NIFTY, "1m") if b.ts >= session_open_ts(self.segment, day)]
+        hi, lo = (max(b.high for b in bars), min(b.low for b in bars)) if bars else (spot, spot)
+        changed = False
+        if self.s.strategy_straddle:
+            row = stx.menu_row(chain, now=now, spot=spot, f=f, t=t, lot=int(pick["lot"] or 1), wing_pts=self.s.strategy_straddle_wing_pts,
+                              iv_open=self._iv_open, rv20=nd["rv20"])
+            if self._iv_open is None and row.get("iv") is not None:
+                self._iv_open, row["d_iv"] = row["iv"], 0.0
+            if not self.menu or self.menu[-1].get("hm") != row["hm"]:
+                self.menu.append(row)
+            rec = self.straddle
+            if rec is None and hm <= stx.LAST_OPEN_HM:
+                adr, opn, pc = nd["adr"], nd["open"], nd["prev_close"]
+                fno = {}
+                if self.enrich is not None:
+                    try:
+                        fno = (self.enrich(NIFTY) or {}).get("fno") or {}
+                    except Exception:  # noqa: BLE001
+                        fno = {}
+                cond = {"gap_adr": round((opn - pc) / adr, 2) if adr and opn and pc else None,
+                        "move_adr": round((spot - opn) / adr, 2) if adr and opn else None,
+                        "range_adr": round((hi - lo) / adr, 2) if adr else None, "adr": adr, "open": opn, "prev_close": pc,
+                        "iv": row.get("iv"), "iv_open": self._iv_open, "rv20": nd["rv20"], "fno": fno}
+                rec = stx.open_record(chain, now=now, day=self.day, spot=spot, f=f, expiry=pick["expiry"], expiry_day_skipped=bool(pick.get("expiry_day")),
+                                     lot=int(pick["lot"] or 1), wing_pts=self.s.strategy_straddle_wing_pts, cond=cond)
+                if rec is not None:
+                    self.straddle, changed = rec, True
+                    log.info("strategy.straddle_open", strike=rec["strike"], credit=rec["credit"], expiry=rec["expiry"], late=rec["late"], hm=hm)
+            if rec is not None and rec["status"] == "OPEN":
+                stx.mark_record(rec, chain)
+                if hm >= stx.CLOSE_HM:
+                    stx.close_record(rec, chain, self.costs, now=now, instruments=pick.get("instruments"))
+                    changed = True
+                    log.info("strategy.straddle_close", strike=rec["strike"], pnl_pts=rec["pnl_pts"], net_inr=rec["net_inr"], stale=rec["stale_exit"])
+        if self.s.strategy_covered:
+            s = self.s
+            self.book, events = cv.step(self.book, now=now, day=self.day, hm=hm, spot=spot, chain=chain, future=pick.get("future"), f=f, t=t,
+                                        expiry=pick["expiry"], quote_of=self.option_mark, costs=self.costs, capital=s.strategy_book_capital_inr,
+                                        margin=s.strategy_book_margin_inr, call_delta=s.strategy_covered_call_delta, roll_delta=s.strategy_covered_roll_delta,
+                                        take_profit=s.strategy_covered_take_profit, max_dd=s.strategy_covered_max_dd, settle_hm=s.strategy_covered_settle_hm,
+                                        instruments=pick.get("instruments"))
+            if events:
+                changed = True
+                log.info("strategy.covered", events=events, equity=self.book.get("equity"), status=self.book.get("status"))
+            self._writes.append(self._write_book())
+        if changed or hm[-1] in "05":
+            self._writes.append(self._write_day())
+
+    async def _write_book(self) -> None:
+        if self.book is not None:
+            await asyncio.to_thread(self._dump_book, dict(self.book))
+
+    def _dump_book(self, book: dict[str, Any]) -> None:
+        self.dir.mkdir(parents=True, exist_ok=True)
+        tmp = self.dir / "book.json.tmp"
+        tmp.write_text(json.dumps(book, default=str))
+        tmp.replace(self.dir / "book.json")
+
+    def read_book(self) -> dict[str, Any] | None:
+        p = self.dir / "book.json"
+        if not p.exists():
+            return None
+        try:
+            return json.loads(p.read_text())
+        except ValueError:
+            return None
 
     # -- the live route's answers ------------------------------------------------------------------------
 
@@ -909,7 +1037,7 @@ class ShadowRunner:
         return {
             "strategy": self.name, "sequence": self.sequence, "day": self.day, "rule": self.rule, "filter": self.filter, "picker": self.picker, "stop": self.s.strategy_stop, "min_rr": self.s.strategy_min_rr, "gate_extra": self.s.strategy_gate_extra, "pdc": self.pdc, "notional_inr": self.notional,
             "walls_round": self.s.strategy_walls_round, "max_move_adr": self.s.strategy_max_move_adr, "levels_hl": self.s.strategy_levels_hl, "entry_cutoff": self.s.strategy_entry_cutoff,
-            "max_trades_per_day": self.s.strategy_max_trades_per_day,
+            "max_trades_per_day": self.s.strategy_max_trades_per_day, "straddle_on": self.s.strategy_straddle, "covered_on": self.s.strategy_covered,
             "universe": sum(1 for sym, i in self.underlyings.items() if i.kind is InstrumentKind.EQUITY and sym not in INDEX_ROOTS), "with_levels": len(self.syms),
             "orders": self.orders, "errors": self.errors,
             "summary": {
@@ -924,6 +1052,8 @@ class ShadowRunner:
             },
             "stages": stages, "signals": list(reversed(self.signals)), "positions": sorted(self.positions.values(), key=lambda p: -p["opened_ts"]),
             "trades": list(reversed(closed)),
+            # the shadow straddle's record, the minute menu beside it, and the covered-call book's state today
+            "straddle": self.straddle, "menu": self.menu, "covered": cv.view(self.book, self.day),
             # every rule's exit plan still running, so a restart steps on from here (``_restore``)
             "plans": {pid: {rule: plan.state() for rule, plan in rules.items()} for pid, rules in self.plans.items()},
         }

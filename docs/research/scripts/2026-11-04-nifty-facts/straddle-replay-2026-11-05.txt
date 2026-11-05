@@ -1,0 +1,19 @@
+== 2026-11-05: 47 strikes of 2026-11-09 at 10:00; future 24423.1 spot 24402.2
+   atm 24400.0
+   iv 14.3
+   skew 2.66
+   straddle {'k': 24400.0, 'credit': 299.7, 'credit_inr': 19480, 'be': [24100.3, 24699.7], 'p': 0.574}
+   strangle1 {'k': [24350.0, 24450.0], 'credit': 252.65, 'credit_inr': 16422, 'be': [24097.3, 24702.7], 'p': 0.579}
+   strangle2 {'k': [24300.0, 24500.0], 'credit': 210.95, 'credit_inr': 13712, 'be': [24089.0, 24711.0], 'p': 0.592}
+   fly {'k': [24400.0, 24400.0, 24700.0, 24100.0], 'credit': 199.65, 'credit_inr': 12977, 'be': [24200.3, 24599.7], 'p': 0.405, 'max_loss_inr': 6523}
+   skew_trade {'sell': 'PE 24350', 'buy': 'CE 24450', 'credit': 6.25, 'iv_gap': 2.66, 'delta': 0.897}
+OPEN  {'strike': 24400.0, 'credit': 299.7, 'credit_inr': 19480, 'fly_credit': 199.65, 'fly_max_loss_inr': 6523}
+CLOSE {'debit': 329.85, 'pnl_pts': -30.15, 'gross_inr': -1959.75, 'charges_inr': 235.63, 'net_inr': -2195.38, 'stale_exit': False}
+FLY   {'debit': 125.75, 'pnl_pts': -4.45, 'gross_inr': -289.25, 'charges_inr': 442.96, 'net_inr': -732.21}
+BOOK  ['buy_future', 'sell_call'] {'strike': 24650.0, 'entry': 55.25, 'delta': 0.262, 'iv': 13.34} future 24424.1
+   11:00 f≈24372.8 [] call (24650.0, 52.3, 0.236) equity 1996857.25 dd -3142.75
+   12:00 f≈24408.7 [] call (24650.0, 55.1, 0.255) equity 1999008.75 dd -991.25
+   13:00 f≈24454.8 [] call (24650.0, 60.25, 0.286) equity 2001670.5 dd 0.0
+   14:00 f≈24567.7 [] call (24650.0, 118.0, 0.419) equity 2005255.25 dd 0.0
+   15:00 f≈24539.0 [] call (24650.0, 105.9, 0.39) equity 2004176.25 dd -1079.0
+   15:29 f≈24532.8 [] call (24650.0, 111.0, 0.39) equity 2003441.75 dd -1813.5

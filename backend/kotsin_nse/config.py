@@ -251,6 +251,26 @@ class Settings(BaseSettings):
     #: full run if the trail carries it there) over the risk to the initial stop; 0 = off. The owner, 5 Nov 2026: "RR should
     #: be at least 1:3". Every signal records ``rr`` = {first, last} whatever the setting.
     strategy_min_rr: float = 0.0
+    #: the shadow straddle (``strategy/straddle.py``): the NIFTY at-the-money straddle sold at 10:00 and bought back at 15:29,
+    #: the one thing measured positive on the live days (27 Oct → 5 Nov 2026: +56 / +19 / +52 / +25 / −35 / +47 / −30 points,
+    #: the −35 the expiry day's own chain), with the minute-by-minute menu of what the straddle, the strangles, the iron fly
+    #: and the skew trade would collect. Recorded in the day json; nothing ordered. The owner, 6 Nov 2026: "go ahead".
+    strategy_straddle: bool = False
+    #: the iron fly's wings, in index points each side of the straddle's strike (rounded to the strike step)
+    strategy_straddle_wing_pts: float = 300.0
+    #: the ₹20 lakh covered-call book (``strategy/covered.py``): long one NIFTY future lot, a ~0.30-delta call sold against it,
+    #: rolled up at 0.60 delta, bought back at 30 % of its sale, settled on its expiry day, the pair closed on a 5 % drawdown
+    #: (the owner, 6 Nov 2026: "cover call or position management based on real time market output ... 20 lakh capital")
+    strategy_covered: bool = False
+    strategy_book_capital_inr: float = 2_000_000.0
+    #: the pair's margin, an estimate (one NIFTY future lot plus a short call hedged by it): check 5paisa's calculator
+    strategy_book_margin_inr: float = 220_000.0
+    strategy_covered_call_delta: float = 0.30
+    strategy_covered_roll_delta: float = 0.60
+    strategy_covered_take_profit: float = 0.30
+    strategy_covered_max_dd: float = 0.05
+    #: on the call's own expiry day it is settled at this time (its last price, intrinsic by then) and the next expiry's sold
+    strategy_covered_settle_hm: str = "15:20"
 
     # ---- the positional book: the daily order block (strategy/daily_ob.py, strategy/positional.py) ------
     #: off by default: the book FAILED its pre-registered test on 2026-10-29 (docs/research/2026-10-29-
