@@ -1679,15 +1679,20 @@ class Engine:
         return {"scrip_code": o.scrip_code, "name": o.name, "expiry": expiry, "strike": o.strike, "kind": want.value, "lot": o.lot_size,
                 "days": (date.fromisoformat(expiry) - date.fromisoformat(today)).days, "instrument": o, "quote": self._option_mark(o.scrip_code)}
 
-    def _straddle_pick(self, symbol: str, spot: float) -> dict[str, Any] | None:
+    def _straddle_pick(self, symbol: str, spot: float, include_today: bool = False) -> dict[str, Any] | None:
         """The chain the shadow straddle and the covered-call book price from (strategy/straddle.py): every tracked strike
         of the nearest expiry strictly after today (on expiry day the following week's) with both legs' quotes now, the
-        lot, and the front future's quote. None when the root has no options tracked."""
+        lot, and the front future's quote. With ``include_today`` the nearest expiry at or after today (the intraday
+        records run on expiry day itself). None when the root has no options tracked."""
         g = self.groups.get(symbol)
         if g is None or not g.options:
             return None
         today = ist_day(time.time()).isoformat()
-        expiry, skipped = pick_expiry([o.expiry for o in g.options], today)
+        if include_today:
+            xs = sorted({o.expiry for o in g.options if o.expiry >= today})
+            expiry, skipped = (xs[0] if xs else None), False
+        else:
+            expiry, skipped = pick_expiry([o.expiry for o in g.options], today)
         if expiry is None:
             return None
         strikes: dict[float, dict[str, Any]] = {}

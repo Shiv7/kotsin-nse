@@ -38,6 +38,7 @@ from ..scan.replay import guarded_adr
 from ..structure.engine import Bar5
 from . import covered as cv
 from . import cpr_retest as cr
+from . import intraday_books as ib
 from . import level_retest as lr
 from . import straddle as stx
 from . import wise_gate as wg
@@ -148,6 +149,8 @@ class ShadowRunner:
         self._iv_open: float | None = None
         self._nifty: dict[str, Any] | None = None
         self.book: dict[str, Any] | None = self.read_book() if settings.strategy_covered else None
+        #: the intraday option records (strategy/intraday_books.py), by name, today's only
+        self.intraday: dict[str, dict[str, Any]] = {}
 
     @property
     def underlyings(self) -> Mapping[str, Instrument]:
@@ -171,6 +174,7 @@ class ShadowRunner:
         self.syms, self.signals, self.trades, self.plans = {}, [], [], {}
         self.positions = {}
         self.straddle, self.menu, self._iv_open, self._nifty = None, [], None, None
+        self.intraday = {}
         self._restored_entered: set[tuple[str, int]] = set()
         self._restore(day)
 
@@ -188,6 +192,7 @@ class ShadowRunner:
             self.straddle = snap.get("straddle") or None
             self.menu = list(snap.get("menu") or [])
             self._iv_open = next((r["iv"] for r in self.menu if r.get("iv") is not None), None)
+            self.intraday = dict(snap.get("intraday") or {})
             for p in snap.get("positions") or []:
                 self.positions[p["id"]] = p
                 for key in ("live", "live_exit"):
@@ -789,13 +794,13 @@ class ShadowRunner:
         """The engine's minute (``Engine._scan``): the shadow straddle sold at 10:00 and bought back at 15:29 with its
         menu of what each structure collects now, and the ₹20 lakh covered-call book's management — all from the chain
         the engine tracks at this minute. Nothing here orders; a failure never reaches the book."""
-        if self.straddle_pick is None or not (self.s.strategy_straddle or self.s.strategy_covered):
+        if self.straddle_pick is None or not (self.s.strategy_straddle or self.s.strategy_covered or self.s.strategy_intraday_books):
             return
         day = ist_day(now)
         if day.isoformat() != self.day:
             return  # the day rolls on its first bar; nothing before it
         hm = ist_hm(now)
-        if hm < stx.OPEN_HM or hm > "15:30":
+        if hm < "09:15" or hm > "15:30":
             return
         try:
             self._minute(now, day, hm)
@@ -838,7 +843,7 @@ class ShadowRunner:
             if not self.menu or self.menu[-1].get("hm") != row["hm"]:
                 self.menu.append(row)
             rec = self.straddle
-            if rec is None and hm <= stx.LAST_OPEN_HM:
+            if rec is None and stx.OPEN_HM <= hm <= stx.LAST_OPEN_HM:
                 adr, opn, pc = nd["adr"], nd["open"], nd["prev_close"]
                 fno = {}
                 if self.enrich is not None:
@@ -866,6 +871,23 @@ class ShadowRunner:
                     stx.close_record(rec, chain, self.costs, now=now, instruments=pick.get("instruments"))
                     changed = True
                     log.info("strategy.straddle_close", strike=rec["strike"], pnl_pts=rec["pnl_pts"], net_inr=rec["net_inr"], stale=rec["stale_exit"])
+        if self.s.strategy_intraday_books:
+            today_pick = self.straddle_pick(NIFTY, spot, include_today=True)
+            if today_pick and today_pick.get("strikes"):
+                tchain, tdte = today_pick["strikes"], int(today_pick.get("days") or 0)
+                for spec in ib.SPECS.values():
+                    rec = self.intraday.get(spec.name)
+                    if rec is None and tdte in spec.dte and spec.open_hm <= hm <= "15:00":
+                        rec = ib.open_record(spec, tchain, now=now, day=self.day, spot=spot, expiry=today_pick["expiry"], dte=tdte, lot=int(today_pick["lot"] or 1))
+                        if rec is not None:
+                            self.intraday[spec.name] = rec
+                            changed = True
+                            log.info("strategy.intraday_open", book=spec.name, credit=rec["credit"], dte=tdte, legs={k: v["strike"] for k, v in rec["legs"].items()})
+                    elif rec is not None and rec.get("status") == "OPEN":
+                        ev = ib.manage(rec, spec, tchain, self.costs, now=now)
+                        if ev:
+                            changed = True
+                            log.info("strategy.intraday", book=spec.name, events=ev, status=rec["status"], pnl=rec.get("pnl_pts"))
         if self.s.strategy_covered:
             s = self.s
             self.book, events = cv.step(self.book, now=now, day=self.day, hm=hm, spot=spot, chain=chain, future=pick.get("future"), f=f, t=t,
@@ -1043,6 +1065,7 @@ class ShadowRunner:
             "strategy": self.name, "sequence": self.sequence, "day": self.day, "rule": self.rule, "filter": self.filter, "picker": self.picker, "stop": self.s.strategy_stop, "min_rr": self.s.strategy_min_rr, "gate_extra": self.s.strategy_gate_extra, "pdc": self.pdc, "notional_inr": self.notional,
             "walls_round": self.s.strategy_walls_round, "max_move_adr": self.s.strategy_max_move_adr, "levels_hl": self.s.strategy_levels_hl, "entry_cutoff": self.s.strategy_entry_cutoff,
             "max_trades_per_day": self.s.strategy_max_trades_per_day, "straddle_on": self.s.strategy_straddle, "covered_on": self.s.strategy_covered,
+            "intraday_on": self.s.strategy_intraday_books,
             "universe": sum(1 for sym, i in self.underlyings.items() if i.kind is InstrumentKind.EQUITY and sym not in INDEX_ROOTS), "with_levels": len(self.syms),
             "orders": self.orders, "errors": self.errors,
             "summary": {
@@ -1058,7 +1081,7 @@ class ShadowRunner:
             "stages": stages, "signals": list(reversed(self.signals)), "positions": sorted(self.positions.values(), key=lambda p: -p["opened_ts"]),
             "trades": list(reversed(closed)),
             # the shadow straddle's record, the minute menu beside it, and the covered-call book's state today
-            "straddle": self.straddle, "menu": self.menu, "covered": cv.view(self.book, self.day),
+            "straddle": self.straddle, "menu": self.menu, "covered": cv.view(self.book, self.day), "intraday": self.intraday,
             # every rule's exit plan still running, so a restart steps on from here (``_restore``)
             "plans": {pid: {rule: plan.state() for rule, plan in rules.items()} for pid, rules in self.plans.items()},
         }

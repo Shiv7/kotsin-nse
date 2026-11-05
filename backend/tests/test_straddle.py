@@ -186,3 +186,60 @@ def test_the_managed_variant_books_the_target_or_the_stop_and_the_path_is_kept(t
     assert stx.manage_record(rec3, later, costs, now=AT_1529) is None
     stx.close_record(rec3, later, costs, now=AT_1529)
     assert rec3["managed"]["how"] == "close" and rec3["managed"]["pnl_pts"] == rec3["pnl_pts"] and rec3["managed"]["net_inr"] == rec3["net_inr"]
+
+
+def test_the_intraday_books_sell_the_fixed_premium_legs_and_stop_them(tmp_path):
+    from kotsin_nse.strategy import intraday_books as ib
+
+    costs = CostModel(Settings(_env_file=None, data_dir=tmp_path, engine_enabled=False))
+    t = stx.expiry_t("2026-01-06", OPEN + 7 * 60)  # the weekly expiry is tomorrow: DT1
+    f = 24420.0
+    chain = chain_at(f, t=t, iv=0.20)
+    spec = ib.SPECS["sleep"]
+    rec = ib.open_record(spec, chain, now=OPEN + 7 * 60, day=DAY, spot=24402.0, expiry="2026-01-06", dte=1, lot=65)
+    assert rec is not None and rec["opened_hm"] == "09:22" and rec["dte"] == 1 and set(rec["legs"]) == {"CE", "PE"}
+    ce, pe = rec["legs"]["CE"], rec["legs"]["PE"]
+    assert ce["strike"] > 24402 > pe["strike"] and abs(ce["entry"] - 75) < 25 and abs(pe["entry"] - 75) < 25  # the legs nearest ₹75 each side
+    assert ce["stop"] == round(ce["entry"] * 1.5, 2) and rec["credit"] == round(ce["entry"] + pe["entry"], 2)
+    # a quiet minute: marked, nothing closed
+    assert ib.manage(rec, spec, chain, costs, now=OPEN + 8 * 60) == [] and rec["status"] == "OPEN" and len(rec["path"]) == 1
+    # the index jumps 400 points: the call's ask runs through its stop, the put's stop moves to cost
+    up = chain_at(f + 400, t=stx.expiry_t("2026-01-06", OPEN + 30 * 60), iv=0.20)
+    ev = ib.manage(rec, spec, up, costs, now=OPEN + 30 * 60)
+    assert any("CE" in e and "stopped" in e for e in ev) and any("moved to cost" in e for e in ev)
+    assert ce["status"] == "CLOSED" and ce["how"] == "stop" and ce["exit"] >= ce["stop"] - 0.6 and pe["status"] == "OPEN" and pe["stop"] == pe["entry"]
+    # the bell: the put is bought back, the record settles with charges on both legs
+    late = chain_at(f + 400, t=stx.expiry_t("2026-01-06", AT_1529), iv=0.20)
+    ev = ib.manage(rec, spec, late, costs, now=OPEN + 6 * 3600)  # 15:15
+    assert any("bell" in e for e in ev) and rec["status"] == "CLOSED" and pe["how"] == "close" and rec["closed_hm"] == "15:15"
+    assert rec["pnl_pts"] == round(ce["entry"] - ce["exit"] + pe["entry"] - pe["exit"], 2) and rec["charges_inr"] > 0 and rec["net_inr"] == round(rec["gross_inr"] - rec["charges_inr"], 2)
+    # the expiry-day book: ₹6 legs, far out, only on DT0
+    x = ib.open_record(ib.SPECS["expiry_otm"], chain_at(f, t=stx.expiry_t("2026-01-05", OPEN + 15 * 60), iv=0.20), now=OPEN + 15 * 60, day=DAY, spot=24402.0, expiry="2026-01-05", dte=0, lot=65)
+    assert x is not None and x["legs"]["CE"]["strike"] - 24402 > 100 and 24402 - x["legs"]["PE"]["strike"] > 100 and x["credit"] < 30
+
+
+async def test_the_runner_keeps_the_intraday_records_in_the_day_file(tmp_path):
+    store = BarStore()
+    _seed_daily(store, "ABC", "1")
+    _seed_daily(store, "NIFTY", "99")
+    for i in range(46):
+        store.close(_ubar("NIFTY", "99", "1m", OPEN + 60 * i, 24380.0, 24390.0, 24370.0, 24402.0))
+    r = _runner(tmp_path, store, strategy_sequence="level", strategy_intraday_books=True)
+    await _feed(r, store, [(104.0, 104.5, 103.5, 104.2)])
+    f = 24420.0
+
+    def pick(symbol, spot, include_today=False):
+        exp = "2026-01-06" if include_today else EXPIRY
+        t = stx.expiry_t(exp, OPEN + 7 * 60)
+        return {"expiry": exp, "expiry_day": False, "days": 1 if include_today else 3, "lot": 65, "strikes": chain_at(f, t=t, iv=0.2), "instruments": {},
+                "future": {"scrip_code": "F1", "name": "NIFTY FUT", "expiry": "2026-01-27", "lot": 65, "ltp": f, "quote": {"ltp": f, "bid": f - 1, "ask": f + 1, "age_s": 1.0}}}
+
+    r.straddle_pick = pick
+    r.option_mark = lambda code: None
+    r.on_minute(OPEN + 7 * 60)  # 09:22 on a DT1 day: the sleep record opens, the expiry book does not
+    assert "sleep" in r.intraday and r.intraday["sleep"]["status"] == "OPEN" and "expiry_otm" not in r.intraday
+    r.on_minute(OPEN + 6 * 3600)  # 15:15
+    assert r.intraday["sleep"]["status"] == "CLOSED"
+    await asyncio.gather(*r._tasks)  # type: ignore[attr-defined]
+    snap = json.loads((tmp_path / "strategy" / f"{DAY}.json").read_text())
+    assert snap["intraday_on"] is True and snap["intraday"]["sleep"]["status"] == "CLOSED" and snap["intraday"]["sleep"]["opened_hm"] == "09:22"

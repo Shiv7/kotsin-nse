@@ -109,11 +109,13 @@ class Book:
     symbol: str = "NIFTY"
     note: str = ""
     max_open: int = 1  # positions open at once: 2 lets a monthly structure overlap the next month's, as the playbooks deploy
+    #: open only when the monthly ATM IV's percentile against the trailing year (regime.py) is at least this: sell premium when it is rich
+    min_iv_pct: float | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {"name": self.name, "structure": self.structure, "params": self.params, "entry": asdict(self.entry), "exit": asdict(self.exit),
                 "manage": self.manage, "balance_ratio": self.balance_ratio, "max_rolls": self.max_rolls, "costs": asdict(self.costs), "symbol": self.symbol,
-                "note": self.note, "max_open": self.max_open}
+                "note": self.note, "max_open": self.max_open, "min_iv_pct": self.min_iv_pct}
 
 
 def new_state(book: Book) -> dict[str, Any]:
@@ -267,9 +269,10 @@ def _close(state: dict[str, Any], book: Book, d: Day, prices: dict[int, float], 
     return row
 
 
-def step(state: dict[str, Any], store: Store, day: str, book: Book) -> list[str]:
+def step(state: dict[str, Any], store: Store, day: str, book: Book, regime: dict[str, float] | None = None) -> list[str]:
     """Advance the book by one bhavcopy session: manage, mark and maybe close each open position, then open a new
-    one if the calendar says so and fewer than ``book.max_open`` are running. Returns the events of the day."""
+    one if the calendar says so, fewer than ``book.max_open`` are running and the regime (the day's monthly IV
+    percentile, when the book asks for one) allows. Returns the events of the day."""
     d = store.get(day)
     events: list[str] = []
     if "open" in state:  # a state written before positions could overlap
@@ -314,6 +317,11 @@ def step(state: dict[str, Any], store: Store, day: str, book: Book) -> list[str]
     if len(state["opens"]) < book.max_open:
         expiry = book.entry.expiry_for(d)
         taken = {o["expiry"] for o in state["opens"]} | {c["expiry"] for c in state["cycles"][-4:]}
+        if expiry is not None and expiry not in taken and book.min_iv_pct is not None:
+            pct = (regime or {}).get(day)
+            if pct is None or pct < book.min_iv_pct:
+                events.append(f"{day} regime: IV percentile {pct} under {book.min_iv_pct}; no entry on {expiry}")
+                expiry = None
         if expiry is not None and expiry not in taken:
             legs = BUILDERS[book.structure](d, expiry, **book.params)
             if legs is None:
@@ -331,12 +339,12 @@ def step(state: dict[str, Any], store: Store, day: str, book: Book) -> list[str]
     return events
 
 
-def backtest(store: Store, book: Book, start: str | None = None, end: str | None = None) -> dict[str, Any]:
+def backtest(store: Store, book: Book, start: str | None = None, end: str | None = None, regime: dict[str, float] | None = None) -> dict[str, Any]:
     state = new_state(book)
     for day in store.days:
         if (start and day < start) or (end and day > end):
             continue
-        step(state, store, day, book)
+        step(state, store, day, book, regime)
     return state
 
 

@@ -277,6 +277,10 @@ class Settings(BaseSettings):
     strategy_covered_max_dd: float = 0.05
     #: on the call's own expiry day it is settled at this time (its last price, intrinsic by then) and the next expiry's sold
     strategy_covered_settle_hm: str = "15:20"
+    #: the intraday option records the daily bhavcopy cannot test (``strategy/intraday_books.py``): the "sleep" fixed-premium
+    #: straddle on the day before and the day of the weekly expiry, and the expiry-day far-OTM sale — recorded from the
+    #: engine's own quotes beside the 10:00 straddle, never ordered (the owner's pasted transcripts, 6 Nov 2026)
+    strategy_intraday_books: bool = False
 
     # ---- the positional book: the daily order block (strategy/daily_ob.py, strategy/positional.py) ------
     #: off by default: the book FAILED its pre-registered test on 2026-10-29 (docs/research/2026-10-29-

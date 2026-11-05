@@ -66,6 +66,14 @@ def paths(settings: Settings) -> tuple[Store, Path, Path]:
     return Store(settings.data_dir / "oi_daily"), settings.data_dir / "paper", settings.data_dir / "regime"
 
 
+def regime_pct(store: Store, rroot: Path) -> dict[str, float]:
+    """day → the monthly ATM IV's percentile against the trailing year, for the books that filter on it."""
+    H = regime.with_percentiles(regime.history(store, rroot))
+    if H.empty or "iv_m_pct" not in H:
+        return {}
+    return {str(r.day): float(r.iv_m_pct) for r in H.itertuples() if r.iv_m_pct == r.iv_m_pct}
+
+
 def load_state(root: Path, book: Book) -> dict[str, Any]:
     p = root / f"{book.name}.json"
     return json.loads(p.read_text()) if p.exists() else new_state(book)
@@ -78,9 +86,12 @@ def save_state(root: Path, book: Book, state: dict[str, Any]) -> None:
     tmp.replace(root / f"{book.name}.json")
 
 
-def advance(store: Store, root: Path, books: dict[str, Book] | None = None, *, upto: str | None = None, start: str | None = None) -> dict[str, list[str]]:
+def advance(store: Store, root: Path, books: dict[str, Book] | None = None, *, upto: str | None = None, start: str | None = None,
+            regime_by_day: dict[str, float] | None = None) -> dict[str, list[str]]:
     """Step every book over the bhavcopy days it has not seen (from ``start`` for a fresh book)."""
     out: dict[str, list[str]] = {}
+    if regime_by_day is None and any(b.min_iv_pct is not None for b in (books or BOOKS).values()):
+        regime_by_day = regime_pct(store, root.parent / "regime")
     for book in (books or BOOKS).values():
         state = load_state(root, book)
         if "rules" in state:
@@ -90,17 +101,17 @@ def advance(store: Store, root: Path, books: dict[str, Book] | None = None, *, u
         for day in store.days:
             if (last and day <= last) or (not last and start and day < start) or (upto and day > upto):
                 continue
-            events += step(state, store, day, book)
+            events += step(state, store, day, book, regime_by_day)
         save_state(root, book, state)
         out[book.name] = events
     return out
 
 
-def run_backtests(store: Store, start: str | None, end: str | None, books: dict[str, Book] | None = None) -> pd.DataFrame:
+def run_backtests(store: Store, start: str | None, end: str | None, books: dict[str, Book] | None = None, regime_by_day: dict[str, float] | None = None) -> pd.DataFrame:
     rows = []
     results: dict[str, dict[str, Any]] = {}
     for book in (books or BOOKS).values():
-        st = backtest(store, book, start, end)
+        st = backtest(store, book, start, end, regime_by_day)
         results[book.name] = st
         s = summary(st, book.costs.lot)
         rows.append({"book": book.name, **s})
@@ -125,7 +136,7 @@ def main() -> None:
     pd.set_option("display.width", 250)
     pd.set_option("display.max_columns", 40)
     if a.backtest:
-        D = run_backtests(store, a.start, a.end)
+        D = run_backtests(store, a.start, a.end, regime_by_day=regime_pct(store, rroot))
         print(f"== backtest {a.start or store.days[0]} → {a.end or store.days[-1]} on {store.symbol} bhavcopy closes; points per unit, ₹ at lot {COSTS.lot} after slippage and charges")
         print(D.to_string())
         if a.out:
