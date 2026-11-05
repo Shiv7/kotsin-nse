@@ -1,0 +1,28 @@
+
+== 2026-11-05: 218 simulable signals (booked 2), all-signal mean +5.4 bps, win 46 %
+  first two (the live book)                            net  -186.2 bps  (ADANIENT S -51, APOLLOHOSP S -109)
+  first two with risk ≥ 80 bps                         net   -96.7 bps  (APOLLOHOSP S -109, ASTRAL S +39)
+  first two with the first wall ≤ 0.5R                 net  -100.4 bps  (APOLLOHOSP S -109, BSE L +35)
+  first two with the board with the trade (score ≥ 2)  net   -96.7 bps  (APOLLOHOSP S -109, ASTRAL S +39)
+  first two with the future's state with the trade     net   -96.7 bps  (APOLLOHOSP S -109, ASTRAL S +39)
+  first two longs                                      net  +207.8 bps  (BSE L +35, PAYTM L +199)
+  first two after 10:15                                net   +26.7 bps  (JIOFIN L +18, ICICIBANK L +35)
+  first two with breadth ≥ 60 % the trade's way        net  -186.2 bps  (ADANIENT S -51, APOLLOHOSP S -109)
+  first two: breadth ≥ 60 % and not a top-10 % leader  net  -158.9 bps  (ADANIENT S -51, COCHINSHIP S -82)
+  best possible two (hindsight)                        net  +969.5 bps  (PATANJALI L +525, UNOMINDA L +470)
+  random two (mean of 200 draws)                       net    -9.2 bps  (p90 +126)
+
+== pickers across the days given (net bps of the two trades, summed)
+day                                                  2026-11-05  total
+picker                                                                
+best possible two (hindsight)                             969.5  969.5
+first two longs                                           207.8  207.8
+first two after 10:15                                      26.7   26.7
+random two                                                 -9.2   -9.2
+first two with risk ≥ 80 bps                              -96.7  -96.7
+first two with the board with the trade (score ≥ 2)       -96.7  -96.7
+first two with the future's state with the trade          -96.7  -96.7
+first two with the first wall ≤ 0.5R                     -100.4 -100.4
+first two: breadth ≥ 60 % and not a top-10 % leader      -158.9 -158.9
+first two (the live book)                                -186.2 -186.2
+first two with breadth ≥ 60 % the trade's way            -186.2 -186.2
