@@ -31,8 +31,8 @@ def main() -> None:
     bh = pq.read_table(DD / "oi_daily" / f"{DAY}.parquet").to_pandas()
     m = lf.master_for(DAY)
     # the lot by root: the master's future rows (ScripType XX) for "SYMBOL DD MON YYYY"
-    fut_rows = m[m["ScripType"].astype(str) == "XX"]
-    lots = {str(n).split(" ")[0]: int(l) for n, l in zip(fut_rows["Name"], fut_rows["LotSize"], strict=False)}
+    names = m["Name"].astype(str)
+    lots = {sym: int(m[names.str.startswith(sym + " ")]["LotSize"].max() or 0) for sym in sys.argv[1:]}
     arch = archive_daily(DAY).set_index("symbol")
     now = datetime.datetime(2026, 11, 6, 9, 15, tzinfo=IST).timestamp()
     rows = []
