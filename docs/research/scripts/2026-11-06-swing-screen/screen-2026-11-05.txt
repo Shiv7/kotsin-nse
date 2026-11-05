@@ -1,0 +1,148 @@
+== six sessions 2026-10-29 → 2026-11-05 on a 2026-10-28 base; NIFTY +8.1 %; 212 F&O stocks with data
+   breadth: up 198 / down 14; beat NIFTY 81; above the 20-DMA 183; median move +2.3 ADR, median efficiency 0.60; build-up: {'short covering': 118, 'long build-up': 62, 'flat OI': 18, 'short build-up': 10, 'long unwinding': 4}
+
+== LEADERS: ≥ 1.5 ADR up, ≥ 4 up days of 6, efficiency ≥ 0.5, above the 20-DMA, ahead of NIFTY — 79 names, by relative strength
+                                    sector   close  ret6_pct  move_adr  rs6_pct  up_days   eff  pullback_adr  pos6  vs_dma20_pct  vs_dma50_pct  vs_20d_high_pct  oi6_pct        build_up  vol6_over_20         bias fut_state   pcr
+symbol                                                                                                                                                                                                                             
+UNOMINDA    Automobile and Auto Components  1332.0      21.1       7.2     13.0        4  0.87           3.8  0.99          19.9          13.6             -0.2     -0.1         flat OI          1.34  Strong Bull        LB  0.54
+MUTHOOTFIN              Financial Services  2839.6      18.7       7.6     10.6        5  0.72           3.9  0.97          11.8           4.0             -0.6    -12.2  short covering          1.31  Strong Bull        LB  0.70
+PRESTIGE                            Realty  1642.0      17.9       5.3      9.8        6  1.00           1.5  0.98          12.3           9.9             -0.3     -4.7  short covering          0.42  Strong Bull        SC  0.32
+ASHOKLEY                     Capital Goods   170.4      17.6       6.7      9.5        5  0.99           2.7  0.95          15.3           8.4             -0.9     -1.3  short covering          1.00  Strong Bull        LB  0.64
+LODHA                               Realty  1174.9      16.7       4.9      8.5        4  0.66           2.5  0.97          12.3           5.1             -0.5      9.1   long build-up          0.72  Strong Bull        LB  0.42
+BAJFINANCE              Financial Services  1069.9      16.6       5.9      8.5        6  1.00           2.1  0.97          11.9           7.3             -0.5    -10.8  short covering          0.79  Strong Bull        LB  0.81
+NAM-INDIA               Financial Services  1070.0      16.0       4.2      7.9        5  0.80           1.6  0.93           7.1          -1.6             -2.2      2.7   long build-up          0.91  Strong Bull        SC  0.54
+SHRIRAMFIN              Financial Services   963.9      15.8       4.2      7.7        5  0.79           1.3  0.93           7.3          -0.8             -2.7    -15.7  short covering          0.85  Strong Bull        LB  0.70
+INDIGO                            Services  5429.8      15.8       6.2      7.7        5  0.96           1.4  0.93          13.3          10.6             -1.1    -12.3  short covering          0.92  Strong Bull        SC  0.59
+NBCC                          Construction    80.6      15.4       5.3      7.3        4  0.60           3.2  0.95           9.5           1.6             -0.7     19.3   long build-up          0.86  Strong Bull        LB  0.25
+MARICO          Fast Moving Consumer Goods   887.1      15.3       7.1      7.1        4  0.94           2.8  0.94          11.2           9.9             -0.9    -12.0  short covering          1.43  Strong Bear        SB  0.60
+360ONE                  Financial Services  1140.7      15.1       5.1      7.0        5  0.66           1.6  0.95           9.6           5.7             -0.7     -2.1  short covering          0.49  Strong Bull        LB  0.77
+HDFCAMC                 Financial Services  2632.4      14.5       5.0      6.3        5  0.96           1.4  0.97          12.5           9.8             -0.4    -13.5  short covering          0.59  Strong Bull        LB  0.56
+GODREJPROP                          Realty  1813.7      14.3       4.6      6.2        5  0.78           2.2  0.99          13.5           5.6             -0.1     10.0   long build-up          0.63  Strong Bull        LB  0.45
+UNITDSPR        Fast Moving Consumer Goods  1401.0      14.1       4.6      6.0        5  1.00           1.3  0.83           5.3           1.0             -2.2     -7.5  short covering          0.72  Strong Bear        SB  0.59
+CHOLAFIN                Financial Services  1760.0      13.9       4.6      5.8        5  0.86           1.6  0.91          11.9           4.3             -1.2     -8.0  short covering          0.80  Strong Bull        LB  0.55
+HYUNDAI     Automobile and Auto Components  2120.9      13.6       4.5      5.5        5  0.92           1.5  0.89           8.8           2.8             -1.3      4.2   long build-up          0.70  Strong Bull        LB  0.37
+RELIANCE        Oil Gas & Consumable Fuels  1312.9      13.4       5.8      5.3        4  0.94           2.5  0.93           8.7           6.3             -0.9      1.1   long build-up          1.28         Bear        SB  0.36
+MOTILALOFS              Financial Services  1094.9      13.1       3.2      5.0        4  0.59           1.8  0.99           8.9           7.9             -0.1    -14.2  short covering          1.25  Strong Bull        SC  0.33
+MANAPPURAM              Financial Services   326.2      13.0       3.8      4.9        5  0.59           2.4  0.95           6.2           2.1             -1.1     -6.0  short covering          0.58  Strong Bull        LB  0.48
+LTF                     Financial Services   278.4      12.9       3.8      4.8        5  0.71           1.5  0.93           9.8          -0.9             -0.9    -16.5  short covering          0.44  Strong Bull        LB  0.71
+VEDL                       Metals & Mining   262.3      12.5       4.0      4.4        5  0.99           1.8  0.92           7.3           1.6             -2.0    -11.5  short covering          0.59  Strong Bull        SC  0.50
+GAIL            Oil Gas & Consumable Fuels   184.8      12.2       5.2      4.1        5  0.90           2.2  0.84           8.7           7.7             -2.1     -7.0  short covering          1.06  Strong Bear        LU  0.89
+HINDZINC                   Metals & Mining   568.6      12.2       4.4      4.1        5  0.74           2.5  0.90           7.9           1.2             -1.3      6.3   long build-up          0.88  Strong Bull        LB  0.51
+JIOFIN                  Financial Services   229.6      11.9       4.7      3.8        5  0.83           2.0  0.93           7.8           3.0             -0.8      1.8   long build-up          0.64  Strong Bull        LB  0.54
+DLF                                 Realty   745.2      11.8       4.9      3.7        5  0.93           1.9  0.97          10.2          11.3             -0.4      2.8   long build-up          0.65         Bull        SC  0.55
+ADANIGREEN                           Power  1417.3      11.7       3.2      3.6        5  0.90           1.4  0.92           9.7           9.8             -0.9     -9.3  short covering          0.38         Bull        SC  0.55
+DELHIVERY                         Services   430.1      11.7       3.8      3.6        5  0.67           2.1  0.90           7.6           2.1             -1.2     -2.4  short covering          1.40  Strong Bull        LB  0.32
+PHOENIXLTD                          Realty  2120.0      11.6       4.2      3.5        5  0.90           2.7  0.97          10.2          10.6             -0.4     -1.9  short covering          0.60  Strong Bull        SC  0.24
+PATANJALI       Fast Moving Consumer Goods   412.2      11.5       3.5      3.4        5  0.60           3.0  0.97          12.6          13.6             -0.4    -10.6  short covering          0.83  Strong Bull        SC  0.34
+
+== CLEANEST TRENDS: efficiency ≥ 0.7, 5+ up days, no pullback over 1 ADR, ≥ 2 ADR — 0 names
+Empty DataFrame
+Columns: [sector, close, ret6_pct, move_adr, rs6_pct, up_days, eff, pullback_adr, pos6, vs_dma20_pct, vs_dma50_pct, vs_20d_high_pct, oi6_pct, build_up, vol6_over_20, bias, fut_state, pcr]
+Index: []
+
+== LAGGARDS in an up week: six-day return negative, or 3 points or more behind NIFTY — 84 names
+                                    sector    close  ret6_pct  move_adr  rs6_pct  up_days   eff  pullback_adr  pos6  vs_dma20_pct  vs_dma50_pct  vs_20d_high_pct  oi6_pct        build_up  vol6_over_20         bias fut_state   pcr
+symbol                                                                                                                                                                                                                              
+PIIND                            Chemicals   1768.0     -14.0      -4.6    -22.1        4  0.49           7.5  0.04         -16.1         -21.7            -21.0     64.4  short build-up          1.59  Strong Bear        SB  1.21
+CUMMINSIND                   Capital Goods   4135.0     -10.5      -4.1    -18.6        3  0.46           6.1  0.14          -9.8         -14.6            -15.7     -5.1  long unwinding          1.64  Strong Bear        SB  1.21
+SOLARINDS                        Chemicals  18515.0      -3.8      -1.3    -11.9        3  0.25           4.4  0.04          -4.8          -7.0            -11.3     26.6  short build-up          1.91  Strong Bear        SB  0.93
+SAGILITY            Information Technology     43.7      -3.6      -1.0    -11.7        3  0.30           2.6  0.49          -1.2          -2.1             -7.1     36.0  short build-up          1.41  Strong Bull        LB  0.59
+CGPOWER                              Power    809.0      -2.8      -0.8    -10.9        2  0.22           1.9  0.39          -3.0          -6.7             -9.7      2.5  short build-up          0.57  Strong Bear        SB  1.05
+FEDERALBNK              Financial Services    338.5      -2.2      -0.8    -10.3        3  0.34           2.2  0.42           0.2           0.5             -4.8     -8.8  long unwinding          0.46  Strong Bull        LB  0.67
+UPL                              Chemicals    525.5      -2.0      -0.6    -10.2        3  0.20           2.4  0.48           1.2          -3.1             -4.4     16.4  short build-up          1.09  Strong Bear        SB  0.48
+BLUESTARCO               Consumer Durables   1566.3      -2.0      -0.6    -10.1        2  0.15           2.3  0.12          -0.3           2.1             -6.4     -9.3  long unwinding          0.79         Bull        SC  0.64
+KPITTECH            Information Technology    542.0      -1.9      -0.5    -10.0        3  0.18           2.2  0.69           3.1           0.7             -5.1      3.5  short build-up          0.45         Bull        SC  0.41
+OIL             Oil Gas & Consumable Fuels    439.0      -1.9      -0.9    -10.0        3  0.22           4.0  0.31          -2.4          -5.7             -5.5     30.8  short build-up          0.90  Strong Bear        SB  1.55
+PNBHOUSING              Financial Services   1102.0      -1.8      -0.6     -9.9        3  0.18           3.6  0.40          -2.3          -2.9            -10.0      7.7  short build-up          1.00  Strong Bull        LB  0.74
+POLICYBZR               Financial Services    971.7      -1.6      -0.3     -9.8        3  0.09           2.3  0.51          -4.1         -28.6            -11.0     13.8  short build-up          0.47    Mild Bear        LU  0.69
+POWERINDIA                   Capital Goods  28115.0      -1.1      -0.3     -9.2        2  0.06           2.3  0.58          -1.8          -7.8            -11.1    -11.0  long unwinding          0.66  Strong Bear        SB  0.82
+BHARATFORG  Automobile and Auto Components   1746.1      -0.8      -0.3     -8.9        4  0.07           3.0  0.23          -2.0          -7.7             -7.4     25.5  short build-up          1.29  Strong Bear        SB  0.59
+LUPIN                           Healthcare   1982.0       0.5       0.2     -7.7        4  0.09           3.0  0.32           0.8          -3.1             -3.9      0.4         flat OI          0.93  Strong Bear        SB  0.75
+MPHASIS             Information Technology   2530.0       0.5       0.1     -7.6        3  0.04           1.6  0.56           1.7           5.7             -3.4    -10.4  short covering          0.83  Strong Bull        LB  1.12
+ENRIN                                    ?   2859.0       0.7       0.2     -7.5        2  0.05           1.7  0.54          -1.7          -7.5            -15.4     18.0   long build-up          0.97  Strong Bear        SB  0.78
+MANKIND                         Healthcare   2510.0       0.8       0.2     -7.3        3  0.13           0.9  0.50           5.1           4.9             -2.0     -8.0  short covering          0.41  Strong Bear        LU  0.62
+COALINDIA       Oil Gas & Consumable Fuels    396.1       1.0       0.5     -7.1        3  0.11           2.0  0.55          -2.1          -3.9             -5.8    -11.4  short covering          0.69  Strong Bear        SB  0.46
+TCS                 Information Technology   2490.0       1.2       0.4     -6.9        3  0.18           1.9  0.54           3.4           9.3             -5.1      7.4   long build-up          0.36  Strong Bull        LB  0.53
+CROMPTON                 Consumer Durables    206.8       1.3       0.3     -6.8        4  0.10           1.5  0.84           1.7          -4.4             -6.8      0.4         flat OI          0.31  Strong Bull        LB  0.63
+APLAPOLLO                    Capital Goods   2195.0       1.4       0.5     -6.8        3  0.25           1.7  0.60           2.7           1.4             -2.0    -20.0  short covering          0.46  Strong Bear        LU  1.01
+SIEMENS                      Capital Goods   3416.0       1.3       0.4     -6.8        3  0.12           1.6  0.58          -2.0          -8.6            -10.1      8.8   long build-up          0.49  Strong Bear        SB  0.49
+OFSS                Information Technology  10140.0       1.5       0.5     -6.6        4  0.24           1.8  0.64           0.1          -7.0             -6.2     -8.4  short covering          0.83         Bull        SC  0.61
+GVT&D                                    ?   4130.0       1.7       0.5     -6.4        3  0.11           2.7  0.63           2.5          -2.1             -4.2    -17.9  short covering          0.79  Strong Bear        SB  0.90
+
+== LONG BUILD-UP ahead of NIFTY (price up, futures OI up over the window) — 18 names, by OI added
+                                    sector   close  ret6_pct  move_adr  rs6_pct  up_days   eff  pullback_adr  pos6  vs_dma20_pct  vs_dma50_pct  vs_20d_high_pct  oi6_pct       build_up  vol6_over_20         bias fut_state   pcr
+symbol                                                                                                                                                                                                                            
+NBCC                          Construction    80.6      15.4       5.3      7.3        4  0.60           3.2  0.95           9.5           1.6             -0.7     19.3  long build-up          0.86  Strong Bull        LB  0.25
+PIDILITIND                       Chemicals  1548.1      11.4       4.9      3.3        5  0.86           2.6  0.92           4.6           1.0             -1.2     15.8  long build-up          1.41  Strong Bull        LB  0.34
+AMBUJACEM           Construction Materials   387.5      10.3       2.9      2.2        5  0.73           1.2  0.91           8.3           2.8             -1.0     14.1  long build-up          0.76  Strong Bull        LB  0.29
+ASIANPAINT               Consumer Durables  2530.0      10.7       4.8      2.6        5  0.98           1.7  0.87           8.0           4.3             -1.8     12.3  long build-up          1.61  Strong Bull        LB  0.53
+KALYANKJIL               Consumer Durables   557.2       9.3       2.3      1.1        5  0.58           1.4  0.99           4.1          -1.5             -2.7     11.1  long build-up          0.47  Strong Bull        LB  0.29
+GODREJPROP                          Realty  1813.7      14.3       4.6      6.2        5  0.78           2.2  0.99          13.5           5.6             -0.1     10.0  long build-up          0.63  Strong Bull        LB  0.45
+JINDALSTEL                 Metals & Mining  1151.8       9.9       3.4      1.8        6  1.00           1.6  0.86           9.3           4.3             -1.5      9.9  long build-up          0.64         Bull        SC  0.70
+MAXHEALTH                       Healthcare   930.8       9.3       2.7      1.2        5  0.99           1.4  0.86           8.3          -1.7             -1.4      9.2  long build-up          0.76  Strong Bull        LB  0.53
+LODHA                               Realty  1174.9      16.7       4.9      8.5        4  0.66           2.5  0.97          12.3           5.1             -0.5      9.1  long build-up          0.72  Strong Bull        LB  0.42
+HINDZINC                   Metals & Mining   568.6      12.2       4.4      4.1        5  0.74           2.5  0.90           7.9           1.2             -1.3      6.3  long build-up          0.88  Strong Bull        LB  0.51
+HYUNDAI     Automobile and Auto Components  2120.9      13.6       4.5      5.5        5  0.92           1.5  0.89           8.8           2.8             -1.3      4.2  long build-up          0.70  Strong Bull        LB  0.37
+DLF                                 Realty   745.2      11.8       4.9      3.7        5  0.93           1.9  0.97          10.2          11.3             -0.4      2.8  long build-up          0.65         Bull        SC  0.55
+NAM-INDIA               Financial Services  1070.0      16.0       4.2      7.9        5  0.80           1.6  0.93           7.1          -1.6             -2.2      2.7  long build-up          0.91  Strong Bull        SC  0.54
+JIOFIN                  Financial Services   229.6      11.9       4.7      3.8        5  0.83           2.0  0.93           7.8           3.0             -0.8      1.8  long build-up          0.64  Strong Bull        LB  0.54
+BAJAJFINSV              Financial Services  1838.0      11.2       5.0      3.1        5  1.00           2.3  0.95           7.7           1.6             -0.6      1.3  long build-up          0.76  Strong Bull        LB  0.35
+GLENMARK                        Healthcare  2495.0       8.5       2.8      0.4        4  0.64           1.9  0.81           9.1           5.5             -1.9      1.1  long build-up          0.69  Strong Bear        LU  0.57
+RELIANCE        Oil Gas & Consumable Fuels  1312.9      13.4       5.8      5.3        4  0.94           2.5  0.93           8.7           6.3             -0.9      1.1  long build-up          1.28         Bear        SB  0.36
+HINDPETRO       Oil Gas & Consumable Fuels   379.8       9.4       3.3      1.3        4  0.71           1.3  0.79          10.3           8.3             -2.9      1.0  long build-up          0.57  Strong Bull        LB  0.33
+
+== SHORT BUILD-UP (price down, OI up) — 10 names
+                                    sector    close  ret6_pct  move_adr  rs6_pct  up_days   eff  pullback_adr  pos6  vs_dma20_pct  vs_dma50_pct  vs_20d_high_pct  oi6_pct        build_up  vol6_over_20         bias fut_state   pcr
+symbol                                                                                                                                                                                                                              
+PIIND                            Chemicals   1768.0     -14.0      -4.6    -22.1        4  0.49           7.5  0.04         -16.1         -21.7            -21.0     64.4  short build-up          1.59  Strong Bear        SB  1.21
+SAGILITY            Information Technology     43.7      -3.6      -1.0    -11.7        3  0.30           2.6  0.49          -1.2          -2.1             -7.1     36.0  short build-up          1.41  Strong Bull        LB  0.59
+OIL             Oil Gas & Consumable Fuels    439.0      -1.9      -0.9    -10.0        3  0.22           4.0  0.31          -2.4          -5.7             -5.5     30.8  short build-up          0.90  Strong Bear        SB  1.55
+SOLARINDS                        Chemicals  18515.0      -3.8      -1.3    -11.9        3  0.25           4.4  0.04          -4.8          -7.0            -11.3     26.6  short build-up          1.91  Strong Bear        SB  0.93
+BHARATFORG  Automobile and Auto Components   1746.1      -0.8      -0.3     -8.9        4  0.07           3.0  0.23          -2.0          -7.7             -7.4     25.5  short build-up          1.29  Strong Bear        SB  0.59
+UPL                              Chemicals    525.5      -2.0      -0.6    -10.2        3  0.20           2.4  0.48           1.2          -3.1             -4.4     16.4  short build-up          1.09  Strong Bear        SB  0.48
+POLICYBZR               Financial Services    971.7      -1.6      -0.3     -9.8        3  0.09           2.3  0.51          -4.1         -28.6            -11.0     13.8  short build-up          0.47    Mild Bear        LU  0.69
+PNBHOUSING              Financial Services   1102.0      -1.8      -0.6     -9.9        3  0.18           3.6  0.40          -2.3          -2.9            -10.0      7.7  short build-up          1.00  Strong Bull        LB  0.74
+KPITTECH            Information Technology    542.0      -1.9      -0.5    -10.0        3  0.18           2.2  0.69           3.1           0.7             -5.1      3.5  short build-up          0.45         Bull        SC  0.41
+CGPOWER                              Power    809.0      -2.8      -0.8    -10.9        2  0.22           1.9  0.39          -3.0          -6.7             -9.7      2.5  short build-up          0.57  Strong Bear        SB  1.05
+
+== EXTENDED: four ADRs or more in six sessions — 41 names (a chase, not an entry, until a pullback is recorded)
+                                    sector   close  ret6_pct  move_adr  rs6_pct  up_days   eff  pullback_adr  pos6  vs_dma20_pct  vs_dma50_pct  vs_20d_high_pct  oi6_pct        build_up  vol6_over_20         bias fut_state   pcr
+symbol                                                                                                                                                                                                                             
+MUTHOOTFIN              Financial Services  2839.6      18.7       7.6     10.6        5  0.72           3.9  0.97          11.8           4.0             -0.6    -12.2  short covering          1.31  Strong Bull        LB  0.70
+UNOMINDA    Automobile and Auto Components  1332.0      21.1       7.2     13.0        4  0.87           3.8  0.99          19.9          13.6             -0.2     -0.1         flat OI          1.34  Strong Bull        LB  0.54
+MARICO          Fast Moving Consumer Goods   887.1      15.3       7.1      7.1        4  0.94           2.8  0.94          11.2           9.9             -0.9    -12.0  short covering          1.43  Strong Bear        SB  0.60
+ASHOKLEY                     Capital Goods   170.4      17.6       6.7      9.5        5  0.99           2.7  0.95          15.3           8.4             -0.9     -1.3  short covering          1.00  Strong Bull        LB  0.64
+INDIGO                            Services  5429.8      15.8       6.2      7.7        5  0.96           1.4  0.93          13.3          10.6             -1.1    -12.3  short covering          0.92  Strong Bull        SC  0.59
+BAJFINANCE              Financial Services  1069.9      16.6       5.9      8.5        6  1.00           2.1  0.97          11.9           7.3             -0.5    -10.8  short covering          0.79  Strong Bull        LB  0.81
+RELIANCE        Oil Gas & Consumable Fuels  1312.9      13.4       5.8      5.3        4  0.94           2.5  0.93           8.7           6.3             -0.9      1.1   long build-up          1.28         Bear        SB  0.36
+PRESTIGE                            Realty  1642.0      17.9       5.3      9.8        6  1.00           1.5  0.98          12.3           9.9             -0.3     -4.7  short covering          0.42  Strong Bull        SC  0.32
+TITAN                    Consumer Durables  4834.6      11.5       5.3      3.3        6  1.00           2.9  0.96           8.7           2.6             -0.5     -5.5  short covering          0.82  Strong Bull        LB  0.43
+NBCC                          Construction    80.6      15.4       5.3      7.3        4  0.60           3.2  0.95           9.5           1.6             -0.7     19.3   long build-up          0.86  Strong Bull        LB  0.25
+GAIL            Oil Gas & Consumable Fuels   184.8      12.2       5.2      4.1        5  0.90           2.2  0.84           8.7           7.7             -2.1     -7.0  short covering          1.06  Strong Bear        LU  0.89
+GRASIM              Construction Materials  3225.0      11.2       5.2      3.1        6  1.00           1.3  0.98           9.5           4.1             -0.2     -1.8  short covering          0.56  Strong Bull        LB  0.36
+HDFCBANK                Financial Services   760.5      11.0       5.1      2.9        5  0.95           1.5  0.97           7.6           6.8             -0.3     -5.3  short covering          0.51  Strong Bull        LB  0.61
+IOC             Oil Gas & Consumable Fuels   144.3      10.9       5.1      2.8        5  0.96           1.5  0.84          10.1           8.0             -2.0     -3.9  short covering          0.58  Strong Bull        SC  0.37
+360ONE                  Financial Services  1140.7      15.1       5.1      7.0        5  0.66           1.6  0.95           9.6           5.7             -0.7     -2.1  short covering          0.49  Strong Bull        LB  0.77
+
+== by sector (Devina's map): count, median six-day return, median relative strength, share above the 20-DMA
+                                 n  ret6   rs6  above20  eff
+sector                                                      
+Realty                           6  13.0   5.0      1.0  0.9
+Oil Gas & Consumable Fuels       9  10.6   2.5      0.8  0.8
+Services                         5  10.5   2.3      1.0  0.6
+Construction Materials           4  10.4   2.2      1.0  0.9
+Power                           13   8.8   0.7      0.9  0.6
+Metals & Mining                 10   8.4   0.4      1.0  0.7
+Consumer Durables               10   7.8  -0.4      0.9  0.5
+Fast Moving Consumer Goods      14   7.5  -0.6      0.9  0.6
+Automobile and Auto Components  15   7.5  -0.6      0.9  0.6
+Consumer Services                9   7.0  -1.1      0.9  0.5
+Financial Services              53   6.5  -1.6      0.9  0.6
+Construction                     3   6.5  -1.7      1.0  0.6
+Telecommunication                3   5.9  -2.2      1.0  0.6
+Textiles                         1   4.9  -3.2      1.0  0.9
+?                                6   4.4  -3.6      0.5  0.5
+Healthcare                      16   3.2  -5.0      1.0  0.6
+Information Technology          13   2.8  -5.3      0.9  0.3
+Capital Goods                   17   2.8  -5.4      0.4  0.5
+Chemicals                        5  -2.0 -10.2      0.6  0.5
