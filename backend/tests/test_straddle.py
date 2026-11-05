@@ -119,7 +119,7 @@ async def test_the_runner_records_the_straddle_and_the_book_from_the_engines_min
     r.straddle_pick = pick
     r.option_mark = lambda code: None
     r.on_minute(OPEN + 44 * 60)  # 09:59: the menu already runs, the sale and the book wait for the hour
-    assert r.straddle is None and len(r.menu) == 1 and r.menu[0]["hm"] == "09:59" and r.book is None
+    assert r.straddle is None and len(r.menu) == 1 and r.menu[0]["hm"] == "09:59" and r.book["status"] == "FLAT"  # the book is created, nothing bought yet
     r.on_minute(AT_10)
     rec = r.straddle
     assert rec is not None and rec["status"] == "OPEN" and rec["strike"] == 24400.0 and rec["opened_hm"] == "10:00" and rec["late"] is False
