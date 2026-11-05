@@ -146,3 +146,43 @@ async def test_the_runner_records_the_straddle_and_the_book_from_the_engines_min
     r2._roll(date.fromisoformat(DAY))
     assert r2.straddle is not None and r2.straddle["status"] == "CLOSED" and len(r2.menu) == 2 and r2._iv_open == r.menu[0]["iv"]
     assert r2.errors == 0 and r.errors == 0
+
+
+def test_the_managed_variant_books_the_target_or_the_stop_and_the_path_is_kept(tmp_path):
+    costs = CostModel(Settings(_env_file=None, data_dir=tmp_path, engine_enabled=False))
+    t0 = stx.expiry_t(EXPIRY, AT_10)
+    f = 24420.0
+    chain = chain_at(f, t=t0)
+    open_ = dict(now=AT_10, day=DAY, spot=24402.0, f=f, expiry=EXPIRY, expiry_day_skipped=False, lot=65, wing_pts=300.0, cond={})
+    assert stx.open_record(chain, **open_)["managed"] is None  # no target, no stop: the baseline only
+    rec = stx.open_record(chain, **open_, target_pts=20.0, stop_pts=19.0)
+    assert rec["managed"]["status"] == "OPEN" and rec["managed"]["target_pts"] == 20.0 and rec["path"] == [] and rec["mfe"] is None
+    # minute one, the same chain: the spread is the only P&L, nothing to book
+    stx.mark_record(rec, chain, AT_10 + 60)
+    assert stx.manage_record(rec, chain, costs, now=AT_10 + 60) is None and rec["path"] == [["10:01", rec["last_pnl_pts"]]] and rec["last_pnl_pts"] < 0
+    # minute two, vol 10 %: the straddle is far cheaper — the target books, the baseline stays open
+    cheaper = chain_at(f, t=stx.expiry_t(EXPIRY, AT_10 + 120), iv=0.10)
+    stx.mark_record(rec, cheaper, AT_10 + 120)
+    assert rec["last_pnl_pts"] >= 20 and stx.manage_record(rec, cheaper, costs, now=AT_10 + 120) == "target"
+    m = rec["managed"]
+    assert m["status"] == "CLOSED" and m["how"] == "target" and m["closed_hm"] == "10:02" and m["pnl_pts"] == rec["last_pnl_pts"]
+    assert m["debit"] == round(cheaper[24400.0]["CE"]["quote"]["ask"] + cheaper[24400.0]["PE"]["quote"]["ask"], 2) and m["net_inr"] < m["gross_inr"]
+    assert rec["status"] == "OPEN" and rec["mfe"] == ["10:02", rec["last_pnl_pts"]] and rec["mae"][0] == "10:01"
+    assert stx.manage_record(rec, cheaper, costs, now=AT_10 + 180) is None  # booked once
+    # the baseline runs to the close at another price; the managed result is not touched
+    later = chain_at(f, t=stx.expiry_t(EXPIRY, AT_1529), iv=0.12)
+    stx.mark_record(rec, later, AT_1529)
+    stx.close_record(rec, later, costs, now=AT_1529)
+    assert rec["status"] == "CLOSED" and rec["managed"]["how"] == "target" and rec["pnl_pts"] != rec["managed"]["pnl_pts"] and len(rec["path"]) == 3
+    assert stx.summary(rec)["path_rows"] == 3 and "path" not in stx.summary(rec)
+    # the stop: a dearer chain (vol 25 %) takes the running P&L through −19
+    rec2 = stx.open_record(chain, **open_, target_pts=100.0, stop_pts=19.0)
+    dearer = chain_at(f, t=t0, iv=0.25)
+    stx.mark_record(rec2, dearer, AT_10 + 60)
+    assert stx.manage_record(rec2, dearer, costs, now=AT_10 + 60) == "stop" and rec2["managed"]["pnl_pts"] <= -19 and rec2["managed"]["how"] == "stop"
+    # neither reached: the variant closes with the baseline, at the same prices
+    rec3 = stx.open_record(chain, **open_, target_pts=100.0, stop_pts=100.0)
+    stx.mark_record(rec3, later, AT_1529)
+    assert stx.manage_record(rec3, later, costs, now=AT_1529) is None
+    stx.close_record(rec3, later, costs, now=AT_1529)
+    assert rec3["managed"]["how"] == "close" and rec3["managed"]["pnl_pts"] == rec3["pnl_pts"] and rec3["managed"]["net_inr"] == rec3["net_inr"]

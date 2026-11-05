@@ -851,12 +851,17 @@ class ShadowRunner:
                         "range_adr": round((hi - lo) / adr, 2) if adr else None, "adr": adr, "open": opn, "prev_close": pc,
                         "iv": row.get("iv"), "iv_open": self._iv_open, "rv20": nd["rv20"], "fno": fno}
                 rec = stx.open_record(chain, now=now, day=self.day, spot=spot, f=f, expiry=pick["expiry"], expiry_day_skipped=bool(pick.get("expiry_day")),
-                                     lot=int(pick["lot"] or 1), wing_pts=self.s.strategy_straddle_wing_pts, cond=cond)
+                                     lot=int(pick["lot"] or 1), wing_pts=self.s.strategy_straddle_wing_pts, cond=cond,
+                                     target_pts=self.s.strategy_straddle_target_pts, stop_pts=self.s.strategy_straddle_stop_pts)
                 if rec is not None:
                     self.straddle, changed = rec, True
                     log.info("strategy.straddle_open", strike=rec["strike"], credit=rec["credit"], expiry=rec["expiry"], late=rec["late"], hm=hm)
             if rec is not None and rec["status"] == "OPEN":
-                stx.mark_record(rec, chain)
+                stx.mark_record(rec, chain, now)
+                how = stx.manage_record(rec, chain, self.costs, now=now, instruments=pick.get("instruments"))
+                if how:
+                    changed = True
+                    log.info("strategy.straddle_managed", how=how, pnl_pts=rec["managed"]["pnl_pts"], net_inr=rec["managed"]["net_inr"], hm=hm)
                 if hm >= stx.CLOSE_HM:
                     stx.close_record(rec, chain, self.costs, now=now, instruments=pick.get("instruments"))
                     changed = True

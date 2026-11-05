@@ -258,6 +258,12 @@ class Settings(BaseSettings):
     strategy_straddle: bool = False
     #: the iron fly's wings, in index points each side of the straddle's strike (rounded to the strike step)
     strategy_straddle_wing_pts: float = 300.0
+    #: the managed variant, scored beside the hold-to-the-close baseline: bought back the minute the running P&L reaches the
+    #: target or the stop, in index points (0 = none). The owner, 6 Nov 2026: "earn 19 avg … 76 or 90 points book it, lose only
+    #: 19". On the seven archived days (straddle-manage.txt) the path swung 25–35 points against winning days before the decay
+    #: showed: a 19-point stop turned +127 into +4 and no day ever reached 76 (best 57). Recorded, so the read can say.
+    strategy_straddle_target_pts: float = 0.0
+    strategy_straddle_stop_pts: float = 0.0
     #: the ₹20 lakh covered-call book (``strategy/covered.py``): long one NIFTY future lot, a ~0.30-delta call sold against it,
     #: rolled up at 0.60 delta, bought back at 30 % of its sale, settled on its expiry day, the pair closed on a 5 % drawdown
     #: (the owner, 6 Nov 2026: "cover call or position management based on real time market output ... 20 lakh capital")

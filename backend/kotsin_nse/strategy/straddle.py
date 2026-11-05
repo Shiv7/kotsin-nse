@@ -227,9 +227,14 @@ def open_record(
     wing_pts: float,
     cond: dict[str, Any],
     step: float = STRIKE_STEP,
+    target_pts: float = 0.0,
+    stop_pts: float = 0.0,
 ) -> dict[str, Any] | None:
     """Sell the ATM straddle now (the bids), and buy the fly's wings beside it. None when a leg has no usable
-    quote — the record is not opened on a snapshot price."""
+    quote — the record is not opened on a snapshot price. With a ``target_pts`` or ``stop_pts`` a *managed* variant
+    is scored beside the hold-to-the-close baseline: the same sale, bought back the minute the running P&L reaches
+    the target or the stop (the owner, 6 Nov 2026: "if we are getting 76 or 90 points let's book it and lose only
+    19"); the baseline is untouched, so the evening read has both, and the minute ``path`` lets it score any pair."""
     k = atm_strike(spot, step)
     legs: dict[str, dict[str, Any]] = {}
     for kind in ("CE", "PE"):
@@ -260,11 +265,16 @@ def open_record(
         "stale_exit": None, "fly": None,
     }
     rec["fly_max_loss_inr"] = round(max(wing - rec["fly_credit"], 0.0) * lot) if wings else None
+    rec["path"], rec["mfe"], rec["mae"] = [], None, None
+    rec["managed"] = ({"target_pts": target_pts, "stop_pts": stop_pts, "status": "OPEN", "how": None, "closed_hm": None, "debit": None,
+                       "pnl_pts": None, "gross_inr": None, "charges_inr": None, "net_inr": None, "stale_exit": None}
+                      if (target_pts > 0 or stop_pts > 0) else None)
     return rec
 
 
-def mark_record(rec: dict[str, Any], chain: dict[float, dict[str, Any]]) -> None:
-    """The legs' last prices now (a fresh quote only) and the straddle's running P&L in points."""
+def mark_record(rec: dict[str, Any], chain: dict[float, dict[str, Any]], now: float | None = None) -> None:
+    """The legs' last prices now (a fresh quote only), the straddle's running P&L in points, its path and its best
+    and worst point so far."""
     if rec.get("status") != "OPEN":
         return
     for group, side in (("legs", "ask"), ("wings", "bid")):
@@ -275,6 +285,15 @@ def mark_record(rec: dict[str, Any], chain: dict[float, dict[str, Any]]) -> None
                 leg["last"], leg["last_quote"] = p, q
     rec["last_debit"] = round(sum(x["last"] for x in rec["legs"].values()), 2)
     rec["last_pnl_pts"] = round(rec["credit"] - rec["last_debit"], 2)
+    if now is not None:
+        hm = ist_hm(now)
+        path = rec.setdefault("path", [])
+        if not path or path[-1][0] != hm:
+            path.append([hm, rec["last_pnl_pts"]])
+        if rec.get("mfe") is None or rec["last_pnl_pts"] > rec["mfe"][1]:
+            rec["mfe"] = [hm, rec["last_pnl_pts"]]
+        if rec.get("mae") is None or rec["last_pnl_pts"] < rec["mae"][1]:
+            rec["mae"] = [hm, rec["last_pnl_pts"]]
 
 
 def _instrument(leg: dict[str, Any], lot: int, insts: dict[str, Instrument] | None) -> Instrument:
@@ -283,48 +302,79 @@ def _instrument(leg: dict[str, Any], lot: int, insts: dict[str, Instrument] | No
                               lot_size=lot, strike=float(leg["strike"]), underlying="NIFTY")
 
 
+def _buy_back(rec: dict[str, Any], chain: dict[float, dict[str, Any]], costs: Any, instruments: dict[str, Instrument] | None) -> dict[str, Any]:
+    """What buying the straddle's two legs back now costs: each at its ask (a stale leg at its last fresh mark), the
+    gross against the sale, the charges of each leg's round trip entered on the sell side."""
+    lot = int(rec["lot"])
+    exits: dict[str, tuple[float, dict[str, Any] | None]] = {}
+    gross, charges, any_stale = 0.0, 0.0, False
+    for kind, leg in rec["legs"].items():
+        q = leg_quote(chain, leg["strike"], leg["kind"])
+        p = px(q, "ask", leg.get("last") or leg["entry"])
+        any_stale |= stale(q)
+        exits[kind] = (p, q)
+        gross += (leg["entry"] - p) * lot
+        charges += costs.round_trip(_instrument(leg, lot, instruments), leg["entry"], p, lot, entry_side=OrderSide.SELL).total
+    debit = round(sum(p for p, _ in exits.values()), 2)
+    return {"exits": exits, "debit": debit, "pnl_pts": round(rec["credit"] - debit, 2), "gross_inr": round(gross, 2), "charges_inr": round(charges, 2),
+            "net_inr": round(gross - charges, 2), "stale_exit": any_stale}
+
+
+def manage_record(rec: dict[str, Any], chain: dict[float, dict[str, Any]], costs: Any, *, now: float,
+                  instruments: dict[str, Instrument] | None = None) -> str | None:
+    """The managed variant: bought back the minute the running P&L is at or past its target or its stop. Returns
+    "target" / "stop" when it closes this minute, else None. The baseline record is not touched."""
+    m = rec.get("managed")
+    if rec.get("status") != "OPEN" or not m or m.get("status") != "OPEN" or rec.get("last_pnl_pts") is None:
+        return None
+    pnl = rec["last_pnl_pts"]
+    how = "target" if m["target_pts"] > 0 and pnl >= m["target_pts"] else ("stop" if m["stop_pts"] > 0 and pnl <= -m["stop_pts"] else None)
+    if how is None:
+        return None
+    bb = _buy_back(rec, chain, costs, instruments)
+    m.update({"status": "CLOSED", "how": how, "closed_hm": ist_hm(now), "closed_ts": int(now), **{k: bb[k] for k in ("debit", "pnl_pts", "gross_inr", "charges_inr", "net_inr", "stale_exit")}})
+    return how
+
+
 def close_record(rec: dict[str, Any], chain: dict[float, dict[str, Any]], costs: Any, *, now: float, how: str = "close",
                  instruments: dict[str, Instrument] | None = None) -> None:
     """Buy the straddle back (the asks), sell the wings (the bids), and settle: points, rupees, charges — the
     charges from the cost model, each leg a round trip entered on the sell side. A leg without a usable quote
-    closes at its last fresh mark and the record says ``stale_exit``."""
+    closes at its last fresh mark and the record says ``stale_exit``. A managed variant still open closes here too."""
     if rec.get("status") != "OPEN":
         return
     lot = int(rec["lot"])
-    any_stale = False
-    gross, charges = 0.0, 0.0
-    for group, side, entry_side in (("legs", "ask", OrderSide.SELL), ("wings", "bid", OrderSide.BUY)):
-        for leg in (rec.get(group) or {}).values():
-            q = leg_quote(chain, leg["strike"], leg["kind"])
-            p = px(q, side, leg.get("last") or leg["entry"])
-            any_stale |= stale(q) and group == "legs"
-            leg["exit"], leg["exit_quote"], leg["last"] = p, q, p
-            sign = 1 if entry_side is OrderSide.SELL else -1
-            g = (leg["entry"] - p) * lot * sign
-            c = costs.round_trip(_instrument(leg, lot, instruments), leg["entry"], p, lot, entry_side=entry_side).total
-            if group == "legs":
-                gross += g
-                charges += c
-            else:
-                leg["gross_inr"], leg["charges_inr"] = round(g, 2), round(c, 2)
-    debit = round(sum(x["exit"] for x in rec["legs"].values()), 2)
-    rec.update({"status": "CLOSED", "how": how, "closed_ts": int(now), "closed_hm": ist_hm(now), "debit": debit,
-                "pnl_pts": round(rec["credit"] - debit, 2), "gross_inr": round(gross, 2), "charges_inr": round(charges, 2),
-                "net_inr": round(gross - charges, 2), "stale_exit": any_stale, "last_debit": debit, "last_pnl_pts": round(rec["credit"] - debit, 2)})
+    bb = _buy_back(rec, chain, costs, instruments)
+    for kind, (p, q) in bb["exits"].items():
+        rec["legs"][kind].update({"exit": p, "exit_quote": q, "last": p})
+    wg, wc = 0.0, 0.0
+    for leg in (rec.get("wings") or {}).values():
+        q = leg_quote(chain, leg["strike"], leg["kind"])
+        p = px(q, "bid", leg.get("last") or leg["entry"])
+        leg["exit"], leg["exit_quote"], leg["last"] = p, q, p
+        leg["gross_inr"] = round((p - leg["entry"]) * lot, 2)
+        leg["charges_inr"] = round(costs.round_trip(_instrument(leg, lot, instruments), leg["entry"], p, lot, entry_side=OrderSide.BUY).total, 2)
+        wg += leg["gross_inr"]
+        wc += leg["charges_inr"]
+    rec.update({"status": "CLOSED", "how": how, "closed_ts": int(now), "closed_hm": ist_hm(now), "debit": bb["debit"], "pnl_pts": bb["pnl_pts"],
+                "gross_inr": bb["gross_inr"], "charges_inr": bb["charges_inr"], "net_inr": bb["net_inr"], "stale_exit": bb["stale_exit"],
+                "last_debit": bb["debit"], "last_pnl_pts": bb["pnl_pts"]})
     if rec.get("wings"):
         w = rec["wings"]
-        wg = sum(x["gross_inr"] for x in w.values())
-        wc = sum(x["charges_inr"] for x in w.values())
-        rec["fly"] = {"debit": round(w["CE"]["exit"] + w["PE"]["exit"], 2), "pnl_pts": round(rec["fly_credit"] - (debit - w["CE"]["exit"] - w["PE"]["exit"]), 2),
-                      "gross_inr": round(gross + wg, 2), "charges_inr": round(charges + wc, 2), "net_inr": round(gross + wg - charges - wc, 2)}
+        rec["fly"] = {"debit": round(w["CE"]["exit"] + w["PE"]["exit"], 2), "pnl_pts": round(rec["fly_credit"] - (bb["debit"] - w["CE"]["exit"] - w["PE"]["exit"]), 2),
+                      "gross_inr": round(bb["gross_inr"] + wg, 2), "charges_inr": round(bb["charges_inr"] + wc, 2), "net_inr": round(bb["gross_inr"] + wg - bb["charges_inr"] - wc, 2)}
+    m = rec.get("managed")
+    if m and m.get("status") == "OPEN":
+        m.update({"status": "CLOSED", "how": how, "closed_hm": ist_hm(now), "closed_ts": int(now),
+                  **{k: bb[k] for k in ("debit", "pnl_pts", "gross_inr", "charges_inr", "net_inr", "stale_exit")}})
 
 
 def summary(rec: dict[str, Any] | None) -> dict[str, Any] | None:
     """The day json's short form: the record without its minute rows."""
     if not rec:
         return None
-    return {k: v for k, v in rec.items() if k != "menu"} | {"menu_rows": len(rec.get("menu") or [])}
+    return {k: v for k, v in rec.items() if k not in ("menu", "path")} | {"menu_rows": len(rec.get("menu") or []), "path_rows": len(rec.get("path") or [])}
 
 
-__all__ = ["CLOSE_HM", "LAST_OPEN_HM", "OPEN_HM", "atm_strike", "close_record", "expiry_t", "mark_record", "menu_row", "open_record",
-           "p_between", "pick_expiry", "px", "realised_vol", "summary"]
+__all__ = ["CLOSE_HM", "LAST_OPEN_HM", "OPEN_HM", "age_of", "atm_strike", "close_record", "expiry_t", "manage_record", "mark_record", "menu_row",
+           "open_record", "p_between", "pick_expiry", "px", "realised_vol", "summary"]
